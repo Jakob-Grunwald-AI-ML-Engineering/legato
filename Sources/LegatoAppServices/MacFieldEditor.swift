@@ -170,6 +170,11 @@ import LegatoMac
         fieldUnreadable = true
         if !panel.active { panel.active = true; panel.take = PanelTake() }
         for handover in handovers {
+            if handover.requiresReview {
+                wholeRecoveryRuns.insert(handover.runID)
+                retain(handover.text, id: handover.runID)
+                continue
+            }
             var continuation = PanelContinuation(text: handover.text, typed: handover.typed)
             let rest = continuation.rest
             continuations[handover.runID] = continuation

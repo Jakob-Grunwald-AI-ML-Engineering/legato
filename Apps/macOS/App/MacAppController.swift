@@ -98,21 +98,27 @@ import Observation
         fieldEditor.insert = { [weak paster, settings, keyPresses, fallbackOwner] text in
             guard let paster else { return .retained(message: "Dictation is kept in the panel.") }
             let generation = fallbackOwner.generation, pid = fallbackOwner.pid, keys = fallbackOwner.keys
-            let witness = fallbackOwner.witness
+            guard let witness = fallbackOwner.witness, let confirmation = witness.prepareInsertion(text: text) else {
+                return .retained(message: "Insertion cannot be confirmed. Dictation is kept in the panel.")
+            }
             // Same session, no click or real key since it started, the field (when readable) still focused.
             let owned = { @MainActor () -> Bool in
-                guard fallbackOwner.generation == generation, fallbackOwner.allowed, keyPresses.count == keys,
-                      let witness else { return false }
-                return witness.stillFocused()
+                guard fallbackOwner.generation == generation, fallbackOwner.allowed, keyPresses.count == keys else { return false }
+                return confirmation.stillFocused()
             }
             guard owned() else {
                 return .retained(message: "The field or app changed. Dictation is kept in the panel.")
             }
-            switch await paster.type(text, targetPID: pid, passwordField: witness?.isPassword == true, restoreClipboard: settings.restoreClipboard,
+            switch await paster.type(text, targetPID: pid, passwordField: witness.isPassword, restoreClipboard: settings.restoreClipboard,
                                      paced: settings.typewriter && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
                                      realKeyDowns: { keyPresses.count }, stillOwned: owned) {
-            case .typed: return .typed
-            case .interrupted(let remainder): return .interrupted(remainder: remainder, message: "Typing stopped. The rest is kept in the panel.")
+            case .typed:
+                let confirmed = await confirmation.verify()
+                return confirmed && owned() ? .typed : .retained(message: "Insertion could not be confirmed. Dictation is kept in the panel.")
+            case .interrupted:
+                // Posted keys have no per-character readback in this path. Keep the full suggestion when its prefix
+                // could not be confirmed; it is never automatically replayed into another field.
+                return .retained(message: "Insertion stopped before it could be confirmed. Dictation is kept in the panel.")
             case .unavailable(let reason):
                 return .retained(message: reason == .appChanged ? "The field or app changed. Dictation is kept in the panel." : "Insertion is unavailable. Dictation is kept in the panel.")
             }

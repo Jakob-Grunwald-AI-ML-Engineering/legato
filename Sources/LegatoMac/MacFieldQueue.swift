@@ -73,6 +73,9 @@ public final class MacFieldQueue {
         public var text: String
         public var typed: Int
         public var complete: Bool
+        /// An interrupted internal revision cannot safely be appended after the field's existing tail. Keep its
+        /// whole suggestion in the panel for review, while preserving the queue's lossless handover contract.
+        public var requiresReview: Bool = false
     }
 
     // MARK: Tunables
@@ -1782,12 +1785,7 @@ public final class MacFieldQueue {
     private func handOver() -> [Handover] {
         var handovers: [Handover] = []
         for index in runs.indices where handable(index) {
-            if runs[index].regions.filter(\.pending).contains(where: { !$0.desired.starts(with: $0.landing ?? $0.current) }) {
-                // A cleanup interrupted inside existing text has no appendable remainder. Keep the corrected
-                // suggestion for recovery instead of typing it after the field's unchanged tail.
-                abandon(index, .failed)
-                continue
-            }
+            let requiresReview = runs[index].regions.filter(\.pending).contains(where: { !$0.desired.starts(with: $0.landing ?? $0.current) })
             // A key that went out but did not read back usually landed: it counts as typed, so it is not typed twice.
             let typed = Self.typedCount(runs[index].regions.map {
                 TypedRegion(current: $0.landing ?? $0.current, desired: $0.desired, source: $0.source, separator: $0.separator,
@@ -1801,7 +1799,8 @@ public final class MacFieldQueue {
             runs[index].abandoned = true
             let run = runs[index]
             note(.panel, run: run.id, length: typed, text: String(run.target), reason: "unreadable")
-            handovers.append(Handover(runID: run.id, version: run.version, text: String(run.target), typed: typed, complete: run.complete))
+            handovers.append(Handover(runID: run.id, version: run.version, text: String(run.target), typed: typed,
+                                      complete: run.complete, requiresReview: requiresReview))
         }
         return handovers
     }

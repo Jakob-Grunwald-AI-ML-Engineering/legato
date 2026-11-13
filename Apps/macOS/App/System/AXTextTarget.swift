@@ -134,6 +134,25 @@ final class AXTextTarget: TextTarget {
             }
         }
 
+        /// Capture observable insertion bounds without reading any previous text. A destination that cannot provide
+        /// enough evidence keeps its take in the panel before any keys are posted.
+        @MainActor func prepareInsertion(text: String) -> InsertConfirmation? {
+            switch self {
+            case .element(let target):
+                guard target.witnessFocused(password: false), let selection = try? target.selectedRange(),
+                      let expectation = FieldInsertionExpectation(text: text, selection: selection, length: try? target.textLength()) else { return nil }
+                return InsertConfirmation(target: target, expectation: expectation, password: false, minimumLength: nil, initialLength: nil)
+            case .password(let target, let baseline):
+                guard let target, let baseline, target.witnessFocused(password: true), target.characterCount() == baseline else { return nil }
+                let selection = (try? target.selectedRange()) ?? (baseline == 0 ? UTF16Range(location: 0, length: 0) : nil)
+                guard let selection, let expectation = FieldInsertionExpectation(text: text, selection: selection, length: baseline),
+                      expectation.length != baseline else { return nil }
+                // Equal-length password replacement has no observable proof if the host ignores the keys.
+                return InsertConfirmation(target: target, expectation: expectation, password: true, minimumLength: baseline - selection.length, initialLength: baseline)
+            case .unreadable: return nil
+            }
+        }
+
         /// The positively identified typing destination still has focus. An unknown destination never accepts keys.
         @MainActor func stillFocused() -> Bool {
             switch self {
@@ -144,6 +163,57 @@ final class AXTextTarget: TextTarget {
                 return target.editable && target.hasFocus() && (length == nil || target.characterCount() == length)
             }
         }
+    }
+
+    /// Evidence for one panel insert. Normal fields confirm the inserted range and final caret; passwords confirm
+    /// only the exposed character count, never their value, selected text or range contents.
+    @MainActor struct InsertConfirmation {
+        fileprivate let target: AXTextTarget
+        fileprivate let expectation: FieldInsertionExpectation
+        fileprivate let password: Bool
+        fileprivate let minimumLength: Int?
+        fileprivate let initialLength: Int?
+
+        func stillFocused() -> Bool {
+            guard target.witnessFocused(password: password) else { return false }
+            guard password else { return true }
+            guard let minimumLength, let initialLength, let expected = expectation.length, let count = target.characterCount() else { return false }
+            // Own posted keys may already have changed the masked length; an unexpected change stops further keys.
+            return count >= minimumLength && count <= max(initialLength, expected)
+        }
+
+        func verify() async -> Bool {
+            let deadline = ContinuousClock.now + .milliseconds(500)
+            repeat {
+                guard !Task.isCancelled, target.witnessFocused(password: password) else { return false }
+                if password {
+                    if let expected = expectation.length, target.characterCount() == expected { return true }
+                } else if expectation.matches(selection: try? target.selectedRange(), length: try? target.textLength(),
+                                              insertedText: try? target.text(in: expectation.insertedRange), normalizeSpaces: !target.editsInPlace) {
+                    return true
+                }
+                try? await Task.sleep(for: .milliseconds(20))
+            } while ContinuousClock.now < deadline
+            return false
+        }
+    }
+
+    /// A recreated element may still identify this editor. Rebind a witness only within that identity; no text read
+    /// is required, so an empty unreadable field and a password field can still be positively witnessed.
+    private func witnessFocused(password: Bool) -> Bool {
+        if password ? hasFocus() : isFocused() { return editable }
+        guard AXIsProcessTrusted(), NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+              let value = (try? Self.copyAttribute(appElement, kAXFocusedUIElementAttribute)) ?? nil,
+              CFGetTypeID(value) == AXUIElementGetTypeID() else { return false }
+        let focused = unsafeDowncast(value, to: AXUIElement.self)
+        AXUIElementSetMessagingTimeout(focused, Self.messagingTimeout)
+        guard Self.security(of: focused) == (password ? .password : .notPassword),
+              sameEditor(focused), Self.isEditable(focused) else { return false }
+        element = focused
+        reader = AXFieldReader(element: AXElementText(focused))
+        editor = Editor(of: focused)
+        editableCache = nil; textOperationSupported = nil; writeCapabilitiesCache = nil
+        return true
     }
 
     /// A focus witness for typed inserts. This never reads or replaces the field's contents.
@@ -160,6 +230,7 @@ final class AXTextTarget: TextTarget {
         let element = unsafeDowncast(value, to: AXUIElement.self)
         AXUIElementSetMessagingTimeout(element, messagingTimeout)
         let target = AXTextTarget(element: element, appElement: appElement)
+        target.editor = Editor(of: element)
         switch security(of: element) {
         case .password: return target.editable ? .password(target, length: target.characterCount()) : .password(nil, length: nil)
         case .notPassword: return target.editable ? .element(target) : .unreadable
