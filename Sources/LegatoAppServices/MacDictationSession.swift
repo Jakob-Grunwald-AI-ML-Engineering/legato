@@ -60,6 +60,7 @@ import LegatoKeyboardCore
     @ObservationIgnored private var stalled: (session: String, sequence: Int)?
     /// Where finished lines go (the focused field); called one line at a time, in speaking order.
     @ObservationIgnored public var deliver: @MainActor (String) async -> Void = { _ in }
+    @ObservationIgnored public var onDeliverySource: @MainActor (_ id: String, _ raw: String, _ text: String) -> Void = { _, _, _ in }
     /// Types one take that is still being cleaned (whole-take modes): `poll` returns its state as it grows; returns
     /// true when the take was left open because its cleanup failed (nothing more will come until the user chooses).
     @ObservationIgnored public var deliverStream: (@MainActor (_ poll: @MainActor () -> DictationStreamState?) async -> Bool)?
@@ -303,6 +304,9 @@ import LegatoKeyboardCore
                 if stalledHere { stalled = (session, sequence); continue }
             } else {
                 await deliver(next.text)
+            }
+            if let final = pipeline.outbox.first(where: { $0.sequence == next.sequence }), final.final, !final.retracted {
+                onDeliverySource(final.lineID, final.raw, final.text)
             }
             pipeline.acknowledge(sessionID: session, upTo: next.sequence)
         }

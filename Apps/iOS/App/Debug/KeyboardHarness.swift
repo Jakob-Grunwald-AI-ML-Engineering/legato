@@ -181,7 +181,7 @@ final class KeyboardHarnessModel {
                     preferences.strip = true
                 }
                 return preferences
-            })
+            }, correctionStore: AppController.shared.corrections)
         controller.trace = { message in E2E.log("harness \(message) doc=\(E2E.quote(document.text))") }
         controller.beforeStartWatch = { await E2E.waitForStartWatch() }
         document.onChange = { [weak controller] in controller?.documentDidChange() }

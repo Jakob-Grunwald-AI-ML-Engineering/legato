@@ -131,6 +131,8 @@ targets:
     sources: [Keyboard, KeyboardUI]
     dependencies:
       - package: LegatoKit
+        product: LegatoCore
+      - package: LegatoKit
         product: LegatoKeyboardCore
       - package: LegatoKit
         product: LegatoComposerUI

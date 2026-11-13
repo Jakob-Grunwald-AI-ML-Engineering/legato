@@ -34,6 +34,8 @@ struct MenuContent: View {
             Label("Dictation \(controller.settings.dictationHotkey?.displayName ?? "not set")", systemImage: "mic")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
+            Button("Captured edits…") { NSApp.activate(); openWindow(id: "corrections") }
+                .menuAction("menu.corrections") { NSApp.activate(); openWindow(id: "corrections") }
             HistoryList(entries: controller.recent, onCopy: { controller.copy($0) }, onDelete: { controller.delete($0) }, onCopyOriginal: { text in
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(text, forType: .string)
