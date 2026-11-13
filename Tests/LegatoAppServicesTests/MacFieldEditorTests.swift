@@ -144,8 +144,11 @@ import LegatoMac
         editor.begin()
         await editor.applyLive(snapshot("small cab"))
         #expect(target.value == "Hello 🐈 small cab")
+        let liveWrites = target.writes.count
         await editor.applyLive(snapshot("small cat"))
-        #expect(target.value == "Hello 🐈 small cat")
+        // While the mic is live, a backward ASR revision waits behind the speaking head.
+        #expect(target.value == "Hello 🐈 small cab")
+        #expect(target.writes.count == liveWrites)
         await editor.applyLive(snapshot("Small cat.", complete: true))
         #expect(target.value == "Hello 🐈 Small cat.")
         #expect(target.selection.location == target.value.utf16.count)
@@ -683,7 +686,13 @@ import LegatoMac
         let target = EditorTarget("")
         let editor = MacFieldEditor(capture: { .target(target) })
         editor.begin(); await editor.applyLive(snapshot("small cab is here"))
+        let liveWrites = target.writes.count
         await editor.applyLive(snapshot("small cat is here"))
+        #expect(target.value == "small cab is here")
+        #expect(target.writes.count == liveWrites)
+        // Mic-off releases the newest correction even without another final snapshot. The original character
+        // preservation and restored-caret assertions still apply to that deferred edit.
+        await editor.finish()
         #expect(target.value == "small cat is here")
         #expect(target.selection == .init(location: 17, length: 0))
         #expect(target.selections.last == .init(location: 17, length: 0))
