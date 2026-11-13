@@ -889,7 +889,13 @@ public final class MacFieldQueue {
     private var allRegions: [Region] { editRegions.map(\.region) + runs.flatMap(\.regions) }
 
     private func locateAll(_ doc: Document) {
-        for region in allRegions where !region.lost { locate(region, doc) }
+        let speaking = Set(runs.filter(\.speaking).map(\.id))
+        for region in allRegions where !region.lost {
+            // Locating can search the document and acquire recovery evidence. Deferred edits and older runs do
+            // that when speech stops, rather than making the readable new head wait on their stale locations.
+            if !speaking.isEmpty, region.runID.map({ !speaking.contains($0) }) ?? true { continue }
+            locate(region, doc)
+        }
         // A run region that lost its place before any of its words went in starts again at the user's caret.
         for index in runs.indices {
             while let last = runs[index].regions.last, last.lost, last.current.isEmpty, last.original.isEmpty {

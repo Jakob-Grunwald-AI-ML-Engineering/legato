@@ -58,6 +58,27 @@ import LegatoKeyboardCore
 }
 
 @MainActor @Suite struct NativePlanQueueTests {
+    @Test func aStaleBackgroundRegionDoesNotReadAroundBeforeReadableNewSpeech() async {
+        let field = NativePlanField("")
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.live(runID: "old", version: 1, text: "old fragment", complete: true)
+        await queue.whenIdle()
+        field.value = "unrelated replacement"
+        field.selection = .init(location: field.value.utf16.count, length: 0)
+        var recoveryReads = 0
+        queue.journal = { if $0.kind == .recovery { recoveryReads += 1 } }
+        queue.live(runID: "old", version: 2, text: "OLD FRAGMENT", complete: true)
+        queue.live(runID: "new", version: 1, text: "fresh words", speaking: true)
+        await queue.whenIdle()
+        #expect(field.value == "unrelated replacement fresh words")
+        #expect(recoveryReads == 0)
+        queue.takeStopped("new")
+        await queue.whenIdle()
+        #expect(field.value == "unrelated replacement fresh words")
+        #expect(recoveryReads > 0)
+    }
+
     @Test func liveSpeechExtendsBeforeItsCoalescedCorrectionsAndMicOffReleasesThem() async {
         let field = NativePlanField("")
         let queue = MacFieldQueue(target: field)

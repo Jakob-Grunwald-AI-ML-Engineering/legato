@@ -42,6 +42,7 @@ import LegatoKeyboardCore
     var lazyCaret = false
     var stickyChance = 0.3
     var caretSet = CaretSet.ignored
+    var onCaretLanded: (() -> Void)?
     /// The share of word hops that land one to three characters off.
     var hopSkew = 0.0
     /// Visual line width for Command+Left/Right (0: no wrapping).
@@ -120,6 +121,7 @@ import LegatoKeyboardCore
             case .caret(let range):
                 if range.end <= value.count(utf16: true) { selection = range }
                 reported = nil
+                onCaretLanded?()
             }
         }
     }
@@ -1126,19 +1128,27 @@ private struct SeededRandom {
         await queue.whenIdle()
         #expect(queue.caretJumps.direct == .trusted)
         var jumpedAt: ContinuousClock.Instant?
+        var confirmedAt: ContinuousClock.Instant?
+        var hostLatencies: [Duration] = []
         var gaps: [Duration] = []
+        field.onCaretLanded = {
+            if let jump = jumpedAt { hostLatencies.append(clock() - jump); confirmedAt = clock() }
+        }
         queue.journal = { entry in
             guard entry.kind == .sent else { return }
-            if entry.detail == "caret" { jumpedAt = clock() }
-            else if entry.detail == "key", let jump = jumpedAt {
-                gaps.append(clock() - jump); jumpedAt = nil
+            if entry.detail == "caret" { jumpedAt = clock(); confirmedAt = nil }
+            else if entry.detail == "key", jumpedAt != nil {
+                if let confirmed = confirmedAt { gaps.append(clock() - confirmed) }
+                else { Issue.record("edit was sent before the fake host applied its caret jump") }
+                jumpedAt = nil; confirmedAt = nil
             }
         }
         queue.live(runID: "timing", version: 3, text: "the cap is here and the sea is calm today")
         await queue.whenIdle()
         #expect(field.string == "the cap is here and the sea is calm today")
         #expect(!gaps.isEmpty)
-        #expect(gaps.allSatisfy { $0 == .zero })
+        #expect(hostLatencies.contains { $0 > .zero }, "The host's confirmation latency is still honored")
+        #expect(gaps.allSatisfy { $0 == .zero }, "No extra wait after confirmed movement: \(gaps)")
     }
 
     @Test func aFieldThatTakesCaretSetsJumpsStraightThereAndItIsRememberedForTheField() async {
