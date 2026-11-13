@@ -11,7 +11,7 @@ import LegatoRoom
         var iterator = events.makeAsyncIterator()
         let client = SonioxClient(room: room)
         try await client.startDebug()
-        try await client.injectDebugFrame(#"{"tokens":[{"text":"First.","is_final":true},{"text":" Second.","is_final":true},{"text":"<fin>","is_final":true},{"text":" remaining words","is_final":false}]}"#)
+        try await client.injectDebugFrame(#"{"tokens":[{"text":"First.","is_final":true},{"text":" Second.","is_final":true},{"text":" remaining words","is_final":false}]}"#)
         let first = try #require(await iterator.next())
         let second = try #require(await iterator.next())
         let tail = try #require(await iterator.next())
