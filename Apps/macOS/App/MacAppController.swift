@@ -17,6 +17,7 @@ import Observation
     let paster = PasteService()
     let vocabulary: VocabularyService
     let history: any HistoryStore
+    let corrections: CorrectionStore
     var recent: [DictationEntry] = []
     let meetings: MeetingController
     private var meetingIsland: MeetingIslandController?
@@ -62,6 +63,7 @@ import Observation
         let engine = EngineSettings()
         vocabulary = VocabularyService(fileURL: root.appending(path: "vocabulary.json"),
             languages: { VocabularyService.configuredLanguages(engine) })
+        corrections = CorrectionStore(root: root)
         history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary)
         let vocabularyURL = root.appending(path: "vocabulary.json")
         meetings = MeetingController(root: Self.meetingsRoot(in: root), vocabularyURL: vocabularyURL)
@@ -94,6 +96,7 @@ import Observation
             case .password: return .password
             }
         })
+        fieldEditor.correctionCapture = CorrectionCapture(store: corrections)
         fieldEditor.panelMode = { PanelDictationSetting.mode() }
         fieldEditor.insert = { [weak paster, settings, keyPresses, fallbackOwner] text in
             guard let paster else { return .retained(message: "Dictation is kept in the panel.") }
@@ -143,6 +146,9 @@ import Observation
         dictation.onPrepare = { await AXTextTarget.prepareFocused() }
         dictation.onEnd = { [weak fieldEditor] in await fieldEditor?.finish() }
         dictation.onMagicBegin = { [weak fieldEditor] in fieldEditor?.beginInstruction() }
+        dictation.onDeliverySource = { [weak fieldEditor] id, raw, text in
+            fieldEditor?.watchDelivery(id: id, raw: raw, text: text)
+        }
         dictation.deliver = { [weak fieldEditor] in fieldEditor?.deliver($0) }
         dictation.deliverStream = { [weak fieldEditor] poll in await fieldEditor?.stream(poll) ?? false }
         dictation.retractStream = { [weak fieldEditor] in fieldEditor?.retractStreamed() }

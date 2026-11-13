@@ -1,4 +1,5 @@
 import Foundation
+import LegatoCore
 import LegatoKeyboardCore
 import LegatoComposerDoc
 import Observation
@@ -15,6 +16,12 @@ import os
 /// for an instruction moves the cursor besides it, while the queue is paused and has nothing in flight.
 @MainActor @Observable
 final class KeyboardController {
+    @ObservationIgnored private var correctionCapture: CorrectionCapture?
+    @ObservationIgnored private var correctionPoll: Task<Void, Never>?
+    @ObservationIgnored private var correctionSources: [String: (raw: String, text: String)] = [:]
+    @ObservationIgnored private var correctionOwnWriteAt = Date.distantPast
+    @ObservationIgnored private var correctionKeyAt = Date.distantPast
+
     @ObservationIgnored let document: any TextDocument
     @ObservationIgnored private let link: LinkClient
     @ObservationIgnored private let hasFullAccess: @MainActor () -> Bool
@@ -117,7 +124,8 @@ final class KeyboardController {
     init(
         document: any TextDocument, link: LinkClient, hasFullAccess: @escaping @MainActor () -> Bool,
         preferences: @escaping () -> KeyboardPreferences = { .load() },
-        expansionPersistence: KeyboardExpansionPersistence? = nil
+        expansionPersistence: KeyboardExpansionPersistence? = nil,
+        correctionStore: CorrectionStore? = nil
     ) {
         self.document = document
         self.link = link
@@ -135,6 +143,11 @@ final class KeyboardController {
         link.observeComposer { [weak self] in self?.composerNoteArrived() }
         link.observeLiveDictation { [weak self] in self?.receiveLiveDictation() }
         link.observeInstruction { [weak self] in self?.receiveInstruction() }
+        if let correctionStore {
+            correctionCapture = CorrectionCapture(store: correctionStore)
+        } else if let root = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: LinkChannel.appGroupID) {
+            correctionCapture = CorrectionCapture(store: CorrectionStore(root: root))
+        }
         typing = TypingModel(controller: self)
         wordRow = SuggestionController(controller: self)
     }
@@ -401,10 +414,19 @@ final class KeyboardController {
                 self.beat()
             }
         }
+        correctionPoll?.cancel()
+        correctionPoll = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled, let self else { return }
+                self.observeCorrections()
+            }
+        }
         hostDidChange()
     }
 
     func disappeared() {
+        correctionPoll?.cancel(); correctionPoll = nil
         isVisible = false
         if let snapshot = liveSnapshot, !snapshot.complete || snapshot.version != liveAckedVersion || !queue.isIdle {
             // Safari's Next/Previous accessory can cycle keyboard visibility before the new field reports its ID.
@@ -743,6 +765,8 @@ final class KeyboardController {
 
     /// Drops everything pending (each edit's owner hears that it was dropped) and forgets the model.
     private func resetQueue(reason: String) {
+        correctionCapture?.reset()
+        correctionSources = [:]
         // The field changed or the keyboard went away: nothing more of a take's cleanup lands here.
         updateCleanup { $0.clear() }
         queue.reset()
@@ -756,6 +780,7 @@ final class KeyboardController {
 
     private func enqueue(_ input: FieldQueue.Input) {
         syncQueueField()
+        armCorrections()
         queue.enqueue(input)
         var entry = EditJournal.Entry(t: Self.uptimeMs, kind: .input, field: queueDocumentID)
         entry.input = input
@@ -764,6 +789,7 @@ final class KeyboardController {
 
     private func enqueue(_ edit: FieldQueue.Edit, user: Bool = false, completion: ((FieldQueue.Event?) -> Void)? = nil) {
         syncQueueField()
+        if user { armCorrections() }
         if let completion { editCompletions[edit.id] = completion }
         queue.enqueue(edit, user: user)
         var entry = EditJournal.Entry(t: Self.uptimeMs, kind: .edit, field: queueDocumentID)
@@ -830,6 +856,13 @@ final class KeyboardController {
         for event in events {
             switch event {
             case .sent(_, let lane):
+                if lane == .user {
+                    correctionKeyAt = Date()
+                }
+                else {
+                    correctionCapture?.reset()
+                    correctionOwnWriteAt = Date()
+                }
                 clearWatch.ownEdit(at: Date())
                 liveStats.applies += lane == .live ? 1 : 0
                 if lane != .user {
@@ -866,6 +899,11 @@ final class KeyboardController {
                     syncRowTakeover()
                 }
             case .liveApplied(let runID, let version, let complete):
+                if complete, let snapshot = liveSnapshot, snapshot.runID == runID {
+                    correctionSources[runID] = (
+                        snapshot.rawText ?? snapshot.segments.map { $0.raw ?? $0.text }.filter { !$0.isEmpty }.joined(separator: " "),
+                        snapshot.segments.map(\.text).filter { !$0.isEmpty }.joined(separator: " "))
+                }
                 updateCleanup { $0.applied(runID: runID, version: version, complete: complete) }
                 guard runID == liveSnapshot?.runID, version != liveAckedVersion else { break }
                 liveAckedVersion = version
@@ -955,6 +993,11 @@ final class KeyboardController {
     }
 
     private func acknowledgeDictation(upTo: Int) {
+        if let publication = lastDictation {
+            for line in publication.lines where line.seq <= upTo && line.final && !line.retracted {
+                correctionSources[line.lineID] = (line.raw, line.text)
+            }
+        }
         guard let sessionID = typist.sessionID else { return }
         link.writeDictationAck(.init(sessionID: sessionID, upTo: upTo))
     }
@@ -987,6 +1030,33 @@ final class KeyboardController {
         }
         if let upTo = step.acknowledged { acknowledgeDictation(upTo: upTo) }
         pump()
+    }
+
+    /// Read-only: proxy windows must still contain the delivered scope and its unchanged boundaries.
+    /// Unreadable, secure, hidden or newly focused fields stop collection. Our queue writes never teach.
+    private func observeCorrections() {
+        guard isVisible, !isTornDown, !document.isSecureTextEntry, document.documentID == queueDocumentID else {
+            correctionCapture?.reset(); correctionSources = [:]; return
+        }
+        guard queue.isIdle, !typist.needsTicks, !reveal.needsTicks, !isFieldBusy,
+              Date().timeIntervalSince(correctionOwnWriteAt) >= 0.15 else { return }
+        armCorrections()
+        let report = currentReport
+        let snapshot = report.before + (report.selected ?? "") + report.after
+        correctionCapture?.observe(snapshot, origin: Date().timeIntervalSince(correctionKeyAt) < 2 ? .keyboard : .observedHost)
+    }
+
+    private func armCorrections() {
+        guard queue.isIdle, !document.isSecureTextEntry, document.documentID == queueDocumentID else { return }
+        let report = currentReport
+        let snapshot = report.before + (report.selected ?? "") + report.after
+        if !correctionSources.isEmpty {
+            for (id, source) in correctionSources {
+                correctionCapture?.arm(dictationID: id, raw: source.raw, inserted: source.text,
+                    snapshot: snapshot, platform: "iOS", locale: Locale.current.identifier, isIdle: queue.isIdle)
+            }
+            correctionSources = [:]
+        }
     }
 
     // MARK: Live dictation

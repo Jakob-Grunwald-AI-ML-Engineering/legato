@@ -16,6 +16,7 @@ final class AppController {
     let vocabulary: VocabularyService
     let keyboardHost: KeyboardLinkHost?
     let history: any HistoryStore
+    let corrections: CorrectionStore
     let composer: ComposerSession
     let keyboardSession: KeyboardSession
     let dictation: DictationPipeline
@@ -38,6 +39,7 @@ final class AppController {
         vocabulary = VocabularyService(fileURL: root.appending(path: "vocabulary.json"),
             languages: { VocabularyService.configuredLanguages(settings) },
             pairsFileURL: root.appending(path: "wordpairs-dictated.json"))
+        corrections = CorrectionStore(root: root)
         history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary)
         composer = ComposerSession(vocabularyURL: root.appending(path: "vocabulary.json"),
             keepMicrophoneActive: ComposerMicrophonePreference.keepActive(), history: history)
