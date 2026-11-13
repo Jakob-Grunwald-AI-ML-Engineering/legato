@@ -58,6 +58,49 @@ import LegatoKeyboardCore
 }
 
 @MainActor @Suite struct NativePlanQueueTests {
+    @Test func liveSpeechExtendsBeforeItsCoalescedCorrectionsAndMicOffReleasesThem() async {
+        let field = NativePlanField("")
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.live(runID: "speech", version: 1, text: "we saw a boat", speaking: true)
+        await queue.whenIdle()
+        queue.live(runID: "speech", version: 2, text: "We saw a boat today", speaking: true)
+        await queue.whenIdle()
+        #expect(field.value == "we saw a boat today")
+        #expect(!queue.hasWork)
+        queue.live(runID: "speech", version: 3, text: "WE saw a boat today", speaking: true)
+        await queue.whenIdle()
+        #expect(field.value == "we saw a boat today")
+        queue.takeStopped("speech")
+        await queue.whenIdle()
+        #expect(field.value == "WE saw a boat today")
+    }
+
+    @Test func magicWaitsThroughASpeechPauseWithoutTheParkTimeoutDroppingIt() async {
+        let field = NativePlanField("Header old. ")
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.live(runID: "speech", version: 1, text: "fresh words", speaking: true)
+        await queue.whenIdle()
+        var clock = ContinuousClock.now
+        queue.now = { clock }
+        queue.sleep = { duration in clock += duration; await Task.yield() }
+        var admitted = false
+        queue.journal = { if $0.kind == .edit { admitted = true } }
+        async let result = queue.edit(.init(id: "magic", range: .init(location: 0, length: 12), scope: "Header old. ", target: "Header new. "))
+        for _ in 0..<100 where !admitted { await Task.yield() }
+        #expect(admitted)
+        await queue.whenIdle()
+        clock += .seconds(5)
+        queue.live(runID: "speech", version: 2, text: "fresh words today", speaking: true)
+        await queue.whenIdle()
+        #expect(field.value == "Header old. fresh words today")
+        queue.takeStopped("speech")
+        guard case .applied = await result else { Issue.record("deferred Magic was dropped"); return }
+        await queue.whenIdle()
+        #expect(field.value == "Header new. fresh words today")
+    }
+
     @Test func aLongVerifiedRewriteBuildsOneDiffInsteadOfDiffingEveryGrapheme() async {
         let original = String(repeating: "return before sunset and keep these words. ", count: 20)
         let field = NativePlanField(original)

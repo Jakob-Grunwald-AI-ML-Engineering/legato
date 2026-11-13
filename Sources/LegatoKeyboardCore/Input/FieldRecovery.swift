@@ -7,6 +7,20 @@ public struct FieldRecovery: Sendable {
     public static let budgetMs = 2_500.0
     public static let maxAttempts = 1
 
+    /// Start close to the caret. A short target never needs a full 1,024-character walk in both directions.
+    public static func nearbyLimit(for request: Request) -> Int {
+        min(lookAroundChars, max(192, request.targets.map {
+            max($0.expected.count, $0.landed?.count ?? 0) + $0.before.count + $0.after.count + 64
+        }.max() ?? 192))
+    }
+
+    public func canResolve(_ request: Request, text: String, completeDocument: Bool = false) -> Bool {
+        resolve(request, text: text, generation: request.generation, revision: request.revision,
+                restored: true, completeDocument: completeDocument).allSatisfy {
+            if case .replan = $0 { return true }; return false
+        }
+    }
+
     public struct Target: Sendable, Equatable {
         public var id: String
         public var expected: String

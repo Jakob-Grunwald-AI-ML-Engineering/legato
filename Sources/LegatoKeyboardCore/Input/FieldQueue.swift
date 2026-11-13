@@ -154,12 +154,16 @@ public struct FieldQueue: Sendable {
         public var editConfirmationMs: Double
         /// The adapter can supply a bounded, self-verifying cursor read on request.
         public var canReadAround: Bool
+        /// Production speech delivery keeps backward revisions behind the incoming speaking head.
+        public var prioritizeSpeech: Bool
         public init(animated: Bool = true, movesByCharacters: Bool = false, capitalization: AutoCapitalizationType = .none,
-                    keysWaitForTake: Bool = true, editConfirmationMs: Double = FieldQueue.charMs, canReadAround: Bool = false) {
+                    keysWaitForTake: Bool = true, editConfirmationMs: Double = FieldQueue.charMs, canReadAround: Bool = false,
+                    prioritizeSpeech: Bool = false) {
             self.animated = animated; self.movesByCharacters = movesByCharacters; self.capitalization = capitalization
             self.keysWaitForTake = keysWaitForTake
             self.editConfirmationMs = editConfirmationMs
             self.canReadAround = canReadAround
+            self.prioritizeSpeech = prioritizeSpeech
         }
     }
 
@@ -352,6 +356,8 @@ public struct FieldQueue: Sendable {
         var cleaned = false
         /// The user stopped the take (`takeStopped`, or a snapshot says so); its complete snapshot comes after its cleanup.
         var stopped = false
+        var speechTargets: [Int: FieldSpeechScheduling.Target] = [:]
+        var deferredSnapshot: LiveDictationSnapshot?
     }
     private(set) var runs: [LiveRun] = []
     /// Finished runs kept for a cleanup still to come (the newest run aside).
@@ -459,6 +465,14 @@ public struct FieldQueue: Sendable {
     private var recoveryGeneration = UUID().uuidString
     public private(set) var recoveryRevision: UInt64 = 0
     public private(set) var recoveryRequest: FieldRecovery.Request?
+    public private(set) var speechRevision: UInt64 = 0
+    public var recoveryBlocksSpeech: Bool {
+        guard let request = recoveryRequest else { return false }
+        let ids = Set(request.targets.map(\.id))
+        return runs.contains { run in
+            !run.stopped && !run.complete && run.regions.contains { $0.tEnd == nil && ids.contains(String($0.spanID)) }
+        }
+    }
 
     /// A recovery response can never replace the model after user input or a field reset.
     public mutating func completeRecovery(_ request: FieldRecovery.Request, report: Report?, restored: Bool, completeDocument: Bool = false) {
@@ -513,13 +527,23 @@ public struct FieldQueue: Sendable {
 
     private mutating func requestRecoveryIfNeeded() {
         guard config.canReadAround, recoveryRequest == nil else { return }
+        let foreground = Set(runs.filter { !$0.stopped && !$0.complete }.flatMap { $0.regions.filter { $0.tEnd == nil }.map(\.spanID) })
         let targets = spans.sorted { $0.key < $1.key }.compactMap { id, span -> FieldRecovery.Target? in
+            if config.prioritizeSpeech, isSpeaking, !foreground.contains(id) { return nil }
             guard span.parked, !span.anchor, !span.userChanged, !span.edited, !span.lastText.isEmpty else { return nil }
             return .init(id: String(id), expected: String(span.lastText), before: String(span.lastBefore), after: String(span.lastAfter))
         }
         guard let request = recovery.begin(generation: recoveryGeneration, revision: recoveryRevision, targets: targets) else { return }
         recoveryRequest = request
         events.append(.resync(.recoveryRequested))
+    }
+
+    /// A background read gives back its lease before another queue item may use the cursor. Its parked targets
+    /// remain intact; the final dictation snapshot can ask for a fresh read instead of dropping deferred edits.
+    public mutating func deferRecovery(_ request: FieldRecovery.Request) {
+        guard recoveryRequest == request else { return }
+        recoveryRequest = nil
+        recoveryRevision &+= 1
     }
 
     private mutating func abandonRecoverySpan(_ id: Int) {
@@ -593,14 +617,18 @@ public struct FieldQueue: Sendable {
 
     // MARK: Inspection
 
+    public var isSpeaking: Bool { runs.contains { !$0.stopped && !$0.complete } }
+
     public var isIdle: Bool {
-        recoveryRequest == nil && inFlight == nil && unit == nil && userLane.isEmpty && editLane.isEmpty && !revealDue && !runs.contains(where: { runNeedsWork($0) })
+        recoveryRequest == nil && inFlight == nil && unit == nil && userLane.isEmpty
+            && (editLane.isEmpty || config.prioritizeSpeech && isSpeaking)
+            && (!revealDue || config.prioritizeSpeech && isSpeaking) && !runs.contains(where: { runNeedsWork($0) })
     }
     public var hasUserInput: Bool { !userLane.isEmpty }
     /// The keyboard's own writes still to land (a unit, queued edits, dictation): a read for an instruction waits for
     /// them, so its scope already shows them.
     public var hasOwnWork: Bool {
-        unit != nil || !editLane.isEmpty || runs.contains(where: { runNeedsWork($0) })
+        unit != nil || (!editLane.isEmpty && !(config.prioritizeSpeech && isSpeaking)) || runs.contains(where: { runNeedsWork($0) })
     }
     public var hasOpInFlight: Bool { inFlight != nil }
     /// Nothing in flight and the caret at the user's cursor: the field is as the user left it, as far as the queue goes.
@@ -682,6 +710,7 @@ public struct FieldQueue: Sendable {
         if let index = runs.firstIndex(where: { $0.runID == snapshot.runID }) {
             if snapshot.stopped == true { runs[index].stopped = true }
             if let latest = runs[index].pending?.version ?? runs[index].version, snapshot.version <= latest, snapshot.complete == runs[index].complete { return }
+            speechRevision &+= 1
             if let pending = runs[index].pending {
                 let seen = ([runs[index].lastSegmentID] + runs[index].held.flatMap { $0.segments.map(\.id) }).max() ?? -1
                 if (pending.segments.map(\.id).max() ?? -1) > seen { runs[index].held.append(pending) }
@@ -690,6 +719,7 @@ public struct FieldQueue: Sendable {
             return
         }
         guard !retiredRunIDs.contains(snapshot.runID) else { return }
+        speechRevision &+= 1
         closeOpenRegions(.newRun)
         var run = LiveRun(runID: snapshot.runID)
         run.pending = snapshot
@@ -702,6 +732,9 @@ public struct FieldQueue: Sendable {
     public mutating func takeStopped(_ runID: String) {
         guard let index = runs.firstIndex(where: { $0.runID == runID }) else { return }
         runs[index].stopped = true
+        if let deferred = runs[index].deferredSnapshot, runs[index].pending == nil {
+            runs[index].pending = deferred
+        }
     }
 
     /// Ends work for a run: its unfinished text is reported as dropped (the app keeps the take in History).
@@ -956,6 +989,17 @@ public struct FieldQueue: Sendable {
         // Nothing of the keyboard's own starts, and no jump goes out, on a model the field's report does not show at the
         // caret (another field's report can fit it elsewhere): it waits, and a report that holds still so reseeds.
         let shown = lastReport.map(consistent) ?? true
+        if config.prioritizeSpeech, isSpeaking, case .edit(_, .edit)? = unit?.owner {
+            // Finish the issued op first (the barrier above), then return to the speaking head. The edit is
+            // replanned from confirmed text when dictation stops, never replayed from its old cursor offsets.
+            abortUnit()
+            if cursor != userCursor { return send(.move(units(to: userCursor)), lane: .live, moveTo: userCursor) }
+        }
+        if config.prioritizeSpeech, isSpeaking, case .region(let owner)? = unit?.owner,
+           runs.first(where: { $0.runID == owner }).map({ $0.stopped || $0.complete }) == true {
+            abortUnit()
+            if cursor != userCursor { return send(.move(units(to: userCursor)), lane: .live, moveTo: userCursor) }
+        }
         if let current = unit {
             if !shown, let op = current.ops.first {
                 switch op {
@@ -967,6 +1011,10 @@ public struct FieldQueue: Sendable {
         }
         if selection > 0 { revealDue = false; return .idle }
         guard shown else { return .wait }
+        if config.prioritizeSpeech, isSpeaking {
+            if let action = nextLive() { return action }
+            return .idle
+        }
         if let action = nextEdit() { return action }
         if let action = nextLive() { return action }
         if let action = revealCaret() { return action }
@@ -1429,6 +1477,7 @@ public struct FieldQueue: Sendable {
 
     private func runNeedsWork(_ run: LiveRun) -> Bool {
         if run.pending != nil || !run.held.isEmpty { return true }
+        if config.prioritizeSpeech, isSpeaking, run.stopped || run.complete { return false }
         for region in run.regions where !region.abandoned {
             guard let span = spans[region.spanID], !span.parked, !span.edited else { continue }
             let desired = Array(desiredText(region, in: run)), current = chars(of: span)
@@ -1455,6 +1504,7 @@ public struct FieldQueue: Sendable {
                 (runs[ri].regions[a].tEnd == nil ? 0 : 1, a) < (runs[ri].regions[b].tEnd == nil ? 0 : 1, b)
             }
             for gi in order {
+                if config.prioritizeSpeech, isSpeaking, runs[ri].stopped || runs[ri].complete { continue }
                 let region = runs[ri].regions[gi]
                 guard let span = spans[region.spanID], !span.parked else { continue }
                 let desired = Array(desiredText(region, in: runs[ri]))
@@ -1543,7 +1593,8 @@ public struct FieldQueue: Sendable {
 
     private mutating func ack(_ ri: Int) {
         let run = runs[ri]
-        guard let version = run.version, run.pending == nil, run.ackedVersion != version, !runNeedsWork(run), inFlight == nil else { return }
+        if config.prioritizeSpeech, isSpeaking, run.stopped || run.complete { return }
+        guard run.deferredSnapshot == nil, let version = run.version, run.pending == nil, run.ackedVersion != version, !runNeedsWork(run), inFlight == nil else { return }
         runs[ri].ackedVersion = version
         events.append(.liveApplied(runID: run.runID, version: version, complete: run.complete))
     }
@@ -1561,6 +1612,21 @@ public struct FieldQueue: Sendable {
     /// A snapshot becomes the run's target: region bounds move with the text diff.
     private mutating func apply(_ snapshot: LiveDictationSnapshot, to ri: Int) {
         var snapshot = snapshot
+        if config.prioritizeSpeech {
+            let speaking = !runs[ri].stopped && !snapshot.complete && snapshot.stopped != true
+            let authoritative = snapshot
+            for index in snapshot.segments.indices {
+                let segment = snapshot.segments[index]
+                var target = runs[ri].speechTargets[segment.id] ?? .init()
+                // Joined cleanup can empty later segments. While speaking, raw new segments remain speech;
+                // previously observed segments keep their delivery projection until the take stops.
+                let text = speaking && segment.cleaned ? (segment.raw ?? segment.text) : segment.text
+                snapshot.segments[index].text = String(target.update(Array(text), speaking: speaking))
+                if speaking { snapshot.segments[index].cleaned = false; snapshot.segments[index].unit = nil }
+                runs[ri].speechTargets[segment.id] = target
+            }
+            runs[ri].deferredSnapshot = speaking && snapshot != authoritative ? authoritative : nil
+        }
         runs[ri].version = snapshot.version
         let wasComplete = runs[ri].complete
         runs[ri].complete = snapshot.complete

@@ -1118,6 +1118,29 @@ private struct SeededRandom {
         #expect(editor.string.hasPrefix("Log: sail"), "\(editor.string)")
     }
 
+    @Test func aTrustedConfirmedCaretJumpDoesNotAddAFixedDelayBeforeTheNextEdit() async {
+        let (field, queue, clock, _) = keyedField("", configure: { $0.caretSet = .takes })
+        queue.live(runID: "timing", version: 1, text: "the cab is here and the sea is calm today")
+        await queue.whenIdle()
+        queue.live(runID: "timing", version: 2, text: "the cat is here and the sea is calm today")
+        await queue.whenIdle()
+        #expect(queue.caretJumps.direct == .trusted)
+        var jumpedAt: ContinuousClock.Instant?
+        var gaps: [Duration] = []
+        queue.journal = { entry in
+            guard entry.kind == .sent else { return }
+            if entry.detail == "caret" { jumpedAt = clock() }
+            else if entry.detail == "key", let jump = jumpedAt {
+                gaps.append(clock() - jump); jumpedAt = nil
+            }
+        }
+        queue.live(runID: "timing", version: 3, text: "the cap is here and the sea is calm today")
+        await queue.whenIdle()
+        #expect(field.string == "the cap is here and the sea is calm today")
+        #expect(!gaps.isEmpty)
+        #expect(gaps.allSatisfy { $0 == .zero })
+    }
+
     @Test func aFieldThatTakesCaretSetsJumpsStraightThereAndItIsRememberedForTheField() async {
         let (field, queue, _, _) = keyedField("", configure: { $0.caretSet = .takes })
         queue.live(runID: "r", version: 1, text: "the cab is here and the sea is calm today")

@@ -765,6 +765,7 @@ final class KeyboardController {
         queue.config.movesByCharacters = charactersField != nil && charactersField == id
         queue.config.capitalization = autocapitalization
         queue.config.canReadAround = true
+        queue.config.prioritizeSpeech = true
     }
 
     /// Drops everything pending (each edit's owner hears that it was dropped) and forgets the model.
@@ -1269,6 +1270,13 @@ final class KeyboardController {
                 self.queue.completeRecovery(request, report: nil, restored: false)
                 self.handle(self.queue.drainEvents()); return
             }
+            let policy = FieldRecovery()
+            if policy.canResolve(request, text: origin.before + origin.after) {
+                self.queue.completeRecovery(request, report: origin, restored: true)
+                self.handle(self.queue.drainEvents()); return
+            }
+            let headNeedsRecovery = self.queue.recoveryBlocksSpeech
+            let speechRevision = self.queue.speechRevision
             self.isReadingField = true
             self.fieldOperationCancelled = false
             self.syncRowTakeover()
@@ -1278,6 +1286,7 @@ final class KeyboardController {
                 guard let self else { return true }
                 return Task.isCancelled || !self.isVisible || self.isTornDown || self.document.documentID != fieldID
                     || self.fieldOperationCancelled || self.queue.recoveryRevision != request.revision
+                    || (!headNeedsRecovery && self.queue.isSpeaking && self.queue.speechRevision != speechRevision)
                     || Self.milliseconds(clock.now - start) >= FieldRecovery.budgetMs
             }, canMove: { [weak self] in
                 // A cancelled read still restores its cursor; a switched field must never receive the old restoration.
@@ -1285,18 +1294,64 @@ final class KeyboardController {
                     && self?.document.selectedText?.isEmpty != false
             }, move: { [weak self] units in self?.dispatch(.move(units), reading: true) })
             var reader = self.reader(for: fieldID)
-            reader.cap = FieldRecovery.lookAroundChars
-            reader.blockLimit = FieldRecovery.lookAroundChars
+            reader.cap = FieldRecovery.nearbyLimit(for: request)
+            reader.blockLimit = reader.cap
             reader.maxRereads = 3
-            let up = await reader.readUp(windows, known: "", limit: .cap)
-            let down: Result<FieldReader.Result, FieldReader.Failure>
+            var up = await reader.readUp(windows, known: "", limit: .cap)
+            if !headNeedsRecovery, self.queue.isSpeaking, self.queue.speechRevision != speechRevision {
+                // FieldReader cancellation restores before returning. The next queue observation still verifies
+                // its position; no edit is sent on the strength of a cancelled read.
+                let returned = self.currentReport
+                if returned.selected == nil, FieldMatch.confirms(expectedBefore: origin.before, expectedAfter: origin.after,
+                                                                 reportedBefore: returned.before, reportedAfter: returned.after) {
+                    self.queue.deferRecovery(request)
+                } else {
+                    self.queue.completeRecovery(request, report: nil, restored: false)
+                    self.handle(self.queue.drainEvents())
+                }
+                return
+            }
+            var down: Result<FieldReader.Result, FieldReader.Failure>
             if case .success(let above) = up, !windows.isCancelled {
                 // The upward read may have learned Safari's grapheme/paragraph units. Its downward half must use
                 // the same units when it moves and restores, rather than guessing UTF-16 again.
                 if let collapses = above.collapsesBreaks { reader.collapsesBreaks = collapses }
                 if let characters = above.movesByCharacters { reader.movesByCharacters = characters }
-                down = await reader.readDown(windows, known: "", room: FieldRecovery.lookAroundChars)
+                if policy.canResolve(request, text: above.text + origin.after) {
+                    let returned = self.currentReport
+                    if FieldMatch.confirms(expectedBefore: origin.before, expectedAfter: origin.after,
+                                           reportedBefore: returned.before, reportedAfter: returned.after) {
+                        self.learn(above, field: fieldID)
+                        self.queue.completeRecovery(request, report: .init(before: above.text, after: origin.after), restored: true)
+                        self.handle(self.queue.drainEvents()); return
+                    }
+                }
+                down = await reader.readDown(windows, known: "", room: reader.cap)
             } else { down = .failure(.cancelled) }
+            if case .success(let above) = up, case .success(let below) = down, !windows.isCancelled,
+               reader.cap < FieldRecovery.lookAroundChars,
+               !policy.canResolve(request, text: above.text + below.text) {
+                // Nearby evidence did not suffice. Expand once within the same total budget; the shorter first
+                // attempt must not turn a previously recoverable distant target into a false refusal.
+                reader.cap = FieldRecovery.lookAroundChars; reader.blockLimit = reader.cap
+                up = await reader.readUp(windows, known: "", limit: .cap)
+                if case .success(let expanded) = up, !windows.isCancelled {
+                    if let collapses = expanded.collapsesBreaks { reader.collapsesBreaks = collapses }
+                    if let characters = expanded.movesByCharacters { reader.movesByCharacters = characters }
+                    down = await reader.readDown(windows, known: "", room: reader.cap)
+                } else { down = .failure(.cancelled) }
+            }
+            if !headNeedsRecovery, self.queue.isSpeaking, self.queue.speechRevision != speechRevision {
+                let returned = self.currentReport
+                if returned.selected == nil, FieldMatch.confirms(expectedBefore: origin.before, expectedAfter: origin.after,
+                                                                 reportedBefore: returned.before, reportedAfter: returned.after) {
+                    self.queue.deferRecovery(request)
+                } else {
+                    self.queue.completeRecovery(request, report: nil, restored: false)
+                    self.handle(self.queue.drainEvents())
+                }
+                return
+            }
             let report = self.currentReport
             let restored = !windows.isCancelled && self.document.documentID == fieldID && report.selected == nil
                 && FieldMatch.confirms(expectedBefore: origin.before, expectedAfter: origin.after,
