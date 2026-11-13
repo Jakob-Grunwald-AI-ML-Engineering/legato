@@ -41,6 +41,8 @@ public final class MacFieldQueue {
         public var reason: Reason
         /// The text that did not reach the field (the whole desired text of the work).
         public var text: String
+        /// Characters already represented in the field, including an unconfirmed key that may have landed.
+        public var typed: Int = 0
     }
     /// A change of read text: `scope`, read at `range` between `before` and `after`, becomes `target`.
     public struct Edit: Sendable, Equatable {
@@ -140,6 +142,8 @@ public final class MacFieldQueue {
     /// panel. Each run is handed over once, never dropped; the queue leaves it (and its later versions) alone from then.
     /// Nil: such work waits and drops after `parkLimit` like work for an unfocused field.
     public var onUnreadable: (@MainActor ([Handover]) -> Void)?
+    /// A failed native transport gets one reassessment for this bound field, never a cycle of retries.
+    private var reassessedWriteFailure = false
     /// Counts changes the queue saw land (its own, verified, and the user's).
     public private(set) var revision = 0
 
@@ -678,6 +682,7 @@ public final class MacFieldQueue {
         if target.isFocused() { return true }
         switch target.refocus(allowOther: allowOther ?? !wroteAnything) {
         case .rebound(let same):
+            if !same { reassessedWriteFailure = false }
             note(.rebound, detail: same ? "same editor" : "other field")
             if rebindPending == nil { rebindPending = .some(userCaret) }
             // A move under way is planned again from the new element's caret.
@@ -1020,14 +1025,14 @@ public final class MacFieldQueue {
             try target.replace(range, with: text)
         } catch {
             expectedSelections.append(UTF16Range(location: range.location + text.utf16.count, length: 0))
-            return await failed(region, after: after, reason: "write")
+            return await failed(region, after: after, reason: "write", unchanged: nativeWriteUnchanged(region, doc: doc, target: target))
         }
         // Read back the region and the caret before anything else goes out.
         let shown = try? target.text(in: UTF16Range(location: region.start, length: String(after).utf16.count))
         guard shown == String(after) else {
             // The op may still land: the caret it leaves is ours too.
             expectedSelections.append(UTF16Range(location: range.location + text.utf16.count, length: 0))
-            return await failed(region, after: after, reason: "readback")
+            return await failed(region, after: after, reason: "readback", unchanged: nativeWriteUnchanged(region, doc: doc, target: target))
         }
         let delta = text.utf16.count - range.length
         apply(region, landed: after, at: range, delta: delta, inserted: text.utf16.count)
@@ -1631,11 +1636,27 @@ public final class MacFieldQueue {
         }
     }
 
-    private func failed(_ region: Region, after: [Character], reason: String) async -> Bool {
+    private func nativeWriteUnchanged(_ region: Region, doc: Document, target: any TextTarget) -> Bool {
+        (try? target.textLength()) == doc.length
+            && (try? target.text(in: UTF16Range(location: region.start, length: String(region.current).utf16.count))) == String(region.current)
+    }
+
+    private func failed(_ region: Region, after: [Character], reason: String, unchanged: Bool = false) async -> Bool {
         region.failures += 1
-        region.landing = after
+        region.landing = unchanged ? region.current : after
         note(.mismatch, id: region.id, run: region.runID, reason: reason, detail: "failures=\(region.failures)")
         if region.failures >= Self.retryLimit {
+            if unchanged, !reassessedWriteFailure, let target, target.editsInPlace, target.isFocused() {
+                reassessedWriteFailure = true
+                if target.recoverWriteFailure() {
+                    // Nothing of this op landed. The next queue step reads again and plans the missing changes
+                    // through the reassessed transport; already confirmed text is never replayed.
+                    region.failures = 0
+                    region.landing = nil
+                    expectedSelections = []
+                    return true
+                }
+            }
             region.lost = true
             drop(region, .failed)
         }
@@ -1697,9 +1718,19 @@ public final class MacFieldQueue {
     // MARK: Drops
 
     private func drop(_ region: Region, _ reason: Reason) {
+        let represented = region.landing ?? region.current
+        let appending = region.desired.starts(with: represented)
+        if reason == .failed, appending, region.runID != nil, let onUnreadable {
+            // A readable field may acknowledge writes without applying them. Keep the take growing in the panel,
+            // exactly as when reads stop, rather than abandoning all its later snapshots.
+            region.lost = false
+            onUnreadable(handOver())
+            return
+        }
         region.dropReason = reason
         note(.dropped, id: region.id, run: region.runID, text: String(region.desired), reason: reason.rawValue)
-        onDrop?(Drop(id: region.id, runID: region.runID, reason: reason, text: String(region.desired)))
+        let typed = reason == .userChanged || !appending ? 0 : represented.count
+        onDrop?(Drop(id: region.id, runID: region.runID, reason: reason, text: String(region.desired), typed: typed))
         region.desired = region.current
     }
 
@@ -1718,10 +1749,15 @@ public final class MacFieldQueue {
         for index in runs.indices { abandon(index, reason) }
     }
 
-    /// A run whose field went away drops once, as a whole: its newest text goes to the owner (History and the clipboard),
+    /// A run whose field went away drops once, as a whole: its newest text goes to the owner for panel recovery,
     /// and its later versions are neither placed nor dropped again. A run with nothing left to place stays as it is.
     private func abandon(_ index: Int, _ reason: Reason) {
         guard !runs[index].abandoned, runs[index].regions.contains(where: \.pending) || runs[index].needsRegion else { return }
+        let onlyAppending = runs[index].regions.filter(\.pending).allSatisfy { $0.desired.starts(with: $0.landing ?? $0.current) }
+        let typed = onlyAppending ? Self.typedCount(runs[index].regions.map {
+            TypedRegion(current: $0.landing ?? $0.current, desired: $0.desired, source: $0.source, separator: $0.separator,
+                        original: Array($0.original), trimsLead: $0.trimsLead, lost: $0.lost)
+        }) : 0
         for region in runs[index].regions {
             if region.pending { region.dropReason = reason; region.desired = region.current }
             region.open = false
@@ -1731,7 +1767,7 @@ public final class MacFieldQueue {
         // A retracted run's text is not wanted: nothing to recover.
         let text = runs[index].retracted ? "" : String(runs[index].target)
         note(.dropped, run: runs[index].id, text: text, reason: reason.rawValue)
-        onDrop?(Drop(id: runs[index].id, runID: runs[index].id, reason: reason, text: text))
+        onDrop?(Drop(id: runs[index].id, runID: runs[index].id, reason: reason, text: text, typed: typed))
     }
 
     // MARK: Panel handover
@@ -1746,6 +1782,12 @@ public final class MacFieldQueue {
     private func handOver() -> [Handover] {
         var handovers: [Handover] = []
         for index in runs.indices where handable(index) {
+            if runs[index].regions.filter(\.pending).contains(where: { !$0.desired.starts(with: $0.landing ?? $0.current) }) {
+                // A cleanup interrupted inside existing text has no appendable remainder. Keep the corrected
+                // suggestion for recovery instead of typing it after the field's unchanged tail.
+                abandon(index, .failed)
+                continue
+            }
             // A key that went out but did not read back usually landed: it counts as typed, so it is not typed twice.
             let typed = Self.typedCount(runs[index].regions.map {
                 TypedRegion(current: $0.landing ?? $0.current, desired: $0.desired, source: $0.source, separator: $0.separator,

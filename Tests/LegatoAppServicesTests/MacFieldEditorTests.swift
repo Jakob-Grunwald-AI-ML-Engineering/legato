@@ -51,17 +51,44 @@ import LegatoMac
     var value: String
     var selection: UTF16Range
     var keys: [FieldKey] = []
+    var startsWithNativeWrites = false
+    var nativeWriteLandsBeforeThrowing = false
+    var nativeWriteThrowsWithoutLanding = false
+    var nativeWrites = 0
+    var recoveryChecks = 0
+    var focused = true
+    var loseFocusAfterBackspace = false
+    var readable = true
+    var loseReadsAfterBackspace = false
+    private var recovered = false
     init(_ value: String) { self.value = value; selection = .init(location: value.utf16.count, length: 0) }
-    var editsInPlace: Bool { false }
+    var editsInPlace: Bool { startsWithNativeWrites && !recovered }
     var typesKeys: Bool { true }
-    func isFocused() -> Bool { true }
+    func isFocused() -> Bool { focused }
     func selectedRange() throws -> UTF16Range { selection }
-    func textLength() throws -> Int { value.utf16.count }
+    func textLength() throws -> Int {
+        guard readable else { throw TextTargetReadError.unsupported }
+        return value.utf16.count
+    }
     func text(in range: UTF16Range) throws -> String {
-        guard range.location >= 0, range.end <= value.utf16.count else { throw TextTargetReadError.unsupported }
+        guard readable, range.location >= 0, range.end <= value.utf16.count else { throw TextTargetReadError.unsupported }
         return (value as NSString).substring(with: NSRange(location: range.location, length: range.length))
     }
-    func replace(_ range: UTF16Range, with text: String) throws {}
+    func replace(_ range: UTF16Range, with text: String) throws {
+        nativeWrites += 1
+        if nativeWriteThrowsWithoutLanding { throw TextTargetReadError.unsupported }
+        if nativeWriteLandsBeforeThrowing {
+            value = (value as NSString).replacingCharacters(in: NSRange(location: range.location, length: range.length), with: text)
+            selection = .init(location: range.location + text.utf16.count, length: 0)
+            throw TextTargetReadError.unsupported
+        }
+    }
+    func recoverWriteFailure() -> Bool {
+        recoveryChecks += 1
+        guard startsWithNativeWrites, !recovered else { return false }
+        recovered = true
+        return true
+    }
     func press(_ key: FieldKey, mark: Int, selection planned: UTF16Range) throws {
         guard planned == selection else { throw FieldKeyRefusal.selectionMoved }
         if case .hop = key { throw FieldKeyRefusal.unavailable }
@@ -73,6 +100,8 @@ import LegatoMac
         case .backspace:
             value = ns.replacingCharacters(in: NSRange(location: selection.location - 1, length: 1), with: "")
             selection = .init(location: selection.location - 1, length: 0)
+            if loseFocusAfterBackspace { focused = false }
+            if loseReadsAfterBackspace { readable = false }
         case .text(let character):
             value = ns.replacingCharacters(in: NSRange(location: selection.location, length: 0), with: String(character))
             selection = .init(location: selection.location + String(character).utf16.count, length: 0)
@@ -162,7 +191,8 @@ import LegatoMac
         await editor.applyLive(snapshot("Hello world.", complete: true))
         #expect(target.value == "hello")
         #expect(other.value == "Untouched")
-        #expect(copied == "Hello world.")
+        #expect(copied.isEmpty)
+        #expect(editor.panel.recoveryText == "Hello world.")
     }
     @Test func userTypingAfterTheWordsClosesTheRegionAndItsCleanupStillLands() async {
         let target = EditorTarget("")
@@ -264,18 +294,20 @@ import LegatoMac
         #expect(await editor.apply(edit)?.applied == true)
         #expect(target.value == "Note: DRAFT")
     }
-    @Test func aScopeTheUserChangedIsDroppedAndReported() async throws {
+    @Test func aScopeTheUserChangedKeepsItsSuggestionInThePanelWithoutCopying() async throws {
         let target = EditorTarget("draft")
         let editor = MacFieldEditor(capture: { .target(target) })
-        var reports: [String] = []
+        var reports: [String] = [], copies: [String] = []
         editor.report = { reports.append($0) }
+        editor.recover = { copies.append($0) }
         editor.begin(); editor.beginInstruction()
         let read = try await editor.read(.context, instructionID: "magic", reading: {})
         target.value = "drift"
         let edit = ScopedEdit(instructionID: "magic", documentID: read.documentID, before: "draft", after: "", target: "DRAFT")
         #expect(await editor.apply(edit)?.applied == false)
         #expect(target.value == "drift")
-        #expect(!reports.isEmpty)
+        #expect(editor.panel.recoveryText == "DRAFT")
+        #expect(reports.isEmpty && copies.isEmpty)
     }
 
     @Test func oldCleanupCannotFollowMagicIntoANewFieldOrSelection() async throws {
@@ -311,12 +343,13 @@ import LegatoMac
         await editor.applyLive(snapshot("Late cleanup.", complete: true))
         await editor.finish()
         #expect(inserts == ["Ready."])
-        // Real input during the take: copied, never typed.
+        // Real input during the take: retained in the panel, never typed or copied automatically.
         editor.begin(); editor.relinquish()
         await editor.applyLive(snapshot("Keep this.", run: "fresh", complete: true))
         await editor.finish()
         #expect(inserts == ["Ready."])
-        #expect(copies == ["Keep this."])
+        #expect(copies.isEmpty)
+        #expect(editor.panel.recoveryText == "Keep this.")
     }
     /// Jakob's tight list in Edge: the field bound, then stopped reading. The take is never dropped and shows no notice:
     /// what went in live stays, the rest grows and is cleaned in the panel, and it is typed once at the end.
@@ -372,15 +405,132 @@ import LegatoMac
             #expect(notices.isEmpty)
         }
     }
-    @Test func aPasswordTakeThatCannotBeTypedGoesToTheClipboardWithOneLine() async {
+    @Test func aPasswordTakeThatCannotBeTypedStaysInThePanelUntilExplicitlyCopied() async {
         let editor = MacFieldEditor(capture: { .password })
         var copies: [String] = [], notices: [String] = []
-        editor.insert = { text in copies.append(text); return .copied(message: "Dictation copied: the field or app changed. Paste with ⌘V.") }
+        editor.insert = { _ in .retained(message: "The field changed.") }
+        editor.recover = { copies.append($0) }
         editor.report = { notices.append($0) }
         editor.begin(); await editor.applyLive(snapshot("words", complete: true))
         await editor.finish()
+        #expect(copies.isEmpty && notices.isEmpty)
+        #expect(editor.panel.recoveryText == "words")
+        editor.copyRecovery()
         #expect(copies == ["words"])
-        #expect(notices.count == 1)
+        #expect(editor.panel.recoveryText == "words")
+    }
+
+    @Test func anInterruptedPanelInsertRetainsOnlyTheRemainderAcrossTheNextTake() async {
+        let editor = MacFieldEditor(capture: { .none })
+        var inserts: [String] = [], copies: [String] = []
+        editor.recover = { copies.append($0) }
+        editor.insert = { text in
+            inserts.append(text)
+            return .interrupted(remainder: "untyped remainder", message: "Stopped")
+        }
+        editor.begin()
+        await editor.applyLive(snapshot("typed prefix untyped remainder", run: "old", complete: true))
+        await editor.finish()
+        #expect(editor.panel.recoveryText == "untyped remainder")
+        editor.insert = { inserts.append($0); return .typed }
+        editor.begin()
+        await editor.applyLive(snapshot("New take.", run: "new", complete: true))
+        await editor.applyLive(snapshot("Late old cleanup.", run: "old", complete: true))
+        await editor.finish()
+        #expect(inserts == ["typed prefix untyped remainder", "New take."])
+        #expect(editor.panel.recoveryText == "untyped remainder")
+        #expect(copies.isEmpty)
+        editor.copyRecovery()
+        #expect(copies == ["untyped remainder"])
+        editor.dismissRecovery()
+        #expect(editor.panel.recoveryText.isEmpty)
+    }
+
+    @Test func ignoredLiveWritesHandTheWholeTakeToThePanelAndKeepItsCleanup() async {
+        let target = EditorTarget("First take.")
+        target.ignoreWrites = true
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false }
+        editor.sleep = { _ in }
+        var inserts: [String] = [], copies: [String] = []
+        editor.insert = { inserts.append($0); return .typed }
+        editor.recover = { copies.append($0) }
+        editor.begin()
+        await editor.applyLive(snapshot("second local dictation", run: "second"))
+        #expect(editor.panel.active)
+        #expect(editor.panel.take.text == "second local dictation")
+        await editor.applyLive(snapshot("Second local dictation test.", run: "second", complete: true))
+        #expect(editor.panel.take.text == "Second local dictation test.")
+        await editor.finish()
+        #expect(target.value == "First take.")
+        #expect(inserts == [" Second local dictation test."])
+        #expect(editor.panel.recoveryText.isEmpty && copies.isEmpty)
+    }
+
+    @Test(arguments: [false, true]) func confirmedIgnoredNativeWritesReassessOnceAndContinueLiveWithVerifiedKeys(throwsWithoutLanding: Bool) async {
+        let target = KeyTarget("First take.")
+        target.startsWithNativeWrites = true
+        target.nativeWriteThrowsWithoutLanding = throwsWithoutLanding
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false }
+        editor.sleep = { _ in }
+        var inserts: [String] = [], copies: [String] = []
+        editor.insert = { inserts.append($0); return .typed }
+        editor.recover = { copies.append($0) }
+        editor.begin()
+        await editor.applyLive(snapshot("second local dictation", run: "second"))
+        #expect(target.value == "First take. second local dictation")
+        #expect(target.recoveryChecks == 1)
+        #expect(target.nativeWrites == MacFieldQueue.retryLimit)
+        #expect(!target.keys.isEmpty)
+        #expect(!editor.panel.active)
+        await editor.applyLive(snapshot("Second local dictation test.", run: "second", complete: true))
+        await editor.finish()
+        #expect(target.value == "First take. Second local dictation test.")
+        #expect(target.recoveryChecks == 1)
+        #expect(editor.panel.recoveryText.isEmpty && copies.isEmpty && inserts.isEmpty)
+    }
+
+    @Test func aThrowingWriteThatLandedNeverReassessesOrReplaysThroughKeys() async {
+        let target = KeyTarget("First take.")
+        target.startsWithNativeWrites = true
+        target.nativeWriteLandsBeforeThrowing = true
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false }
+        editor.sleep = { _ in }
+        editor.begin()
+        await editor.applyLive(snapshot("Second take.", run: "second", complete: true))
+        await editor.finish()
+        #expect(target.value == "First take. Second take.")
+        #expect(target.recoveryChecks == 0 && target.keys.isEmpty)
+        #expect(!editor.panel.active && editor.panel.recoveryText.isEmpty)
+    }
+
+    @Test(arguments: [false, true]) func interruptedCleanupRetainsTheWholeSuggestionAndItsLateRevision(unreadable: Bool) async {
+        let target = KeyTarget("")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false }
+        var clock = ContinuousClock.now
+        editor.sleep = { clock += $0 }
+        var copies: [String] = []
+        editor.recover = { copies.append($0) }
+        editor.begin()
+        editor.queue.now = { clock }
+        await editor.applyLive(snapshot("safe unchanged tail", run: "interrupted"))
+        #expect(target.value == "safe unchanged tail")
+        target.loseFocusAfterBackspace = !unreadable
+        target.loseReadsAfterBackspace = unreadable
+        await editor.applyLive(snapshot("Safe unchanged tail", run: "interrupted", complete: true))
+        #expect(target.value == "afe unchanged tail")
+        #expect(editor.panel.recoveryText == "Safe unchanged tail")
+        await editor.applyLive(snapshot("Safe unchanged tail.", run: "interrupted", complete: true))
+        await editor.finish()
+        #expect(editor.panel.recoveryText == "Safe unchanged tail.")
+        #expect(target.value == "afe unchanged tail")
+        editor.dismissRecovery()
+        await editor.applyLive(snapshot("Dismissed late cleanup.", run: "interrupted", complete: true))
+        #expect(editor.panel.recoveryText.isEmpty && editor.panel.take.isEmpty)
+        #expect(copies.isEmpty)
     }
     @Test func onlyAPasswordBindKeepsTakesOutOfHistory() {
         var field: FocusedField = .password
@@ -440,7 +590,7 @@ import LegatoMac
         await keyed.finish()
         #expect(keys.value == "Hi there.")
     }
-    @Test func anElementThatReadsButTakesNoWritesOrKeysUsesThePanelAndOnlyCopies() async throws {
+    @Test func anElementThatReadsButTakesNoWritesOrKeysKeepsTextInThePanel() async throws {
         let target = EditorTarget("Some text")
         target.inPlace = false
         let editor = MacFieldEditor(capture: { .target(target) })
@@ -456,7 +606,8 @@ import LegatoMac
         #expect(read.above == "Some text")
         await editor.finish()
         // A page is not a field: its letters could be the site's shortcuts, so nothing is typed.
-        #expect(inserts.isEmpty && copied == ["more"])
+        #expect(inserts.isEmpty && copied.isEmpty)
+        #expect(editor.panel.recoveryText == "more")
     }
     @Test func aKeystrokeFieldIsEditedLiveWithoutThePanel() async {
         let target = KeyTarget("Hi")
@@ -649,7 +800,8 @@ import LegatoMac
         editor.sleep = { _ in if target.value.hasPrefix("c") { target.value = "Q" + target.value.dropFirst() } }
         await editor.applyLive(snapshot("cXYZ unchanged tail", complete: true))
         #expect(target.value == "QX unchanged tail")
-        #expect(copied == "cXYZ unchanged tail", "copied: \(copied) journal: \(editor.queue.debugState)")
+        #expect(copied.isEmpty)
+        #expect(editor.panel.recoveryText == "cXYZ unchanged tail")
     }
 
 }

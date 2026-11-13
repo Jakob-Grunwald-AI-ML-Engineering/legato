@@ -100,6 +100,10 @@ public protocol TextTarget: AnyObject {
     /// Whether `replace` lands exactly, so the field can be edited live with Accessibility writes. False where the
     /// host reads but does not apply text writes (Chromium web content).
     var editsInPlace: Bool { get }
+    /// A scoped AX write was independently verified not to have changed the field. The adapter may disable that
+    /// transport and offer guarded keys instead. This sends no input, returns true only on an actual downgrade,
+    /// and is never called for an uncertain or partially landed write.
+    func recoverWriteFailure() -> Bool
     /// Whether the field is edited with synthetic keys instead (`press`), each one verified by reading it back.
     var typesKeys: Bool { get }
     /// A counter of the user's real key presses and clicks: a key planned at one mark is refused at another.
@@ -119,6 +123,7 @@ public protocol TextTarget: AnyObject {
 public enum TextTargetReadError: Error { case unsupported }
 public extension TextTarget {
     var editsInPlace: Bool { true }
+    func recoverWriteFailure() -> Bool { false }
     var typesKeys: Bool { false }
     var inputMark: Int { 0 }
     func press(_ key: FieldKey, mark: Int, selection: UTF16Range) throws { throw FieldKeyRefusal.unavailable }

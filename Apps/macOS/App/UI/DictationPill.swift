@@ -18,6 +18,8 @@ struct DictationPillActions {
     var magic: @MainActor () -> Void = {}
     var undo: @MainActor () -> Void = {}
     var redo: @MainActor () -> Void = {}
+    var copyRecovery: @MainActor () -> Void = {}
+    var dismissRecovery: @MainActor () -> Void = {}
 }
 
 /// Never key, never main, never activating: the field underneath keeps focus. Clicks pass through except while the
@@ -55,7 +57,7 @@ final class DictationPillController {
     private static let size = NSSize(width: 460, height: 64)
     private static let failedSize = NSSize(width: 460, height: 92)
     private var size: NSSize {
-        let base = session.pipeline.takePhase == .failed || session.instruction.strip.phase != .idle ? Self.failedSize : Self.size
+        let base = session.pipeline.takePhase == .failed || session.instruction.strip.phase != .idle || !takePanel.recoveryText.isEmpty ? Self.failedSize : Self.size
         guard DictationPillView.showsPanel(session: session, panel: takePanel) else { return base }
         return NSSize(width: base.width, height: max(base.height, panelHeight(base: base)))
     }
@@ -227,7 +229,7 @@ struct DictationPillView: View {
 
     var body: some View {
         NotchIsland(style: model.style, presentation: presentation) { card }
-            .accessibilityElement(children: showsFailedActions || showsControls || session.instruction.strip.phase != .idle ? .contain : .combine)
+            .accessibilityElement(children: showsFailedActions || showsControls || !panel.recoveryText.isEmpty || session.instruction.strip.phase != .idle ? .contain : .combine)
     }
 
     private var card: some View {
@@ -243,6 +245,7 @@ struct DictationPillView: View {
             }
             if session.instruction.strip.phase != .idle { magicActions }
             else if showsFailedActions { failedActions }
+            else if !panel.recoveryText.isEmpty { recoveryActions }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -310,13 +313,21 @@ struct DictationPillView: View {
         .buttonStyle(.bordered).controlSize(.small)
     }
 
+    private var recoveryActions: some View {
+        HStack(spacing: 8) {
+            Spacer(minLength: 0)
+            Button("Copy") { actions.copyRecovery() }.accessibilityIdentifier("dictation.pill.copyRecovery")
+            Button("Dismiss") { actions.dismissRecovery() }.accessibilityIdentifier("dictation.pill.dismissRecovery")
+        }.buttonStyle(.bordered).controlSize(.small)
+    }
+
     /// A take typing live into its field: the pill holds the listening state and quick controls, not the words.
     private var compact: Bool { Self.compact(panel: panel) }
     private var listeningNow: Bool { session.phase == .listening && model.notice == nil && pipeline.takePhase == .buffering }
     private var showsControls: Bool { Self.showsControls(session: session, panel: panel, notice: model.notice) }
 
     static func compact(panel: DictationPanel) -> Bool {
-        DictationPillContent.forTake(panelActive: panel.active) == .listeningControls
+        DictationPillContent.forTake(panelActive: panel.active || !panel.recoveryText.isEmpty) == .listeningControls
     }
     /// The quick controls show while a take types live and nothing else (a notice, a failed cleanup, Magic's strip) owns the card.
     static func showsControls(session: MacDictationSession, panel: DictationPanel, notice: String?) -> Bool {
@@ -325,7 +336,7 @@ struct DictationPillView: View {
     }
     static func takesClicks(session: MacDictationSession, panel: DictationPanel, notice: String?) -> Bool {
         session.pipeline.takePhase == .failed || session.instruction.strip.phase != .idle
-            || showsControls(session: session, panel: panel, notice: notice)
+            || !panel.recoveryText.isEmpty || showsControls(session: session, panel: panel, notice: notice)
     }
 
     private var showsFailedActions: Bool { (model.notice == nil || inPanel) && pipeline.takePhase == .failed }
@@ -340,7 +351,9 @@ struct DictationPillView: View {
     /// A panel-mode take is on show: from the dictation start until its words were typed (or are held after a failed
     /// cleanup). Magic's strip takes precedence while it runs.
     static func showsPanel(session: MacDictationSession, panel: DictationPanel) -> Bool {
-        guard panel.active, session.instruction.strip.phase == .idle else { return false }
+        guard session.instruction.strip.phase == .idle else { return false }
+        if !panel.recoveryText.isEmpty { return true }
+        guard panel.active else { return false }
         return session.phase != .idle || panel.inserting || !panel.take.isEmpty || session.pipeline.takePhase != .buffering
     }
 
@@ -348,7 +361,7 @@ struct DictationPillView: View {
     /// on their way there (a take before its cleaned words stream in, buffered lines, the live line).
     static func panelText(session: MacDictationSession, panel: DictationPanel) -> String {
         let pipeline = session.pipeline
-        var parts = [panel.take.text]
+        var parts = [panel.recoveryText, panel.deliveryText, panel.take.text]
         if pipeline.mode != .live {
             if !panel.take.isGrowing { parts.append(pipeline.failedText ?? pipeline.cleaningText ?? "") }
             parts += pipeline.takeLines
@@ -382,6 +395,7 @@ struct DictationPillView: View {
         if inPanel, let notice = model.notice { return notice }
         guard model.notice == nil else { return nil }
         if inPanel, panel.inserting { return "Typing into the app…" }
+        if inPanel, !panel.recoveryText.isEmpty { return "Text kept here. Copy it when you're ready." }
         switch pipeline.takePhase {
         case .failed: return "Couldn't clean up. Your text is held."
         case .cleaning: return compact ? nil : "Cleaning…"

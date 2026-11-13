@@ -19,6 +19,8 @@ final class AXTextTarget: TextTarget {
     private let appElement: AXUIElement
     private let pid: pid_t
     private var textOperationSupported: Bool?
+    private var writeCapabilitiesCache: FieldWriteCapabilities?
+    private var scopedWriteFailed = false
     /// What identifies the editor apart from the element object (`Editor`), read at capture and at each rebind.
     private var editor: Editor?
 
@@ -116,7 +118,7 @@ final class AXTextTarget: TextTarget {
     enum PasteWitness {
         /// The focused element: the insert goes ahead only while it still has focus.
         case element(AXTextTarget)
-        /// No element could be read (nothing focused that Accessibility exposes): the app and the key guards decide.
+        /// No positively identified typing destination: retain the take in the panel instead of sending blind keys.
         case unreadable
         /// A password field: the insert goes ahead while its element (when one was read) keeps focus and its length
         /// (when exposed) is unchanged. Secure input hides the user's keys from Legato's tap, so the length stands in.
@@ -132,14 +134,14 @@ final class AXTextTarget: TextTarget {
             }
         }
 
-        /// The witnessed field still has focus (an unreadable one: no element to check, the app guard decides).
+        /// The positively identified typing destination still has focus. An unknown destination never accepts keys.
         @MainActor func stillFocused() -> Bool {
             switch self {
-            case .element(let target): return target.isFocused()
-            case .unreadable: return true
+            case .element(let target): return target.editable && target.isFocused()
+            case .unreadable: return false
             case .password(let target, let length):
-                guard let target else { return true }
-                return target.hasFocus() && (length == nil || target.characterCount() == length)
+                guard let target else { return false }
+                return target.editable && target.hasFocus() && (length == nil || target.characterCount() == length)
             }
         }
     }
@@ -159,9 +161,9 @@ final class AXTextTarget: TextTarget {
         AXUIElementSetMessagingTimeout(element, messagingTimeout)
         let target = AXTextTarget(element: element, appElement: appElement)
         switch security(of: element) {
-        case .password: return .password(target, length: target.characterCount())
-        case .notPassword: return .element(target)
-        // Unanswered like the capture, which then dictates through the panel: the app and key guards decide.
+        case .password: return target.editable ? .password(target, length: target.characterCount()) : .password(nil, length: nil)
+        case .notPassword: return target.editable ? .element(target) : .unreadable
+        // Failed role reads never authorize blind keys; the text remains available in the panel.
         case .unknown: return .unreadable
         }
     }
@@ -246,12 +248,30 @@ final class AXTextTarget: TextTarget {
         }
     }
 
-    /// Whether Accessibility writes land exactly in this field. Chromium's web content reports success for an
-    /// AXSelectedText write and changes nothing.
-    var editsInPlace: Bool { !Self.isChromium(pid: pid) }
-    /// Chromium fields are edited with synthetic keys, each read back (`MacFieldQueue`). Only an editable element
-    /// takes keys: the page itself (AXWebArea) reads as text too, and a letter typed there can be a site's shortcut.
-    var typesKeys: Bool { Self.isChromium(pid: pid) && editable }
+    /// Scoped AX replacements require their own setter (or WebKit's marker operation). A whole-value setter alone
+    /// is insufficient: WhatsApp exposes one while refusing AXSelectedText. Chromium ignores its advertised setter.
+    var editsInPlace: Bool { writeCapabilities.editsInPlace }
+    /// Editable fields without scoped AX writes use synthetic keys, each independently read back by the queue.
+    /// Readable pages do not take keys: a letter typed there could invoke a site shortcut.
+    var typesKeys: Bool { writeCapabilities.typesKeys }
+    private var writeCapabilities: FieldWriteCapabilities {
+        if let writeCapabilitiesCache { return writeCapabilitiesCache }
+        var selectedTextSettable: DarwinBoolean = false
+        let setter = AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &selectedTextSettable) == .success
+            && selectedTextSettable.boolValue
+        let capabilities = FieldWriteCapabilities(chromium: chromium, editable: editable, selectedTextSettable: setter,
+                                                  textOperation: supportsTextOperation(), scopedWriteFailed: scopedWriteFailed)
+        writeCapabilitiesCache = capabilities
+        return capabilities
+    }
+    /// An advertised setter that read back unchanged is no longer trusted for this binding. The queue will read
+    /// afresh and plan the remaining edit with guarded keys; no retry is performed inside the adapter.
+    func recoverWriteFailure() -> Bool {
+        guard !scopedWriteFailed, editsInPlace, editable, isFocused() else { return false }
+        scopedWriteFailed = true
+        writeCapabilitiesCache = nil
+        return typesKeys
+    }
     private var editableCache: Bool?
     private var editable: Bool {
         if let editableCache { return editableCache }
@@ -260,9 +280,16 @@ final class AXTextTarget: TextTarget {
         return value
     }
     private static func isEditable(_ element: AXUIElement) -> Bool {
-        var settable: DarwinBoolean = false
-        if AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success, settable.boolValue { return true }
-        return (try? copyAttribute(element, "AXEditableAncestor")) != nil
+        let role = (try? copyAttribute(element, kAXRoleAttribute)) as? String
+        var valueSettable: DarwinBoolean = false, selectedTextSettable: DarwinBoolean = false
+        let value = AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &valueSettable) == .success && valueSettable.boolValue
+        let selected = AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &selectedTextSettable) == .success && selectedTextSettable.boolValue
+        var ancestorRole: String?
+        if let ancestor = (try? copyAttribute(element, "AXEditableAncestor")) ?? nil,
+           CFGetTypeID(ancestor) == AXUIElementGetTypeID() {
+            ancestorRole = (try? copyAttribute(unsafeDowncast(ancestor, to: AXUIElement.self), kAXRoleAttribute)) as? String
+        }
+        return FieldTypingDestination.accepts(role: role, textSettable: value || selected, editableAncestorRole: ancestorRole)
     }
     var inputMark: Int { RealInput.shared.count }
 
@@ -340,7 +367,8 @@ final class AXTextTarget: TextTarget {
         guard same || allowOther else { return .declined }
         element = focused
         reader = focusedReader
-        editableCache = nil; textOperationSupported = nil
+        editableCache = nil; textOperationSupported = nil; writeCapabilitiesCache = nil
+        if !same { scopedWriteFailed = false }
         editor = Editor(of: focused)
         return .rebound(sameEditor: same)
     }
