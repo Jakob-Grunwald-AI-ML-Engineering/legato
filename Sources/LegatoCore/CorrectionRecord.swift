@@ -118,7 +118,8 @@ public struct CorrectionTracker: Sendable {
     public private(set) var lastError: String?
     public init(store: CorrectionStore) { self.store = store }
     public func reset() { trackers = [] }
-    @discardableResult public func arm(dictationID: String, raw: String, inserted: String, snapshot: String, platform: String, locale: String) -> Bool {
+    @discardableResult public func arm(dictationID: String, raw: String, inserted: String, snapshot: String, platform: String, locale: String, isIdle: Bool) -> Bool {
+        guard isIdle else { return false }
         trackers.removeAll { $0.dictationID == dictationID || !$0.active }
         if let tracker = CorrectionTracker(dictationID: dictationID, rawText: raw, insertedText: inserted,
                                             snapshot: snapshot, platform: platform, localeIdentifier: locale) {

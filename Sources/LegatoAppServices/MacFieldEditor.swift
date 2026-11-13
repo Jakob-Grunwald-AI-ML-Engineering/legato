@@ -270,7 +270,7 @@ import LegatoMac
         guard let snapshot = correctionSnapshot() else { return }
         for (id, source) in correctionSources {
             if correctionCapture?.arm(dictationID: id, raw: source.raw, inserted: source.text,
-                                       snapshot: snapshot, platform: "macOS", locale: Locale.current.identifier) == true {
+                                       snapshot: snapshot, platform: "macOS", locale: Locale.current.identifier, isIdle: !queue.hasWork) == true {
                 correctionSources.removeValue(forKey: id)
                 correctionExpires = Date().addingTimeInterval(600)
             }
@@ -284,7 +284,7 @@ import LegatoMac
         guard let snapshot else { return }
         if snapshot.complete {
             correctionSources[snapshot.runID] = (
-                snapshot.segments.map { $0.raw ?? $0.text }.filter { !$0.isEmpty }.joined(separator: " "), Self.body(of: snapshot))
+                snapshot.rawText ?? snapshot.segments.map { $0.raw ?? $0.text }.filter { !$0.isEmpty }.joined(separator: " "), Self.body(of: snapshot))
         }
         guard !retiredRunIDs.contains(snapshot.runID) else { return }
         seenRunIDs.insert(snapshot.runID)

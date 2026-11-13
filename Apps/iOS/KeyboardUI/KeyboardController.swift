@@ -780,6 +780,7 @@ final class KeyboardController {
 
     private func enqueue(_ input: FieldQueue.Input) {
         syncQueueField()
+        armCorrections()
         queue.enqueue(input)
         var entry = EditJournal.Entry(t: Self.uptimeMs, kind: .input, field: queueDocumentID)
         entry.input = input
@@ -788,6 +789,7 @@ final class KeyboardController {
 
     private func enqueue(_ edit: FieldQueue.Edit, user: Bool = false, completion: ((FieldQueue.Event?) -> Void)? = nil) {
         syncQueueField()
+        if user { armCorrections() }
         if let completion { editCompletions[edit.id] = completion }
         queue.enqueue(edit, user: user)
         var entry = EditJournal.Entry(t: Self.uptimeMs, kind: .edit, field: queueDocumentID)
@@ -855,7 +857,6 @@ final class KeyboardController {
             switch event {
             case .sent(_, let lane):
                 if lane == .user {
-                    armCorrections()
                     correctionKeyAt = Date()
                 }
                 else {
@@ -900,9 +901,8 @@ final class KeyboardController {
             case .liveApplied(let runID, let version, let complete):
                 if complete, let snapshot = liveSnapshot, snapshot.runID == runID {
                     correctionSources[runID] = (
-                        snapshot.segments.map { $0.raw ?? $0.text }.filter { !$0.isEmpty }.joined(separator: " "),
+                        snapshot.rawText ?? snapshot.segments.map { $0.raw ?? $0.text }.filter { !$0.isEmpty }.joined(separator: " "),
                         snapshot.segments.map(\.text).filter { !$0.isEmpty }.joined(separator: " "))
-                    armCorrections()
                 }
                 updateCleanup { $0.applied(runID: runID, version: version, complete: complete) }
                 guard runID == liveSnapshot?.runID, version != liveAckedVersion else { break }
@@ -1047,13 +1047,13 @@ final class KeyboardController {
     }
 
     private func armCorrections() {
-        guard !document.isSecureTextEntry, document.documentID == queueDocumentID else { return }
+        guard queue.isIdle, !document.isSecureTextEntry, document.documentID == queueDocumentID else { return }
         let report = currentReport
         let snapshot = report.before + (report.selected ?? "") + report.after
         if !correctionSources.isEmpty {
             for (id, source) in correctionSources {
                 correctionCapture?.arm(dictationID: id, raw: source.raw, inserted: source.text,
-                    snapshot: snapshot, platform: "iOS", locale: Locale.current.identifier)
+                    snapshot: snapshot, platform: "iOS", locale: Locale.current.identifier, isIdle: queue.isIdle)
             }
             correctionSources = [:]
         }

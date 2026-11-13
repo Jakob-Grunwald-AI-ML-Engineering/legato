@@ -82,6 +82,17 @@ struct CorrectionRecordTests {
         #expect(noRecordvalue == nil)
     }
 
+    @MainActor @Test func completionDuringOwnWritesDoesNotArmUntilIdle() {
+        let capture = CorrectionCapture(store: CorrectionStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)))
+        let duringOwnWrites = capture.arm(dictationID: "take", raw: "hello john", inserted: "Hello John.",
+            snapshot: "Hello John.", platform: "test", locale: "en", isIdle: false)
+        #expect(!duringOwnWrites)
+        capture.reset() // A trailing own write in the same event batch.
+        let whenIdle = capture.arm(dictationID: "take", raw: "hello john", inserted: "Hello John.",
+            snapshot: "Hello John.", platform: "test", locale: "en", isIdle: true)
+        #expect(whenIdle)
+    }
+
     @Test func independentWritersAndDeletePreserveOtherEvidence() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
