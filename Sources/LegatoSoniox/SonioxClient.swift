@@ -343,7 +343,7 @@ public actor SonioxClient {
     }
     private func publish(_ output: SegmenterOutput, activity: Bool) async throws {
         latestTail = output.tail
-        for event in output.events {
+        for (index, event) in output.events.enumerated() {
             switch event {
             case .boundary(let reason, let time):
                 _ = try await room.publish(channel: .asrBoundary, participant: .segmenter,
@@ -355,8 +355,16 @@ public actor SonioxClient {
                 var fields: [String: JSONValue] = ["t0": t0.map(JSONValue.number) ?? .null, "t1": t1.map(JSONValue.number) ?? .null, "timings": try .encoding(segment.words.map { ["t0": $0.t0, "t1": $0.t1] }), "reason": .string(segment.reason), "thresholds": thresholds]
                 if let speaker = segment.speaker { fields["speaker"] = .string(speakerPrefix + speaker) }
                 let metadata: JSONValue = .object(fields)
+                // A final can consume only a prefix of the previous partial. Carry the rest of this update so
+                // consumers never briefly erase it before the separate tail event arrives. Include later finals.
+                let following = output.events.dropFirst(index + 1).compactMap { event -> String? in
+                    guard case .segment(let next) = event else { return nil }
+                    return next.words.map(\.word.text).joined(separator: " ")
+                }
+                let remainingTail = (following + [output.tail]).filter { !$0.isEmpty }.joined(separator: " ")
                 _ = try await room.publish(channel: .asrSegment, participant: .segmenter,
-                    payload: .object(["words": try .encoding(segment.words.map(\.word)), "metadata": metadata]),
+                    payload: .object(["words": try .encoding(segment.words.map(\.word)), "metadata": metadata,
+                                      "remainingTail": .string(remainingTail)]),
                     tOrigin: t0.flatMap { start in audioOrigin.map { $0 + start } })
             }
         }

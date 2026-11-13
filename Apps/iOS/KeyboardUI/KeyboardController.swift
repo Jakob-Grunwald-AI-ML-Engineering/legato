@@ -792,7 +792,7 @@ final class KeyboardController {
     /// Steps the queue against the field's report and carries out the op it hands over. Not reentrant (the field's
     /// change notes during an op come back here); paused while a walk reads the field.
     private func pump() {
-        guard !isTornDown, isVisible, !isFieldBusy, !pumping, document.documentID != nil, !document.isSecureTextEntry else { return }
+        guard !isTornDown, isVisible, !isFieldBusy, !queue.ownsRead, !pumping, document.documentID != nil, !document.isSecureTextEntry else { return }
         pumping = true
         defer { pumping = false }
         syncQueueField()
@@ -813,17 +813,32 @@ final class KeyboardController {
             }
             handle(events)
             guard case .send(let op) = action else { break }
-            switch op {
-            case .move(let units): document.adjustTextPosition(byCharacterOffset: units)
-            case .deleteBackward(let count): for _ in 0..<count { document.deleteBackward() }
-            case .insert(let text): document.insert(text)
-            }
+            dispatch(op)
+            // Planning a diff can take tens of milliseconds. None of that time was spent in the host: the
+            // confirmation clock starts only after the OS received this operation.
+            queue.operationDispatched()
+            lastStepAt = ContinuousClock.now
         }
         if let open = queue.openRegion { sessionSpan.track(runID: open.runID, anchor: open.anchor, region: open.text) }
         startTickerIfNeeded()
     }
 
     /// What the queue reports: acknowledgements, drops and the live run's progress go to their owners.
+    /// The sole physical mutation point. Queue steps own writes; field readers borrow the cursor through the same
+    /// coordinator and may only move it. The wrappers used by FieldReader never mutate the document themselves.
+    private func dispatch(_ op: ShadowOp, reading: Bool = false) {
+        if reading {
+            guard queue.ownsRead, case .move = op else { return }
+        } else {
+            guard !queue.ownsRead, queue.hasOpInFlight else { return }
+        }
+        switch op {
+        case .move(let units): document.adjustTextPosition(byCharacterOffset: units)
+        case .deleteBackward(let count): for _ in 0..<count { document.deleteBackward() }
+        case .insert(let text): document.insert(text)
+        }
+    }
+
     private func handle(_ events: [FieldQueue.Event]) {
         guard !events.isEmpty else { return }
         journal.write(EditJournal.entries(for: events, t: Self.uptimeMs, field: queueDocumentID))
@@ -1109,7 +1124,7 @@ final class KeyboardController {
             pump()
         }
         if !queue.isHome { trace?("queue pause timed out") }
-        return queue.isHome
+        return queue.acquireRead()
     }
 
     /// Before a read for an instruction: the keyboard's own writes on their way (a cleanup landing) go in first, so the
@@ -1125,6 +1140,7 @@ final class KeyboardController {
     }
 
     private func resumeQueue() {
+        queue.releaseRead()
         queue.paused = false
         pump()
     }
@@ -1176,7 +1192,7 @@ final class KeyboardController {
     /// show text that is no longer there. A move of one character and back makes it report afresh; each move is given
     /// the settle gap (the proxy shows a move before the host applied it). Not with a selection (a move would collapse it).
     @discardableResult private func refreshContext() async -> Bool {
-        guard isVisible, !isTornDown, !shouldCancelFieldOperation, !Task.isCancelled else { return false }
+        guard queue.ownsRead, isVisible, !isTornDown, !shouldCancelFieldOperation, !Task.isCancelled else { return false }
         guard document.selectedText?.isEmpty != false else { return true }
         let id = document.documentID
         let origin = (before: shown(document.contextBefore), after: shown(document.contextAfter))
@@ -1195,7 +1211,7 @@ final class KeyboardController {
             FieldMatch.confirms(expectedBefore: window.before, expectedAfter: window.after,
                                 reportedBefore: shown(document.contextBefore), reportedAfter: shown(document.contextAfter))
         }
-        document.adjustTextPosition(byCharacterOffset: step)
+        dispatch(.move(step), reading: true)
         var landed = false
         for _ in 0..<6 {
             await settle()
@@ -1203,7 +1219,7 @@ final class KeyboardController {
             if shows(moved) { landed = true; break }
         }
         guard landed else { return false }
-        document.adjustTextPosition(byCharacterOffset: -step)
+        dispatch(.move(-step), reading: true)
         for _ in 0..<6 {
             await settle()
             guard isVisible, !isTornDown, document.documentID == id else { return false }
@@ -1419,9 +1435,9 @@ final class KeyboardController {
         syncRowTakeover()
         let started = Date()
         #if DEBUG
-        let windows: any FieldWindowProxy = WindowProbe.enabled ? WindowProbe(DocumentWindows(document, cancelled: { [weak self] in self?.shouldCancelFieldOperation == true }, canMove: { [weak self] in self?.isVisible == true && self?.isTornDown == false })) : DocumentWindows(document, cancelled: { [weak self] in self?.shouldCancelFieldOperation == true }, canMove: { [weak self] in self?.isVisible == true && self?.isTornDown == false })
+        let windows: any FieldWindowProxy = WindowProbe.enabled ? WindowProbe(DocumentWindows(document, cancelled: { [weak self] in self?.shouldCancelFieldOperation == true }, canMove: { [weak self] in self?.isVisible == true && self?.isTornDown == false && self?.queue.ownsRead == true }, move: { [weak self] units in self?.dispatch(.move(units), reading: true) })) : DocumentWindows(document, cancelled: { [weak self] in self?.shouldCancelFieldOperation == true }, canMove: { [weak self] in self?.isVisible == true && self?.isTornDown == false && self?.queue.ownsRead == true }, move: { [weak self] units in self?.dispatch(.move(units), reading: true) })
         #else
-        let windows: any FieldWindowProxy = DocumentWindows(document, cancelled: { [weak self] in self?.shouldCancelFieldOperation == true }, canMove: { [weak self] in self?.isVisible == true && self?.isTornDown == false })
+        let windows: any FieldWindowProxy = DocumentWindows(document, cancelled: { [weak self] in self?.shouldCancelFieldOperation == true }, canMove: { [weak self] in self?.isVisible == true && self?.isTornDown == false && self?.queue.ownsRead == true }, move: { [weak self] units in self?.dispatch(.move(units), reading: true) })
         #endif
         let field = document.documentID
         let result = await run(reader(for: field), windows)
@@ -2025,16 +2041,17 @@ final class KeyboardController {
     private let shown: (String) -> String
     private let cancelled: () -> Bool
     private let canMove: () -> Bool
+    private let dispatchMove: (Int) -> Void
     var isCancelled: Bool { cancelled() }
-    init(_ document: any TextDocument, shown: @escaping (String) -> String, cancelled: @escaping () -> Bool, canMove: @escaping () -> Bool) {
+    init(_ document: any TextDocument, shown: @escaping (String) -> String, cancelled: @escaping () -> Bool, canMove: @escaping () -> Bool, move: @escaping (Int) -> Void) {
         self.document = document; self.documentID = document.documentID; self.shown = shown
-        self.cancelled = cancelled; self.canMove = canMove
+        self.cancelled = cancelled; self.canMove = canMove; self.dispatchMove = move
     }
     var windowBefore: String { document.documentID == documentID ? shown(document.contextBefore) : "" }
     var windowAfter: String { document.documentID == documentID ? shown(document.contextAfter) : "" }
     func move(by units: Int) {
         guard canMove(), document.documentID == documentID else { return }
-        document.adjustTextPosition(byCharacterOffset: units)
+        dispatchMove(units)
     }
     func pause(milliseconds: Int) async {
         // Restoration still needs real host turns when the requesting task was cancelled.
@@ -2047,16 +2064,17 @@ final class KeyboardController {
     private let documentID: String?
     private let cancelled: () -> Bool
     private let canMove: () -> Bool
+    private let dispatchMove: (Int) -> Void
     var isCancelled: Bool { cancelled() }
-    init(_ document: any TextDocument, cancelled: @escaping () -> Bool, canMove: @escaping () -> Bool) {
+    init(_ document: any TextDocument, cancelled: @escaping () -> Bool, canMove: @escaping () -> Bool, move: @escaping (Int) -> Void) {
         self.document = document; self.documentID = document.documentID
-        self.cancelled = cancelled; self.canMove = canMove
+        self.cancelled = cancelled; self.canMove = canMove; self.dispatchMove = move
     }
     var windowBefore: String { document.documentID == documentID ? document.contextBefore : "" }
     var windowAfter: String { document.documentID == documentID ? document.contextAfter : "" }
     func move(by units: Int) {
         guard canMove(), document.documentID == documentID else { return }
-        document.adjustTextPosition(byCharacterOffset: units)
+        dispatchMove(units)
     }
     func pause(milliseconds: Int) async {
         // Restoration still needs real host turns when the requesting task was cancelled.

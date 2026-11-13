@@ -149,10 +149,13 @@ public struct FieldQueue: Sendable {
         public var capitalization: AutoCapitalizationType
         /// The user's keys wait (bounded, `keyHoldMaxMs`) until the take's text already heard is typed (`flushBeforeKeys`).
         public var keysWaitForTake: Bool
+        /// Adapter settlement floor for optimistic insert/delete reports; independent of typewriter pacing.
+        public var editConfirmationMs: Double
         public init(animated: Bool = true, movesByCharacters: Bool = false, capitalization: AutoCapitalizationType = .none,
-                    keysWaitForTake: Bool = true) {
+                    keysWaitForTake: Bool = true, editConfirmationMs: Double = FieldQueue.charMs) {
             self.animated = animated; self.movesByCharacters = movesByCharacters; self.capitalization = capitalization
             self.keysWaitForTake = keysWaitForTake
+            self.editConfirmationMs = editConfirmationMs
         }
     }
 
@@ -440,7 +443,22 @@ public struct FieldQueue: Sendable {
         /// A jump of the keyboard's own to this span (a region's or an edit's).
         var jumpSpan: Int?
     }
-    private var inFlight: InFlight?
+    private var coordinator = FieldEditCoordinator.Operations()
+    private var inFlight: InFlight? {
+        didSet {
+            // Losing a prediction is not confirmation. The shared barrier drains its remaining transit first.
+            if inFlight == nil, coordinator.current?.kind != .read { coordinator.invalidate() }
+        }
+    }
+
+    public var ownsRead: Bool { coordinator.current?.kind == .read }
+    public mutating func acquireRead() -> Bool { isHome && coordinator.begin(.read) }
+    public mutating func releaseRead() { coordinator.finishRead() }
+    /// The adapter calls this after the OS send, never before planning or dispatch.
+    public mutating func operationDispatched() {
+        coordinator.dispatched(); sinceSendMs = 0; inFlight?.waitedMs = 0
+    }
+
     private var sinceSendMs = 1_000.0
     private var lastReport: Report?
     private var reportStableMs = 0.0
@@ -638,6 +656,8 @@ public struct FieldQueue: Sendable {
 
     /// One step against the field's report: at most one op to carry out.
     public mutating func step(report: Report, elapsedMs: Double) -> Action {
+        guard !ownsRead else { return .wait }
+        coordinator.advance(elapsedMs)
         stepElapsedMs = elapsedMs
         sinceSendMs += elapsedMs
         if userLane.isEmpty {
@@ -675,7 +695,7 @@ public struct FieldQueue: Sendable {
         }
         if var flight = inFlight {
             // The proxy shows a move at once, before the host applied it: only a report after the settle gap counts.
-            let settled = sinceSendMs >= flight.settleMs
+            let settled = coordinator.settled && sinceSendMs >= flight.settleMs
             // A report that fits the state before the op as well proves nothing (the op may still be on its way), and
             // neither does one that shows a state the host lags behind.
             // A stale check's zero-offset move changes nothing: a fresh report of the model is its confirmation.
@@ -683,6 +703,7 @@ public struct FieldQueue: Sendable {
                flight.anywhere || !pins(report, in: flight.pre) || (flight.staleCheck && flight.op == .move(0)),
                !lagging.contains(where: { pins(report, in: $0.state) }) {
                 if flight.anywhere { relocate(report) }
+                guard coordinator.confirm(matches: true) else { return .wait }
                 events.append(.confirmed(waitedMs: flight.waitedMs))
                 lastSendConfirmed = true
                 confirmedHistory.append((flight.pre, flight.input, 0))
@@ -763,6 +784,7 @@ public struct FieldQueue: Sendable {
     /// (inserts, deletes, moves) land in order, no closer than `charMs`; a change of kind after an edit waits for the
     /// host to have applied it (`editSettleMs`), since Safari can land a later op of another kind first.
     private mutating func next() -> Action {
+        guard coordinator.available else { return .wait }
         let saved = self
         let action = plannedNext()
         guard case .send(let op) = action, let last = saved.lastSentOp, saved.sinceSendMs < Self.gap(after: last, before: op) else {
@@ -1218,8 +1240,9 @@ public struct FieldQueue: Sendable {
                 }
             case .delete(let count, let owner):
                 guard cursor >= count, count > 0 else { unit = nil; requeue(current.owner); return .wait }
-                current.ops.removeFirst(); unit = current
-                return send(.deleteBackward(count), lane: lane(of: current.owner)) { q in q.removeRange(q.cursor - count, q.cursor, owner: owner) }
+                if count > 1 { current.ops[0] = .delete(count - 1, owner: owner) } else { current.ops.removeFirst() }
+                unit = current
+                return send(.deleteBackward(1), lane: lane(of: current.owner)) { q in q.removeRange(q.cursor - 1, q.cursor, owner: owner) }
             case .insert(let chars, let owner):
                 var credit = 0.0
                 if current.paced {
@@ -1724,11 +1747,17 @@ public struct FieldQueue: Sendable {
 
     private mutating func send(_ op: ShadowOp, lane: Lane, anywhere: Bool = false, moveTo: Int? = nil,
                                _ apply: (inout FieldQueue) -> Void = { _ in }) -> Action {
+        let isCursorMove: Bool
+        if case .move = op { isCursorMove = true } else { isCursorMove = false }
+        guard coordinator.begin(isCursorMove ? .move : .edit,
+                                settleMs: anywhere ? Self.transitMs : isCursorMove ? Self.moveSettleMs : config.editConfirmationMs,
+                                transitMs: Self.transitMs) else { return .wait }
         let pre = ModelState(text: text, cursor: cursor, userCursor: userCursor, selection: selection, spans: spans)
         if let moveTo { cursor = moveTo } else { apply(&self) }
         var isMove = false
         if case .move = op { isMove = true }
         inFlight = InFlight(op: op, lane: lane, anywhere: anywhere, pre: pre, isMove: isMove, settleMs: anywhere ? Self.transitMs : isMove ? Self.moveSettleMs : 0)
+        coordinator.dispatched()
         lastSentOp = op; lastSentLane = lane
         recentSends.append(Sent(op: op, lane: lane, pre: pre))
         if recentSends.count > 16 { recentSends.removeFirst() }

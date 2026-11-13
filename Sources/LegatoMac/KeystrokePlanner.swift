@@ -94,15 +94,12 @@ public enum KeystrokePlanner {
 
     /// The spans that turn `old` into `new`, front to back.
     public static func spans(from old: [Character], to new: [Character], paceMs: Double = calmMs, jumpMs: Double = jumpMs) -> [Span] {
-        var hunks = ShadowEditPlanner.changes(from: old, to: new).map { Hunk(start: $0.start, end: $0.end, text: $0.text) }
+        let hunks = FieldEditCoordinator.changes(from: old, to: new).map { Hunk(start: $0.start, end: $0.end, text: $0.text) }
         guard !hunks.isEmpty else { return [] }
-        hunks = snapToWords(hunks, old: old, new: new)
         return merge(hunks, old: old).map { group in
             let start = group.first!.start, end = group.last!.end
             let text = Array(new[map(start, hunks: hunks, side: .start)..<map(end, hunks: hunks, side: .end)])
-            let minimal = cost(of: group, paceMs: paceMs, jumpMs: jumpMs)
-            let block = cost(of: [Hunk(start: start, end: end, text: text)], paceMs: paceMs, jumpMs: jumpMs)
-            return Span(start: start, end: end, text: text, block: group.count > 1 && block < minimal, hunks: group)
+            return Span(start: start, end: end, text: text, block: false, hunks: group)
         }
     }
 

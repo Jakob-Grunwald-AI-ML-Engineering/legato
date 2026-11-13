@@ -110,3 +110,62 @@ struct FieldEditCoordinatorTests {
         #expect(owner.uncertain)
     }
 }
+
+@Suite struct SharedFieldOperationTests {
+    @Test(arguments: [0.0, FieldQueue.moveSettleMs])
+    func bothTransportsSerializeAndRequireConfirmedReadback(settle: Double) {
+        var coordinator = FieldEditCoordinator.Operations()
+        let result1 = coordinator.begin(.move, settleMs: settle, transitMs: 115)
+        #expect(result1)
+        coordinator.advance(36) // expensive planning before dispatch is not host settlement
+        coordinator.dispatched()
+        let result2 = !coordinator.begin(.edit)
+        #expect(result2)
+        let result3 = !coordinator.begin(.read)
+        #expect(result3)
+        let result4 = !coordinator.confirm(matches: false)
+        #expect(result4)
+        if settle > 0 {
+            coordinator.advance(settle - 1)
+            let result5 = !coordinator.confirm(matches: true)
+            #expect(result5, "Optimistic proxy reports cannot confirm a move early")
+            coordinator.advance(1)
+        }
+        let result6 = coordinator.confirm(matches: true)
+        #expect(result6)
+        let result7 = coordinator.begin(.read)
+        #expect(result7)
+        let result8 = !coordinator.begin(.edit)
+        #expect(result8, "A reader owns the cursor, including its restoration")
+        coordinator.finishRead()
+        let result9 = coordinator.begin(.edit)
+        #expect(result9)
+    }
+
+    @Test func anUncertainMutationDrainsBeforeAnyOtherOwnerCanMoveTheCursor() {
+        var coordinator = FieldEditCoordinator.Operations()
+        let result10 = coordinator.begin(.edit, transitMs: 115)
+        #expect(result10)
+        coordinator.dispatched()
+        coordinator.advance(10)
+        coordinator.invalidate()
+        #expect(!coordinator.available)
+        let result11 = !coordinator.begin(.read)
+        #expect(result11)
+        coordinator.advance(104)
+        let result12 = !coordinator.begin(.edit)
+        #expect(result12)
+        coordinator.advance(1)
+        let result13 = coordinator.begin(.read)
+        #expect(result13)
+        #expect(coordinator.revision == 0, "Timeout did not become a successful edit")
+    }
+
+    @Test func aRefusedOperationNeverConsumesTheHostTransitWindow() {
+        var coordinator = FieldEditCoordinator.Operations()
+        let result14 = coordinator.begin(.edit, transitMs: 1000)
+        #expect(result14)
+        coordinator.invalidate() // adapter refused; nothing was dispatched
+        #expect(coordinator.available)
+    }
+}

@@ -232,6 +232,34 @@ public final class MacFieldQueue {
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
     private var flushing = 0
     private var exclusive = false
+    private var operations = FieldEditCoordinator.Operations()
+    private var operationsAt: ContinuousClock.Instant?
+
+    private func advanceOperations() {
+        let at = now()
+        if let operationsAt {
+            let elapsed = (at - operationsAt).components
+            operations.advance(Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1e15)
+        }
+        operationsAt = at
+    }
+
+    private func beginOperation(_ kind: FieldEditCoordinator.Operations.Kind, transit: Duration = .zero) -> Bool {
+        advanceOperations()
+        let parts = transit.components
+        return operations.begin(kind, transitMs: Double(parts.seconds) * 1000 + Double(parts.attoseconds) / 1e15)
+    }
+
+    private func operationDispatched() {
+        operations.dispatched()
+        operationsAt = now()
+    }
+
+    @discardableResult private func confirmOperation(_ matches: Bool) -> Bool {
+        advanceOperations()
+        return operations.confirm(matches: matches)
+    }
+
     private var userActedFlag = false
     /// The caret the user expects (nil until first read).
     private var userCaret: UTF16Range?
@@ -469,8 +497,9 @@ public final class MacFieldQueue {
     public func exclusive<T>(label: String, text: String, _ body: @MainActor () async -> T) async -> T {
         note(.typed, id: label, text: text)
         await whenIdle()
+        while !beginOperation(.read) { await sleep(Self.waitTick) }
         exclusive = true
-        defer { exclusive = false; schedule() }
+        defer { operations.finishRead(); exclusive = false; schedule() }
         return await body()
     }
 
@@ -1002,7 +1031,9 @@ public final class MacFieldQueue {
     private var pacedNow: Bool { flushing == 0 && paced() }
 
     private func perform(_ region: Region, doc: Document, target: any TextTarget) async -> Bool {
-        let changes = ShadowEditPlanner.changes(from: region.current, to: region.desired)
+        guard beginOperation(.edit) else { return false }
+        defer { operations.invalidate() }
+        let changes = FieldEditCoordinator.changes(from: region.current, to: region.desired)
         guard let change = changes.first else { return true }
         let whole = !pacedNow
         var lower = change.start, upper = change.end, insertion: [Character] = []
@@ -1026,6 +1057,7 @@ public final class MacFieldQueue {
         opsSent += 1
         do {
             try target.replace(range, with: text)
+            operationDispatched()
         } catch {
             expectedSelections.append(UTF16Range(location: range.location + text.utf16.count, length: 0))
             return await failed(region, after: after, reason: "write", unchanged: nativeWriteUnchanged(region, doc: doc, target: target))
@@ -1037,6 +1069,7 @@ public final class MacFieldQueue {
             expectedSelections.append(UTF16Range(location: range.location + text.utf16.count, length: 0))
             return await failed(region, after: after, reason: "readback", unchanged: nativeWriteUnchanged(region, doc: doc, target: target))
         }
+        guard confirmOperation(true) else { return false }
         let delta = text.utf16.count - range.length
         apply(region, landed: after, at: range, delta: delta, inserted: text.utf16.count)
         revision += 1
@@ -1047,8 +1080,10 @@ public final class MacFieldQueue {
         if done, region.retracting, !region.original.isEmpty { wanted = UTF16Range(location: region.start, length: region.end - region.start) }
         userCaret = wanted
         let selection = try? target.selectedRange()
-        if selection != wanted {
+        if selection != wanted, beginOperation(.move) {
             try? target.setSelectedRange(wanted)
+            operationDispatched()
+            _ = confirmOperation((try? target.selectedRange()) == wanted)
             expectedSelections = [(try? target.selectedRange()) == wanted ? wanted : (selection ?? wanted)]
         } else {
             expectedSelections = [wanted]
@@ -1056,7 +1091,7 @@ public final class MacFieldQueue {
         note(.verified, id: region.id, run: region.runID, location: region.start, length: region.end - region.start, text: String(region.current),
              selection: wanted)
         if pacedNow, !insertion.isEmpty {
-            let remaining = ShadowEditPlanner.changes(from: region.current, to: region.desired).reduce(0) { $0 + $1.text.count }
+            let remaining = FieldEditCoordinator.changes(from: region.current, to: region.desired).reduce(0) { $0 + $1.text.count }
             let ops = remaining + typedBacklog(besides: region)
             // Nothing more to type: no wait after the last grapheme.
             if ops > 0 {
@@ -1104,6 +1139,7 @@ public final class MacFieldQueue {
     /// edit (Backspace or one grapheme). It counts by the field's value: the region's new text at its place, what
     /// followed it still after it, and the field's length. A caret that lags behind a landed key is waited for.
     private func performKey(_ region: Region, doc: Document, selection: UTF16Range, target: any TextTarget, mark: Int) async -> Bool {
+        defer { operations.invalidate() }
         guard let unit = keyUnit(for: region, doc: doc) else { return true }
         var step = unit.steps[unit.index]
         var caret = region.start + String(step.before[..<step.caret]).utf16.count
@@ -1157,6 +1193,7 @@ public final class MacFieldQueue {
 
             /// The key's text and caret showed: the region takes it.
             func land(caretSeen: Bool, lastSelection: UTF16Range) {
+                _ = confirmOperation(true)
                 apply(region, landed: after, at: range, delta: delta, inserted: inserted.utf16.count)
                 unit.index += 1
                 revision += 1
@@ -1310,9 +1347,12 @@ public final class MacFieldQueue {
     /// never tried again in this field (it may still take within `caretSetLateLimit`; nothing goes out before).
     private func caretSet(_ goal: UTF16Range, doc: Document, selection: UTF16Range, target: any TextTarget, mark: Int,
                           region: Region?) async -> Bool {
+        guard beginOperation(.move, transit: Self.caretSetLateLimit) else { return false }
+        defer { operations.invalidate() }
         note(.sent, id: region?.id, run: region?.runID, location: selection.location, selection: goal, detail: "caret")
         do {
             try target.setCaret(goal, mark: mark, selection: selection)
+            operationDispatched()
             opsSent += 1
         } catch {
             let refusal = error as? FieldKeyRefusal ?? .unavailable
@@ -1327,6 +1367,7 @@ public final class MacFieldQueue {
             (try? target.selectedRange()) == goal && (try? target.textLength()) == doc.length
         }
         if took {
+            _ = confirmOperation(true)
             guard target.inputMark == mark else { userActedFlag = true; return true }
             if caretJumps.direct == .untested { caretJumps.direct = .tentative }
             probeAt = caretJumps.direct == .tentative && goal.length == 0 ? goal.location : nil
@@ -1452,6 +1493,7 @@ public final class MacFieldQueue {
                           target: any TextTarget, mark: Int, region: Region?, detail: String, anyWay: Bool = false,
                           exactOnly: Bool = false, refusal: inout FieldKeyRefusal?) async -> UTF16Range? {
         note(.sent, id: region?.id, run: region?.runID, location: selection.location, selection: exact, detail: detail)
+        defer { operations.invalidate() }
         if let refused = sendKey(key, target: target, mark: mark, selection: selection) {
             refusal = refused
             return nil
@@ -1490,6 +1532,7 @@ public final class MacFieldQueue {
             await sleep(Self.waitTick)
             return nil
         }
+        _ = confirmOperation(true)
         moveFailures = 0
         expectedSelections = [seen]
         caretOwed = userCaret != seen
@@ -1580,11 +1623,16 @@ public final class MacFieldQueue {
 
     /// Sends one key through the target's guards. A refusal sends nothing: the next step reads again and replans.
     private func sendKey(_ key: FieldKey, target: any TextTarget, mark: Int, selection: UTF16Range) -> FieldKeyRefusal? {
+        let kind: FieldEditCoordinator.Operations.Kind
+        switch key { case .backspace, .text: kind = .edit; default: kind = .move }
+        guard beginOperation(kind, transit: Self.keyLateLimit) else { return .unavailable }
         do {
             try target.press(key, mark: mark, selection: selection)
+            operationDispatched()
             opsSent += 1
             return nil
         } catch {
+            operations.invalidate() // a refused key was never dispatched
             let refusal = error as? FieldKeyRefusal ?? .unavailable
             note(.refused, reason: "\(refusal)")
             refused(refusal, target: target, mark: mark)
@@ -1676,7 +1724,7 @@ public final class MacFieldQueue {
         run.target = text
         let sources = run.regions.map(\.source)
         let old = sources.flatMap { $0 } + run.remainder
-        let changes = ShadowEditPlanner.changes(from: old, to: text)
+        let changes = FieldEditCoordinator.changes(from: old, to: text)
         // Text inserted at a boundary between regions belongs to the earlier one; at the run's closed end it waits for a
         // region at the user's caret (`inclusive` false).
         func map(_ boundary: Int, inclusive: Bool = true) -> Int {

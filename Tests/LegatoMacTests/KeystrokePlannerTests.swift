@@ -17,11 +17,11 @@ import Testing
         }
     }
 
-    @Test func aWordThatChangesMostlyIsRetypedWhole() {
-        // "Thursday" → "Friday": the whole word goes and comes back, not a few letters in the middle of it.
+    @Test func aWordChangePreservesItsUnchangedLetters() {
+        // The shared exact plan keeps the unchanged "rday" in the host.
         let steps = run("on Thursday", "on Friday")
-        #expect(steps.filter { $0.key == .backspace }.count == 8)
-        #expect(steps.compactMap { if case .type(let c) = $0.key { c } else { nil } } == Array("Friday"))
+        #expect(steps.filter { $0.key == .backspace }.count == 4)
+        #expect(steps.compactMap { if case .type(let c) = $0.key { c } else { nil } } == Array("iF"))
         // "colour" → "color" stays one deleted letter.
         #expect(run("colour", "color").map(\.key) == [.backspace])
     }
@@ -43,7 +43,7 @@ import Testing
         #expect(KeystrokePlanner.steps(from: Array("a colour b"), to: Array("a color b")).count == 1)
     }
 
-    @Test func nearbyChangesMergeAndTheCheaperModeWins() {
+    @Test func nearbyChangesShareJumpsWithoutBroadeningReplacements() {
         let spans = KeystrokePlanner.spans(from: Array("a-b-c-d"), to: Array("x-y-z-w"))
         #expect(spans.count == 1)
         // Far-apart one-letter fixes stay minimal: two short edits, no retyping of the words between them.

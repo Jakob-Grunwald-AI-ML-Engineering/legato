@@ -2,12 +2,8 @@ import Foundation
 
 /// Plans how a change of known text goes into the field, and at what pace. Pure.
 ///
-/// - Spans: the minimal grapheme diff (`ShadowEditPlanner.diff`); a word whose graphemes change by at least half is
-///   replaced whole ("Thursday" → "Friday"; "colour" → "color" stays one deleted letter); changes a few unchanged
-///   graphemes apart, or in one word, merge into one span: one jump in, the span, one jump out.
-/// - Mode: a span goes in as minimal character edits (the differing characters only, with short moves between them)
-///   or as one block delete and its new text typed, whichever the cost estimate says is quicker; a tie keeps the
-///   minimal edits.
+/// - Spans use the shared desktop grapheme diff. Nearby changes share a cursor jump, but unchanged letters,
+///   whitespace and punctuation always stay in the host. A cost estimate never broadens a replacement.
 /// - Pace: one grapheme per op with a 5 ms minimum gap, matching the Mac trial. The queue separately confirms each
 ///   operation and preserves the host's move/edit safety windows. No extra pause between words.
 public enum SpanPlanner {
@@ -69,23 +65,19 @@ public enum SpanPlanner {
     /// op) and the queue's settles.
     public static func spans(from old: [Character], to new: [Character], leaveTailAppend: Bool = false,
                              paceMs: Double = calmMs, moveSettleMs: Double, editSettleMs: Double) -> [Span] {
-        var hunks = ShadowEditPlanner.diff(old, new).map { Hunk(start: $0.start, end: $0.end, text: $0.text) }
+        var hunks = FieldEditCoordinator.changes(from: old, to: new).map { Hunk(start: $0.start, end: $0.end, text: $0.text) }
         if leaveTailAppend, let last = hunks.last, last.start == old.count, last.end == old.count { hunks.removeLast() }
-        guard !hunks.isEmpty else { return [] }
-        hunks = snapToWords(hunks, old: old, new: new)
+        // Group nearby changes for a cursor jump, while preserving every unchanged character inside the group.
         return merge(hunks, old: old).map { group in
             let start = group.first!.start, end = group.last!.end
             let text = Array(new[map(start, hunks: hunks, side: .start)..<map(end, hunks: hunks, side: .end)])
-            let minimal = cost(of: group, paceMs: paceMs, moveSettleMs: moveSettleMs, editSettleMs: editSettleMs)
-            let block = cost(of: [Hunk(start: start, end: end, text: text)], paceMs: paceMs, moveSettleMs: moveSettleMs,
-                             editSettleMs: editSettleMs)
-            return Span(start: start, end: end, text: text, block: group.count > 1 && block < minimal, hunks: group)
+            return Span(start: start, end: end, text: text, block: false, hunks: group)
         }
     }
 
     /// The minimal grapheme diff with words that change by half or more replaced whole (`FieldMerge`'s changes).
     static func wordHunks(from old: [Character], to new: [Character]) -> [Hunk] {
-        let hunks = ShadowEditPlanner.diff(old, new).map { Hunk(start: $0.start, end: $0.end, text: $0.text) }
+        let hunks = FieldEditCoordinator.changes(from: old, to: new).map { Hunk(start: $0.start, end: $0.end, text: $0.text) }
         return hunks.isEmpty ? [] : snapToWords(hunks, old: old, new: new)
     }
 

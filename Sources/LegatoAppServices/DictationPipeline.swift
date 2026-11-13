@@ -194,7 +194,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         guard !raw.isEmpty else { return }
         if mode == .live {
             if held != nil { held?.append(.line(line)); return }
-            await receiveLive(raw, sequence: line.sequence, forced: Self.forcedSplits.contains(line.reason))
+            await receiveLive(raw, sequence: line.sequence, forced: Self.forcedSplits.contains(line.reason), remainingTail: line.remainingTail)
             return
         }
         if mode != .lineByLine { bufferLine(raw); return }
@@ -389,7 +389,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
             case .tail(let text): liveTail(text)
             case .line(let line):
                 let raw = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !raw.isEmpty { await receiveLive(raw, sequence: line.sequence, forced: Self.forcedSplits.contains(line.reason)) }
+                if !raw.isEmpty { await receiveLive(raw, sequence: line.sequence, forced: Self.forcedSplits.contains(line.reason), remainingTail: line.remainingTail) }
             case .begin:
                 // A take that began while this one ran without a stop: its run ends first.
                 if let run = liveRun, !run.complete { held?.insert(.begin, at: 0); return await finishLive() }
@@ -407,9 +407,12 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     /// Segment reasons that cut a sentence short (`Segmenter.maxWords`, `maxDuration`), not end it.
     private static let forcedSplits: Set<String> = ["words", "duration"]
 
-    private func receiveLive(_ raw: String, sequence: Int, forced: Bool) async {
+    private func receiveLive(_ raw: String, sequence: Int, forced: Bool, remainingTail: String? = nil) async {
         var run = currentLiveRun()
         let unit = run.addFinal(key: sequence, text: raw, closes: !forced)
+        // Commit the final and the provider update's residual words in one publication. A segment
+        // often finalizes only the first few words of the head the keyboard already shows.
+        if let remainingTail { run.setHead(remainingTail) }
         let pieces = run.drainSplitUnits()
         publishLive(run)
         for piece in pieces { await submitLive(piece.text, key: piece.key, run: run) }

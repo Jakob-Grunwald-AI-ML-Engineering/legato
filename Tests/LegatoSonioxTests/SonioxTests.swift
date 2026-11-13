@@ -5,6 +5,22 @@ import LegatoRoom
 @testable import LegatoSoniox
 
 @Suite(.timeLimit(.minutes(1))) struct SonioxTests {
+    @Test func eachFinalCarriesAllFollowingWordsFromTheSameProviderUpdate() async throws {
+        let room = Room(segmentRouting: .intercepted)
+        let events = await room.subscribe(participant: .ui, channels: [.asrSegment, .asrRawTail], buffering: .unbounded)
+        var iterator = events.makeAsyncIterator()
+        let client = SonioxClient(room: room)
+        try await client.startDebug()
+        try await client.injectDebugFrame(#"{"tokens":[{"text":"First.","is_final":true},{"text":" Second.","is_final":true},{"text":"<fin>","is_final":true},{"text":" remaining words","is_final":false}]}"#)
+        let first = try #require(await iterator.next())
+        let second = try #require(await iterator.next())
+        let tail = try #require(await iterator.next())
+        #expect(first.channel == .asrSegment && first.payload["remainingTail"] == .string("Second.  remaining words"))
+        #expect(second.channel == .asrSegment && second.payload["remainingTail"] == .string(" remaining words"))
+        #expect(tail.channel == .asrRawTail && tail.payload["text"] == .string(" remaining words"))
+        await client.cancel()
+    }
+
     @Test func muteGatesAudioButKeepsSocketAndDrainsProviderBacklog() async throws {
         let room = Room()
         let socket = FakeSocket()

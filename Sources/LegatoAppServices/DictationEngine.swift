@@ -183,7 +183,8 @@ import LegatoVocabulary
             await room.resolveSegment(event.id)
             guard let words = try? event.payload["words"]?.decode([Word].self), !words.isEmpty else { return }
             let reason = (try? event.payload["metadata"]?["reason"]?.decode(String.self)) ?? ""
-            await deliver(words: words, reason: reason)
+            let remainingTail = try? event.payload["remainingTail"]?.decode(String.self)
+            await deliver(words: words, reason: reason, remainingTail: remainingTail)
         case .asrBoundary:
             if case .string(let reason) = event.payload["reason"], reason == "finalize" || reason == "finished" { sink.boundary(reason) }
         case .asrRawTail:
@@ -195,8 +196,8 @@ import LegatoVocabulary
         default: break
         }
     }
-    private func deliver(words: [Word], reason: String) async {
-        let line = DictationRouteLine(sequence: lineSequence, text: words.map(\.text).joined(separator: " "), words: words, reason: reason)
+    private func deliver(words: [Word], reason: String, remainingTail: String? = nil) async {
+        let line = DictationRouteLine(sequence: lineSequence, text: words.map(\.text).joined(separator: " "), words: words, reason: reason, remainingTail: remainingTail)
         lineSequence += 1
         await sink.receive(line)
     }
