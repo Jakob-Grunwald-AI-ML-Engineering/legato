@@ -458,7 +458,10 @@ final class KeyboardController {
     func documentDidChange() {
         // A walk moves the cursor on purpose: nothing of it is the user's. The queue's own ops come back here too; it
         // reads them from the next report.
-        guard !isFieldBusy else { return }
+        if isFieldBusy {
+            if document.selectedText?.isEmpty == false { fieldOperationCancelled = true }
+            return
+        }
         if isVisible, !pumping { writePresence(notify: false) }
         refreshTraits()
         typing.documentChanged()
@@ -739,10 +742,12 @@ final class KeyboardController {
         queue.config.animated = !UIAccessibility.isReduceMotionEnabled
         queue.config.movesByCharacters = charactersField != nil && charactersField == id
         queue.config.capitalization = autocapitalization
+        queue.config.canReadAround = true
     }
 
     /// Drops everything pending (each edit's owner hears that it was dropped) and forgets the model.
     private func resetQueue(reason: String) {
+        recoveryTask?.cancel(); recoveryTask = nil; recoveryTaskID = nil
         cursorReadID = nil
         // The field changed or the keyboard went away: nothing more of a take's cleanup lands here.
         updateCleanup { $0.clear() }
@@ -865,6 +870,7 @@ final class KeyboardController {
                 }
                 if kind == .reseeded { liveStats.drifts += 1; liveStats.lastDrift = kind.rawValue }
                 trace?("queue resync=\(kind.rawValue)")
+                if kind == .recoveryRequested { beginQueueRecovery() }
             case .nudged, .insertedBehind:
                 break
             case .applied(let id, _):
@@ -1119,7 +1125,7 @@ final class KeyboardController {
     @ObservationIgnored private var cursorReadID: UUID?
     private func pauseQueue(limit: Duration = .milliseconds(2500)) async -> UUID? {
         let clock = ContinuousClock(), start = clock.now, fieldID = document.documentID
-        // Magic and a new take may both need fresh context. A failed waiter never releases the current owner's lease.
+        // Magic and mismatch recovery may both need the cursor. A failed waiter never releases the current owner's lease.
         while cursorReadID != nil || queue.paused || isFieldBusy {
             guard !Task.isCancelled, !isTornDown, isVisible, document.documentID == fieldID,
                   clock.now - start < limit else { return nil }
@@ -1162,6 +1168,79 @@ final class KeyboardController {
         queue.releaseRead()
         queue.paused = false
         pump()
+    }
+
+    @ObservationIgnored private var recoveryTask: Task<Void, Never>?
+    @ObservationIgnored private var recoveryTaskID: UUID?
+
+    /// A mismatch gets one bounded look around, under the queue's own cursor lease. Reading is separate from
+    /// changing: only shared policy may turn its evidence into new minimal edits after restoration was verified.
+    private func beginQueueRecovery() {
+        guard recoveryTask == nil, let request = queue.recoveryRequest else { return }
+        let taskID = UUID(), fieldID = document.documentID
+        recoveryTaskID = taskID
+        recoveryTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.recoveryTaskID == taskID { self.recoveryTask = nil; self.recoveryTaskID = nil }
+            }
+            guard let lease = await self.pauseQueue() else {
+                self.queue.completeRecovery(request, report: nil, restored: false)
+                self.handle(self.queue.drainEvents())
+                return
+            }
+            defer { self.resumeQueue(lease) }
+            guard self.document.documentID == fieldID, self.queue.recoveryRequest?.id == request.id,
+                  self.queue.recoveryRevision == request.revision, self.isVisible, !Task.isCancelled else { return }
+            let origin = self.currentReport
+            // Unknown empty windows provide no safe cursor position to explore. A selection is the user's, too.
+            guard origin.selected == nil, !origin.before.isEmpty || !origin.after.isEmpty else {
+                self.queue.completeRecovery(request, report: nil, restored: false)
+                self.handle(self.queue.drainEvents()); return
+            }
+            self.isReadingField = true
+            self.fieldOperationCancelled = false
+            self.syncRowTakeover()
+            defer { self.isReadingField = false; self.syncRowTakeover() }
+            let clock = ContinuousClock(), start = clock.now
+            let windows = DocumentWindows(self.document, cancelled: { [weak self] in
+                guard let self else { return true }
+                return Task.isCancelled || !self.isVisible || self.isTornDown || self.document.documentID != fieldID
+                    || self.fieldOperationCancelled || self.queue.recoveryRevision != request.revision
+                    || Self.milliseconds(clock.now - start) >= FieldRecovery.budgetMs
+            }, canMove: { [weak self] in
+                // A cancelled read still restores its cursor; a switched field must never receive the old restoration.
+                self?.isVisible == true && self?.isTornDown == false && self?.document.documentID == fieldID && self?.queue.ownsRead == true
+                    && self?.document.selectedText?.isEmpty != false
+            }, move: { [weak self] units in self?.dispatch(.move(units), reading: true) })
+            var reader = self.reader(for: fieldID)
+            reader.cap = FieldRecovery.lookAroundChars
+            reader.blockLimit = FieldRecovery.lookAroundChars
+            reader.maxRereads = 3
+            let up = await reader.readUp(windows, known: "", limit: .cap)
+            let down: Result<FieldReader.Result, FieldReader.Failure>
+            if case .success(let above) = up, !windows.isCancelled {
+                // The upward read may have learned Safari's grapheme/paragraph units. Its downward half must use
+                // the same units when it moves and restores, rather than guessing UTF-16 again.
+                if let collapses = above.collapsesBreaks { reader.collapsesBreaks = collapses }
+                if let characters = above.movesByCharacters { reader.movesByCharacters = characters }
+                down = await reader.readDown(windows, known: "", room: FieldRecovery.lookAroundChars)
+            } else { down = .failure(.cancelled) }
+            let report = self.currentReport
+            let restored = !windows.isCancelled && self.document.documentID == fieldID && report.selected == nil
+                && FieldMatch.confirms(expectedBefore: origin.before, expectedAfter: origin.after,
+                                       reportedBefore: report.before, reportedAfter: report.after)
+            if case .success(let above) = up, case .success(let below) = down, restored {
+                self.learn(above, field: fieldID)
+                self.learn(below, field: fieldID)
+                let evidence = FieldQueue.Report(before: above.text, after: below.text)
+                let complete = above.stop == .start && !above.moreRemains && below.stop == .start && !below.moreRemains
+                self.queue.completeRecovery(request, report: evidence, restored: true, completeDocument: complete)
+            } else {
+                self.queue.completeRecovery(request, report: nil, restored: false)
+            }
+            self.handle(self.queue.drainEvents())
+        }
     }
 
     // MARK: Instruction mode

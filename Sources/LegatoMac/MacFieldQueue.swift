@@ -233,6 +233,8 @@ public final class MacFieldQueue {
     private var flushing = 0
     private var exclusive = false
     private var operations = FieldEditCoordinator.Operations()
+    private var recovery = FieldRecovery()
+    private var recoveredRead = false
     private var operationsAt: ContinuousClock.Instant?
 
     private func advanceOperations() {
@@ -657,7 +659,10 @@ public final class MacFieldQueue {
         // A caret that moved with no real input while a key of ours may still land is that key's, not the user's.
         noteUser(selection: selection, doc: doc, ownKey: keyed && lateKey != nil && (lastMark == nil || mark == lastMark))
         locateAll(doc)
+        // Recovery acquired a new observation; no write is planned against the document read before it.
+        if recoveredRead { recoveredRead = false; return true }
         placeEdits(doc)
+        if recoveredRead { recoveredRead = false; return true }
         finishEdits()
         if keyed {
             if mark != lastMark {
@@ -893,12 +898,58 @@ public final class MacFieldQueue {
             refreshContext(region, doc)
             return
         }
+        if let recovered = recoverTarget(id: region.id, expected: String(region.current), landed: region.landing.map { String($0) },
+                                         before: region.before, after: region.after) {
+            switch recovered {
+            case .replan(let placement, let fresh):
+                region.start = fresh.base + String((fresh.text as String).prefix(placement.range.lowerBound)).utf16.count
+                region.current = Array(placement.text)
+                region.keys = nil; region.landing = nil; region.failures = 0
+                refreshContext(region, fresh)
+                recoveredRead = true
+                return
+            case .waiting: return
+            case .stop: break
+            }
+        }
         region.lost = true
         // An empty run region is placed again (`locateAll`); anything else was changed under it. The run's later words
         // start a region of their own at the user's caret.
         if region.runID != nil, region.current.isEmpty, region.original.isEmpty { return }
         region.open = false
         if region.current != region.desired { drop(region, .userChanged) }
+    }
+
+    private enum RecoveryResult { case replan(FieldRecovery.Placement, Document), waiting, stop }
+
+    /// Accessibility can obtain fresh bounded evidence without moving the user's cursor. The same policy used by
+    /// the proxy adapter decides whether the expected target, or a freshly observed late result, still exists.
+    private func recoverTarget(id: String, expected: String, landed: String? = nil, before: String, after: String) -> RecoveryResult? {
+        guard let target, target.isFocused() else { return nil }
+        guard beginOperation(.read) else { return .waiting }
+        defer { operations.finishRead() }
+        let mark = target.inputMark, requestRevision = UInt64(max(0, revision)), start = now()
+        let generation = documentID
+        let wanted = FieldRecovery.Target(id: id, expected: expected, landed: landed, before: before, after: after)
+        guard let request = recovery.begin(generation: generation, revision: requestRevision, targets: [wanted]) else { return nil }
+        note(.recovery, id: id, detail: "attempt \(request.id)")
+        guard let oldSelection = try? target.selectedRange(), let (fresh, selected) = read(target),
+              let restored = try? target.selectedRange(), oldSelection == selected, selected == restored,
+              target.isFocused(), target.inputMark == mark,
+              now() - start < .milliseconds(FieldRecovery.budgetMs) else {
+            note(.recovery, id: id, reason: "unreadableOrChanged", detail: "refused \(request.id)")
+            return .stop
+        }
+        note(.recovery, id: id, detail: "evidence \(fresh.text.length) restored \(request.id)")
+        let complete = fresh.base == 0 && fresh.text.length == fresh.length
+        let decisions = recovery.resolve(request, text: fresh.text as String, generation: documentID,
+                                         revision: UInt64(max(0, revision)), restored: true, completeDocument: complete)
+        guard case .replan(let placement)? = decisions.first else {
+            note(.recovery, id: id, reason: "changedOrAmbiguous", detail: "refused \(request.id)")
+            return .stop
+        }
+        note(.recovery, id: id, detail: "unique replan \(request.id)")
+        return .replan(placement, fresh)
     }
 
     /// The text before a region must still end with what was there, unless the user typed right at its edge.
@@ -946,6 +997,7 @@ public final class MacFieldQueue {
     private func placeEdits(_ doc: Document) {
         var waiting: [PendingEdit] = []
         for pending in edits {
+            if recoveredRead { waiting.append(pending); continue }
             let edit = pending.edit
             var start: Int?
             if doc.string(edit.range.location, edit.range.length) == edit.scope,
@@ -955,6 +1007,19 @@ public final class MacFieldQueue {
                 let hits = doc.find(edit.before + edit.scope + edit.after)
                 if hits.count == 1 { start = hits[0] + edit.before.utf16.count }
                 else if edit.scope.count >= Self.relocateChars, doc.find(edit.scope).count == 1 { start = doc.find(edit.scope)[0] }
+            }
+            if start == nil, now() - pending.since >= Self.placeGrace,
+               let result = recoverTarget(id: edit.id, expected: edit.scope, before: edit.before, after: edit.after) {
+                switch result {
+                case .replan:
+                    // Coordinates, anchors and overlap ownership must all come from one observation. Let the next
+                    // fresh queue read place the still-pending edit; never create its region against this old doc.
+                    recoveredRead = true
+                    waiting.append(pending)
+                    continue
+                case .waiting: waiting.append(pending); continue
+                case .stop: break
+                }
             }
             if let start {
                 let region = Region(id: edit.id, runID: nil, start: start, current: Array(edit.scope), desired: Array(edit.target), open: false)
