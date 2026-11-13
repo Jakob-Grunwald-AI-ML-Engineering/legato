@@ -113,6 +113,7 @@ public struct FieldQueue: Sendable {
         /// A jump of the keyboard's own went nowhere (the report kept showing the caret where it was): the text it was
         /// for is not in this field. Its work drops and the model starts over from the report (`reseeded` follows).
         case jumpFailed
+        case recoveryRequested, recoveryEvidence, recoveryRestored, recoveryReplanned, recoveryRefused
     }
     public enum CloseCause: String, Sendable, Codable { case keystroke, cursor, resync, selection, newRun, edit }
 
@@ -149,10 +150,16 @@ public struct FieldQueue: Sendable {
         public var capitalization: AutoCapitalizationType
         /// The user's keys wait (bounded, `keyHoldMaxMs`) until the take's text already heard is typed (`flushBeforeKeys`).
         public var keysWaitForTake: Bool
+        /// Adapter settlement floor for optimistic insert/delete reports; independent of typewriter pacing.
+        public var editConfirmationMs: Double
+        /// The adapter can supply a bounded, self-verifying cursor read on request.
+        public var canReadAround: Bool
         public init(animated: Bool = true, movesByCharacters: Bool = false, capitalization: AutoCapitalizationType = .none,
-                    keysWaitForTake: Bool = true) {
+                    keysWaitForTake: Bool = true, editConfirmationMs: Double = FieldQueue.charMs, canReadAround: Bool = false) {
             self.animated = animated; self.movesByCharacters = movesByCharacters; self.capitalization = capitalization
             self.keysWaitForTake = keysWaitForTake
+            self.editConfirmationMs = editConfirmationMs
+            self.canReadAround = canReadAround
         }
     }
 
@@ -440,7 +447,107 @@ public struct FieldQueue: Sendable {
         /// A jump of the keyboard's own to this span (a region's or an edit's).
         var jumpSpan: Int?
     }
-    private var inFlight: InFlight?
+    private var coordinator = FieldEditCoordinator.Operations()
+    private var inFlight: InFlight? {
+        didSet {
+            // Losing a prediction is not confirmation. The shared barrier drains its remaining transit first.
+            if inFlight == nil, coordinator.current?.kind != .read { coordinator.invalidate() }
+        }
+    }
+
+    private var recovery = FieldRecovery()
+    private var recoveryGeneration = UUID().uuidString
+    public private(set) var recoveryRevision: UInt64 = 0
+    public private(set) var recoveryRequest: FieldRecovery.Request?
+
+    /// A recovery response can never replace the model after user input or a field reset.
+    public mutating func completeRecovery(_ request: FieldRecovery.Request, report: Report?, restored: Bool, completeDocument: Bool = false) {
+        guard recoveryRequest == request else { return }
+        // The production adapter acquires a read lease only after the op in flight is settled. Never let a late or
+        // incorrectly timed response replace the model beneath an issued op; its request remains pending.
+        guard inFlight == nil else { events.append(.resync(.recoveryRefused)); return }
+        // All current request paths already abort their jump unit, but no future caller may carry precomputed
+        // offsets across this model replacement. Its owner is requeued and planned against the fresh evidence.
+        abortUnit()
+        recoveryRequest = nil
+        guard request.generation == recoveryGeneration, request.revision == recoveryRevision else {
+            events.append(.resync(.recoveryRefused)); return
+        }
+        let evidence = (report?.before ?? "") + (report?.after ?? "")
+        let decisions = recovery.resolve(request, text: evidence, generation: recoveryGeneration,
+                                         revision: recoveryRevision, restored: restored, completeDocument: completeDocument)
+        events.append(.resync(.recoveryEvidence))
+        if restored { events.append(.resync(.recoveryRestored)) }
+        if let report, restored {
+            let oldText = text, oldCursor = cursor
+            let updated = Array(report.before + report.after), newCursor = report.before.count
+            // The walk returned to the user's cursor. Rebase other already-known spans only where the fresh read
+            // independently agrees with their contents; unknown or changed spans remain parked.
+            for (id, var span) in spans where !span.parked {
+                let known = Array(oldText[span.start..<span.end])
+                let at = span.start + newCursor - oldCursor
+                if at >= 0, at + known.count <= updated.count, updated[at..<(at + known.count)].elementsEqual(known) {
+                    span.start = at; span.end = at + known.count
+                } else {
+                    span.lastText = known; span.parked = true
+                }
+                spans[id] = span
+            }
+            text = updated; cursor = newCursor; userCursor = newCursor; selection = 0; seeded = true
+            readMarks = []; userLost = nil; lagging = []; confirmedHistory = []; recentSends = []
+        }
+        for decision in decisions {
+            switch decision {
+            case .replan(let placement):
+                guard restored, let id = Int(placement.id), var span = spans[id] else { continue }
+                span.start = placement.range.lowerBound; span.end = placement.range.upperBound
+                span.lastText = Array(placement.text); span.parked = false
+                spans[id] = span
+                events.append(.resync(.recoveryReplanned))
+            case .stop(let key, _):
+                if let id = Int(key) { abandonRecoverySpan(id) }
+                events.append(.resync(.recoveryRefused))
+            }
+        }
+    }
+
+    private mutating func requestRecoveryIfNeeded() {
+        guard config.canReadAround, recoveryRequest == nil else { return }
+        let targets = spans.sorted { $0.key < $1.key }.compactMap { id, span -> FieldRecovery.Target? in
+            guard span.parked, !span.anchor, !span.userChanged, !span.edited, !span.lastText.isEmpty else { return nil }
+            return .init(id: String(id), expected: String(span.lastText), before: String(span.lastBefore), after: String(span.lastAfter))
+        }
+        guard let request = recovery.begin(generation: recoveryGeneration, revision: recoveryRevision, targets: targets) else { return }
+        recoveryRequest = request
+        events.append(.resync(.recoveryRequested))
+    }
+
+    private mutating func abandonRecoverySpan(_ id: Int) {
+        var abandoned: [EditState] = []
+        userLane.removeAll { if case .edit(let state) = $0, state.spanID == id { abandoned.append(state); return true }; return false }
+        editLane.removeAll { if $0.spanID == id { abandoned.append($0); return true }; return false }
+        for state in abandoned { drop(state, .unplaceable) }
+        for ri in runs.indices {
+            for gi in runs[ri].regions.indices where runs[ri].regions[gi].spanID == id && !runs[ri].regions[gi].abandoned {
+                runs[ri].regions[gi].abandoned = true
+                let region = runs[ri].regions[gi]
+                if !region.dropped {
+                    runs[ri].regions[gi].dropped = true
+                    events.append(.dropped(Drop(id: "\(runs[ri].runID)#\(gi)", runID: runs[ri].runID, kind: nil,
+                                                reason: .unplaceable, text: desiredText(region, in: runs[ri]), partial: nil)))
+                }
+            }
+        }
+    }
+
+    public var ownsRead: Bool { coordinator.current?.kind == .read }
+    public mutating func acquireRead() -> Bool { isHome && coordinator.begin(.read) }
+    public mutating func releaseRead() { coordinator.finishRead() }
+    /// The adapter calls this after the OS send, never before planning or dispatch.
+    public mutating func operationDispatched() {
+        coordinator.dispatched(); sinceSendMs = 0; inFlight?.waitedMs = 0
+    }
+
     private var sinceSendMs = 1_000.0
     private var lastReport: Report?
     private var reportStableMs = 0.0
@@ -487,7 +594,7 @@ public struct FieldQueue: Sendable {
     // MARK: Inspection
 
     public var isIdle: Bool {
-        inFlight == nil && unit == nil && userLane.isEmpty && editLane.isEmpty && !revealDue && !runs.contains(where: { runNeedsWork($0) })
+        recoveryRequest == nil && inFlight == nil && unit == nil && userLane.isEmpty && editLane.isEmpty && !revealDue && !runs.contains(where: { runNeedsWork($0) })
     }
     public var hasUserInput: Bool { !userLane.isEmpty }
     /// The keyboard's own writes still to land (a unit, queued edits, dictation): a read for an instruction waits for
@@ -544,6 +651,9 @@ public struct FieldQueue: Sendable {
     // MARK: Enqueue
 
     public mutating func enqueue(_ input: Input) {
+        recoveryRevision &+= 1
+        if recoveryRequest != nil { events.append(.resync(.recoveryRefused)) }
+        recoveryRequest = nil
         if userLane.isEmpty, case .insert = input { keyCutWord = openRegionWordRest() != nil }
         userLane.append(.input(input, retried: false))
     }
@@ -561,6 +671,7 @@ public struct FieldQueue: Sendable {
 
     /// `user`: an edit the user asked for (word row, undo, version swap): it goes in the user lane.
     public mutating func enqueue(_ edit: Edit, user: Bool = false) {
+        if user { recoveryRevision &+= 1; recoveryRequest = nil }
         var state = EditState(edit: edit)
         if seeded, !edit.atCursor, edit.selected == nil { state.anchorID = addSpan(Span(start: userCursor, end: userCursor, anchor: true)) }
         if user { userLane.append(.edit(state)) } else { editLane.append(state) }
@@ -638,6 +749,8 @@ public struct FieldQueue: Sendable {
 
     /// One step against the field's report: at most one op to carry out.
     public mutating func step(report: Report, elapsedMs: Double) -> Action {
+        guard !ownsRead else { return .wait }
+        coordinator.advance(elapsedMs)
         stepElapsedMs = elapsedMs
         sinceSendMs += elapsedMs
         if userLane.isEmpty {
@@ -675,7 +788,7 @@ public struct FieldQueue: Sendable {
         }
         if var flight = inFlight {
             // The proxy shows a move at once, before the host applied it: only a report after the settle gap counts.
-            let settled = sinceSendMs >= flight.settleMs
+            let settled = coordinator.settled && sinceSendMs >= flight.settleMs
             // A report that fits the state before the op as well proves nothing (the op may still be on its way), and
             // neither does one that shows a state the host lags behind.
             // A stale check's zero-offset move changes nothing: a fresh report of the model is its confirmation.
@@ -683,6 +796,7 @@ public struct FieldQueue: Sendable {
                flight.anywhere || !pins(report, in: flight.pre) || (flight.staleCheck && flight.op == .move(0)),
                !lagging.contains(where: { pins(report, in: $0.state) }) {
                 if flight.anywhere { relocate(report) }
+                guard coordinator.confirm(matches: true) else { return .wait }
                 events.append(.confirmed(waitedMs: flight.waitedMs))
                 lastSendConfirmed = true
                 confirmedHistory.append((flight.pre, flight.input, 0))
@@ -763,6 +877,8 @@ public struct FieldQueue: Sendable {
     /// (inserts, deletes, moves) land in order, no closer than `charMs`; a change of kind after an edit waits for the
     /// host to have applied it (`editSettleMs`), since Safari can land a later op of another kind first.
     private mutating func next() -> Action {
+        if recoveryRequest != nil, !paused { return .wait }
+        guard coordinator.available else { return .wait }
         let saved = self
         let action = plannedNext()
         guard case .send(let op) = action, let last = saved.lastSentOp, saved.sinceSendMs < Self.gap(after: last, before: op) else {
@@ -1076,6 +1192,14 @@ public struct FieldQueue: Sendable {
                     // The report may still catch up with a cursor move; past the grace the text is not there.
                     state.unplacedMs += stepElapsedMs
                     if lane == .edit, state.unplacedMs < Self.placeGraceMs { return .wait }
+                    if config.canReadAround, lane == .edit, !state.edit.atCursor, state.edit.selected == nil,
+                       !(state.edit.before + state.edit.after).isEmpty {
+                        var pending = Span(start: userCursor, end: userCursor)
+                        pending.parked = true; pending.lastText = Array(state.edit.before + state.edit.after)
+                        state.spanID = addSpan(pending)
+                        requestRecoveryIfNeeded()
+                        if recoveryRequest != nil { return .wait }
+                    }
                     drop(state, placement == .ambiguous ? .unplaceable : .changed); return .done
                 }
                 if state.edit.kind == .magic { closeOpenRegions(.edit) }
@@ -1084,6 +1208,8 @@ public struct FieldQueue: Sendable {
         guard let id = state.spanID, let span = spans[id] else { drop(state, .changed); return .done }
         if span.userChanged { drop(state, .userEdited); return .done }
         if span.parked {
+            requestRecoveryIfNeeded()
+            if recoveryRequest != nil { return .wait }
             // Out of sight after a resync: an edit waits a while for its text to show again, then drops.
             state.unplacedMs += stepElapsedMs
             if lane == .edit, state.unplacedMs < Self.parkLimitMs { return .wait }
@@ -1113,10 +1239,9 @@ public struct FieldQueue: Sendable {
         return .started
     }
 
-    /// Back to front, span by span (`SpanPlanner`): jump to the span's end, then either one delete of it and its new
-    /// text typed, or each change in it (move, delete its old characters, type its new ones). Typed one grapheme per
-    /// op when paced, else in one op. `minimal`: only the differing characters, never a whole word or a block (in a
-    /// region the user edited, those would delete and retype the user's own characters).
+    /// Exact changes, back to front, grouped for cursor jumps. Every unchanged character stays in the host;
+    /// deleting a changed range is still one confirmed grapheme per operation. `minimal` also avoids grouping
+    /// separate changes in regions edited by the user. Insertions animate when paced.
     private func plan(spanID: Int, from current: [Character], to target: [Character], paced: Bool, leaveTailAppend: Bool = false,
                       minimal: Bool = false) -> [QOp] {
         guard spans[spanID] != nil else { return [] }
@@ -1218,8 +1343,9 @@ public struct FieldQueue: Sendable {
                 }
             case .delete(let count, let owner):
                 guard cursor >= count, count > 0 else { unit = nil; requeue(current.owner); return .wait }
-                current.ops.removeFirst(); unit = current
-                return send(.deleteBackward(count), lane: lane(of: current.owner)) { q in q.removeRange(q.cursor - count, q.cursor, owner: owner) }
+                if count > 1 { current.ops[0] = .delete(count - 1, owner: owner) } else { current.ops.removeFirst() }
+                unit = current
+                return send(.deleteBackward(1), lane: lane(of: current.owner)) { q in q.removeRange(q.cursor - 1, q.cursor, owner: owner) }
             case .insert(let chars, let owner):
                 var credit = 0.0
                 if current.paced {
@@ -1724,11 +1850,17 @@ public struct FieldQueue: Sendable {
 
     private mutating func send(_ op: ShadowOp, lane: Lane, anywhere: Bool = false, moveTo: Int? = nil,
                                _ apply: (inout FieldQueue) -> Void = { _ in }) -> Action {
+        let isCursorMove: Bool
+        if case .move = op { isCursorMove = true } else { isCursorMove = false }
+        guard coordinator.begin(isCursorMove ? .move : .edit,
+                                settleMs: anywhere ? Self.transitMs : isCursorMove ? Self.moveSettleMs : config.editConfirmationMs,
+                                transitMs: Self.transitMs) else { return .wait }
         let pre = ModelState(text: text, cursor: cursor, userCursor: userCursor, selection: selection, spans: spans)
         if let moveTo { cursor = moveTo } else { apply(&self) }
         var isMove = false
         if case .move = op { isMove = true }
         inFlight = InFlight(op: op, lane: lane, anywhere: anywhere, pre: pre, isMove: isMove, settleMs: anywhere ? Self.transitMs : isMove ? Self.moveSettleMs : 0)
+        coordinator.dispatched()
         lastSentOp = op; lastSentLane = lane
         recentSends.append(Sent(op: op, lane: lane, pre: pre))
         if recentSends.count > 16 { recentSends.removeFirst() }
@@ -2016,6 +2148,10 @@ public struct FieldQueue: Sendable {
         events.append(.resync(.jumpFailed))
         cursor = caret
         abortUnit()
+        if config.canReadAround {
+            reseed(report, flight: flight)
+            if recoveryRequest != nil { return }
+        }
         for ri in runs.indices {
             for gi in runs[ri].regions.indices where runs[ri].regions[gi].spanID == target && !runs[ri].regions[gi].abandoned {
                 runs[ri].regions[gi].abandoned = true
@@ -2068,6 +2204,7 @@ public struct FieldQueue: Sendable {
         userActed = false
         events.append(.resync(.reseeded))
         unparkSpans()
+        requestRecoveryIfNeeded()
     }
 
     /// The report's text next to the caret (`contextChars` on a side, as a span's found again) stands in the old text
@@ -2184,6 +2321,7 @@ public struct FieldQueue: Sendable {
     /// The user tapped at `at` (current text) while an op was on its way: everything stops there; reports of the
     /// states before it are lag from now on.
     private mutating func userTapped(at: Int, flight: InFlight?) {
+        recoveryRevision &+= 1; recoveryRequest = nil
         abortUnit()
         lagging.append((ModelState(text: text, cursor: cursor, userCursor: userCursor, selection: selection, spans: spans), 0))
         if let flight { lagging.append((flight.pre, 0)) }

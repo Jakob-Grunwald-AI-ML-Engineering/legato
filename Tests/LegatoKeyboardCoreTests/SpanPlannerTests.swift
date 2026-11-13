@@ -23,17 +23,19 @@ import Testing
         #expect(result[0].hunks == [.init(start: 8, end: 9, text: [])])
     }
 
-    @Test func aWordChangedMostlyIsReplacedWhole() {
+    @Test func aWordChangePreservesItsUnchangedLetters() {
         let result = spans("see you on Thursday at noon", "see you on Friday at noon")
         #expect(result.count == 1)
-        #expect(result[0].hunks == [.init(start: 11, end: 19, text: Array("Friday"))])
+        #expect(result[0].hunks.reduce(0) { $0 + $1.end - $1.start } == 4)
+        #expect(result[0].hunks.flatMap(\.text) == Array("Fi"))
+        #expect(apply(result, to: "see you on Thursday at noon") == "see you on Friday at noon")
     }
 
     @Test func twoNearbyFixesAreOneSpan() {
         let old = "I has a apple today", new = "I have an apple today"
         let result = spans(old, new)
         #expect(result.count == 1)
-        #expect(result[0].start == 2 && result[0].end == 7)
+        #expect(result[0].start == 4 && result[0].end == 7)
         #expect(apply(result, to: old) == new)
     }
 
@@ -43,14 +45,18 @@ import Testing
         #expect(apply(spans(old, new), to: old) == new)
     }
 
-    @Test func uppercasingASentenceIsOneBlockDeleteAndEveryGraphemeTyped() {
+    @Test func uppercasingASentencePreservesWhitespaceAndPunctuation() {
         let old = "the meeting is at three pm tomorrow, we need the slides"
         #expect(old.count == 55)
         let result = spans(old, old.uppercased())
         #expect(result.count == 1)
-        #expect(result[0].block)
+        #expect(!result[0].block)
         #expect(result[0].start == 0 && result[0].end == 55)
         #expect(result[0].text == Array(old.uppercased()))
+        for hunk in result[0].hunks {
+            #expect(old.dropFirst(hunk.start).prefix(hunk.end - hunk.start).allSatisfy { $0.isLowercase })
+            #expect(hunk.text.allSatisfy { $0.isUppercase })
+        }
     }
 
     @Test func insertingAWordDoesNotRetypeItsNeighbour() {

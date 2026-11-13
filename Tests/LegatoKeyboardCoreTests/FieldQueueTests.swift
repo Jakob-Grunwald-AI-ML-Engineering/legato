@@ -372,7 +372,7 @@ import Testing
         #expect(lag < 1_500, "the typewriter trails speech by the backlog's budget at most")
     }
 
-    @Test func aOneWordSonioxFixMidTextIsOneDeleteAndTheWordTyped() {
+    @Test func aOneWordSonioxFixPreservesUnchangedLetters() {
         var rig = rig()
         rig.queue.enqueue(snap(1, "I will meet you on Thursday at noon in the lobby"))
         rig.drain()
@@ -383,11 +383,14 @@ import Testing
         let took = (rig.sent.last?.ms ?? start) - start
         print("speed: one-word Soniox fix mid-text took \(Int(took)) ms (\(rig.sent.count - from) ops)")
         #expect(rig.field.string == "I will meet you on Friday at noon in the lobby")
-        #expect(rig.sent[from...].map(\.op) == [.move(-21), .deleteBackward(8)] + "Friday".map { .insert(String($0)) } + [.move(21), .deleteBackward(1), .insert("y")])
+        let edits = rig.sent[from...].map(\.op)
+        // Four changed letters plus the take-end caret reveal, never an eight-character word replacement.
+        #expect(edits.filter { if case .deleteBackward = $0 { true } else { false } } == Array(repeating: .deleteBackward(1), count: 5))
+        #expect(inserts(rig, from: from).map(\.text).joined() == "iFy")
         #expect(took < 1_500)
     }
 
-    @Test func magicUppercasingASentenceIsOneBlockDeleteAndRetyped() {
+    @Test func magicUppercasingPreservesEverySpaceAndPunctuationMark() {
         let sentence = "the meeting is at three pm tomorrow, we need the slides"
         var rig = rig(sentence)
         rig.run(ms: 100)
@@ -399,13 +402,13 @@ import Testing
         print("speed: uppercase Magic of \(sentence.count) chars took \(Int(took)) ms, \(Int(took / Double(sentence.count))) ms a character")
         #expect(rig.field.string == sentence.uppercased())
         let ops = rig.sent[from...].map(\.op)
-        // A single-line field has no line for a rich editor to fill: one block delete, no jumps (the empty-line guard
-        // only applies where a real line break bounds the line; it cost Magic about 0.23 s here).
-        #expect(ops.filter { if case .deleteBackward = $0 { true } else { false } } == [.deleteBackward(sentence.count)])
-        #expect(!ops.contains { if case .move = $0 { true } else { false } })
-        #expect(inserts(rig, from: from).count == sentence.count)
+        // Only letters change case. Spaces and punctuation are never deleted or retyped for a cheaper block.
+        #expect(ops.filter { if case .deleteBackward = $0 { true } else { false } }.allSatisfy { $0 == .deleteBackward(1) })
+        #expect(inserts(rig, from: from).map(\.text).joined().allSatisfy { $0.isUppercase })
+        #expect(inserts(rig, from: from).count == sentence.filter { $0.isLowercase }.count)
         #expect(rig.field.reorders == 0)
-        #expect(took < 3_000)
+        #expect(took < Double(sentence.count) * FieldQueue.editSettleMs * 2,
+                "Targeted edits respect the proxy's move/edit settlement windows")
     }
 
     @Test func aCleanupOfTwentyScatteredChangesInThreeHundredCharacters() {

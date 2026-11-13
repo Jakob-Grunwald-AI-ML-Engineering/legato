@@ -64,6 +64,8 @@ public final class MacFieldQueue {
         /// The result's range in the field.
         case applied(UTF16Range)
         case dropped(Reason)
+        /// Confirmed changes were made before editing stopped; the caller must not claim nothing was edited.
+        case stopped(Reason)
     }
     /// A run handed to the panel because its field stopped reading (`onUnreadable`): `text` is its newest text, of which
     /// the first `typed` characters stand for what is in the field already. That text stays as it is.
@@ -184,6 +186,9 @@ public final class MacFieldQueue {
         var landing: [Character]?
         /// Keystroke fields: the planned keys toward `desired`.
         var keys: KeyUnit?
+        var nativePlan: NativeEditPlan?
+        var verifiedWrites = 0
+        var uncertainWrite = false
         init(id: String, runID: String?, start: Int, current: [Character], desired: [Character], open: Bool) {
             self.id = id; self.runID = runID; self.start = start; self.current = current; self.desired = desired; self.open = open
         }
@@ -234,6 +239,36 @@ public final class MacFieldQueue {
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
     private var flushing = 0
     private var exclusive = false
+    private var operations = FieldEditCoordinator.Operations()
+    private var recovery = FieldRecovery()
+    private var recoveredRead = false
+    private var operationsAt: ContinuousClock.Instant?
+
+    private func advanceOperations() {
+        let at = now()
+        if let operationsAt {
+            let elapsed = (at - operationsAt).components
+            operations.advance(Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1e15)
+        }
+        operationsAt = at
+    }
+
+    private func beginOperation(_ kind: FieldEditCoordinator.Operations.Kind, transit: Duration = .zero) -> Bool {
+        advanceOperations()
+        let parts = transit.components
+        return operations.begin(kind, transitMs: Double(parts.seconds) * 1000 + Double(parts.attoseconds) / 1e15)
+    }
+
+    private func operationDispatched() {
+        operations.dispatched()
+        operationsAt = now()
+    }
+
+    @discardableResult private func confirmOperation(_ matches: Bool) -> Bool {
+        advanceOperations()
+        return operations.confirm(matches: matches)
+    }
+
     private var userActedFlag = false
     /// The caret the user expects (nil until first read).
     private var userCaret: UTF16Range?
@@ -471,8 +506,9 @@ public final class MacFieldQueue {
     public func exclusive<T>(label: String, text: String, _ body: @MainActor () async -> T) async -> T {
         note(.typed, id: label, text: text)
         await whenIdle()
+        while !beginOperation(.read) { await sleep(Self.waitTick) }
         exclusive = true
-        defer { exclusive = false; schedule() }
+        defer { operations.finishRead(); exclusive = false; schedule() }
         return await body()
     }
 
@@ -633,7 +669,10 @@ public final class MacFieldQueue {
         // A caret that moved with no real input while a key of ours may still land is that key's, not the user's.
         noteUser(selection: selection, doc: doc, ownKey: keyed && lateKey != nil && (lastMark == nil || mark == lastMark))
         locateAll(doc)
+        // Recovery acquired a new observation; no write is planned against the document read before it.
+        if recoveredRead { recoveredRead = false; return true }
         placeEdits(doc)
+        if recoveredRead { recoveredRead = false; return true }
         finishEdits()
         if keyed {
             if mark != lastMark {
@@ -819,6 +858,7 @@ public final class MacFieldQueue {
             caretOwed = false
             revision += 1
             for index in runs.indices { close(&runs[index], cause: moved ? "cursor" : "input") }
+            for region in allRegions { region.nativePlan = nil }
             note(.user, selection: selection, detail: moved ? "moved" : "acted")
         }
         // A caret past the text (work that did not land after all) is the field's own caret again.
@@ -866,8 +906,26 @@ public final class MacFieldQueue {
         if let found = relocate(region, doc) {
             note(.relocated, id: region.id, run: region.runID, location: found, detail: "from \(region.start)")
             region.start = found
+            region.nativePlan = nil
             refreshContext(region, doc)
             return
+        }
+        if let recovered = recoverTarget(id: region.id, expected: String(region.current), landed: region.landing.map { String($0) },
+                                         before: region.before, after: region.after) {
+            switch recovered {
+            case .replan(let placement, let fresh):
+                region.start = fresh.base + String((fresh.text as String).prefix(placement.range.lowerBound)).utf16.count
+                if region.current != Array(placement.text) { region.verifiedWrites += 1 }
+                region.uncertainWrite = false
+                region.current = Array(placement.text)
+                region.nativePlan = nil
+                region.keys = nil; region.landing = nil; region.failures = 0
+                refreshContext(region, fresh)
+                recoveredRead = true
+                return
+            case .waiting: return
+            case .stop: break
+            }
         }
         region.lost = true
         // An empty run region is placed again (`locateAll`); anything else was changed under it. The run's later words
@@ -875,6 +933,38 @@ public final class MacFieldQueue {
         if region.runID != nil, region.current.isEmpty, region.original.isEmpty { return }
         region.open = false
         if region.current != region.desired { drop(region, .userChanged) }
+    }
+
+    private enum RecoveryResult { case replan(FieldRecovery.Placement, Document), waiting, stop }
+
+    /// Accessibility can obtain fresh bounded evidence without moving the user's cursor. The same policy used by
+    /// the proxy adapter decides whether the expected target, or a freshly observed late result, still exists.
+    private func recoverTarget(id: String, expected: String, landed: String? = nil, before: String, after: String) -> RecoveryResult? {
+        guard let target, target.isFocused() else { return nil }
+        guard beginOperation(.read) else { return .waiting }
+        defer { operations.finishRead() }
+        let mark = target.inputMark, requestRevision = UInt64(max(0, revision)), start = now()
+        let generation = documentID
+        let wanted = FieldRecovery.Target(id: id, expected: expected, landed: landed, before: before, after: after)
+        guard let request = recovery.begin(generation: generation, revision: requestRevision, targets: [wanted]) else { return nil }
+        note(.recovery, id: id, detail: "attempt \(request.id)")
+        guard let oldSelection = try? target.selectedRange(), let (fresh, selected) = read(target),
+              let restored = try? target.selectedRange(), oldSelection == selected, selected == restored,
+              target.isFocused(), target.inputMark == mark,
+              now() - start < .milliseconds(FieldRecovery.budgetMs) else {
+            note(.recovery, id: id, reason: "unreadableOrChanged", detail: "refused \(request.id)")
+            return .stop
+        }
+        note(.recovery, id: id, detail: "evidence \(fresh.text.length) restored \(request.id)")
+        let complete = fresh.base == 0 && fresh.text.length == fresh.length
+        let decisions = recovery.resolve(request, text: fresh.text as String, generation: documentID,
+                                         revision: UInt64(max(0, revision)), restored: true, completeDocument: complete)
+        guard case .replan(let placement)? = decisions.first else {
+            note(.recovery, id: id, reason: "changedOrAmbiguous", detail: "refused \(request.id)")
+            return .stop
+        }
+        note(.recovery, id: id, detail: "unique replan \(request.id)")
+        return .replan(placement, fresh)
     }
 
     /// The text before a region must still end with what was there, unless the user typed right at its edge.
@@ -922,6 +1012,7 @@ public final class MacFieldQueue {
     private func placeEdits(_ doc: Document) {
         var waiting: [PendingEdit] = []
         for pending in edits {
+            if recoveredRead { waiting.append(pending); continue }
             let edit = pending.edit
             var start: Int?
             if doc.string(edit.range.location, edit.range.length) == edit.scope,
@@ -931,6 +1022,19 @@ public final class MacFieldQueue {
                 let hits = doc.find(edit.before + edit.scope + edit.after)
                 if hits.count == 1 { start = hits[0] + edit.before.utf16.count }
                 else if edit.scope.count >= Self.relocateChars, doc.find(edit.scope).count == 1 { start = doc.find(edit.scope)[0] }
+            }
+            if start == nil, now() - pending.since >= Self.placeGrace,
+               let result = recoverTarget(id: edit.id, expected: edit.scope, before: edit.before, after: edit.after) {
+                switch result {
+                case .replan:
+                    // Coordinates, anchors and overlap ownership must all come from one observation. Let the next
+                    // fresh queue read place the still-pending edit; never create its region against this old doc.
+                    recoveredRead = true
+                    waiting.append(pending)
+                    continue
+                case .waiting: waiting.append(pending); continue
+                case .stop: break
+                }
             }
             if let start {
                 let region = Region(id: edit.id, runID: nil, start: start, current: Array(edit.scope), desired: Array(edit.target), open: false)
@@ -958,9 +1062,16 @@ public final class MacFieldQueue {
         edits = waiting
     }
 
+    private func stoppedResult(_ region: Region, reason: Reason) -> EditResult {
+        if region.verifiedWrites > 0 { return .stopped(reason) }
+        // An unconfirmed write is uncertain, even if focus loss is what finally stopped the work.
+        if region.uncertainWrite { return .dropped(.failed) }
+        return .dropped(reason)
+    }
+
     private func finishEdits() {
         editRegions.removeAll { entry in
-            if entry.region.lost { entry.done.resume(returning: .dropped(entry.region.dropReason)); return true }
+            if entry.region.lost { entry.done.resume(returning: stoppedResult(entry.region, reason: entry.region.dropReason)); return true }
             guard !entry.region.pending else { return false }
             let range = UTF16Range(location: entry.region.start, length: entry.region.end - entry.region.start)
             note(.applied, id: entry.region.id, location: range.location, length: range.length)
@@ -1006,31 +1117,37 @@ public final class MacFieldQueue {
 
     private var pacedNow: Bool { flushing == 0 && paced() }
 
+    /// Diagnostic count: verified character advances reuse a plan; only a changed target or field rebuilds the diff.
+    private(set) var nativePlanBuilds = 0
+
+    private func nativePlan(for region: Region) -> NativeEditPlan {
+        if let plan = region.nativePlan, plan.matches(current: region.current, desired: region.desired, paced: pacedNow) { return plan }
+        nativePlanBuilds += 1
+        let plan = NativeEditPlan(current: region.current, desired: region.desired, paced: pacedNow)
+        region.nativePlan = plan
+        return plan
+    }
+
     private func perform(_ region: Region, doc: Document, target: any TextTarget) async -> Bool {
-        let changes = ShadowEditPlanner.changes(from: region.current, to: region.desired)
-        guard let change = changes.first else { return true }
-        let whole = !pacedNow
-        var lower = change.start, upper = change.end, insertion: [Character] = []
-        if whole {
-            insertion = change.text
-        } else if upper > lower {
-            lower = upper - 1 // one grapheme at a time, from the end of the deleted span
-        } else {
-            insertion = [change.text[0]]
-        }
+        guard beginOperation(.edit) else { return false }
+        defer { operations.invalidate() }
+        var plan = nativePlan(for: region)
+        guard let step = plan.next, let after = plan.afterNext else { return true }
+        let lower = step.range.lowerBound, upper = step.range.upperBound
+        let insertion = step.replacement
         let location = region.start + String(region.current[..<lower]).utf16.count
         let removed = String(region.current[lower..<upper])
         let range = UTF16Range(location: location, length: removed.utf16.count)
         let text = String(insertion)
         // The caret follows an open region's end when the user's caret was there.
         let follows = region.open && userCaret == UTF16Range(location: region.end, length: 0)
-        var after = region.current
-        after.replaceSubrange(lower..<upper, with: insertion)
         note(.sent, id: region.id, run: region.runID, location: range.location, length: range.length, text: text,
              read: doc.context(before: range.location, 40) + "|" + doc.context(after: range.location, 40))
         opsSent += 1
+        region.uncertainWrite = true
         do {
             try target.replace(range, with: text)
+            operationDispatched()
         } catch {
             expectedSelections.append(UTF16Range(location: range.location + text.utf16.count, length: 0))
             return await failed(region, after: after, reason: "write", unchanged: nativeWriteUnchanged(region, doc: doc, target: target))
@@ -1042,6 +1159,8 @@ public final class MacFieldQueue {
             expectedSelections.append(UTF16Range(location: range.location + text.utf16.count, length: 0))
             return await failed(region, after: after, reason: "readback", unchanged: nativeWriteUnchanged(region, doc: doc, target: target))
         }
+        guard confirmOperation(true), plan.confirm(after) else { region.nativePlan = nil; return false }
+        region.nativePlan = plan
         let delta = text.utf16.count - range.length
         apply(region, landed: after, at: range, delta: delta, inserted: text.utf16.count)
         revision += 1
@@ -1052,8 +1171,10 @@ public final class MacFieldQueue {
         if done, region.retracting, !region.original.isEmpty { wanted = UTF16Range(location: region.start, length: region.end - region.start) }
         userCaret = wanted
         let selection = try? target.selectedRange()
-        if selection != wanted {
+        if selection != wanted, beginOperation(.move) {
             try? target.setSelectedRange(wanted)
+            operationDispatched()
+            _ = confirmOperation((try? target.selectedRange()) == wanted)
             expectedSelections = [(try? target.selectedRange()) == wanted ? wanted : (selection ?? wanted)]
         } else {
             expectedSelections = [wanted]
@@ -1061,7 +1182,7 @@ public final class MacFieldQueue {
         note(.verified, id: region.id, run: region.runID, location: region.start, length: region.end - region.start, text: String(region.current),
              selection: wanted)
         if pacedNow, !insertion.isEmpty {
-            let remaining = ShadowEditPlanner.changes(from: region.current, to: region.desired).reduce(0) { $0 + $1.text.count }
+            let remaining = plan.remainingInsertions
             let ops = remaining + typedBacklog(besides: region)
             // Nothing more to type: no wait after the last grapheme.
             if ops > 0 {
@@ -1109,6 +1230,7 @@ public final class MacFieldQueue {
     /// edit (Backspace or one grapheme). It counts by the field's value: the region's new text at its place, what
     /// followed it still after it, and the field's length. A caret that lags behind a landed key is waited for.
     private func performKey(_ region: Region, doc: Document, selection: UTF16Range, target: any TextTarget, mark: Int) async -> Bool {
+        defer { operations.invalidate() }
         guard let unit = keyUnit(for: region, doc: doc) else { return true }
         var step = unit.steps[unit.index]
         var caret = region.start + String(step.before[..<step.caret]).utf16.count
@@ -1152,6 +1274,7 @@ public final class MacFieldQueue {
             // this key was planned (for a piped key, where the one before it was seen to leave it).
             guard sendKey(key, target: target, mark: mark, selection: piped == 1 ? selection : UTF16Range(location: caret, length: 0)) == nil
             else { return piped > 1 }
+            region.uncertainWrite = true
             let sentAt = now()
             lastKey = (.edit, sentAt)
             probeAt = nil
@@ -1162,6 +1285,7 @@ public final class MacFieldQueue {
 
             /// The key's text and caret showed: the region takes it.
             func land(caretSeen: Bool, lastSelection: UTF16Range) {
+                _ = confirmOperation(true)
                 apply(region, landed: after, at: range, delta: delta, inserted: inserted.utf16.count)
                 unit.index += 1
                 revision += 1
@@ -1315,9 +1439,12 @@ public final class MacFieldQueue {
     /// never tried again in this field (it may still take within `caretSetLateLimit`; nothing goes out before).
     private func caretSet(_ goal: UTF16Range, doc: Document, selection: UTF16Range, target: any TextTarget, mark: Int,
                           region: Region?) async -> Bool {
+        guard beginOperation(.move, transit: Self.caretSetLateLimit) else { return false }
+        defer { operations.invalidate() }
         note(.sent, id: region?.id, run: region?.runID, location: selection.location, selection: goal, detail: "caret")
         do {
             try target.setCaret(goal, mark: mark, selection: selection)
+            operationDispatched()
             opsSent += 1
         } catch {
             let refusal = error as? FieldKeyRefusal ?? .unavailable
@@ -1332,6 +1459,7 @@ public final class MacFieldQueue {
             (try? target.selectedRange()) == goal && (try? target.textLength()) == doc.length
         }
         if took {
+            _ = confirmOperation(true)
             guard target.inputMark == mark else { userActedFlag = true; return true }
             if caretJumps.direct == .untested { caretJumps.direct = .tentative }
             probeAt = caretJumps.direct == .tentative && goal.length == 0 ? goal.location : nil
@@ -1457,6 +1585,7 @@ public final class MacFieldQueue {
                           target: any TextTarget, mark: Int, region: Region?, detail: String, anyWay: Bool = false,
                           exactOnly: Bool = false, refusal: inout FieldKeyRefusal?) async -> UTF16Range? {
         note(.sent, id: region?.id, run: region?.runID, location: selection.location, selection: exact, detail: detail)
+        defer { operations.invalidate() }
         if let refused = sendKey(key, target: target, mark: mark, selection: selection) {
             refusal = refused
             return nil
@@ -1495,6 +1624,7 @@ public final class MacFieldQueue {
             await sleep(Self.waitTick)
             return nil
         }
+        _ = confirmOperation(true)
         moveFailures = 0
         expectedSelections = [seen]
         caretOwed = userCaret != seen
@@ -1585,11 +1715,16 @@ public final class MacFieldQueue {
 
     /// Sends one key through the target's guards. A refusal sends nothing: the next step reads again and replans.
     private func sendKey(_ key: FieldKey, target: any TextTarget, mark: Int, selection: UTF16Range) -> FieldKeyRefusal? {
+        let kind: FieldEditCoordinator.Operations.Kind
+        switch key { case .backspace, .text: kind = .edit; default: kind = .move }
+        guard beginOperation(kind, transit: Self.keyLateLimit) else { return .unavailable }
         do {
             try target.press(key, mark: mark, selection: selection)
+            operationDispatched()
             opsSent += 1
             return nil
         } catch {
+            operations.invalidate() // a refused key was never dispatched
             let refusal = error as? FieldKeyRefusal ?? .unavailable
             note(.refused, reason: "\(refusal)")
             refused(refusal, target: target, mark: mark)
@@ -1629,6 +1764,9 @@ public final class MacFieldQueue {
         let pivot = range?.location ?? region.start
         let pivotEnd = range.map { $0.location + $0.length } ?? region.end
         let oldEnd = region.end
+        if region.current != landed { region.verifiedWrites += 1 }
+        region.uncertainWrite = false
+        if let plan = region.nativePlan, plan.expected != landed { region.nativePlan = nil }
         region.current = landed
         region.failures = 0
         // Regions after this one shift; one that overlaps it (a run region under a Magic edit) keeps its place and is
@@ -1650,6 +1788,8 @@ public final class MacFieldQueue {
     }
 
     private func failed(_ region: Region, after: [Character], reason: String, unchanged: Bool = false) async -> Bool {
+        region.nativePlan = nil
+        if unchanged { region.uncertainWrite = false }
         region.failures += 1
         region.landing = unchanged ? region.current : after
         note(.mismatch, id: region.id, run: region.runID, reason: reason, detail: "failures=\(region.failures)")
@@ -1681,7 +1821,7 @@ public final class MacFieldQueue {
         run.target = text
         let sources = run.regions.map(\.source)
         let old = sources.flatMap { $0 } + run.remainder
-        let changes = ShadowEditPlanner.changes(from: old, to: text)
+        let changes = FieldEditCoordinator.changes(from: old, to: text)
         // Text inserted at a boundary between regions belongs to the earlier one; at the run's closed end it waits for a
         // region at the user's caret (`inclusive` false).
         func map(_ boundary: Int, inclusive: Bool = true) -> Int {
@@ -1751,7 +1891,7 @@ public final class MacFieldQueue {
         edits = []
         for entry in editRegions {
             if entry.region.pending { drop(entry.region, reason) }
-            entry.done.resume(returning: .dropped(reason))
+            entry.done.resume(returning: stoppedResult(entry.region, reason: reason))
         }
         editRegions = []
         for index in runs.indices { abandon(index, reason) }

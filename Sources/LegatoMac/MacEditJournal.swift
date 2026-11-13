@@ -21,7 +21,7 @@ public enum MacEditJournal {
         case sent, verified, mismatch
         /// A region was found again elsewhere, or started and closed.
         case relocated, regionStarted, regionClosed
-        case applied, dropped, waiting, reset
+        case applied, dropped, waiting, reset, recovery
         /// Keystroke fields: a region's keys were planned; a key was refused by its guards (nothing sent).
         case planned, refused
         /// The field stopped reading: a run went on in the panel (`text`: its newest text, `length`: the characters of it

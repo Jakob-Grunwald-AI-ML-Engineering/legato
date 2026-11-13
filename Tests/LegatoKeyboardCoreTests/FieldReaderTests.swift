@@ -424,4 +424,3 @@ private extension String {
         #expect(span.text == "New words" && !span.startsField)
     }
 }
-

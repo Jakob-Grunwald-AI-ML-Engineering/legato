@@ -156,8 +156,36 @@ setup() {
   mkdir -p "$LEGATO_DEVICE_STATE"
   printf '%s\n' '{"id":"c-test","event":"received"}' '{"id":"c-test","event":"done"}' > "$FIXTURE/done"
 }
+# Functional fixtures assert protocol results, not how quickly a loaded Mac starts their stub processes.
+# Keep their requested budgets intact but stop the child interpreter's logical clock. A separate wall-clock
+# guard catches a broken fixture/CLI loop; the deadline and child-reaping fixtures below retain real time.
+run_functional_ctl() (
+  ctl_child="" guard_child="" rc=0
+  trap 'for child in "$ctl_child" "$guard_child"; do if [ -n "$child" ]; then kill -TERM -- "-$child" 2> /dev/null || true; wait "$child" 2> /dev/null || true; fi; done' EXIT
+  set -m
+  "$BASH" -c 'unset SECONDS; SECONDS=0; source "$@"' fixture-clock "$ROOT/scripts/device/ctl.sh" "$@" &
+  ctl_child=$!
+  (
+    sleep 10
+    echo 'fixture: functional command exceeded its 10s wall-clock guard' >&2
+    kill -TERM -- "-$ctl_child" 2> /dev/null || true
+    sleep 0.1
+    kill -KILL -- "-$ctl_child" 2> /dev/null || true
+  ) &
+  guard_child=$!
+  set +m
+  wait "$ctl_child" || rc=$?
+  ctl_child=""
+  exit "$rc"
+)
 # Use the fixture interpreter for the CLI too; PATH may otherwise silently select another Bash.
-run_ctl() { "$BASH" "$ROOT/scripts/device/ctl.sh" "$@" > "$FIXTURE/out" 2> "$FIXTURE/err"; }
+run_ctl() {
+  case "$SCENARIO" in
+    complete | later | decimal | terminal | startup | control | probe | probe-error | reply | malformed | ask-newline)
+      run_functional_ctl "$@" > "$FIXTURE/out" 2> "$FIXTURE/err" ;;
+    *) "$BASH" "$ROOT/scripts/device/ctl.sh" "$@" > "$FIXTURE/out" 2> "$FIXTURE/err" ;;
+  esac
+}
 check() { if "$@"; then echo "PASS $SCENARIO"; else echo "FAIL $SCENARIO"; failures=$((failures + 1)); cat "$FIXTURE/err"; fi; }
 completed() { run_ctl wait c-test 2 && grep -q '"event":"done"' "$FIXTURE/out"; }
 setup complete; check completed
@@ -188,7 +216,10 @@ bounded() {
   [ "$((SECONDS - began))" -le 2 ] || return 1
   grep -q -- '--timeout 5' "$FIXTURE/calls" || return 1
   ! grep -q 'Please specify a timeout' "$FIXTURE/err" || return 1
-  [ -s "$FIXTURE/children" ] || return 1
+  if [ ! -s "$FIXTURE/children" ]; then
+    echo "fixture: the 1s budget ended before the mocked $SCENARIO process reached its stall; that timeout phase was not exercised" >&2
+    return 1
+  fi
   local child
   while read -r child; do
     if kill -0 "$child" 2> /dev/null; then echo "leaked child $child" >&2; return 1; fi

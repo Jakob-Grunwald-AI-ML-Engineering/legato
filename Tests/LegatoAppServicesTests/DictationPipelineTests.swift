@@ -238,6 +238,28 @@ extension DictationPipelineTests {
         #expect(published.compactMap { $0?.version } == published.compactMap { $0?.version }.sorted())
     }
 
+    @Test func finalizingAPrefixKeepsTheRemainingSpokenWordsInEveryPublication() async throws {
+        let pipeline = live()
+        var published: [String] = []
+        pipeline.onLiveChange = { snapshot in
+            if let snapshot { published.append(snapshot.segments.map(\.text).filter { !$0.isEmpty }.joined(separator: " ")) }
+        }
+        pipeline.tailChanged("the first sentence. the next words are already visible")
+        await pipeline.receive(DictationRouteLine(sequence: 0, text: "the first sentence.", words: [], reason: "punctuation",
+                                                  remainingTail: "the next words are already visible"))
+        pipeline.tailChanged("the next words are already visible")
+        #expect(published.allSatisfy { $0 == "the first sentence. the next words are already visible" },
+                "Moving words from the head into finals cannot erase and retype their unchanged suffix")
+        // A genuine provider revision still changes the head immediately; atomic rollover does not hide retractions.
+        pipeline.tailChanged("the corrected next words")
+        #expect(published.last == "the first sentence. the corrected next words")
+        await pipeline.receive(DictationRouteLine(sequence: 1, text: "the corrected next words", words: [], reason: "finished",
+                                                  remainingTail: ""))
+        #expect(pipeline.liveRun?.isSpeaking == false)
+        #expect(published.last == "the first sentence. the corrected next words")
+        await pipeline.reset()
+    }
+
     @Test func finishingWaitsForCleanupAndCompletesTheRun() async throws {
         let pipeline = live()
         await pipeline.receive(routeLine(0, "only sentence"))

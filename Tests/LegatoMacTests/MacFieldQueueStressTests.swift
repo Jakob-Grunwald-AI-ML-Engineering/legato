@@ -489,6 +489,7 @@ private struct SeededRandom {
             reader.unreadable = dictating && started && !ended
         }
         var userRng = SeededRandom(seed &+ 7)
+        var guaranteedUserInput = false
         // Element identity churns in half the sessions, interfering or not (it keeps the text): the element is recreated
         // (Enter, a new line, a re-render) or focus moves into the caret line's nested element and back, sometimes before
         // the first word.
@@ -518,7 +519,12 @@ private struct SeededRandom {
             // The focused element stops or starts exposing its text (its editable root still reads).
             if let reader, modeRng.chance(0.03 * scale) { reader.nestedBroken.toggle() }
             guard interferes else { return }
-            if userRng.chance(0.05 * scale) {
+            // Faster atomic replacements have fewer sleep opportunities. Every interfering session still exercises
+            // a real input, while the randomized keys/clicks continue to vary its later interactions.
+            if !guaranteedUserInput {
+                guaranteedUserInput = true
+                field.type(Character(String(typedDigits % 10))); typedDigits += 1; queue.userActed()
+            } else if userRng.chance(0.05 * scale) {
                 field.type(Character(String(typedDigits % 10))); typedDigits += 1; queue.userActed()
             } else if userRng.chance(0.02 * scale) {
                 field.click(); queue.userActed()

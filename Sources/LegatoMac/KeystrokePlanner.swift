@@ -4,12 +4,8 @@ import LegatoKeyboardCore
 /// Plans how a change of a region's text goes into a field that takes keystrokes (Chromium web content), and at what
 /// pace. Pure. The same rules as the iOS keyboard's span planner:
 ///
-/// - Spans: the minimal grapheme diff; a word whose graphemes change by at least half is replaced whole ("Thursday" →
-///   "Friday"; "colour" → "color" stays one deleted letter); changes a few unchanged graphemes apart, or in one word,
-///   merge into one span.
-/// - Mode: a span goes in as minimal edits (the differing characters only, with caret moves between them) or as one
-///   block delete and its new text typed, whichever costs less; a tie keeps the minimal edits. A caret move costs one
-///   key per grapheme up to the price of a jump (`jumpMs`): the queue jumps straight to a far change.
+/// - Spans share the exact desktop grapheme diff. Nearby changes share jumps, while unchanged letters, spaces
+///   and punctuation remain in the host. Cost estimates never broaden a replacement into a whole word or block.
 /// - Pace: one grapheme per key. The gap between typed graphemes spreads the work over about `budgetMs`, no slower than
 ///   `calmMs` and no faster than `floorMs`; a backlog of `behindOps` or more goes at the floor.
 public enum KeystrokePlanner {
@@ -94,15 +90,12 @@ public enum KeystrokePlanner {
 
     /// The spans that turn `old` into `new`, front to back.
     public static func spans(from old: [Character], to new: [Character], paceMs: Double = calmMs, jumpMs: Double = jumpMs) -> [Span] {
-        var hunks = ShadowEditPlanner.changes(from: old, to: new).map { Hunk(start: $0.start, end: $0.end, text: $0.text) }
+        let hunks = FieldEditCoordinator.changes(from: old, to: new).map { Hunk(start: $0.start, end: $0.end, text: $0.text) }
         guard !hunks.isEmpty else { return [] }
-        hunks = snapToWords(hunks, old: old, new: new)
         return merge(hunks, old: old).map { group in
             let start = group.first!.start, end = group.last!.end
             let text = Array(new[map(start, hunks: hunks, side: .start)..<map(end, hunks: hunks, side: .end)])
-            let minimal = cost(of: group, paceMs: paceMs, jumpMs: jumpMs)
-            let block = cost(of: [Hunk(start: start, end: end, text: text)], paceMs: paceMs, jumpMs: jumpMs)
-            return Span(start: start, end: end, text: text, block: group.count > 1 && block < minimal, hunks: group)
+            return Span(start: start, end: end, text: text, block: false, hunks: group)
         }
     }
 

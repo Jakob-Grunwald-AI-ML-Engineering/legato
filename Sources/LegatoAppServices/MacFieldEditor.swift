@@ -546,6 +546,10 @@ import LegatoMac
         case .applied(let landed):
             instructionCursor = UTF16Range(location: landed.end, length: 0)
             return .init(id: edit.id, applied: true, cursor: edit.target.utf16.count, revision: nil)
+        case .stopped:
+            return .init(id: edit.id, applied: false,
+                         reason: "Editing stopped. Some changes may remain in the field; check it before retrying.",
+                         stopped: true)
         case .dropped(.userChanged):
             return refused("The text changed. Nothing more was edited.")
         case .dropped(.failed):
