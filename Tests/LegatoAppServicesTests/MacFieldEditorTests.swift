@@ -120,6 +120,22 @@ import LegatoMac
         SnapshotVersion.value += 1
         return .init(runID: run, version: SnapshotVersion.value, segments: [.init(id: 0, text: text, final: complete)], complete: complete)
     }
+    @Test func idleObserverRunsAfterFinalWritesBeforeWaitersResume() async {
+        let target = EditorTarget("Draft:")
+        let queue = MacFieldQueue(target: target)
+        queue.paced = { false }
+        var observed: String?
+        var pendingAtObservation = true
+        queue.onIdle = {
+            observed = target.value
+            pendingAtObservation = queue.hasWork
+        }
+        queue.live(runID: "take", version: 1, text: "Hello John.", complete: true)
+        await queue.whenIdle()
+        #expect(observed == "Draft: Hello John.")
+        #expect(!pendingAtObservation)
+    }
+
     @Test func rawPartialReplacementsAndCleanupStayInsideTheOwnedSpan() async {
         let target = EditorTarget("Hello 🐈", .init(location: 8, length: 0))
         let editor = MacFieldEditor(capture: { .target(target) })

@@ -158,9 +158,9 @@ import LegatoMac
                 correctionCapture?.reset()
                 correctionOwnWriteAt = Date()
             }
-            if entry.kind == .verified { armCorrections() }
             journal?(entry)
         }
+        queue.onIdle = { [weak self] in self?.armCorrections() }
         correctionPoll?.cancel()
         correctionExpires = Date().addingTimeInterval(600)
         correctionPoll = Task { [weak self] in
@@ -257,7 +257,7 @@ import LegatoMac
     public func watchDelivery(id: String, raw: String, text: String) {
         guard !passwordField, !panel.active else { return }
         correctionSources[id] = (raw, text)
-        armCorrections()
+        if !queue.hasWork { armCorrections() }
     }
 
     private func correctionSnapshot() -> String? {
