@@ -222,6 +222,8 @@ public final class MacFieldQueue {
         var complete = false
         /// Typed at the fast end of the pace (a panel take's one insert at its end).
         var fast = false
+        var speaking = false
+        var speechTarget = FieldSpeechScheduling.Target()
         /// Words past the last region wait for a region of their own (whitespace alone waits for more words).
         var needsRegion: Bool {
             !retracted && !abandoned && remainder.contains { !$0.isWhitespace || $0.isNewline }
@@ -279,6 +281,7 @@ public final class MacFieldQueue {
     private var opsSent = 0
     /// Keystroke fields: the last key sent, for the settle at a move/edit transition.
     private var lastKey: (kind: KeyKind, at: ContinuousClock.Instant)?
+    private var lastMoveConfirmed = false
     /// Keystroke fields: the caret is away from where the user expects it (a jump that still has to come back).
     private var caretOwed = false
     /// Keystroke fields: arrows that did not read back in a row.
@@ -319,8 +322,9 @@ public final class MacFieldQueue {
     // MARK: Inspection
 
     public var hasWork: Bool {
-        caretOwed || edits.isEmpty == false || editRegions.contains { $0.region.pending }
-            || runs.contains { run in run.needsRegion || run.regions.contains(where: \.pending) }
+        let speaking = runs.contains { $0.speaking && !$0.abandoned }
+        return caretOwed || (!speaking && (!edits.isEmpty || editRegions.contains { $0.region.pending }))
+            || runs.contains { run in !run.abandoned && (!speaking || run.speaking) && (run.needsRegion || run.regions.contains(where: \.pending)) }
     }
     /// The last run region (text and range) when it ends at the user's caret: the dictation Magic may call "what I said".
     public var lastRegionAtCaret: (range: UTF16Range, text: String)? {
@@ -349,7 +353,7 @@ public final class MacFieldQueue {
     /// A live run's newest text (a snapshot, a growing take, a typed line). Older versions of a run are ignored.
     /// `fast`: typed at the fast end of the pace (still one grapheme per op), for a finished take inserted at once.
     /// `complete`: this is the run's last text (it can then be undone as a change of its own, `undo()`).
-    public func live(runID: String, version: Int, text: String, fast: Bool = false, complete: Bool = false) {
+    public func live(runID: String, version: Int, text: String, fast: Bool = false, complete: Bool = false, speaking: Bool = false) {
         let index = runs.firstIndex { $0.id == runID } ?? {
             runs.append(Run(id: runID))
             // New dictation is a new change: whatever was undone can no longer be redone.
@@ -367,9 +371,21 @@ public final class MacFieldQueue {
         if userActedFlag { for other in runs.indices { close(&runs[other], cause: "input") } }
         runs[index].version = version
         if fast { runs[index].fast = true }
-        retarget(&runs[index], to: Array(text))
+        runs[index].speaking = speaking && !complete
+        let delivery = runs[index].speechTarget.update(Array(text), speaking: runs[index].speaking)
+        retarget(&runs[index], to: delivery)
         note(.live, id: nil, run: runID, text: text, detail: "v\(version)")
         historyChanged()
+        schedule()
+    }
+
+    /// Mic-off releases the latest coalesced correction even before the final cleanup snapshot arrives.
+    public func takeStopped(_ runID: String) {
+        guard let index = runs.firstIndex(where: { $0.id == runID }), !runs[index].abandoned, !runs[index].retracted else { return }
+        runs[index].speaking = false
+        let final = runs[index].speechTarget.authoritative
+        let delivery = runs[index].speechTarget.update(final, speaking: false)
+        retarget(&runs[index], to: delivery)
         schedule()
     }
 
@@ -377,6 +393,7 @@ public final class MacFieldQueue {
     public func retract(runID: String) {
         guard let index = runs.firstIndex(where: { $0.id == runID }) else { return }
         runs[index].retracted = true
+        runs[index].speaking = false
         runs[index].remainder = []
         for (offset, region) in runs[index].regions.enumerated() where !region.lost {
             region.retracting = true; region.open = false
@@ -632,12 +649,12 @@ public final class MacFieldQueue {
         }
     }
 
-    private func read(_ target: any TextTarget) -> (Document, UTF16Range)? {
+    private func read(_ target: any TextTarget, cap: Int = MacFieldQueue.readCap) -> (Document, UTF16Range)? {
         guard let selection = try? target.selectedRange(), let length = try? target.textLength() else { return nil }
         var base = 0, count = length
-        if length > Self.readCap {
-            base = max(0, min(length - Self.readCap, selection.location - Self.readCap / 2))
-            count = Self.readCap
+        if length > cap {
+            base = max(0, min(length - cap, selection.location - cap / 2))
+            count = cap
         }
         guard let text = try? target.text(in: UTF16Range(location: base, length: count)) else { return nil }
         return (Document(base: base, text: Self.folded(text, keyed: Self.keyed(target)) as NSString, length: length), selection)
@@ -671,7 +688,9 @@ public final class MacFieldQueue {
         locateAll(doc)
         // Recovery acquired a new observation; no write is planned against the document read before it.
         if recoveredRead { recoveredRead = false; return true }
-        placeEdits(doc)
+        // Placing a background edit can claim a run's regions or trigger a recovery read. It waits with the edit,
+        // so it cannot steal ownership from the new speech that the scheduler has put first.
+        if !runs.contains(where: \.speaking) { placeEdits(doc) }
         if recoveredRead { recoveredRead = false; return true }
         finishEdits()
         if keyed {
@@ -870,7 +889,14 @@ public final class MacFieldQueue {
     private var allRegions: [Region] { editRegions.map(\.region) + runs.flatMap(\.regions) }
 
     private func locateAll(_ doc: Document) {
-        for region in allRegions where !region.lost { locate(region, doc) }
+        let speaking = Set(runs.filter { $0.speaking && !$0.abandoned }.map(\.id))
+        for region in allRegions where !region.lost {
+            if let id = region.runID, runs.first(where: { $0.id == id })?.abandoned == true { continue }
+            // Locating can search the document and acquire recovery evidence. Deferred edits and older runs do
+            // that when speech stops, rather than making the readable new head wait on their stale locations.
+            if !speaking.isEmpty, region.runID.map({ !speaking.contains($0) }) ?? true { continue }
+            locate(region, doc)
+        }
         // A run region that lost its place before any of its words went in starts again at the user's caret.
         for index in runs.indices {
             while let last = runs[index].regions.last, last.lost, last.current.isEmpty, last.original.isEmpty {
@@ -911,7 +937,7 @@ public final class MacFieldQueue {
             return
         }
         if let recovered = recoverTarget(id: region.id, expected: String(region.current), landed: region.landing.map { String($0) },
-                                         before: region.before, after: region.after) {
+                                         before: region.before, after: region.after, observed: doc) {
             switch recovered {
             case .replan(let placement, let fresh):
                 region.start = fresh.base + String((fresh.text as String).prefix(placement.range.lowerBound)).utf16.count
@@ -939,7 +965,8 @@ public final class MacFieldQueue {
 
     /// Accessibility can obtain fresh bounded evidence without moving the user's cursor. The same policy used by
     /// the proxy adapter decides whether the expected target, or a freshly observed late result, still exists.
-    private func recoverTarget(id: String, expected: String, landed: String? = nil, before: String, after: String) -> RecoveryResult? {
+    private func recoverTarget(id: String, expected: String, landed: String? = nil, before: String, after: String,
+                               observed: Document) -> RecoveryResult? {
         guard let target, target.isFocused() else { return nil }
         guard beginOperation(.read) else { return .waiting }
         defer { operations.finishRead() }
@@ -948,15 +975,27 @@ public final class MacFieldQueue {
         let wanted = FieldRecovery.Target(id: id, expected: expected, landed: landed, before: before, after: after)
         guard let request = recovery.begin(generation: generation, revision: requestRevision, targets: [wanted]) else { return nil }
         note(.recovery, id: id, detail: "attempt \(request.id)")
-        guard let oldSelection = try? target.selectedRange(), let (fresh, selected) = read(target),
+        // The initial queue observation may already contain two indistinguishable candidates. Looking only near
+        // the caret would hide the other one, not prove which is owned. Refresh the full original scope instead.
+        let wasComplete = observed.base == 0 && observed.text.length == observed.length
+        let knownAmbiguity = recovery.hasAmbiguity(request, text: observed.text as String, completeDocument: wasComplete)
+        let cap = knownAmbiguity ? Self.readCap : 2 * FieldRecovery.nearbyLimit(for: request)
+        guard let oldSelection = try? target.selectedRange(), var (fresh, selected) = read(target, cap: cap),
               let restored = try? target.selectedRange(), oldSelection == selected, selected == restored,
               target.isFocused(), target.inputMark == mark,
               now() - start < .milliseconds(FieldRecovery.budgetMs) else {
             note(.recovery, id: id, reason: "unreadableOrChanged", detail: "refused \(request.id)")
             return .stop
         }
+        var complete = fresh.base == 0 && fresh.text.length == fresh.length
+        if !recovery.canResolve(request, text: fresh.text as String, completeDocument: complete), !complete,
+           let (wider, selection) = read(target), selection == oldSelection,
+           (try? target.selectedRange()) == oldSelection, target.inputMark == mark, target.isFocused(),
+           now() - start < .milliseconds(FieldRecovery.budgetMs) {
+            fresh = wider
+            complete = fresh.base == 0 && fresh.text.length == fresh.length
+        }
         note(.recovery, id: id, detail: "evidence \(fresh.text.length) restored \(request.id)")
-        let complete = fresh.base == 0 && fresh.text.length == fresh.length
         let decisions = recovery.resolve(request, text: fresh.text as String, generation: documentID,
                                          revision: UInt64(max(0, revision)), restored: true, completeDocument: complete)
         guard case .replan(let placement)? = decisions.first else {
@@ -1024,7 +1063,7 @@ public final class MacFieldQueue {
                 else if edit.scope.count >= Self.relocateChars, doc.find(edit.scope).count == 1 { start = doc.find(edit.scope)[0] }
             }
             if start == nil, now() - pending.since >= Self.placeGrace,
-               let result = recoverTarget(id: edit.id, expected: edit.scope, before: edit.before, after: edit.after) {
+               let result = recoverTarget(id: edit.id, expected: edit.scope, before: edit.before, after: edit.after, observed: doc) {
                 switch result {
                 case .replan:
                     // Coordinates, anchors and overlap ownership must all come from one observation. Let the next
@@ -1082,8 +1121,16 @@ public final class MacFieldQueue {
 
     /// Edits first (the user is waiting on Magic), then dictation in speaking order.
     private func nextRegion() -> Region? {
+        if runs.contains(where: \.speaking) {
+            // Background edits do not send the caret back through earlier words while the user speaks.
+            for run in runs where run.speaking && !run.abandoned {
+                if let region = run.regions.first(where: { $0.open && $0.pending }) { return region }
+                if let region = run.regions.first(where: \.pending) { return region }
+            }
+            return nil
+        }
         if let edit = editRegions.first(where: { $0.region.pending })?.region { return edit }
-        for run in runs { if let region = run.regions.first(where: \.pending) { return region } }
+        for run in runs where !run.abandoned { if let region = run.regions.first(where: \.pending) { return region } }
         return nil
     }
 
@@ -1455,6 +1502,7 @@ public final class MacFieldQueue {
         }
         let sentAt = now()
         lastKey = (.move, sentAt)
+        lastMoveConfirmed = false
         let took = await poll(Self.caretSetConfirm) {
             (try? target.selectedRange()) == goal && (try? target.textLength()) == doc.length
         }
@@ -1462,6 +1510,7 @@ public final class MacFieldQueue {
             _ = confirmOperation(true)
             guard target.inputMark == mark else { userActedFlag = true; return true }
             if caretJumps.direct == .untested { caretJumps.direct = .tentative }
+            lastMoveConfirmed = caretJumps.direct == .trusted
             probeAt = caretJumps.direct == .tentative && goal.length == 0 ? goal.location : nil
             moveFailures = 0
             expectedSelections = [goal]
@@ -1592,6 +1641,7 @@ public final class MacFieldQueue {
         }
         let sentAt = now()
         lastKey = (.move, sentAt)
+        lastMoveConfirmed = false
         probeAt = nil
         var seen: UTF16Range?
         var held: (range: UTF16Range, since: ContinuousClock.Instant)?
@@ -1625,6 +1675,7 @@ public final class MacFieldQueue {
             return nil
         }
         _ = confirmOperation(true)
+        lastMoveConfirmed = seen == exact
         moveFailures = 0
         expectedSelections = [seen]
         caretOwed = userCaret != seen
@@ -1706,6 +1757,9 @@ public final class MacFieldQueue {
     /// At a transition between moves and edits the last key gets `keySettle` to land before the next is planned.
     private func settle(before kind: KeyKind) async -> Bool {
         guard let last = lastKey, last.kind != kind else { return false }
+        // Accessibility/key observation already proved this move. No guessed delay is needed before an edit;
+        // tentative caret sets and late/off-target moves retain their existing proof and transit barriers.
+        if last.kind == .move, kind == .edit, lastMoveConfirmed { return false }
         let elapsed = now() - last.at
         guard elapsed < Self.keySettle else { return false }
         await sleep(Self.keySettle - elapsed)
@@ -1902,7 +1956,7 @@ public final class MacFieldQueue {
     private func abandon(_ index: Int, _ reason: Reason) {
         guard !runs[index].abandoned, runs[index].regions.contains(where: \.pending) || runs[index].needsRegion else { return }
         let onlyAppending = runs[index].regions.filter(\.pending).allSatisfy { $0.desired.starts(with: $0.landing ?? $0.current) }
-        let typed = onlyAppending ? Self.typedCount(runs[index].regions.map {
+        let typed = onlyAppending && !runs[index].speechTarget.hasDeferredRevision ? Self.typedCount(runs[index].regions.map {
             TypedRegion(current: $0.landing ?? $0.current, desired: $0.desired, source: $0.source, separator: $0.separator,
                         original: Array($0.original), trimsLead: $0.trimsLead, lost: $0.lost)
         }) : 0
@@ -1912,8 +1966,9 @@ public final class MacFieldQueue {
         }
         runs[index].remainder = []
         runs[index].abandoned = true
+        runs[index].speaking = false
         // A retracted run's text is not wanted: nothing to recover.
-        let text = runs[index].retracted ? "" : String(runs[index].target)
+        let text = runs[index].retracted ? "" : String(runs[index].speechTarget.authoritative)
         note(.dropped, run: runs[index].id, text: text, reason: reason.rawValue)
         onDrop?(Drop(id: runs[index].id, runID: runs[index].id, reason: reason, text: text, typed: typed))
     }
@@ -1930,7 +1985,8 @@ public final class MacFieldQueue {
     private func handOver() -> [Handover] {
         var handovers: [Handover] = []
         for index in runs.indices where handable(index) {
-            let requiresReview = runs[index].regions.filter(\.pending).contains(where: { !$0.desired.starts(with: $0.landing ?? $0.current) })
+            let requiresReview = runs[index].speechTarget.hasDeferredRevision
+                || runs[index].regions.filter(\.pending).contains(where: { !$0.desired.starts(with: $0.landing ?? $0.current) })
             // A key that went out but did not read back usually landed: it counts as typed, so it is not typed twice.
             let typed = Self.typedCount(runs[index].regions.map {
                 TypedRegion(current: $0.landing ?? $0.current, desired: $0.desired, source: $0.source, separator: $0.separator,
@@ -1942,9 +1998,10 @@ public final class MacFieldQueue {
             }
             runs[index].remainder = []
             runs[index].abandoned = true
+            runs[index].speaking = false
             let run = runs[index]
-            note(.panel, run: run.id, length: typed, text: String(run.target), reason: "unreadable")
-            handovers.append(Handover(runID: run.id, version: run.version, text: String(run.target), typed: typed,
+            note(.panel, run: run.id, length: typed, text: String(run.speechTarget.authoritative), reason: "unreadable")
+            handovers.append(Handover(runID: run.id, version: run.version, text: String(run.speechTarget.authoritative), typed: typed,
                                       complete: run.complete, requiresReview: requiresReview))
         }
         return handovers

@@ -39,6 +39,7 @@ import LegatoKeyboardCore
     var snapshots: [String] = []
     var loseFocusAfter: Int?
     var readsFailAfterWrite = false
+    var ignoreWrites = false
     init(_ text: String) { value = text; selection = .init(location: text.utf16.count, length: 0) }
     func isFocused() -> Bool { focused }
     func selectedRange() throws -> UTF16Range { selection }
@@ -50,6 +51,7 @@ import LegatoKeyboardCore
     }
     func setSelectedRange(_ range: UTF16Range) throws { selection = range }
     func replace(_ range: UTF16Range, with text: String) throws {
+        if ignoreWrites { writes += 1; return }
         value = (value as NSString).replacingCharacters(in: NSRange(location: range.location, length: range.length), with: text)
         selection = .init(location: range.location + text.utf16.count, length: 0)
         writes += 1; snapshots.append(value)
@@ -58,6 +60,97 @@ import LegatoKeyboardCore
 }
 
 @MainActor @Suite struct NativePlanQueueTests {
+    @Test func stoppingATakeCannotReactivateARunAlreadyHandedToThePanel() async {
+        let field = NativePlanField("")
+        field.ignoreWrites = true
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        var clock = ContinuousClock.now
+        queue.now = { clock }
+        queue.sleep = { duration in clock += duration; await Task.yield() }
+        var handovers: [MacFieldQueue.Handover] = []
+        queue.onUnreadable = { handovers += $0 }
+        queue.live(runID: "failed", version: 1, text: "new speech", speaking: true)
+        await queue.whenIdle()
+        #expect(handovers.count == 1)
+        #expect(handovers.first?.text == "new speech")
+        let writes = field.writes
+        queue.takeStopped("failed")
+        let reactivated = queue.hasWork
+        // Keep even a failing regression bounded: a reactivated terminal run must not starve the entire actor.
+        if reactivated { queue.reset() }
+        await queue.whenIdle()
+        #expect(!reactivated)
+        queue.live(runID: "failed", version: 2, text: "New speech.", complete: true)
+        await queue.whenIdle()
+        #expect(field.writes == writes)
+        #expect(handovers.count == 1)
+    }
+
+    @Test func aStaleBackgroundRegionDoesNotReadAroundBeforeReadableNewSpeech() async {
+        let field = NativePlanField("")
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.live(runID: "old", version: 1, text: "old fragment", complete: true)
+        await queue.whenIdle()
+        field.value = "unrelated replacement"
+        field.selection = .init(location: field.value.utf16.count, length: 0)
+        var recoveryReads = 0
+        queue.journal = { if $0.kind == .recovery { recoveryReads += 1 } }
+        queue.live(runID: "old", version: 2, text: "OLD FRAGMENT", complete: true)
+        queue.live(runID: "new", version: 1, text: "fresh words", speaking: true)
+        await queue.whenIdle()
+        #expect(field.value == "unrelated replacement fresh words")
+        #expect(recoveryReads == 0)
+        queue.takeStopped("new")
+        await queue.whenIdle()
+        #expect(field.value == "unrelated replacement fresh words")
+        #expect(recoveryReads > 0)
+    }
+
+    @Test func liveSpeechExtendsBeforeItsCoalescedCorrectionsAndMicOffReleasesThem() async {
+        let field = NativePlanField("")
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.live(runID: "speech", version: 1, text: "we saw a boat", speaking: true)
+        await queue.whenIdle()
+        queue.live(runID: "speech", version: 2, text: "We saw a boat today", speaking: true)
+        await queue.whenIdle()
+        #expect(field.value == "we saw a boat today")
+        #expect(!queue.hasWork)
+        queue.live(runID: "speech", version: 3, text: "WE saw a boat today", speaking: true)
+        await queue.whenIdle()
+        #expect(field.value == "we saw a boat today")
+        queue.takeStopped("speech")
+        await queue.whenIdle()
+        #expect(field.value == "WE saw a boat today")
+    }
+
+    @Test func magicWaitsThroughASpeechPauseWithoutTheParkTimeoutDroppingIt() async {
+        let field = NativePlanField("Header old. ")
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.live(runID: "speech", version: 1, text: "fresh words", speaking: true)
+        await queue.whenIdle()
+        var clock = ContinuousClock.now
+        queue.now = { clock }
+        queue.sleep = { duration in clock += duration; await Task.yield() }
+        var admitted = false
+        queue.journal = { if $0.kind == .edit { admitted = true } }
+        async let result = queue.edit(.init(id: "magic", range: .init(location: 0, length: 12), scope: "Header old. ", target: "Header new. "))
+        for _ in 0..<100 where !admitted { await Task.yield() }
+        #expect(admitted)
+        await queue.whenIdle()
+        clock += .seconds(5)
+        queue.live(runID: "speech", version: 2, text: "fresh words today", speaking: true)
+        await queue.whenIdle()
+        #expect(field.value == "Header old. fresh words today")
+        queue.takeStopped("speech")
+        guard case .applied = await result else { Issue.record("deferred Magic was dropped"); return }
+        await queue.whenIdle()
+        #expect(field.value == "Header new. fresh words today")
+    }
+
     @Test func aLongVerifiedRewriteBuildsOneDiffInsteadOfDiffingEveryGrapheme() async {
         let original = String(repeating: "return before sunset and keep these words. ", count: 20)
         let field = NativePlanField(original)

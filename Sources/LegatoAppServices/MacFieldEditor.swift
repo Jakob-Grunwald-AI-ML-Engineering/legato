@@ -298,7 +298,8 @@ import LegatoMac
             showInPanel(snapshot)
             return
         }
-        queue.live(runID: snapshot.runID, version: snapshot.version, text: Self.body(of: snapshot), complete: snapshot.complete)
+        queue.live(runID: snapshot.runID, version: snapshot.version, text: Self.body(of: snapshot), complete: snapshot.complete,
+                   speaking: !snapshot.complete && snapshot.stopped != true && !sessionEnded)
     }
     public func applyLive(_ snapshot: LiveDictationSnapshot?) async {
         enqueueLive(snapshot)
@@ -368,6 +369,7 @@ import LegatoMac
     /// The session's last words were delivered: the queue finishes its work (paced). A panel session types its
     /// finished text now; a take still held (failed cleanup) follows once the user chose Retry or Insert as-is.
     public func finish() async {
+        for run in seenRunIDs { queue.takeStopped(run) }
         await queue.whenIdle()
         guard panel.active else { return }
         sessionEnded = true

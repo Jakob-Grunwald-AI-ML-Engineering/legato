@@ -28,6 +28,31 @@ import LegatoKeyboardCore
 }
 
 @MainActor @Suite struct DesktopRecoveryIntegrationTests {
+    @Test func nearbyRecoveryCannotHideADuplicateAlreadySeenInTheBroaderDocument() async {
+        let field = RecoveryAXField()
+        let prefix = "Unchanged prefix "
+        let phrase = "Keep three Stay"
+        field.value = prefix
+        field.selection = .init(location: prefix.utf16.count, length: 0)
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        var clock = ContinuousClock.now
+        queue.now = { clock }
+        queue.sleep = { duration in clock += duration; await Task.yield() }
+        queue.live(runID: "take", version: 1, text: phrase)
+        await queue.whenIdle()
+        let duplicated = "Moved " + prefix + phrase + String(repeating: " padding ", count: 80) + prefix + phrase
+        field.value = duplicated
+        field.selection = .init(location: duplicated.utf16.count, length: 0)
+        var journal: [MacEditJournal.Entry] = []
+        queue.journal = { journal.append($0) }
+        queue.live(runID: "take", version: 2, text: "Keep four Stay", complete: true)
+        await queue.whenIdle()
+        #expect(field.value == duplicated, "Neither indistinguishable copy can be chosen for a destructive revision")
+        #expect(journal.contains { $0.kind == .recovery && $0.reason == "changedOrAmbiguous" })
+        #expect(!journal.contains { $0.kind == .recovery && $0.detail?.contains("unique replan") == true })
+    }
+
     @Test func anUnexpectedAXMismatchUsesFreshEvidenceAndTheSharedRecoveryDecision() async {
         let field = RecoveryAXField()
         let bound = MacFieldQueue(target: field)
