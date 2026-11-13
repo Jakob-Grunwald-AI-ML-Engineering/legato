@@ -32,6 +32,13 @@ struct LegatoMacApp: App {
         .defaultSize(width: 820, height: 640)
         .defaultLaunchBehavior(.suppressed)
 
+        Window("Captured edits", id: "corrections") {
+            CorrectionsView(store: MacAppController.shared.corrections)
+                .frame(minWidth: 480, minHeight: 400)
+        }
+        .defaultSize(width: 620, height: 560)
+        .defaultLaunchBehavior(.suppressed)
+
         Settings {
             SettingsView()
                 .environment(controller)

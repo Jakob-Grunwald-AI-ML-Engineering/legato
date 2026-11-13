@@ -9,6 +9,8 @@ struct HistoryView: View {
 
     var body: some View {
         List {
+            NavigationLink("Captured edits") { CorrectionsView(store: controller.corrections) }
+            if entries.isEmpty { Text("No dictations yet").foregroundStyle(.secondary) }
             ForEach(entries) { entry in
                 Button {
                     controller.copy(entry.text)
@@ -43,9 +45,6 @@ struct HistoryView: View {
                     for id in ids { await controller.deleteEntry(id: id) }
                 }
             }
-        }
-        .overlay {
-            if entries.isEmpty { ContentUnavailableView("No dictations yet", systemImage: "text.bubble") }
         }
         .navigationTitle("History")
         // Reloads on appear and whenever the composer or backfill stores a new revision.

@@ -31,8 +31,11 @@ public struct LiveDictationSnapshot: Codable, Equatable, Sendable {
     /// The take was stopped (by any route: mic key, Action Button, bridge) and is ending: its final words and cleanup
     /// are still to come (`complete`). The keyboard holds the user's keys until then (bounded). Nil from older apps.
     public var stopped: Bool?
-    public init(runID: String, version: Int, segments: [LiveSegment], complete: Bool = false, stopped: Bool? = nil) {
+    /// Original ASR words, independent of cleanup's segment grouping; retained for correction evidence.
+    public var rawText: String?
+    public init(runID: String, version: Int, segments: [LiveSegment], complete: Bool = false, stopped: Bool? = nil, rawText: String? = nil) {
         self.runID = runID; self.version = version; self.segments = segments; self.complete = complete; self.stopped = stopped
+        self.rawText = rawText
     }
 }
 
@@ -159,7 +162,8 @@ public struct LiveDictationRun: Sendable, Equatable {
         }
         let speaking = (open + [head]).filter { !$0.isEmpty }.joined(separator: " ")
         if !speaking.isEmpty { segments.append(.init(id: finals.count, text: speaking, final: false)) }
-        return .init(runID: runID, version: version, segments: segments, complete: complete, stopped: stopped && !complete ? true : nil)
+        return .init(runID: runID, version: version, segments: segments, complete: complete, stopped: stopped && !complete ? true : nil,
+                     rawText: complete ? finals.map(\.text).filter { !$0.isEmpty }.joined(separator: " ") : nil)
     }
     public var isEmpty: Bool { finals.isEmpty && head.isEmpty && open.isEmpty }
     public var finalCount: Int { finals.count }

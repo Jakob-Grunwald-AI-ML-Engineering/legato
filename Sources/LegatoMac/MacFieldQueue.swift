@@ -141,6 +141,8 @@ public final class MacFieldQueue {
     public var now: @MainActor () -> ContinuousClock.Instant = { .now }
     public var journal: (@MainActor (MacEditJournal.Entry) -> Void)?
     public var onDrop: (@MainActor (Drop) -> Void)?
+    /// Work is fully confirmed or dropped; called before resuming idle waiters.
+    public var onIdle: (@MainActor () -> Void)?
     /// The bound field still has focus but stopped reading for `unreadableGrace`: its pending dictation goes on in the
     /// panel. Each run is handed over once, never dropped; the queue leaves it (and its later versions) alone from then.
     /// Nil: such work waits and drops after `parkLimit` like work for an unfocused field.
@@ -583,7 +585,10 @@ public final class MacFieldQueue {
         }
         finishEdits()
         pump = nil
-        if !hasWork { let waiters = idleWaiters; idleWaiters = []; waiters.forEach { $0.resume() } }
+        if !hasWork {
+            onIdle?()
+            let waiters = idleWaiters; idleWaiters = []; waiters.forEach { $0.resume() }
+        }
         else if !exclusive { schedule() }
     }
 
