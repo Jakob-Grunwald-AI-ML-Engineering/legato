@@ -322,9 +322,9 @@ public final class MacFieldQueue {
     // MARK: Inspection
 
     public var hasWork: Bool {
-        let speaking = runs.contains(where: \.speaking)
+        let speaking = runs.contains { $0.speaking && !$0.abandoned }
         return caretOwed || (!speaking && (!edits.isEmpty || editRegions.contains { $0.region.pending }))
-            || runs.contains { run in (!speaking || run.speaking) && (run.needsRegion || run.regions.contains(where: \.pending)) }
+            || runs.contains { run in !run.abandoned && (!speaking || run.speaking) && (run.needsRegion || run.regions.contains(where: \.pending)) }
     }
     /// The last run region (text and range) when it ends at the user's caret: the dictation Magic may call "what I said".
     public var lastRegionAtCaret: (range: UTF16Range, text: String)? {
@@ -381,7 +381,7 @@ public final class MacFieldQueue {
 
     /// Mic-off releases the latest coalesced correction even before the final cleanup snapshot arrives.
     public func takeStopped(_ runID: String) {
-        guard let index = runs.firstIndex(where: { $0.id == runID }) else { return }
+        guard let index = runs.firstIndex(where: { $0.id == runID }), !runs[index].abandoned, !runs[index].retracted else { return }
         runs[index].speaking = false
         let final = runs[index].speechTarget.authoritative
         let delivery = runs[index].speechTarget.update(final, speaking: false)
@@ -889,8 +889,9 @@ public final class MacFieldQueue {
     private var allRegions: [Region] { editRegions.map(\.region) + runs.flatMap(\.regions) }
 
     private func locateAll(_ doc: Document) {
-        let speaking = Set(runs.filter(\.speaking).map(\.id))
+        let speaking = Set(runs.filter { $0.speaking && !$0.abandoned }.map(\.id))
         for region in allRegions where !region.lost {
+            if let id = region.runID, runs.first(where: { $0.id == id })?.abandoned == true { continue }
             // Locating can search the document and acquire recovery evidence. Deferred edits and older runs do
             // that when speech stops, rather than making the readable new head wait on their stale locations.
             if !speaking.isEmpty, region.runID.map({ !speaking.contains($0) }) ?? true { continue }
@@ -1122,14 +1123,14 @@ public final class MacFieldQueue {
     private func nextRegion() -> Region? {
         if runs.contains(where: \.speaking) {
             // Background edits do not send the caret back through earlier words while the user speaks.
-            for run in runs where run.speaking {
+            for run in runs where run.speaking && !run.abandoned {
                 if let region = run.regions.first(where: { $0.open && $0.pending }) { return region }
                 if let region = run.regions.first(where: \.pending) { return region }
             }
             return nil
         }
         if let edit = editRegions.first(where: { $0.region.pending })?.region { return edit }
-        for run in runs { if let region = run.regions.first(where: \.pending) { return region } }
+        for run in runs where !run.abandoned { if let region = run.regions.first(where: \.pending) { return region } }
         return nil
     }
 
@@ -1965,6 +1966,7 @@ public final class MacFieldQueue {
         }
         runs[index].remainder = []
         runs[index].abandoned = true
+        runs[index].speaking = false
         // A retracted run's text is not wanted: nothing to recover.
         let text = runs[index].retracted ? "" : String(runs[index].speechTarget.authoritative)
         note(.dropped, run: runs[index].id, text: text, reason: reason.rawValue)
@@ -1996,6 +1998,7 @@ public final class MacFieldQueue {
             }
             runs[index].remainder = []
             runs[index].abandoned = true
+            runs[index].speaking = false
             let run = runs[index]
             note(.panel, run: run.id, length: typed, text: String(run.speechTarget.authoritative), reason: "unreadable")
             handovers.append(Handover(runID: run.id, version: run.version, text: String(run.speechTarget.authoritative), typed: typed,

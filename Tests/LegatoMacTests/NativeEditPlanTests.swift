@@ -39,6 +39,7 @@ import LegatoKeyboardCore
     var snapshots: [String] = []
     var loseFocusAfter: Int?
     var readsFailAfterWrite = false
+    var ignoreWrites = false
     init(_ text: String) { value = text; selection = .init(location: text.utf16.count, length: 0) }
     func isFocused() -> Bool { focused }
     func selectedRange() throws -> UTF16Range { selection }
@@ -50,6 +51,7 @@ import LegatoKeyboardCore
     }
     func setSelectedRange(_ range: UTF16Range) throws { selection = range }
     func replace(_ range: UTF16Range, with text: String) throws {
+        if ignoreWrites { writes += 1; return }
         value = (value as NSString).replacingCharacters(in: NSRange(location: range.location, length: range.length), with: text)
         selection = .init(location: range.location + text.utf16.count, length: 0)
         writes += 1; snapshots.append(value)
@@ -58,6 +60,33 @@ import LegatoKeyboardCore
 }
 
 @MainActor @Suite struct NativePlanQueueTests {
+    @Test func stoppingATakeCannotReactivateARunAlreadyHandedToThePanel() async {
+        let field = NativePlanField("")
+        field.ignoreWrites = true
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        var clock = ContinuousClock.now
+        queue.now = { clock }
+        queue.sleep = { duration in clock += duration; await Task.yield() }
+        var handovers: [MacFieldQueue.Handover] = []
+        queue.onUnreadable = { handovers += $0 }
+        queue.live(runID: "failed", version: 1, text: "new speech", speaking: true)
+        await queue.whenIdle()
+        #expect(handovers.count == 1)
+        #expect(handovers.first?.text == "new speech")
+        let writes = field.writes
+        queue.takeStopped("failed")
+        let reactivated = queue.hasWork
+        // Keep even a failing regression bounded: a reactivated terminal run must not starve the entire actor.
+        if reactivated { queue.reset() }
+        await queue.whenIdle()
+        #expect(!reactivated)
+        queue.live(runID: "failed", version: 2, text: "New speech.", complete: true)
+        await queue.whenIdle()
+        #expect(field.writes == writes)
+        #expect(handovers.count == 1)
+    }
+
     @Test func aStaleBackgroundRegionDoesNotReadAroundBeforeReadableNewSpeech() async {
         let field = NativePlanField("")
         let queue = MacFieldQueue(target: field)
