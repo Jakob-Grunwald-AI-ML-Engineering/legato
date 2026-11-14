@@ -21,15 +21,16 @@ import Foundation
 /// - Never freezes: a report that does not confirm leads to a resync (re-locate the model around the cursor, unique
 ///   matches only, or take the report as the new model) and planning goes on. An edit is dropped only when its text
 ///   cannot be placed or the user changed it (`Event.dropped`).
-/// - Live dictation types only at the caret (an iOS keyboard sees a short window of the field, never the whole of it):
-///   a run's words go in one grapheme at a time at its open piece's end, the user's caret. A revision of the piece's
-///   last words goes in while speaking only when every changed character lies within `nearChars` of the caret and the
-///   report shows them as typed; anything else waits for the stop. At the stop the take's trailing piece is swapped to
-///   its final text in one delete and one insert, after reads of the field (walking back for a long take, each read
-///   overlapping the last) showed every character of it as typed (`Swap`). A user key, delete or caret move ends the
-///   open piece and freezes every piece before it: the keyboard never edits them again, and a take whose final text
-///   cannot stand whole in the field is reported (`Event.dropped`; the app keeps it in History). Later words start a
-///   new piece at the user's caret; where pieces start is told to the app (`pieceStarts`), which cleans them apart.
+/// - Live dictation types only at the caret and trusts the model (the keyboard is the field's only writer; an iOS
+///   keyboard sees a short window of it): a run's words go in one grapheme at a time at its open piece's end, the
+///   user's caret. A revision of the piece's last words goes in while speaking only when every changed character lies
+///   within `nearChars` of the caret and the report shows them as typed; anything else waits for the stop. At the stop
+///   the take is swapped to its final text in one delete and one insert when the report's text before the caret shows
+///   the take's end as the model has it (`Swap`); otherwise it stays as typed and is reported (`Event.dropped`; the app
+///   keeps it in History). A word is never split: a take never starts or goes on inside one (`liveStart`).
+/// - Once the user types, deletes, moves the caret or makes an edit during or after a take (`LiveRun.userActed`), the
+///   keyboard never deletes or moves in it again: no revision, no swap. Its later words start a new piece at the user's
+///   caret, typed as spoken; where pieces start is told to the app (`pieceStarts`), which cleans them apart.
 /// - Field switches look like taps (Safari gives a page's fields one identity): a jump counts only when a report pins
 ///   it, and one that went nowhere or stopped short drops its work once and reseeds the model (`Resync.jumpFailed`).
 /// - Instruction edits carry the read they came from (`markRead`): their scope is found through every change since,
@@ -117,7 +118,8 @@ public struct FieldQueue: Sendable {
         /// for is not in this field. Its work drops and the model starts over from the report (`reseeded` follows).
         case jumpFailed
         case recoveryRequested, recoveryEvidence, recoveryRestored, recoveryReplanned, recoveryRefused
-        /// The stop's swap did not go: the field did not show the take as typed, or the user acted first.
+        /// The stop's swap did not go: the report did not show the take's end before the caret as the model has it, or
+        /// after the delete its text could not go where the take was.
         case swapRefused
     }
     public enum CloseCause: String, Sendable, Codable { case keystroke, cursor, resync, selection, newRun, edit }
@@ -143,8 +145,6 @@ public struct FieldQueue: Sendable {
         case liveApplied(runID: String, version: Int, complete: Bool)
         case regionStarted(runID: String, anchorChars: Int)
         case regionClosed(runID: String, cause: CloseCause)
-        /// The op just sent inserts behind the user's cursor: the user's cursor stays in front of it.
-        case insertedBehind
         /// A zero-offset move went out to make the proxy report afresh (the op in flight stays in flight).
         case nudged
     }
@@ -307,6 +307,10 @@ public struct FieldQueue: Sendable {
         /// The complete version settled (swapped in, or kept with the fallback): each version once.
         var settledVersion: Int?
         var fallbackReported = false
+        /// The user typed, deleted, tapped, moved the caret or made an edit during or after the take (or the field changed
+        /// in a way nothing explains): its later words are only appended at the caret as spoken; the keyboard makes no
+        /// delete or move for it again (no revision, no swap; History has the cleaned take).
+        var userActed = false
         /// Delivered text up to here is never typed again (it went with a swap that did not finish, or landed elsewhere).
         var settledThrough = 0
     }
@@ -344,8 +348,6 @@ public struct FieldQueue: Sendable {
         /// Deletes this many characters before the caret in one op (the same delete at one place: order cannot matter).
         case delete(Int, owner: Int?)
         case insert(String, owner: Int?)
-        /// Inserted at the caret, behind the user's cursor (which stays in front of it).
-        case insertBehind(String)
         case setUserCursorToCursor
         case startRegion(run: String, tStart: Int, anchor: String)
     }
@@ -367,7 +369,7 @@ public struct FieldQueue: Sendable {
                 switch op {
                 case .moveInSpan, .moveToUser, .moveToSpanEnd: kind = .move
                 case .delete: kind = .delete
-                case .insert, .insertBehind: kind = .insert
+                case .insert: kind = .insert
                 case .setUserCursorToCursor, .startRegion: continue
                 }
                 if let previous, previous != kind {
@@ -541,7 +543,6 @@ public struct FieldQueue: Sendable {
         var before: String
         var after: String
         var lane: Lane
-        var runID: String?
         var elapsedMs = 0.0
     }
     private var strayInsertion: StrayInsertion?
@@ -567,7 +568,8 @@ public struct FieldQueue: Sendable {
 
     public var isIdle: Bool {
         recoveryRequest == nil && strayInsertion == nil && tapRace == nil && inFlight == nil && unit == nil && swap == nil
-            && userLane.isEmpty && (editLane.isEmpty || config.prioritizeSpeech && isSpeaking) && !runs.contains(where: { runNeedsWork($0) })
+            && userLane.isEmpty && (editLane.isEmpty || config.prioritizeSpeech && isSpeaking)
+            && !runs.contains(where: { runNeedsWork($0) || ackDue($0) })
     }
     public var hasUserInput: Bool { !userLane.isEmpty }
     /// The keyboard's own writes still to land (a unit, queued edits, dictation): a read for an instruction waits for
@@ -577,7 +579,7 @@ public struct FieldQueue: Sendable {
     }
     public var hasOpInFlight: Bool { inFlight != nil }
     /// Nothing in flight and the caret at the user's cursor: the field is as the user left it, as far as the queue goes.
-    public var isHome: Bool { inFlight == nil && cursor == userCursor && sinceSendMs >= Self.transitMs && !(swap?.replacing ?? false) }
+    public var isHome: Bool { inFlight == nil && cursor == userCursor && sinceSendMs >= Self.transitMs && swap == nil }
     public var isInUnit: Bool { unit != nil }
     public var modelText: String { String(text) }
     /// The text before the user's cursor once pending at-cursor edits landed: what typed lines and host text plan against.
@@ -613,13 +615,13 @@ public struct FieldQueue: Sendable {
             for piece in run.pieces {
                 let span = spans[piece.spanID]
                 parts.append("[\(piece.tStart)..\(piece.tEnd.map(String.init) ?? "open") parked=\(span?.parked ?? true) "
-                             + "changed=\(span?.userChanged ?? false) frozen=\(piece.frozen) swapped=\(piece.swapped != nil) "
+                             + "changed=\(span?.userChanged ?? false) userActed=\(run.userActed) swapped=\(piece.swapped != nil) "
                              + "has=\(String(span.map { chars(of: $0) } ?? []).debugDescription) wants=\(desiredText(piece, in: run).debugDescription)]")
             }
             if let rest = untypedRest(of: run) { parts.append("rest@\(rest)") }
             if run.speech.hasDeferredRevision { parts.append("deferred=\(String(run.speech.authoritative.suffix(40)).debugDescription)") }
         }
-        if let swap { parts.append("swap=\(swap.phase) covered=\(swap.covered.map(String.init) ?? "-")") }
+        if let swap { parts.append("swap=\(swap.inserted ? "inserted" : "deleted")") }
         return parts.joined(separator: " ")
     }
 
@@ -909,12 +911,11 @@ public struct FieldQueue: Sendable {
                 return send(.move(lost.units), lane: .edit, anywhere: true) { _ in }
             }
         }
-        // The stop's swap deleted the take: its final text goes in before anything else (keys wait for this one insert).
-        if swap?.replacing == true { return nextSwap() ?? .wait }
+        // The stop's swap deleted the take: its final text goes in before anything else (keys wait for this one insert,
+        // the swap's delete being already on its way).
+        if swap != nil, let action = nextSwap() { return action }
         if paused {
             abortUnit()
-            // A read needs the cursor: the swap's walk gives it back and is tried again afterwards.
-            if swap != nil { swap = nil }
             if cursor != userCursor, selection == 0 { return send(.move(units(to: userCursor)), lane: .user, moveTo: userCursor) }
             return .wait
         }
@@ -942,8 +943,6 @@ public struct FieldQueue: Sendable {
         if !userLane.isEmpty {
             // Keys wait for the take's text already heard: a typed line on its way goes on.
             if keysWait, case .edit(let state, _)? = unit?.owner, state.edit.kind == .typist { return nextInUnit() }
-            // Keys never wait for the stop's swap: the take stays as typed (its final text is in History).
-            if swap != nil { failSwap(.userEdited) }
             abortUnit()
             if cursor != userCursor, selection == 0 { return send(.move(units(to: userCursor)), lane: .user, moveTo: userCursor) }
             if keysWait, let action = flushBeforeKeys() { return action }
@@ -978,7 +977,6 @@ public struct FieldQueue: Sendable {
         }
         if selection > 0 { return .idle }
         guard shown else { return .wait }
-        if swap != nil, let action = nextSwap() { return action }
         // The caret away from the user's cursor with nothing under way (an edit's unit or a walk that stopped): it goes back.
         if cursor != userCursor, userLost == nil { return send(.move(units(to: userCursor)), lane: .edit, moveTo: userCursor) }
         if config.prioritizeSpeech, isSpeaking {
@@ -1327,7 +1325,11 @@ public struct FieldQueue: Sendable {
                 current.ops.removeFirst(); unit = current
                 if let ri = runs.firstIndex(where: { $0.runID == runID }) {
                     let id = addSpan(Span(start: userCursor, end: userCursor))
-                    runs[ri].pieces.append(Piece(spanID: id, tStart: tStart, anchor: anchor, startSegment: startSegment(at: tStart, in: runs[ri])))
+                    // In front of text without a space (a caret put inside a word or before one): the space after the
+                    // piece goes in at its end once the take is done (the caret never goes back for it).
+                    let glued = userCursor < text.count && !text[userCursor].isWhitespace && !Self.closingMarks.contains(text[userCursor])
+                    runs[ri].pieces.append(Piece(spanID: id, tStart: tStart, anchor: anchor, startSegment: startSegment(at: tStart, in: runs[ri]),
+                                                 spaceAfter: glued))
                     events.append(.regionStarted(runID: runID, anchorChars: anchor.count))
                 }
             case .delete(let count, let owner):
@@ -1346,11 +1348,6 @@ public struct FieldQueue: Sendable {
                 current.ops.removeFirst(); unit = current
                 let action = send(.insert(chars), lane: lane(of: current.owner)) { q in q.insertAtCursor(Array(chars), owner: owner) }
                 paceCreditMs = credit
-                return action
-            case .insertBehind(let chars):
-                current.ops.removeFirst(); unit = current
-                let action = send(.insert(chars), lane: lane(of: current.owner)) { q in q.insertAtCursor(Array(chars), owner: nil, behindUser: true) }
-                events.append(.insertedBehind)
                 return action
             }
         }
@@ -1512,8 +1509,8 @@ public struct FieldQueue: Sendable {
         var anchor: String
         /// The segment its words start with: its final text is known on its own (nil: it starts inside a segment).
         var startSegment: Int?
-        /// The user typed, deleted or moved the caret since it was typed: the keyboard never edits it again.
-        var frozen = false
+        /// It stands in front of text without a space: one goes in at its end when the take is done.
+        var spaceAfter = false
         /// The text a swap put in, standing for the delivered words before `swappedEnd`.
         var swapped: [Character]?
         var swappedEnd = 0
@@ -1522,6 +1519,7 @@ public struct FieldQueue: Sendable {
     private func runNeedsWork(_ run: LiveRun) -> Bool {
         if run.pending != nil || swap?.runID == run.runID { return true }
         if run.complete, run.version != nil, run.settledVersion != run.version, !run.pieces.isEmpty { return true }
+        if run.complete, run.settledVersion == run.version, run.pieces.last?.spaceAfter == true { return true }
         if let piece = run.pieces.last(where: { $0.tEnd == nil }), let span = spans[piece.spanID] {
             if span.parked || span.end != userCursor || chars(of: span) != Array(desiredText(piece, in: run)) { return true }
         }
@@ -1538,22 +1536,20 @@ public struct FieldQueue: Sendable {
 
     private mutating func nextLive() -> Action? {
         for ri in runs.indices { applyPending(ri) }
-        if swap != nil { return nextSwap() ?? .wait }
         for ri in runs.indices {
             if let action = settleFinal(ri) { return action }
-            if swap != nil { return nextSwap() ?? .wait }
+            if runs[ri].complete, runs[ri].settledVersion == runs[ri].version, let action = separateFollowingText(ri) { return action }
             if let action = typeOpenPiece(ri) { return action }
             if let from = untypedRest(of: runs[ri]) {
                 guard reportStableMs >= Self.stableMs || !config.animated else { return .wait }
-                let anchor = String(text[max(0, userCursor - 200)..<userCursor])
-                // A reseed can leave the caret away from the user's cursor: the piece starts at the user's cursor.
-                var ops: [QOp] = cursor == userCursor ? [] : [.moveToUser]
-                if userCursor < text.count, !text[userCursor].isWhitespace, !Self.closingMarks.contains(text[userCursor]) {
-                    // The run starts in front of text without a space: one goes in behind it, and the caret stays before it.
-                    ops += [.insertBehind(" "), .moveToUser]
+                // The piece starts at the user's cursor (a reseed can leave the caret away from it).
+                if cursor != userCursor { return send(.move(units(to: userCursor)), lane: .live, moveTo: userCursor) }
+                if let action = liveStart(ri) {
+                    if action == .wait { continue }
+                    return action
                 }
-                ops.append(.startRegion(run: runs[ri].runID, tStart: from, anchor: anchor))
-                unit = Unit(ops: ops, owner: .space, paced: false)
+                let anchor = String(text[max(0, userCursor - 200)..<userCursor])
+                unit = Unit(ops: [.startRegion(run: runs[ri].runID, tStart: from, anchor: anchor)], owner: .space, paced: false)
                 return nextInUnit()
             }
             ack(ri)
@@ -1568,6 +1564,29 @@ public struct FieldQueue: Sendable {
         retiredRunIDs += settled
         if retiredRunIDs.count > 32 { retiredRunIDs.removeFirst(retiredRunIDs.count - 32) }
         return nil
+    }
+
+    private static func isWordCharacter(_ c: Character) -> Bool { c.isLetter || c.isNumber }
+
+    /// A word is never split by a take (Jakob's rule): nil when its next piece may start at the user's caret. With the
+    /// caret inside a word, a take that has typed nothing yet and that the user has not acted in goes to the word's end
+    /// first; words that would go on there after the user acted wait (`.wait`: nothing is moved for them), and once
+    /// the take is complete they stay untyped and the take is reported (the cleaned take is in History).
+    private mutating func liveStart(_ ri: Int) -> Action? {
+        let at = userCursor
+        guard at > 0, at < text.count, Self.isWordCharacter(text[at - 1]), Self.isWordCharacter(text[at]), selection == 0 else { return nil }
+        if runs[ri].pieces.isEmpty, !runs[ri].userActed {
+            var end = at
+            while end < text.count, Self.isWordCharacter(text[end]) { end += 1 }
+            let action = send(.move(units(to: end)), lane: .live, moveTo: end)
+            userCursor = cursor
+            return action
+        }
+        if runs[ri].complete {
+            runs[ri].settledThrough = runs[ri].delivered.count
+            reportFallback(ri, .userEdited, force: true)
+        }
+        return .wait
     }
 
     /// The open piece of run `ri` at the user's caret: its delivered words go in one grapheme at a time; a revision of
@@ -1612,7 +1631,7 @@ public struct FieldQueue: Sendable {
         }
         // A verified revision of the last words: what differs goes, then is typed again.
         let k = current.count - Self.commonPrefix(current, desired)
-        guard k <= Self.nearChars, verifiesBefore(k, span: span) else {
+        guard !runs[ri].userActed, k <= Self.nearChars, verifiesBefore(k, span: span) else {
             closeOpenPieces(.resync, ri: ri)
             return nil
         }
@@ -1624,7 +1643,7 @@ public struct FieldQueue: Sendable {
     /// of the caret, and the field's report showing them as typed) is taken now; anything else waits for the stop.
     private mutating func nearRevision(_ ri: Int, _ pi: Int) -> Bool {
         let run = runs[ri], piece = run.pieces[pi]
-        guard !run.complete, run.speech.hasDeferredRevision, !piece.frozen, let span = spans[piece.spanID] else { return false }
+        guard !run.complete, !run.userActed, run.speech.hasDeferredRevision, let span = spans[piece.spanID] else { return false }
         let delivered = run.speech.delivered, revised = run.speech.authoritative
         let from = Self.commonPrefix(delivered, revised)
         // A contraction alone (a word taken back) waits: ASR takes words back and forth, and the stop settles it.
@@ -1649,11 +1668,17 @@ public struct FieldQueue: Sendable {
 
     static func commonPrefix(_ a: [Character], _ b: [Character]) -> Int { zip(a, b).prefix { $0 == $1 }.count }
 
-    private mutating func ack(_ ri: Int) {
-        let run = runs[ri]
+    /// The field shows the run's newest version and that is still to be said (`Event.liveApplied`).
+    private func ackDue(_ run: LiveRun) -> Bool {
         // A deferred revision is not in the field yet: the version is not shown.
         guard !(run.speech.hasDeferredRevision && !run.complete), let version = run.version, run.pending == nil,
-              run.ackedVersion != version, !runNeedsWork(run), inFlight == nil else { return }
+              run.ackedVersion != version, !runNeedsWork(run) else { return false }
+        return true
+    }
+
+    private mutating func ack(_ ri: Int) {
+        let run = runs[ri]
+        guard ackDue(run), let version = run.version, inFlight == nil else { return }
         runs[ri].ackedVersion = version
         events.append(.liveApplied(runID: run.runID, version: version, complete: run.complete))
     }
@@ -1777,19 +1802,15 @@ public struct FieldQueue: Sendable {
     }
 
     /// The user took over (or a resync), or the piece lost its place (`only`): open pieces end at the end of the word
-    /// typed so far. Every piece before a user action is frozen: the keyboard never edits it again (its final text is
-    /// in History).
+    /// typed so far. A user action (`freeze`) ends the keyboard's edits of the take (`LiveRun.userActed`).
     private mutating func closeOpenPieces(_ cause: CloseCause, ri only: Int? = nil, freeze: Bool? = nil) {
         // Anything but the next run may be the user's doing (a resync is a change the model cannot explain): the pieces
         // before it are never corrected.
         let freezes = freeze ?? (cause != .newRun && only == nil)
         for ri in runs.indices where only == nil || only == ri {
             if only == nil { applyPending(ri) }
-            if freezes {
-                for pi in runs[ri].pieces.indices { runs[ri].pieces[pi].frozen = true }
-                if swap?.runID == runs[ri].runID, swap?.replacing == false { failSwap(.userEdited) }
-                if swap?.runID == runs[ri].runID, swap?.replacing == true { swap?.userActed = true }
-            }
+            // A change nothing explains may be the user's too: the take is only appended to from now on.
+            if freezes { runs[ri].userActed = true }
             guard let pi = runs[ri].pieces.lastIndex(where: { $0.tEnd == nil }) else { continue }
             let piece = runs[ri].pieces[pi]
             let span = spans[piece.spanID]
@@ -1820,131 +1841,106 @@ public struct FieldQueue: Sendable {
 
     // MARK: Swap at stop
 
-    /// The stop's one verified swap: the take's trailing piece is replaced by its final text, deleted and inserted in
-    /// one op each, once the field showed every character of it as typed (`verify`: reads at the caret and further
-    /// back, each overlapping the last). Anything else leaves the field as it is.
+    /// The stop's one swap: the take, untouched by the user, goes in one delete and its final text in one insert at the
+    /// caret, once the report's text before the caret showed the take's end as the model has it (the model is trusted
+    /// beyond the window: the keyboard is the field's only writer). Keys wait for the insert once the delete went.
     struct Swap: Sendable, Equatable {
-        /// `insert`: the delete went; `landing`: the insert went, its confirmation is due.
-        enum Phase: Sendable, Equatable { case verify, back, replace, insert, landing }
         var runID: String
         var version: Int
         var spanID: Int
         var text: [Character]
-        var phase = Phase.verify
-        /// The lowest model offset the reads so far showed as the model has it.
-        var covered: Int?
-        var reads = 0
-        /// The user acted while the take's characters were going (their delete was on its way or done).
-        var userActed = false
-        /// The take's characters are going or gone: the swap finishes first.
-        var replacing: Bool { phase == .insert || phase == .landing }
+        /// The model's text around the take when the delete went: a report that does not fit the model after it may
+        /// still show just this (Safari's block echo), the take gone from between.
+        var before: [Character]
+        var after: [Character]
+        /// The delete went and the insert too: its confirmation is due.
+        var inserted = false
     }
     private var swap: Swap?
     /// How long the open piece has been out of sight.
     private var parkedPieceMs = 0.0
     /// A revision while speaking edits at most this many characters before the caret.
     public static let nearChars = 60
-    /// Consecutive reads of the walk overlap by this much.
-    static let walkOverlapChars = 8
-    /// The walk gives up past this many reads: a few, and one for every four characters of the take.
-    static func walkReadLimit(_ chars: Int) -> Int { 16 + chars / 4 }
+    /// The swap needs the report to show this much of the take before the caret (all of a shorter take).
+    static let tailChars = 16
 
-    /// Run `ri`'s complete version: its trailing piece swapped to the final text, or the field kept as it is (the final
-    /// text is in History: `Event.dropped`). Each version is settled once.
+    /// Run `ri`'s complete version: the take swapped to its final text, or the field kept as it is (the final text is
+    /// in History: `Event.dropped`). Each version is settled once.
     private mutating func settleFinal(_ ri: Int) -> Action? {
         let run = runs[ri]
         guard run.complete, let version = run.version, run.settledVersion != version, swap == nil,
               let pi = run.pieces.indices.last, untypedRest(of: run) == nil else { return nil }
         let piece = run.pieces[pi]
         func keep(_ reason: DropReason?) -> Action? {
+            // The take's words still to type go in first (at the caret); it settles once they are in.
+            if piece.tEnd == nil, let span = spans[piece.spanID], !span.parked, chars(of: span) != Array(desiredText(piece, in: run)) { return nil }
             runs[ri].settledVersion = version
             reportFallback(ri, reason)
-            return nil
+            return separateFollowingText(ri)
         }
-        guard let final = finalText(pi, in: run) else { return keep(run.pieces.contains(where: \.frozen) ? .userEdited : .changed) }
+        if run.userActed { return keep(.userEdited) }
+        guard let final = finalText(pi, in: run) else { return keep(.changed) }
         guard let span = spans[piece.spanID], !span.parked else { return keep(.unplaceable) }
         let current = chars(of: span)
         if current == final { return keep(nil) }
         // The delivered words are the final text: typing gets there.
-        if piece.tEnd == nil, !piece.frozen, Array(desiredText(piece, in: run)) == final, final.starts(with: current) { return nil }
-        guard !piece.frozen, !span.userChanged, !span.edited, selection == 0, span.end == userCursor else { return keep(.userEdited) }
-        if cursor != userCursor { return send(.move(units(to: userCursor)), lane: .live, moveTo: userCursor) }
-        swap = Swap(runID: run.runID, version: version, spanID: piece.spanID, text: final)
-        return nextSwap()
+        if piece.tEnd == nil, Array(desiredText(piece, in: run)) == final, final.starts(with: current) { return nil }
+        guard !span.userChanged, !span.edited, selection == 0, span.end == userCursor, cursor == userCursor else { return keep(.changed) }
+        guard showsTake(span) else {
+            events.append(.resync(.swapRefused))
+            return keep(.changed)
+        }
+        swap = Swap(runID: run.runID, version: version, spanID: piece.spanID, text: final,
+                    before: Array(text[max(0, span.start - 200)..<span.start]), after: Array(text[span.end..<min(text.count, span.end + 200)]))
+        guard span.end > span.start else { return nextSwap() }
+        let id = piece.spanID
+        return send(.deleteBackward(span.end - span.start), lane: .live) { q in q.removeRange(span.start, span.end, owner: id) }
     }
 
+    /// The report's text before the caret (its visible tail) shows the take's end as the model has it: `tailChars` of
+    /// it at least (all of a shorter take), and the report fits the model at the caret.
+    private func showsTake(_ span: Span) -> Bool {
+        guard let report = lastReport, report.selected == nil, span.end == cursor,
+              FieldReader.trusted(before: report.before).count >= min(span.end - span.start, Self.tailChars) else { return false }
+        return FieldMatch.positions(in: text, reportedBefore: report.before, reportedAfter: report.after).contains(cursor)
+    }
+
+    /// The report's text right next to the caret (`contextChars` a side) is the text that stood around the take.
+    static func showsGap(_ report: Report, before: [Character], after: [Character]) -> Bool {
+        guard report.selected == nil else { return false }
+        let b = Array(FieldReader.trusted(before: report.before).suffix(contextChars)), a = Array(report.after.prefix(contextChars))
+        return b.count >= min(contextChars, before.count) && before.suffix(b.count).elementsEqual(b)
+            && a.count <= after.count && after.prefix(a.count).elementsEqual(a)
+    }
+
+    /// The swap's insert, once its delete went: the final text goes where the take was. Nil once the swap is over.
     private mutating func nextSwap() -> Action? {
         guard var s = swap else { return nil }
-        if s.phase == .insert, spans[s.spanID]?.parked == true, !s.userActed, cursor == userCursor, selection == 0 {
-            // The delete went, then the report did not fit the model (nobody acted): the caret is where the take was,
-            // and its final text goes there rather than nowhere.
-            spans[s.spanID] = Span(start: cursor, end: cursor)
-        }
-        guard runs.contains(where: { $0.runID == s.runID }), let span = spans[s.spanID], !span.parked else {
-            failSwap(.unplaceable); return nil
-        }
-        switch s.phase {
-        case .verify, .back:
-            guard !span.userChanged, !span.edited, selection == 0, span.end == userCursor,
-                  runs.first(where: { $0.runID == s.runID })?.pieces.last(where: { $0.spanID == s.spanID })?.frozen == false else {
-                failSwap(.userEdited); return nil
+        guard let ri = runs.firstIndex(where: { $0.runID == s.runID }) else { swap = nil; return nil }
+        if !s.inserted {
+            if spans[s.spanID]?.parked == true, !runs[ri].userActed, cursor == userCursor, selection == 0, let report = lastReport,
+               Self.showsGap(report, before: s.before, after: s.after) {
+                // The report after the delete did not fit the model, but the caret stands between the text that was
+                // around the take (Safari's block echo read differently): the caret is where the take was.
+                spans[s.spanID] = Span(start: cursor, end: cursor)
             }
-            // Each read shows the model's text at the caret, after a move the report pinned there (or one that fit there
-            // among other places in repetitive text, with a window of its own long enough to tell).
-            guard let report = lastReport, report.selected == nil,
-                  FieldMatch.positions(in: text, reportedBefore: report.before, reportedAfter: report.after).contains(cursor),
-                  s.reads == 0 || lastSendConfirmed
-                    || FieldReader.trusted(before: report.before).count + report.after.count >= 2 * Self.walkOverlapChars
-            else { failSwap(.changed); return nil }
-            if s.phase == .back {
-                s.phase = .replace; swap = s
-                return nextSwap()
+            // Anything else after the delete (a tap or another change raced with it), or the user acting: nothing goes in
+            // where the take was not seen to go (the take is in History).
+            guard !runs[ri].userActed, let span = spans[s.spanID], !span.parked, span.start == span.end, cursor == span.start, userCursor == cursor else {
+                failSwap(); return nil
             }
-            let trusted = FieldReader.trusted(before: report.before)
-            let echo = trusted.count < report.before.count && report.before.first?.isNewline == true
-            let low = max(0, cursor - trusted.count - (echo ? 1 : 0)), high = cursor + report.after.count
-            if let covered = s.covered {
-                // The reads overlap: this one reaches into what the last ones showed.
-                guard high >= covered + min(Self.walkOverlapChars, cursor - covered) else { failSwap(.changed); return nil }
-            }
-            s.covered = min(s.covered ?? low, low); s.reads += 1
-            if s.covered! <= span.start {
-                s.phase = cursor == userCursor ? .replace : .back
-                swap = s
-                if s.phase == .back { return send(.move(units(to: userCursor)), lane: .live, moveTo: userCursor) }
-                return nextSwap()
-            }
-            let next = max(span.start, min(cursor - 1, s.covered! + Self.walkOverlapChars))
-            guard s.reads < Self.walkReadLimit(span.end - span.start), next < cursor else { failSwap(.changed); return nil }
-            swap = s
-            return jump(to: next, span: s.spanID, lane: .live)
-        case .replace:
-            guard cursor == userCursor, span.end == cursor else { failSwap(.changed); return nil }
-            s.phase = .insert; swap = s
-            let n = span.end - span.start
-            guard n > 0 else { return nextSwap() }
-            let id = s.spanID
-            return send(.deleteBackward(n), lane: .live) { q in q.removeRange(span.start, span.end, owner: id) }
-        case .insert:
-            // The take's characters are gone: its final text goes where they were, in one insert. Keys wait for it; a
-            // tap meanwhile is the user's place, and nothing goes back there (the take is in History).
             guard !s.text.isEmpty else { finishSwap(); return nil }
-            guard cursor == span.start, userCursor == cursor else { failSwap(.unplaceable); return nil }
+            s.inserted = true; swap = s
             let id = s.spanID, text = s.text
-            s.phase = .landing; swap = s
             return send(.insert(String(text)), lane: .live) { q in
                 q.insertAtCursor(text, owner: id)
                 q.userCursor = q.cursor
             }
-        case .landing:
-            // Its report shows the final text in place: done. A resync on the way (it landed elsewhere, or the field
-            // changed) leaves it unknown: reported.
-            guard chars(of: span) == s.text, span.end == cursor, let report = lastReport, consistent(report) else {
-                failSwap(.unplaceable); return nil
-            }
-            finishSwap()
-            return nil
         }
+        // The insert confirmed with the final text in place: done. Anything else (a resync on its way) leaves it unknown.
+        guard let span = spans[s.spanID], !span.parked, chars(of: span) == s.text, span.end == cursor else { failSwap(); return nil }
+        finishSwap()
+        return nil
     }
 
     private mutating func finishSwap() {
@@ -1960,30 +1956,40 @@ public struct FieldQueue: Sendable {
         reportFallback(ri, .userEdited)
     }
 
-    /// The swap stops: the field keeps the take as typed and the final text is in History. Once its delete went, the
-    /// take's characters are gone from the field: a drop says so.
-    private mutating func failSwap(_ reason: DropReason) {
+    /// The take is done and its last piece stands in front of text without a space: one goes in at its end, where the
+    /// caret is (an insert, never a move back). Not when the user is elsewhere.
+    private mutating func separateFollowingText(_ ri: Int) -> Action? {
+        guard let pi = runs[ri].pieces.indices.last, runs[ri].pieces[pi].spaceAfter else { return nil }
+        runs[ri].pieces[pi].spaceAfter = false
+        guard let span = spans[runs[ri].pieces[pi].spanID], !span.parked, span.end == cursor, cursor == userCursor, selection == 0,
+              cursor < text.count, !text[cursor].isWhitespace, !Self.closingMarks.contains(text[cursor]) else { return nil }
+        return send(.insert(" "), lane: .live) { q in
+            q.insertAtCursor([" "], owner: nil)
+            q.userCursor = q.cursor
+        }
+    }
+
+    /// The swap stops after its delete went: the take's characters are gone from the field, and a drop says so (the
+    /// final text is in History). Nothing of the take is edited again.
+    private mutating func failSwap() {
         guard let s = swap else { return }
         swap = nil
         events.append(.resync(.swapRefused))
         guard let ri = runs.firstIndex(where: { $0.runID == s.runID }) else { return }
         runs[ri].settledVersion = s.version
-        if s.replacing {
-            runs[ri].fallbackReported = false
-            runs[ri].settledThrough = runs[ri].delivered.count
-            closeOpenPieces(.resync, ri: ri, freeze: true)
-        }
-        reportFallback(ri, s.replacing ? .unplaceable : reason)
+        runs[ri].settledThrough = runs[ri].delivered.count
+        closeOpenPieces(.resync, ri: ri, freeze: true)
+        reportFallback(ri, .unplaceable, force: true)
     }
 
     /// The run's final text does not stand whole in the field (a piece kept raw, or the user's edits in it): the app
-    /// keeps it in History. Reported once per run.
-    private mutating func reportFallback(_ ri: Int, _ reason: DropReason?) {
+    /// keeps it in History. Reported once per run; `force`: without looking (the field is known not to show it).
+    private mutating func reportFallback(_ ri: Int, _ reason: DropReason?, force: Bool = false) {
         let run = runs[ri]
         guard !run.fallbackReported, run.complete else { return }
         let whole = Self.joined(run.segments)
-        var shown = true
-        for pi in run.pieces.indices {
+        var shown = !force
+        for pi in run.pieces.indices where shown {
             guard let span = spans[run.pieces[pi].spanID], !span.parked else { shown = false; break }
             if let final = finalText(pi, in: run) {
                 if chars(of: span) != final { shown = false; break }
@@ -2051,7 +2057,7 @@ public struct FieldQueue: Sendable {
 
     // MARK: Model
 
-    private mutating func insertAtCursor(_ chars: [Character], owner: Int?, behindUser: Bool = false) {
+    private mutating func insertAtCursor(_ chars: [Character], owner: Int?) {
         guard !chars.isEmpty else { return }
         let i = cursor, n = chars.count
         record(.insert(at: i, count: n, owner: owner))
@@ -2063,7 +2069,7 @@ public struct FieldQueue: Sendable {
             span.end = max(span.end, span.start)
             spans[id] = span
         }
-        if userCursor > i || (userCursor == i && !behindUser) { userCursor += n }
+        if userCursor >= i { userCursor += n }
         cursor = i + n
     }
 
@@ -2299,7 +2305,6 @@ public struct FieldQueue: Sendable {
             reseed(report, flight: flight)
             if recoveryRequest != nil { return }
         }
-        if swap?.spanID == target { failSwap(.unplaceable) }
         var gone: [EditState] = []
         userLane.removeAll { if case .edit(let s) = $0, s.spanID == target { gone.append(s); return true }; return false }
         editLane.removeAll { if $0.spanID == target { gone.append($0); return true }; return false }
@@ -2504,8 +2509,7 @@ public struct FieldQueue: Sendable {
                 userCursor = p
                 strayInsertion = StrayInsertion(text: key,
                     before: String(sent.pre.text[max(0, p - Self.relocateChars)..<p]),
-                    after: String(sent.pre.text[p..<min(sent.pre.text.count, p + Self.relocateChars)]), lane: last.lane,
-                    runID: nil)
+                    after: String(sent.pre.text[p..<min(sent.pre.text.count, p + Self.relocateChars)]), lane: last.lane)
             }
             tapRace = nil
             lagging = []
@@ -2519,9 +2523,8 @@ public struct FieldQueue: Sendable {
     private mutating func refuseStrayInsertion() {
         guard let stray = strayInsertion else { return }
         strayInsertion = nil
-        if let runID = stray.runID { cancelRun(runID) }
         events.append(.resync(.recoveryRefused))
-        events.append(.dropped(Drop(id: "stray:" + UUID().uuidString, runID: stray.runID, kind: nil,
+        events.append(.dropped(Drop(id: "stray:" + UUID().uuidString, runID: nil, kind: nil,
                                     reason: .unplaceable, text: stray.text, partial: nil)))
     }
 
@@ -2603,7 +2606,7 @@ public struct FieldQueue: Sendable {
             closeOpenPieces(.cursor)
         }
         // Regions begun and edits placed since that state have no span in it: they are planned afresh.
-        if swap != nil { failSwap(.changed) }
+        if swap != nil { failSwap() }
         for ri in runs.indices { runs[ri].pieces.removeAll { spans[$0.spanID] == nil } }
         for i in editLane.indices where editLane[i].spanID.map({ spans[$0] == nil }) ?? false { editLane[i].spanID = nil }
         for i in userLane.indices { if case .edit(var e) = userLane[i], e.spanID.map({ spans[$0] == nil }) ?? false { e.spanID = nil; userLane[i] = .edit(e) } }

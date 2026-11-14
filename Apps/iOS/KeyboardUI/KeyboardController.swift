@@ -918,7 +918,7 @@ final class KeyboardController {
                 if kind == .reseeded { liveStats.drifts += 1; liveStats.lastDrift = kind.rawValue }
                 trace?("queue resync=\(kind.rawValue)")
                 if kind == .recoveryRequested { beginQueueRecovery() }
-            case .nudged, .insertedBehind:
+            case .nudged:
                 break
             case .applied(let id, _):
                 if let completion = editCompletions.removeValue(forKey: id) { completion(event) }

@@ -221,14 +221,70 @@ import Testing
         #expect(rig.field.string.hasSuffix("the end") || rig.drops.count == 1)
     }
 
-    @Test func aRunInFrontOfTextGetsASpaceBehindItAndTheCaretStaysInFront() {
+    /// The caret never goes back for the space after a take typed in front of text: it goes in at the take's end once
+    /// the take is done (an insert at the caret).
+    @Test func aRunInFrontOfTextGetsItsSpaceAfterItWhenTheTakeIsDone() {
         var rig = QueueRig(FakeField("Hello world", caret: 6))
         rig.queue.enqueue(snap(1, "big"))
         rig.drain()
-        #expect(rig.field.string == "Hello big world")
-        rig.queue.enqueue(snap(2, "big wide"))
+        #expect(rig.field.string == "Hello bigworld")
+        rig.queue.enqueue(snap(2, "big wide", complete: true))
         rig.drain()
         #expect(rig.field.string == "Hello big wide world")
+        #expect(rig.field.caret == 15)
+        #expect(!rig.sent.contains { if case .move = $0.op { true } else { false } })
+    }
+
+    /// A take never splits a word: one started with the caret inside a word goes in after the word (the caret moves to
+    /// its end first; nobody acted in the take yet).
+    @Test func aTakeStartedInsideAWordGoesAfterTheWord() {
+        var rig = QueueRig(FakeField("the wagon", caret: 7))
+        rig.queue.enqueue(snap(1, "pocket will", complete: true))
+        rig.drain()
+        #expect(rig.field.string == "the wagon pocket will")
+        #expect(rig.drops.isEmpty)
+    }
+
+    /// Words that go on after the user put the caret inside a word are not typed into it, and nothing moves for them:
+    /// the take ends as it was typed and is reported (the cleaned take is in History).
+    @Test func wordsAfterTheUserPutTheCaretInsideAWordWait() {
+        var rig = QueueRig(FakeField(""))
+        rig.queue.enqueue(snap(1, "alpha beta"))
+        rig.drain()
+        rig.queue.enqueue(.move(-3))
+        rig.drain()
+        let moved = rig.sent.count
+        rig.queue.enqueue(snap(2, "alpha beta gamma", complete: true))
+        rig.drain()
+        #expect(rig.field.string == "alpha beta")
+        #expect(rig.sent.count == moved)
+        #expect(rig.drops.map(\.reason) == [.userEdited])
+        // The caret goes between words: later words start there.
+        rig.queue.enqueue(.move(3))
+        rig.drain()
+        rig.queue.enqueue(snap(3, "alpha beta gamma delta", complete: true))
+        rig.drain()
+        #expect(rig.field.string == "alpha beta delta")
+    }
+
+    /// The stop's swap lands and the queue says so before it goes idle (the keyboard stops stepping then, and its
+    /// "Applying edits…" waits for this acknowledgement).
+    @Test(arguments: [false, true])
+    func aSwappedTakeIsAcknowledgedBeforeTheQueueGoesIdle(safari: Bool) {
+        var field = FakeField("")
+        field.hostDelays = safari
+        var rig = QueueRig(field)
+        rig.queue.enqueue(snap(1, "um the boat is ready"))
+        rig.queue.enqueue(snap(2, "um the boat is ready", complete: true))
+        rig.drain()
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 3, segments: [
+            .init(id: 0, text: "The boat is ready.", cleaned: true, final: true),
+        ], complete: true))
+        var ticks = 0
+        repeat { rig.tick(); ticks += 1 } while !(rig.queue.isIdle && !rig.queue.hasOpInFlight && rig.field.settled) && ticks < 400
+        #expect(rig.field.string == "The boat is ready.")
+        #expect(rig.events.contains { $0.event == .liveApplied(runID: "r", version: 3, complete: true) })
+        #expect(rig.drops.isEmpty)
     }
 
     @Test func aRunAfterASentenceEndStartsWithACapitalAndASpace() {
@@ -517,8 +573,8 @@ import Testing
         rig.field.tap(at: 0)
         rig.run(ms: 500)
         rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 2, segments: [
-            .init(id: 0, text: "first words", final: true), .init(id: 1, text: "more", final: false),
-        ]))
+            .init(id: 0, text: "first words", final: true), .init(id: 1, text: "more", final: true),
+        ], complete: true))
         rig.drain()
         #expect(rig.field.string == "more first word")
     }

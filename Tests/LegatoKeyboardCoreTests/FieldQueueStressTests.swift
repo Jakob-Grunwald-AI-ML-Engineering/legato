@@ -100,8 +100,8 @@ import Testing
 /// A Markdown list dictated in one run (UAT F1, F3): the user types "- " and "\n- " between the items, the run's
 /// segments go on after a stop (the run is complete, then new speech comes), and the cleanups join the items into one
 /// sentence (", ", "; ", ". ", " and "), early, mid-list or at the end. Every item starts at the caret and keeps its own
-/// words. An item the user typed after is never edited again: it stays as typed, or as its own cleanup that landed
-/// before the keys; the last item, untouched, takes its own cleanup. Anything not cleaned is reported (History).
+/// words. Once the user typed during the run nothing of it is edited again: every item stays as typed, or as its own
+/// cleanup that landed before the keys. Anything not cleaned is reported (History).
 struct ListSession {
     private var rng: SeededGenerator
     /// The app cleaned the items apart (the keyboard reported the pieces): each is a sentence of its own and keeps its
@@ -204,6 +204,7 @@ struct ListSession {
         guard rig.drain(limitMs: 60_000) else { return "no stall: the queue did not drain (text \(rig.field.string.debugDescription))" }
         if rig.field.reorders > 0 || rig.field.staleTriggers > 0 { return "host timing traps: \(rig.field.reorders) reorders, \(rig.field.staleTriggers) stale" }
         if let frozen = rig.field.frozenEdits.first { return "dictation edited after the user acted: \(frozen)" }
+        if let edit = rig.field.liveEditsAfterUser.first { return "dictation made a \(edit) after the user acted" }
         let lines = String(rig.field.string.dropFirst(initial.count)).components(separatedBy: "\n")
         guard rig.field.string.hasPrefix(initial), lines.count == items.count else {
             return "final text \(rig.field.string.debugDescription) for items \(items) (joiner \(joiner.debugDescription), stops \(stops), apart \(apart))"
@@ -216,12 +217,12 @@ struct ListSession {
             }
             if line != cleaned { cleanedAll = false }
         }
-        // The last item's own cleanup (cleaned apart, or the only item): nobody typed after it, so it lands.
-        if apart || items.count == 1, lines.last != "- " + Self.capitalized(items.last!) + "." {
+        // A single item's cleanup lands; with more items the user typed during the run, so nothing more is edited.
+        if items.count == 1, lines.last != "- " + Self.capitalized(items.last!) + "." {
             return "the untouched last item was not cleaned (text \(rig.field.string.debugDescription), apart \(apart))"
         }
         let reported = rig.drops.contains { $0.runID == run && $0.reason != .reset }
-        if !(apart || items.count == 1) || !cleanedAll {
+        if !cleanedAll {
             guard reported else { return "items kept as typed without a report (text \(rig.field.string.debugDescription))" }
         } else if reported {
             return "dropped \(rig.drops.map(\.reason.rawValue)) though every item shows its cleanup"
@@ -451,6 +452,7 @@ struct StressSession {
         // Dictation never deletes or moves over text from before the user's last action (racing with it aside).
         for field in fields {
             if let frozen = field.frozenEdits.first { return "dictation edited after the user acted: \(frozen) (text \(field.string.debugDescription))" }
+            if let edit = field.liveEditsAfterUser.first { return "dictation made a \(edit) after the user acted (text \(field.string.debugDescription))" }
         }
         // The live run only ever deletes what it typed (in the field it typed it into).
         // (A selection or text another keyboard typed is invisible until a late report shows it: an op already on its

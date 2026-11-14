@@ -7,9 +7,11 @@ import Testing
 /// one, re-splits into finals, segments joined at punctuation (", like"), fillers the cleanup removes, long takes (many
 /// times the window). Some sessions the user leaves alone; in others they type, delete, move or tap during the take or
 /// after its stop. Invariants: one op in flight, no host timing traps, dictation never deletes or moves over text from
-/// before the user's last action (nor anyone else's text), every key lands once at the user's caret, no word of the
-/// take stands more often than any version had it, an untouched take ends exactly as its cleaned text with nothing
-/// reported, and a touched one either shows its cleaned text or is reported (`Event.dropped`, History).
+/// before the user's last action (nor anyone else's text), the keyboard makes no delete or move once the user acted
+/// (an op already on its way aside), every key lands once at the user's caret and no user character is lost, no word of
+/// the take stands more often than any version had it, an untouched take ends exactly as its cleaned text with nothing
+/// reported (unless the report at the stop did not show the take's end as typed: it is kept and reported, counted
+/// apart), and a touched one either shows its cleaned text or is reported (`Event.dropped`, History).
 /// `LEGATO_STRESS_RUNS` sets the seed count, `LEGATO_STRESS_SEED` replays one, `LEGATO_STRESS_TRACE=1` traces.
 @Suite struct FieldQueueTakeStressTests {
     private static var environment: [String: String] { ProcessInfo.processInfo.environment }
@@ -186,15 +188,23 @@ struct TakeSession {
             default: break
             }
         }
-        if let bad = rig.field.deletions.first(where: { $0.by == .live && $0.origin != .live && !$0.racing }) {
-            return "dictation deleted \(String(bad.char).debugDescription) written by \(bad.origin.rawValue)"
+        if let bad = rig.field.deletions.first(where: { ($0.by == .live || $0.by == .edit) && $0.origin != .live && !$0.racing }) {
+            return "the keyboard (\(bad.by.rawValue)) deleted \(String(bad.char).debugDescription) written by \(bad.origin.rawValue)"
         }
         if let frozen = rig.field.frozenEdits.first { return "dictation edited after the user acted: \(frozen) (text \(rig.field.string.debugDescription))" }
-        // A long delete is only the stop's swap: its insert follows at once.
+        if let edit = rig.field.ownEditsAfterUser.first {
+            return "the keyboard (\(edit.writer.rawValue)) made a \(edit.what) after the user acted (text \(rig.field.string.debugDescription))"
+        }
+        // A long delete is only the stop's swap: its insert follows at once, unless a tap raced with the delete (the
+        // insert then does not go where the take was not seen to go, and the take is reported).
         let live = rig.events.compactMap { if case .sent(let op, .live) = $0.event { op } else { nil } }
+        let reportedTake = rig.drops.contains { $0.runID == "t" && $0.reason != .reset }
         for (i, op) in live.enumerated() {
             guard case .deleteBackward(let n) = op, n > FieldQueue.nearChars else { continue }
-            guard i + 1 < live.count, case .insert = live[i + 1] else { return "a delete of \(n) characters without the swap's insert" }
+            guard i + 1 < live.count, case .insert = live[i + 1] else {
+                if reportedTake, rig.field.deletions.contains(where: { $0.by == .live && $0.racing }) { continue }
+                return "a delete of \(n) characters without the swap's insert"
+            }
         }
         let userInserts = rig.events.compactMap { e -> String? in if case .sent(.insert(let s), .user) = e.event { s } else { nil } }
         if userInserts.count != keys.count { return "keys sent \(userInserts.count) of \(keys.count)" }
@@ -232,6 +242,12 @@ struct TakeSession {
         if !acted, contradicted, rig.field.string != before + typed + after {
             guard reported else { return "contradicted take neither cleaned nor reported (text \(rig.field.string.debugDescription))" }
             outcome = "untouched-kept+reported(field contradicted the model)"
+            return nil
+        }
+        // The report at the stop did not show the take's end as the model has it: kept as typed, and reported.
+        if !acted, rig.events.contains(where: { $0.event == .resync(.swapRefused) }), rig.field.string != before + typed + after {
+            guard reported else { return "take kept at the stop without a report (text \(rig.field.string.debugDescription))" }
+            outcome = "untouched-kept+reported(tail not shown)"
             return nil
         }
         if !acted {

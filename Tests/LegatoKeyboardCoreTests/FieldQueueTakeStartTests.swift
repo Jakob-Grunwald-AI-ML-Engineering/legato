@@ -176,10 +176,11 @@ import Testing
         #expect(rig.drops.map(\.reason) == [.userEdited])
     }
 
-    /// UAT F3 on the real path: the app cleans each piece on its own (the keyboard reported where they start), so each
-    /// comes back a sentence of its own. The pieces the user typed after stay as typed; the last one is swapped.
+    /// UAT F3 on the real path: the app cleans each piece on its own (the keyboard reported where they start). The user
+    /// typed during the run (the lines' starts), so nothing of it is edited any more: every piece stays as typed and the
+    /// cleaned take is in History.
     @Test(arguments: [false, true])
-    func piecesCleanedApartKeepTheirOwnSentenceEnds(safari: Bool) {
+    func piecesCleanedApartStayAsTypedOnceTheUserTyped(safari: Bool) {
         let items = ["buy some milk", "call the plumber tomorrow", "water the plants"]
         var field = FakeField("")
         field.hostDelays = safari
@@ -195,8 +196,9 @@ import Testing
             LiveSegment(id: $0.offset, text: $0.element, cleaned: true, final: true)
         }, complete: true))
         rig.drain()
-        #expect(rig.field.string == "- buy some milk\n- call the plumber tomorrow\n- " + pieces[2])
+        #expect(rig.field.string == "- buy some milk\n- call the plumber tomorrow\n- water the plants")
         #expect(rig.drops.map(\.reason) == [.userEdited])
+        #expect(!rig.sent.contains { if case .deleteBackward = $0.op { true } else { false } })
     }
 
     /// The user taps into the middle of a take's text and types a word there; the take's next words go where the

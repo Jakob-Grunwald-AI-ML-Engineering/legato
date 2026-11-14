@@ -30,7 +30,7 @@ enum JournalReplay {
                 lastStep = entry.t
                 result.events += queue.drainEvents()
                 if case .send(let op) = action { result.sent.append(op) }
-            case .sent: if let op = entry.op?.op, entry.detail != "behind" { result.recorded.append(op) }
+            case .sent: if let op = entry.op?.op { result.recorded.append(op) }
             default: break
             }
         }

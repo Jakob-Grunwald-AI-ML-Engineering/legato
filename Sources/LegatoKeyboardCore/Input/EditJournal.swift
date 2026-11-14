@@ -101,7 +101,6 @@ public enum EditJournal {
             case .confirmed(let waited): entry.kind = .confirmed; entry.detail = "\(Int(waited))"
             case .resync(let kind): entry.kind = .resync; entry.reason = kind.rawValue
             case .nudged: entry.kind = .nudged
-            case .insertedBehind: entry.kind = .sent; entry.detail = "behind"
             case .applied(let id, let cursor): entry.kind = .applied; entry.id = id; entry.detail = "\(cursor)"
             case .dropped(let drop):
                 entry.kind = .dropped; entry.id = drop.id; entry.run = drop.runID; entry.reason = drop.reason.rawValue

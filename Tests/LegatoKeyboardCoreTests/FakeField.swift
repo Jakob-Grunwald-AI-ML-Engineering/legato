@@ -60,6 +60,12 @@ struct FakeField {
     private(set) var raced: [Bool] = []
     /// Dictation deleted or moved over text from before the user's last action (not racing with it).
     private(set) var frozenEdits: [String] = []
+    /// The keyboard's own deletes and moves (dictation's, or another lane's) after the user's first action since
+    /// dictation began typing here (not racing with it): a session's single take may make none (once the user acted
+    /// during or after the take, it is only appended to). Edits (Magic) make their own.
+    private(set) var ownEditsAfterUser: [(writer: Origin, what: String)] = []
+    var liveEditsAfterUser: [String] { ownEditsAfterUser.filter { $0.writer == .live }.map(\.what) }
+    private var actionsAtFirstLive: Int?
     /// Reports cut the text before the caret short this often (a truncated, lagging proxy window).
     var truncation = 0.0
     var truncationRng = SeededGenerator(seed: 11)
@@ -70,8 +76,6 @@ struct FakeField {
         var writer = Origin.outside
         /// The op races with an outside action the queue has not seen yet.
         var racing = false
-        /// The insert lands behind the user's caret (which stays in front of it).
-        var behind = false
         /// The first characters of a user insert are the run's (a key that finished a dictated word).
         var runPrefix = 0
         /// After it lands, the user's caret is this far from the caret (the queue resynced after an outside action).
@@ -191,6 +195,14 @@ struct FakeField {
     private mutating func carryOut(_ send: Send) {
         if send.writer == .user { userActions += 1 }
         let checks = send.writer == .live && !send.racing
+        if send.writer == .live, actionsAtFirstLive == nil { actionsAtFirstLive = userActions }
+        if send.writer == .live || send.writer == .edit, !send.racing, let first = actionsAtFirstLive, userActions > first {
+            switch send.op {
+            case .move(let n) where n != 0: ownEditsAfterUser.append((send.writer, "move \(n)"))
+            case .deleteBackward(let n): ownEditsAfterUser.append((send.writer, "delete \(n)"))
+            default: break
+            }
+        }
         let from = caret
         defer {
             if checks, case .move = send.op {
@@ -215,7 +227,9 @@ struct FakeField {
                     caret -= 1
                 }
             }
-            if send.writer == .user { userCaret = caret }
+            // The user's own move; or dictation's from the user's caret (a take that starts inside a word goes to its end
+            // first: the user's caret goes with it, the keys follow the take).
+            if send.writer == .user || (send.writer == .live && from == userCaret) { userCaret = caret }
         case .deleteBackward(let count):
             for _ in 0..<count {
                 if selection > 0 {
@@ -244,7 +258,7 @@ struct FakeField {
             origin.insert(contentsOf: origins, at: caret)
             epochs.insert(contentsOf: Array(repeating: userActions, count: chars.count), at: caret)
             raced.insert(contentsOf: Array(repeating: send.racing, count: chars.count), at: caret)
-            if userCaret > caret || (userCaret == caret && !send.behind) { userCaret += chars.count }
+            if userCaret >= caret { userCaret += chars.count }
             caret += chars.count
         }
         if let offset = send.userOffset { userCaret = caret + offset }
@@ -330,11 +344,9 @@ struct QueueRig {
             let action = queue.step(report: report, elapsedMs: elapsed)
             elapsed = 0
             var syncUserCaret = false
-            var behind = false
             for event in queue.drainEvents() {
                 events.append((clockMs, event))
                 if case .sent(_, let lane) = event { lastLane = lane }
-                if event == .insertedBehind { behind = true }
                 // An outside action (a tap, a selection, another keyboard typing) races with the queue's own moves and is
                 // revealed by late reports, sometimes in several steps. Where the user meant their caret then cannot be
                 // known by any keyboard (another keyboard typed at a caret a unit had moved): at each resync within the
@@ -356,7 +368,7 @@ struct QueueRig {
             }
             sent.append((clockMs, op))
             let writer: FakeField.Origin = lastLane.map { lane in lane == .user ? .user : lane == .live ? .live : .edit } ?? .edit
-            var send = FakeField.Send(op: op, writer: writer, racing: racing, behind: behind)
+            var send = FakeField.Send(op: op, writer: writer, racing: racing)
             // A key that finished a dictated word carries the word's rest: that part is the run's (keys are one character).
             if writer == .user, case .insert(let s) = op, s.count > 1 { send.runPrefix = s.count - 1 }
             if syncUserCaret { send.userOffset = queue.userCursor - queue.cursor }
