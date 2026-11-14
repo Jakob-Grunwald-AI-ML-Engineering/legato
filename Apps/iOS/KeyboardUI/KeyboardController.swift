@@ -927,21 +927,21 @@ final class KeyboardController {
                 trace?("queue dropped reason=\(drop.reason.rawValue) kind=\(drop.kind?.rawValue ?? "live")")
                 if let completion = editCompletions.removeValue(forKey: drop.id) { completion(event) }
                 else if drop.id == enqueuedHostEditID { enqueuedHostEditID = nil; hostEditLanded(drop.id, applied: false) }
-                else if drop.reason == .unplaceable, drop.runID != nil || drop.id.hasPrefix("stray:") {
+                else if drop.reason != .reset, drop.runID != nil || drop.id.hasPrefix("stray:") {
                     if let runID = drop.runID { updateCleanup { $0.failed(runID: runID) } }
-                    // Dictated words the field could not take: the take is in History. Text the user edited or deleted
-                    // themselves (or an instruction rewrote) is no drop worth telling.
+                    // The take's final text could not stand whole in the field (the user typed or moved since, or the
+                    // field did not show it as typed): the field keeps what it has, the cleaned take is in History.
                     liveRecoveryDismissed = false
                     liveRecoveryNotice = drop.runID == nil
                         ? "Couldn't safely finish the interrupted edit."
-                        : "Some edits couldn't finish. Check Legato's History for the take."
+                        : "Kept as typed. The cleaned take is in Legato's History."
                     syncRowTakeover()
                 }
             case .liveApplied(let runID, let version, let complete):
                 if complete, let snapshot = liveSnapshot, snapshot.runID == runID {
                     correctionSources[runID] = (
-                        snapshot.rawText ?? snapshot.segments.map { $0.raw ?? $0.text }.filter { !$0.isEmpty }.joined(separator: " "),
-                        snapshot.segments.map(\.text).filter { !$0.isEmpty }.joined(separator: " "))
+                        snapshot.rawText ?? LiveSegment.joined(snapshot.segments.map { $0.raw ?? $0.text }),
+                        LiveSegment.joined(snapshot.segments.map(\.text)))
                 }
                 updateCleanup { $0.applied(runID: runID, version: version, complete: complete) }
                 guard runID == liveSnapshot?.runID, version != liveAckedVersion else { break }
@@ -1296,7 +1296,6 @@ final class KeyboardController {
                 self.queue.completeRecovery(request, report: origin, restored: true)
                 self.handle(self.queue.drainEvents()); return
             }
-            let headNeedsRecovery = self.queue.recoveryBlocksSpeech
             let speechRevision = self.queue.speechRevision
             self.isReadingField = true
             self.fieldOperationCancelled = false
@@ -1307,7 +1306,7 @@ final class KeyboardController {
                 guard let self else { return true }
                 return Task.isCancelled || !self.isVisible || self.isTornDown || self.document.documentID != fieldID
                     || self.fieldOperationCancelled || self.queue.recoveryRevision != request.revision
-                    || (!headNeedsRecovery && self.queue.isSpeaking && self.queue.speechRevision != speechRevision)
+                    || (self.queue.isSpeaking && self.queue.speechRevision != speechRevision)
                     || Self.milliseconds(clock.now - start) >= FieldRecovery.budgetMs
             }, canMove: { [weak self] in
                 // A cancelled read still restores its cursor; a switched field must never receive the old restoration.
@@ -1319,7 +1318,7 @@ final class KeyboardController {
             reader.blockLimit = reader.cap
             reader.maxRereads = 3
             var up = await reader.readUp(windows, known: "", limit: .cap)
-            if !headNeedsRecovery, self.queue.isSpeaking, self.queue.speechRevision != speechRevision {
+            if self.queue.isSpeaking, self.queue.speechRevision != speechRevision {
                 // FieldReader cancellation restores before returning. The next queue observation still verifies
                 // its position; no edit is sent on the strength of a cancelled read.
                 let returned = self.currentReport
@@ -1362,7 +1361,7 @@ final class KeyboardController {
                     down = await reader.readDown(windows, known: "", room: reader.cap)
                 } else { down = .failure(.cancelled) }
             }
-            if !headNeedsRecovery, self.queue.isSpeaking, self.queue.speechRevision != speechRevision {
+            if self.queue.isSpeaking, self.queue.speechRevision != speechRevision {
                 let returned = self.currentReport
                 if returned.selected == nil, FieldMatch.confirms(expectedBefore: origin.before, expectedAfter: origin.after,
                                                                  reportedBefore: returned.before, reportedAfter: returned.after) {

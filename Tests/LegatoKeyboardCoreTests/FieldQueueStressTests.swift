@@ -100,7 +100,8 @@ import Testing
 /// A Markdown list dictated in one run (UAT F1, F3): the user types "- " and "\n- " between the items, the run's
 /// segments go on after a stop (the run is complete, then new speech comes), and the cleanups join the items into one
 /// sentence (", ", "; ", ". ", " and "), early, mid-list or at the end. Every item starts at the caret and keeps its own
-/// words; no joiner lands at an item's start.
+/// words. An item the user typed after is never edited again: it stays as typed, or as its own cleanup that landed
+/// before the keys; the last item, untouched, takes its own cleanup. Anything not cleaned is reported (History).
 struct ListSession {
     private var rng: SeededGenerator
     /// The app cleaned the items apart (the keyboard reported the pieces): each is a sentence of its own and keeps its
@@ -202,19 +203,29 @@ struct ListSession {
         publishCleanup(&rig)
         guard rig.drain(limitMs: 60_000) else { return "no stall: the queue did not drain (text \(rig.field.string.debugDescription))" }
         if rig.field.reorders > 0 || rig.field.staleTriggers > 0 { return "host timing traps: \(rig.field.reorders) reorders, \(rig.field.staleTriggers) stale" }
-        let pieces = apart ? items.map(Self.capitalized) : Self.pieces(items, joiner: joiner)
-        let expected = initial + "- " + pieces.joined(separator: ".\n- ") + "."
-        // Each line holds its own words; the last ends the run. A stopped take's cleanup may have put its period at the
-        // end of an earlier line already: a later cleanup that keeps it there leaves it. Items cleaned apart each keep theirs.
+        if let frozen = rig.field.frozenEdits.first { return "dictation edited after the user acted: \(frozen)" }
         let lines = String(rig.field.string.dropFirst(initial.count)).components(separatedBy: "\n")
-        let fits = rig.field.string.hasPrefix(initial) && lines.count == pieces.count && zip(lines, pieces).enumerated().allSatisfy { i, pair in
-            if apart { return pair.0 == "- " + pair.1 + "." }
-            return pair.0 == "- " + pair.1 + (i == pieces.count - 1 ? "." : "") || (stops && i < pieces.count - 1 && pair.0 == "- " + pair.1 + ".")
+        guard rig.field.string.hasPrefix(initial), lines.count == items.count else {
+            return "final text \(rig.field.string.debugDescription) for items \(items) (joiner \(joiner.debugDescription), stops \(stops), apart \(apart))"
         }
-        if !fits {
-            return "final text \(rig.field.string.debugDescription), expected \(apart ? expected.debugDescription : (initial + "- " + pieces.joined(separator: "\n- ") + ".").debugDescription) (joiner \(joiner.debugDescription), stops \(stops), apart \(apart))"
+        var cleanedAll = true
+        for (i, line) in lines.enumerated() {
+            let raw = "- " + items[i], cleaned = "- " + Self.capitalized(items[i]) + "."
+            guard line == raw || line == cleaned else {
+                return "line \(line.debugDescription) is neither \(raw.debugDescription) nor \(cleaned.debugDescription) (text \(rig.field.string.debugDescription))"
+            }
+            if line != cleaned { cleanedAll = false }
         }
-        if !rig.drops.isEmpty { return "dropped \(rig.drops.map(\.reason.rawValue)) with nothing conflicting" }
+        // The last item's own cleanup (cleaned apart, or the only item): nobody typed after it, so it lands.
+        if apart || items.count == 1, lines.last != "- " + Self.capitalized(items.last!) + "." {
+            return "the untouched last item was not cleaned (text \(rig.field.string.debugDescription), apart \(apart))"
+        }
+        let reported = rig.drops.contains { $0.runID == run && $0.reason != .reset }
+        if !(apart || items.count == 1) || !cleanedAll {
+            guard reported else { return "items kept as typed without a report (text \(rig.field.string.debugDescription))" }
+        } else if reported {
+            return "dropped \(rig.drops.map(\.reason.rawValue)) though every item shows its cleanup"
+        }
         return nil
     }
 }
@@ -428,6 +439,7 @@ struct StressSession {
         if rig.field.reorders > 0 { return "\(rig.field.reorders) ops landed out of order (sent too close together)" }
         if rig.field.staleTriggers > 0 { return "\(rig.field.staleTriggers) edits went right behind a move (stale reports)" }
         // One op in flight: a confirmation or a resync between any two ops.
+        let fields = retired + [rig.field]
         var open = false
         for (ms, event) in rig.events {
             switch event {
@@ -436,10 +448,13 @@ struct StressSession {
             default: break
             }
         }
+        // Dictation never deletes or moves over text from before the user's last action (racing with it aside).
+        for field in fields {
+            if let frozen = field.frozenEdits.first { return "dictation edited after the user acted: \(frozen) (text \(field.string.debugDescription))" }
+        }
         // The live run only ever deletes what it typed (in the field it typed it into).
         // (A selection or text another keyboard typed is invisible until a late report shows it: an op already on its
         // way can race with it. Once the queue has seen it, nothing is excused.)
-        let fields = retired + [rig.field]
         for field in fields {
             if let bad = field.deletions.first(where: { $0.by == .live && $0.origin != .live && !$0.racing }) {
                 return "the live run deleted \(String(bad.char).debugDescription) written by \(bad.origin.rawValue)"
@@ -448,8 +463,8 @@ struct StressSession {
         // After a field switch, the run's text goes into the new field only at the user's caret (new words) or next to
         // what it typed there: never its old field's work (a cleanup's jump, a joiner) away from both.
         for field in fields.dropFirst() {
-            if field.liveInserts.contains(where: { !$0.atUserCaret && !$0.touchesOwn && !$0.racing }) {
-                return "the live run typed into another field away from the caret (text \(field.string.debugDescription))"
+            if let bad = field.liveInserts.first(where: { !$0.atUserCaret && !$0.touchesOwn && !$0.racing }) {
+                return "the live run typed into another field away from the caret (text \(field.string.debugDescription); at \(bad.at))"
             }
         }
         // Every key went out exactly once, at the user's caret.
@@ -471,7 +486,10 @@ struct StressSession {
         let closing: Set<Character> = [",", ".", ";", ":", "!", "?", ")", "]", "}", "%", "…", "\u{2019}", "\u{201D}"]
         if let next = after.first, !next.isWhitespace, !closing.contains(next), !typed.isEmpty { typed += " " }
         let expected = before + typed + after
-        if rig.field.string != expected { return "final text \(rig.field.string.debugDescription), expected \(expected.debugDescription)" }
+        if rig.field.string != expected {
+            return "final text \(rig.field.string.debugDescription), expected \(expected.debugDescription) drops \(rig.drops.map(\.reason.rawValue)) "
+                + "resyncs \(rig.events.compactMap { if case .resync(let r) = $0.event { r.rawValue } else { nil } }) state \(rig.queue.debugState)"
+        }
         if !rig.drops.isEmpty { return "dropped \(rig.drops.map(\.reason.rawValue)) with nothing conflicting" }
         return nil
     }

@@ -47,11 +47,22 @@ struct FakeField {
     var userInserts: [(caret: Int, userCaret: Int, racing: Bool)] = []
     /// For every insert of the live run as it lands: whether it went at the user's caret, or near the run's own text in
     /// this field (within four characters), or where the run just deleted its own.
-    var liveInserts: [(atUserCaret: Bool, touchesOwn: Bool, racing: Bool)] = []
+    var liveInserts: [(atUserCaret: Bool, touchesOwn: Bool, racing: Bool, at: String)] = []
     private var liveDeletedAt: Int?
     /// A keyboard op on its way replaced a selection the user made meanwhile: the field now holds text no report showed
     /// the keyboard before (what was selected is gone), so where the user's caret is cannot be known from then on.
     var clobberedSelection = false
+    /// The user's actions so far (keys, deletes, moves, taps, selections, another keyboard), and for each character the
+    /// count when it was written: dictation may delete or move over only its own characters written since the last.
+    private(set) var userActions = 0
+    private(set) var epochs: [Int] = []
+    /// Characters an op racing with an outside action wrote (it may land where the user tapped: no keyboard can tell).
+    private(set) var raced: [Bool] = []
+    /// Dictation deleted or moved over text from before the user's last action (not racing with it).
+    private(set) var frozenEdits: [String] = []
+    /// Reports cut the text before the caret short this often (a truncated, lagging proxy window).
+    var truncation = 0.0
+    var truncationRng = SeededGenerator(seed: 11)
 
     /// How one op is to be carried out and accounted for.
     struct Send {
@@ -72,6 +83,8 @@ struct FakeField {
         self.text = Array(text)
         self.caret = caret ?? self.text.count
         origin = Array(repeating: .initial, count: self.text.count)
+        epochs = Array(repeating: 0, count: self.text.count)
+        raced = Array(repeating: false, count: self.text.count)
         userCaret = self.caret
     }
 
@@ -96,6 +109,17 @@ struct FakeField {
     var current: FieldQueue.Report {
         let shown = proxy ?? (text, caret, selection)
         return Self.report(text: shown.text, caret: shown.caret, selection: shown.selection, window: window, blockEcho: blockEcho)
+    }
+
+    /// Now and then a report shows less before the caret than the window (never more, never other text).
+    private mutating func truncated(_ report: FieldQueue.Report) -> FieldQueue.Report {
+        guard truncation > 0, !report.before.isEmpty, Double.random(in: 0..<1, using: &truncationRng) < truncation else { return report }
+        var cut = report
+        // Never below a few characters: an empty window is the field's start, which no truncation shows (UAT: 288 → 47).
+        let keep = min(report.before.count, 8)
+        guard keep < report.before.count else { return report }
+        cut.before = String(report.before.suffix(Int.random(in: keep..<report.before.count, using: &truncationRng)))
+        return cut
     }
 
     /// The proxy's own view: every op the keyboard sends shows in it at once (optimistically, measured in UAT for edits
@@ -124,7 +148,7 @@ struct FakeField {
         }
         history.append(current)
         if history.count > lagTicks + 1 { history.removeFirst(history.count - lagTicks - 1) }
-        return stuck ?? history.first!
+        return truncated(stuck ?? history.first!)
     }
 
     /// The keyboard sends an op.
@@ -133,7 +157,7 @@ struct FakeField {
         defer {
             var view = self
             view.hostDelays = false
-            if let proxy { view.text = proxy.text; view.caret = proxy.caret; view.selection = proxy.selection; view.origin = Array(repeating: .initial, count: proxy.text.count) }
+            if let proxy { view.text = proxy.text; view.caret = proxy.caret; view.selection = proxy.selection; view.origin = Array(repeating: .initial, count: proxy.text.count); view.epochs = Array(repeating: 0, count: proxy.text.count); view.raced = Array(repeating: false, count: proxy.text.count) }
             view.carryOut(Send(op: send.op))
             proxy = (view.text, view.caret, view.selection)
         }
@@ -165,6 +189,17 @@ struct FakeField {
     mutating func apply(_ op: ShadowOp) { carryOut(Send(op: op)) }
 
     private mutating func carryOut(_ send: Send) {
+        if send.writer == .user { userActions += 1 }
+        let checks = send.writer == .live && !send.racing
+        let from = caret
+        defer {
+            if checks, case .move = send.op {
+                let crossed = min(from, caret)..<max(from, caret)
+                if crossed.contains(where: { epochs[$0] != userActions }) {
+                    frozenEdits.append("move over \(String(text[crossed]).debugDescription) after the user acted")
+                }
+            }
+        }
         switch send.op {
         case .move(let units):
             if selection > 0 { if units >= 0 { caret += selection }; selection = 0 }
@@ -196,7 +231,7 @@ struct FakeField {
                 // Near the run's own text (a user's letter glued onto its word stays inside the region it edited).
                 let near = origin[max(0, caret - 4)..<min(text.count, caret + 4)]
                 let own = near.contains(.live) || liveDeletedAt == caret
-                liveInserts.append((caret == userCaret, own, send.racing))
+                liveInserts.append((caret == userCaret, own, send.racing, "\(string.debugDescription) caret \(caret) user \(userCaret) insert \(send.op)"))
             }
             if selection > 0 {
                 if send.racing, send.writer != .outside { clobberedSelection = true }
@@ -207,6 +242,8 @@ struct FakeField {
             var origins = Array(repeating: send.writer, count: chars.count)
             for i in 0..<min(send.runPrefix, origins.count) { origins[i] = .live }
             origin.insert(contentsOf: origins, at: caret)
+            epochs.insert(contentsOf: Array(repeating: userActions, count: chars.count), at: caret)
+            raced.insert(contentsOf: Array(repeating: send.racing, count: chars.count), at: caret)
             if userCaret > caret || (userCaret == caret && !send.behind) { userCaret += chars.count }
             caret += chars.count
         }
@@ -216,7 +253,10 @@ struct FakeField {
     private mutating func remove(_ range: Range<Int>, _ send: Send) {
         for i in range { deletions.append((text[i], origin[i], send.writer, send.racing)) }
         if send.writer == .live { liveDeletedAt = range.lowerBound }
-        text.removeSubrange(range); origin.removeSubrange(range)
+        if send.writer == .live, !send.racing, range.contains(where: { epochs[$0] != userActions }) {
+            frozenEdits.append("delete of \(String(text[range]).debugDescription) after the user acted")
+        }
+        text.removeSubrange(range); origin.removeSubrange(range); epochs.removeSubrange(range); raced.removeSubrange(range)
         if userCaret >= range.upperBound { userCaret -= range.count } else if userCaret > range.lowerBound { userCaret = range.lowerBound }
     }
 
@@ -228,7 +268,9 @@ struct FakeField {
 
     /// The user taps somewhere (outside the keyboard).
     mutating func tap(at index: Int) {
-        outsideNow(); caret = max(0, min(text.count, index)); selection = 0; userCaret = caret
+        // A tap where the caret already is moves nothing (no keyboard can see it).
+        let to = max(0, min(text.count, index))
+        outsideNow(counts: to != caret || selection > 0); caret = to; selection = 0; userCaret = caret
         if staleReportsAfterTap > 0, let old = truthLog.first {
             // The tap at the same place in the older text (counted from the start: the user tapped there).
             staleShow = (old, caret, staleReportsAfterTap)
@@ -238,7 +280,11 @@ struct FakeField {
     /// Another keyboard (a hardware keyboard) types: invisible to the queue except through reports.
     mutating func typeOutside(_ string: String) { outsideNow(); carryOut(Send(op: .insert(string), writer: .outside)) }
     /// Ops already on their way when the user acts outside the keyboard race with it (as on a real host).
-    private mutating func outsideNow() { for i in pending.indices { pending[i].send.racing = true }; proxy = nil }
+    private mutating func outsideNow(counts: Bool = true) {
+        if counts { userActions += 1 }
+        for i in pending.indices { pending[i].send.racing = true }
+        proxy = nil
+    }
 }
 
 /// The keyboard's loop in miniature: steps the queue against a `FakeField` every `tickMs`.

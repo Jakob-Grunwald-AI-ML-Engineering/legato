@@ -17,11 +17,8 @@ import Testing
         #expect(cleanupLanded)
         #expect(rig.field.string == "Check the memo, Signal message?")
         #expect(rig.field.reorders == 0)
-        let deleted = rig.sent[before...].reduce(0) { count, sent in
-            if case .deleteBackward(let n) = sent.op { count + n } else { count }
-        }
-        // Four filler characters and at most the existing final-caret reveal. The suffix stays untouched.
-        #expect(deleted <= 5)
+        // One verified swap: the take's characters in one delete, the cleaned take in one insert.
+        #expect(rig.sent[before...].map(\.op) == [.deleteBackward(35), .insert("Check the memo, Signal message?")])
     }
 
     private func interruptedCleanup(seed: UInt64) -> QueueRig {
@@ -39,7 +36,7 @@ import Testing
         for _ in 0..<500 {
             let count = rig.sent.count
             rig.tick()
-            if rig.sent.count > count, rig.sent.last?.op == .insert("S") {
+            if rig.sent.count > count, rig.sent.last?.op == .insert(raw.capitalized) {
                 sawIssuedInsert = true
                 break
             }
@@ -60,8 +57,13 @@ import Testing
         var rig = interruptedCleanup(seed: seed)
         let finished = rig.drain()
         #expect(finished)
-        #expect(rig.field.string.hasPrefix("Keep this note. "))
-        #expect(!rig.field.string.hasPrefix("Keep thisS"))
+        // The swap's insert may land where the user tapped (it was on its way): the keyboard never deletes there after
+        // the tap. The user's text stays whole, the take's words stand once (where they landed), and a misplaced take is
+        // reported.
+        #expect(rig.field.string.hasPrefix("Keep this"))
+        #expect(rig.field.string.hasSuffix("note. ") || rig.field.string.contains("note. The Meeting Starts Soon"))
+        #expect(rig.field.string.components(separatedBy: "Meeting").count == 2, "\(rig.field.string.debugDescription) \(rig.drops)")
+        if !rig.field.string.hasSuffix("The Meeting Starts Soon") { #expect(rig.drops.contains { $0.runID == "r" }) }
         #expect(!rig.field.deletions.contains { $0.origin == .initial && $0.by != .outside })
     }
 
@@ -76,7 +78,7 @@ import Testing
         #expect((key?.ms ?? .infinity) - requested <= FieldQueue.userBoundMs + FieldQueue.transitMs + rig.tickMs)
         #expect(rig.drops.contains { $0.id.hasPrefix("stray:") && $0.reason == .unplaceable })
         #expect(!rig.field.deletions.contains { $0.origin == .initial && $0.by != .outside })
-        #expect(rig.queue.isIdle)
+        #expect(rig.queue.isIdle, "\(rig.queue.debugState) \(rig.field.string.debugDescription) \(rig.events.suffix(40).map { "\($0.event)" })")
     }
 
     private func waitingQueue() -> FieldQueue {

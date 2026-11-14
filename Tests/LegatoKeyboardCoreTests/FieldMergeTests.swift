@@ -29,15 +29,4 @@ import Testing
     @Test func bothInsertingAtOnePlaceKeepsKept() {
         #expect(rebase("send the report", kept: "Sende den Bericht.", incoming: "Send the report.").0 == "Sende den Bericht.")
     }
-
-    @Test func knownHunksDecideWhoseALetterIs() {
-        // The user deleted " r" after "delta" and typed "ax": the diff would take the first "a" for the keyboard's.
-        let cells: [FieldQueue.Cell] = Array("delt").map { .own($0) } + [.gone("a"), .gone(" "), .gone("r"), .user("a"), .user("x")]
-            + Array("iver").map { .own($0) }
-        let view = FieldQueue.ownView(cells)
-        #expect(String(view.own) == "delta river")
-        let r = FieldMerge.rebase(base: view.own, kept: Array("deltaxiver"), incoming: Array("delts river"), keptHunks: view.userHunks)
-        #expect(String(r.text) == "deltaxiver")
-        #expect(r.dropped == 1)
-    }
 }

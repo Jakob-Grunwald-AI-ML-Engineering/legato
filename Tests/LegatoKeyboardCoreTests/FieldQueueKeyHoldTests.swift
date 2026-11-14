@@ -41,10 +41,11 @@ import Testing
         #expect(keys.map(\.element.0) == [.insert("\n"), .insert("-"), .insert(" ")])
         let lastLive = sends.lastIndex { $0.1 == .live }
         #expect(lastLive.map { $0 < (keys.first?.offset ?? 0) } == true)
-        // The cleanup lands in the item's own text.
+        // The keys froze the item: its cleanup is never made after them (it is in History).
         rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 2, segments: [.init(id: 0, text: item + ".", cleaned: true, final: true)], complete: true))
         do { let drained = rig.drain(); #expect(drained) }
-        #expect(rig.field.string == "- " + item + ".\n- ")
+        #expect(rig.field.string == "- " + item + "\n- ")
+        #expect(rig.drops.map(\.reason) == [.userEdited])
     }
 
     /// Without the rule the keys cut the item (the bug).
@@ -116,9 +117,9 @@ import Testing
     }
 
     /// The take's cleanup arrives while the item is still being typed (Claude is quicker than a long item): the keys
-    /// still wait for the item's end; the cleanup's changes to the words already typed follow them.
+    /// still wait for the item's end, never for the cleanup, which is not made after them.
     @Test(arguments: [false, true])
-    func aCleanupMidItemStillTypesTheItemsEndBeforeTheKeys(safari: Bool) {
+    func aCleanupMidItemNeverHoldsTheKeys(safari: Bool) {
         var rig = rig("- ", safari: safari)
         let item = "call the landlord about the heating and ask when the plumber can come by"
         let cleaned = "Call the landlord about the heating, and ask when the plumber can come by."
@@ -130,11 +131,13 @@ import Testing
         rig.run(ms: 700)
         rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 2, segments: [.init(id: 0, text: cleaned, cleaned: true, final: true)], complete: true))
         do { let drained = rig.drain(limitMs: 30_000); #expect(drained) }
-        #expect(rig.field.string == "- " + cleaned + "\n")
-        // Before the key went, the item's end was typed whole.
+        #expect(rig.field.string == "- " + item + "\n")
+        // Before the key went, the item's end was typed whole; nothing of the keyboard's own went after it.
         let inserts = rig.events.compactMap { if case .sent(.insert(let s), let lane) = $0.event { (s, lane) } else { nil } }
         let key = inserts.firstIndex { $0.1 == .user } ?? inserts.endIndex
-        #expect(inserts[..<key].map(\.0).joined().hasSuffix("come by."))
+        #expect(inserts[..<key].map(\.0).joined().hasSuffix("come by"))
+        #expect(!inserts[key...].contains { $0.1 != .user })
+        #expect(rig.drops.map(\.reason) == [.userEdited])
     }
 
     /// UAT finding 1: once stopped, the keys wait for the take to complete, so its final words, arriving after the
@@ -197,8 +200,8 @@ import Testing
         #expect(rig.field.string == "Note: buy milk\n")
     }
 
-    /// The caret is shown again once after a cleanup's jumps, at the take's end only.
-    @Test func theCaretIsRevealedOnceAtTheTakesEndOnly() {
+    /// The stop's cleanup is one swap at the take's end; after the user moved into the text, a later one is not made.
+    @Test func theCleanupIsOneSwapAndNoneAfterACursorMove() {
         var rig = rig("", safari: true)
         rig.queue.enqueue(snap(1, "the plan is fine"))
         do { let drained = rig.drain(); #expect(drained) }
@@ -206,16 +209,16 @@ import Testing
         rig.queue.enqueue(snap(2, "The plan is fine.", complete: true))
         do { let drained = rig.drain(); #expect(drained) }
         #expect(rig.field.string == "The plan is fine.")
-        #expect(rig.sent[from...].map(\.op).suffix(3) == [.insert("."), .deleteBackward(1), .insert(".")])
-        // The user moved into the text: a later cleanup's jump back goes there, and nothing is retyped.
+        #expect(rig.sent[from...].map(\.op) == [.deleteBackward(16), .insert("The plan is fine.")])
         rig.queue.enqueue(.move(-10))
         do { let drained = rig.drain(); #expect(drained) }
         from = rig.sent.count
         rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 3, segments: [.init(id: 0, text: "The plan is great.", cleaned: true, final: true)], complete: true))
         do { let drained = rig.drain(); #expect(drained) }
-        #expect(rig.field.string == "The plan is great.")
-        #expect(rig.sent[from...].last.map { if case .move = $0.op { true } else { false } } == true)
+        #expect(rig.field.string == "The plan is fine.")
+        #expect(rig.sent.count == from)
         #expect(rig.field.caret == 7)
+        #expect(rig.drops.map(\.text) == ["The plan is great."])
     }
 }
 

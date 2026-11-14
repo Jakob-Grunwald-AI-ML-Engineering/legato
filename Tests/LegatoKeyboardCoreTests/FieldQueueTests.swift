@@ -10,7 +10,7 @@ import Testing
         #expect(rig.events.contains { $0.event == .liveApplied(runID: "r", version: 1, complete: false) })
     }
 
-    @Test func aSonioxFlipMidTextIsOneJumpUnitWithOnlyTheDifferingCharacters() {
+    @Test func aSonioxFlipNearTheCaretIsDeletedAndRetypedAtTheCaret() {
         var rig = QueueRig(FakeField(""))
         rig.queue.enqueue(snap(1, "I think the plan is fine"))
         rig.drain()
@@ -19,9 +19,27 @@ import Testing
         rig.drain()
         let ops = rig.sent[before...].map(\.op)
         #expect(rig.field.string == "I think the plant is fine")
-        // Move to the change, insert the one character, move back: nothing is deleted and retyped. Then the caret is
-        // brought into view at the take's end: its last grapheme deleted and typed again.
-        #expect(ops == [.move(-8), .insert("t"), .move(8), .deleteBackward(1), .insert("e")])
+        // No jump: the characters from the change to the caret go, and the revised rest is typed again.
+        #expect(ops == [.deleteBackward(8), .insert("t is fine")])
+    }
+
+    /// A revision further back than `nearChars` waits for the stop while new words go on at the caret.
+    @Test func aFarRevisionWaitsForTheStopsSwap() {
+        var rig = QueueRig(FakeField(""))
+        let tail = " and then we went on talking about the weather and the boat for a long while"
+        rig.queue.enqueue(snap(1, "I think the plan is fine" + tail))
+        rig.drain()
+        let before = rig.sent.count
+        rig.queue.enqueue(snap(2, "I think the plant is fine" + tail + " today"))
+        rig.drain()
+        #expect(rig.field.string == "I think the plan is fine" + tail + " today")
+        #expect(rig.sent[before...].map(\.op) == [.insert(" today")])
+        #expect(!rig.sent.contains { if case .move = $0.op { true } else { false } })
+        rig.queue.enqueue(snap(3, "I think the plant is fine" + tail + " today.", complete: true))
+        rig.drain()
+        // The take is longer than the field's window: the swap reads further back first (moves), then swaps it whole.
+        #expect(rig.field.string == "I think the plant is fine" + tail + " today.")
+        #expect(rig.drops.isEmpty)
     }
 
     @Test func aFlipIsPacedOneGraphemePerTickWhenAnimated() {
@@ -71,22 +89,18 @@ import Testing
         #expect(rig.field.caret == 10)
     }
 
-    @Test func nothingInterleavesInsideAJumpUnit() {
+    @Test func aRevisionAtTheCaretNeverMovesTheCaret() {
         var field = FakeField("")
         field.lagTicks = 1
         var rig = QueueRig(field)
         rig.queue.enqueue(snap(1, "one two three four five"))
         rig.drain()
         rig.queue.enqueue(snap(2, "one too three for five"))
+        rig.drain()
         rig.queue.enqueue(FieldQueue.Edit(id: "typed", kind: .typist, target: " six", atCursor: true))
         rig.drain()
         #expect(rig.field.string == "one too three for five six")
-        // While the caret is away from the end, only the unit's own deletes and inserts go out.
-        var away = false
-        for (_, op) in rig.sent {
-            if case .move(let n) = op { away = n < 0 ? true : false; continue }
-            if away, case .insert(let s) = op { #expect(s != " six") }
-        }
+        #expect(!rig.sent.contains { if case .move = $0.op { true } else { false } })
     }
 
     @Test func anUnplaceableEditDropsWithAnEventAndEverythingElseContinues() {
@@ -100,7 +114,8 @@ import Testing
         #expect(rig.field.string == "Hello there! and more")
     }
 
-    @Test func aRevisionOfAClosedRegionLandsWhileItsTextIsUnchanged() {
+    /// The user's key froze the words before it: a later revision of them is never made (it is in History).
+    @Test func aRevisionOfWordsBeforeAUserKeyIsNeverMade() {
         var rig = QueueRig(FakeField(""))
         rig.queue.enqueue(snap(1, "first words"))
         rig.drain()
@@ -108,9 +123,12 @@ import Testing
         rig.queue.enqueue(snap(2, "first words then more"))
         rig.drain()
         #expect(rig.field.string == "first words. then more")
+        let from = rig.sent.count
         rig.queue.enqueue(snap(3, "First words then more", complete: true))
         rig.drain()
-        #expect(rig.field.string == "First words. then more")
+        #expect(rig.field.string == "first words. then more")
+        #expect(rig.sent.count == from)
+        #expect(rig.drops.map(\.reason) == [.userEdited])
     }
 
     @Test func aRegionTheUserTypedIntoDropsItsRevisionWithAnEvent() {
@@ -120,10 +138,11 @@ import Testing
         rig.queue.enqueue(.move(-2))
         rig.queue.enqueue(.insert("Z"))
         rig.drain()
-        rig.queue.enqueue(snap(2, "alpha gamma"))
+        rig.queue.enqueue(snap(2, "alpha gamma", complete: true))
         rig.drain()
         #expect(rig.field.string == "alpha beZta")
         #expect(rig.drops.first?.text == "alpha gamma")
+        #expect(rig.drops.first?.reason == .userEdited)
     }
 
     @Test func aWordCutShortByAKeyIsFinishedFirst() {
@@ -372,7 +391,7 @@ import Testing
         #expect(lag < 1_500, "the typewriter trails speech by the backlog's budget at most")
     }
 
-    @Test func aOneWordSonioxFixPreservesUnchangedLetters() {
+    @Test func aOneWordSonioxFixNearTheCaretRetypesFromTheChangeOnly() {
         var rig = rig()
         rig.queue.enqueue(snap(1, "I will meet you on Thursday at noon in the lobby"))
         rig.drain()
@@ -381,13 +400,14 @@ import Testing
         rig.queue.enqueue(snap(2, "I will meet you on Friday at noon in the lobby"))
         rig.drain()
         let took = (rig.sent.last?.ms ?? start) - start
-        print("speed: one-word Soniox fix mid-text took \(Int(took)) ms (\(rig.sent.count - from) ops)")
+        print("speed: one-word Soniox fix near the caret took \(Int(took)) ms (\(rig.sent.count - from) ops)")
         #expect(rig.field.string == "I will meet you on Friday at noon in the lobby")
         let edits = rig.sent[from...].map(\.op)
-        // Four changed letters plus the take-end caret reveal, never an eight-character word replacement.
-        #expect(edits.filter { if case .deleteBackward = $0 { true } else { false } } == Array(repeating: .deleteBackward(1), count: 5))
-        #expect(inserts(rig, from: from).map(\.text).joined() == "iFy")
-        #expect(took < 1_500)
+        // One delete back to the change, then the rest typed again; the words before it stay.
+        #expect(edits.filter { if case .deleteBackward = $0 { true } else { false } } == [.deleteBackward(29)])
+        #expect(inserts(rig, from: from).map(\.text).joined() == "Friday at noon in the lobby")
+        #expect(!edits.contains { if case .move = $0 { true } else { false } })
+        #expect(took < 3_000)
     }
 
     @Test func magicUppercasingPreservesEverySpaceAndPunctuationMark() {
@@ -453,7 +473,7 @@ import Testing
         return rig
     }
 
-    @Test func aLateCleanupAfterUserEditsLandsInTheRunsRegionsNotAtTheCursor() {
+    @Test func aLateCleanupAfterUserEditsIsNeverMade() {
         var rig = Self.typedWithDeletes()
         #expect(rig.field.string == "please remember to send the quarterly report to the whol team before afterno")
         // The user taps right after "please"; the cleanup arrives much later.
@@ -464,15 +484,15 @@ import Testing
             .init(id: 0, text: "Please remember to send the quarterly report to the whole team before Friday afternoon.", cleaned: true, final: true),
         ], complete: true))
         let drained = rig.drain(); #expect(drained)
-        // The "." goes at the end of the run's last region; the capital of an untouched word lands; the user's own
-        // deletes stay (no "e", no "Friday"), and nothing starts at the user's cursor.
-        #expect(rig.field.string == "Please remember to send the quarterly report to the whol team before afterno.")
-        #expect(!rig.events[from...].contains { if case .regionStarted = $0.event { true } else { false } })
+        // The user edited the take and moved: nothing of the keyboard's own goes, the cleanup is in History.
+        #expect(rig.field.string == "please remember to send the quarterly report to the whol team before afterno")
+        #expect(!rig.events[from...].contains { if case .sent(_, let lane) = $0.event { lane != .user } else { false } })
         #expect(rig.queue.userCursor == 6 && rig.field.caret == 6)
         #expect(rig.events.contains { $0.event == .liveApplied(runID: "r", version: 2, complete: true) })
+        #expect(rig.drops.map(\.reason) == [.userEdited])
     }
 
-    @Test func aCleanupHunkOnAWordTheUserChangedIsDroppedAloneTheOthersLand() {
+    @Test func aCleanupAfterTheUserDeletedAndMovedIsNeverMade() {
         var rig = QueueRig(FakeField(""))
         rig.queue.enqueue(snap(1, "alpha beta gamma delta"))
         rig.drain()
@@ -484,8 +504,7 @@ import Testing
             .init(id: 0, text: "Alpha beta, gamma Delta.", cleaned: true, final: true),
         ], complete: true))
         rig.drain()
-        // "delta" → "Delta" touches the user's word and is dropped; the capital, the comma and the "." land.
-        #expect(rig.field.string == "Alpha beta, gamma delt.")
+        #expect(rig.field.string == "alpha beta gamma delt")
         #expect(rig.drops.map(\.reason) == [.userEdited])
     }
 
