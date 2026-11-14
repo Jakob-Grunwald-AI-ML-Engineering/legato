@@ -423,6 +423,7 @@ class Result:
     notes: list = field(default_factory=list)
     tool_errors: list = field(default_factory=list)
     taps: list = field(default_factory=list)       # what the tool did as the user
+    acted_at: list = field(default_factory=list)   # wall seconds after the replay started, after each user action
     contended: bool = False
     dropped: list = field(default_factory=list)
     resyncs: int = 0
@@ -482,6 +483,7 @@ def run_take(sim: Sim, take: Take, args, workdir: Path) -> Result:
                     if delay > 0:
                         time.sleep(delay)
                     do_action(sim, res, kind, arg, take, mark)
+                    res.acted_at.append(time.time() - t0)
                 if post:
                     # right after stop: the keyboard's live snapshot turns complete before cleanup lands
                     dl = time.time() + dur + 60
@@ -491,6 +493,7 @@ def run_take(sim: Sim, take: Take, args, workdir: Path) -> Result:
                         time.sleep(0.05)
                     for c in post:
                         do_action(sim, res, "key", c, take, mark, after_stop=True)
+                        res.acted_at.append(time.time() - t0)
             except Exception as e:  # noqa: BLE001
                 res.tool_errors.append(f"user actions: {e}")
 
@@ -581,6 +584,34 @@ def short_diff(expected: str, actual: str, width: int = 38) -> str:
     return head + "; " + "; ".join(parts) if parts else head
 
 
+def words_missing_after(take: Take, text: str, acted_wall: float | None, speed: float, margin: float = 0.5) -> list[str]:
+    """The transcript's words first heard after `acted_wall` (+ margin) whose provisional forms never differed, that the
+    field does not show (in order, case and punctuation aside)."""
+    if acted_wall is None:
+        return []
+    first_seen: dict[int, float] = {}
+    shown: dict[int, set] = collections.defaultdict(set)
+    finals: list[tuple[str, int]] = []
+    for fr in take.frames:
+        for tk in fr["tokens"]:
+            if tk.get("text") == "<end>" or "start_ms" not in tk:
+                continue
+            first_seen.setdefault(tk["start_ms"], fr["t"])
+            shown[tk["start_ms"]].update(re.findall(r"[a-z']+", tk["text"].lower()))
+            if tk.get("is_final"):
+                finals.append((tk["text"], tk["start_ms"]))
+    spoken: list[tuple[str, bool]] = []  # (word, counted)
+    for tx, ms in finals:
+        ws = re.findall(r"[a-z']+", tx.lower())
+        late = first_seen.get(ms, 0) / speed > acted_wall + margin
+        for w in ws:
+            spoken.append((w, late and shown[ms] == set(ws)))
+    have = re.findall(r"[a-z']+", text.lower())
+    sm = difflib.SequenceMatcher(None, [w for w, _ in spoken], have, autojunk=False)
+    matched = {i for blk in sm.get_matching_blocks() for i in range(blk.a, blk.a + blk.size)}
+    return [w for i, (w, counted) in enumerate(spoken) if counted and i not in matched]
+
+
 def check(res: Result, args) -> None:
     take, text, entries = res.take, res.text, res.entries
     if res.tool_errors:
@@ -665,6 +696,12 @@ def check(res: Result, args) -> None:
             if bad:
                 res.failures.append(("4", f"{len(bad)} Legato delete/move after the user's first input: "
                                           + "; ".join(f"{l}:{o} {w}" for _, l, o, w in bad[:3])))
+            # 6. the take goes on at the caret after the user acted: every word spoken after the user's last action
+            #    reaches the field (a word whose provisional form differed may stay as first typed, so it is not counted)
+            missing = words_missing_after(take, text, max(res.acted_at) if res.acted_at else None, args.speed)
+            if missing:
+                res.failures.append(("6", f"{len(missing)} word(s) spoken after the user's last action never reached the field: "
+                                          + " ".join(missing[:8])))
             # informational: the text without the user's keys should still be the cleaned take
             rest = re.sub("[" + MARKERS + MARKERS.upper() + "]", "", text)
             if norm_ws(rest).lower() != expected.lower():
@@ -789,7 +826,8 @@ def summarize(results: list[Result], args, outdir: Path) -> int:
     print("\nsummary")
     print(f"  takes {len(results)}   pass {len(passed)}   fail {len(fails)}   tool-error {len(errs)}   contended {len(cont)}")
     inv = collections.Counter(f[0] for r in fails for f in r.failures)
-    names = {"1": "duplicated span", "2": "joint artefact", "3": "final text != cleaned", "4": "user input hurt", "5": "silent drop"}
+    names = {"1": "duplicated span", "2": "joint artefact", "3": "final text != cleaned", "4": "user input hurt", "5": "silent drop",
+             "6": "words lost after the user acted"}
     print("  invariant failures: " + (", ".join(f"#{k} {names[k]} x{v}" for k, v in sorted(inv.items())) or "none"))
     by_kind: dict[str, list[Result]] = collections.defaultdict(list)
     for r in results:
