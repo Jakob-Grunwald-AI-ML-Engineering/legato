@@ -648,7 +648,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         guard groupsLiveHistory, let history, keepsTakes(), let id = UUID(uuidString: run.runID) else { return }
         let raw = run.wholeRaw.text
         guard !raw.isEmpty else { return }
-        let text = run.snapshot.segments.filter(\.final).map(\.text).filter { !$0.isEmpty }.joined(separator: " ")
+        let text = LiveSegment.joined(run.snapshot.segments.filter(\.final).map(\.text))
         let entry = DictationEntry(id: id, date: lastLiveHistory.flatMap { $0.id == id ? $0.date : nil } ?? Date(),
             text: text, rawText: text == raw ? nil : raw, localeIdentifier: Locale.current.identifier,
             engineID: "dictation", duration: 0, cleanupFallback: liveHistoryFallbacks.isEmpty ? nil : true)

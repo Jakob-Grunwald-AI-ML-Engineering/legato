@@ -17,6 +17,28 @@ public struct LiveSegment: Codable, Equatable, Sendable {
     public init(id: Int, text: String, cleaned: Bool = false, final: Bool, unit: Int? = nil, raw: String? = nil) {
         self.id = id; self.text = text; self.cleaned = cleaned; self.final = final; self.unit = unit; self.raw = raw
     }
+
+    /// Pieces of a take's text joined as a reader expects: trimmed, a space between them, none before closing
+    /// punctuation or a line break and none after an opening mark ("from" and ", like" join as "from, like").
+    public static func joined(_ pieces: some Sequence<String>) -> String {
+        var text = ""
+        for piece in pieces {
+            let piece = piece.trimmingCharacters(in: .whitespaces)
+            guard let first = piece.first else { continue }
+            if spaced(text.last, first) { text += " " }
+            text += piece
+        }
+        return text
+    }
+
+    public static let closingMarks: Set<Character> = [",", ".", ";", ":", "!", "?", ")", "]", "}", "%", "…", "\u{2019}", "\u{201D}", "\u{2014}"]
+    public static let openingMarks: Set<Character> = ["(", "[", "{", "\u{201C}", "\u{2018}", "\u{201E}", "\u{201A}", "\u{BF}", "\u{A1}"]
+
+    /// Whether a space goes between text ending in `last` and a piece starting with `first`.
+    public static func spaced(_ last: Character?, _ first: Character) -> Bool {
+        guard let last, !last.isWhitespace else { return false }
+        return !first.isWhitespace && !closingMarks.contains(first) && !openingMarks.contains(last)
+    }
 }
 
 /// app -> keyboard (`link.dictation.live`): where a live run's text should stand now. The whole target is
@@ -160,10 +182,10 @@ public struct LiveDictationRun: Sendable, Equatable {
                 }
             }
         }
-        let speaking = (open + [head]).filter { !$0.isEmpty }.joined(separator: " ")
+        let speaking = LiveSegment.joined(open + [head])
         if !speaking.isEmpty { segments.append(.init(id: finals.count, text: speaking, final: false)) }
         return .init(runID: runID, version: version, segments: segments, complete: complete, stopped: stopped && !complete ? true : nil,
-                     rawText: complete ? finals.map(\.text).filter { !$0.isEmpty }.joined(separator: " ") : nil)
+                     rawText: complete ? LiveSegment.joined(finals.map(\.text)) : nil)
     }
     public var isEmpty: Bool { finals.isEmpty && head.isEmpty && open.isEmpty }
     public var finalCount: Int { finals.count }
@@ -184,7 +206,7 @@ public struct LiveDictationRun: Sendable, Equatable {
             version += 1
             return nil
         }
-        let sentence = (open + [text]).joined(separator: " ")
+        let sentence = LiveSegment.joined(open + [text])
         // A new piece starts here: the open unit ends before it.
         if pieceStarts.contains(finals.count) { closeOpenUnit(before: finals.count) }
         for k in openKeys + [key] { keys[k] = finals.count }
@@ -263,12 +285,12 @@ public struct LiveDictationRun: Sendable, Equatable {
         guard let index = keys[key] else { return nil }
         return units.firstIndex { $0.contains(index) }
     }
-    private func rawText(_ unit: Int) -> String { finals[units[unit]].map(\.text).joined(separator: " ") }
+    private func rawText(_ unit: Int) -> String { LiveSegment.joined(finals[units[unit]].map(\.text)) }
     private func shownText(_ unit: Int) -> String { cleaned[unit] ?? rawText(unit) }
 
     /// The raw words of every final so far, and how many finals and words that is: what `setWhole` replaces.
     public var wholeRaw: (finals: Int, words: Int, text: String) {
-        let text = finals.map(\.text).joined(separator: " ")
+        let text = LiveSegment.joined(finals.map(\.text))
         return (finals.count, text.split(whereSeparator: \.isWhitespace).count, text)
     }
 
@@ -304,7 +326,7 @@ public struct LiveDictationRun: Sendable, Equatable {
     /// will show them.
     public func text(before key: Int) -> String {
         guard let unit = unitIndex(ofKey: key) else { return "" }
-        return (0..<unit).map(shownText).filter { !$0.isEmpty }.joined(separator: " ")
+        return LiveSegment.joined((0..<unit).map(shownText))
     }
 
     /// The speaking head (the non-final words); empty when none.
