@@ -246,6 +246,8 @@ public struct FieldQueue: Sendable {
         /// The text around it then (up to `contextChars` each side): it must stand there too.
         var lastBefore: [Character] = []
         var lastAfter: [Character] = []
+        /// The user typed or edited while the span was lost: a change found there may be theirs.
+        var userActedParked = false
         /// From the user's first change on: who wrote each character, and the keyboard's characters the user deleted. A
         /// dictation region merges the run's newer text against the keyboard's view (`FieldMerge`), so the user's
         /// words stay and the rest lands.
@@ -321,6 +323,7 @@ public struct FieldQueue: Sendable {
     private enum UserItem: Sendable, Equatable {
         case input(Input, retried: Bool)
         case edit(EditState)
+        var isMove: Bool { if case .input(.move, _) = self { true } else { false } }
     }
     private var userLane: [UserItem] = []
     private var editLane: [EditState] = []
@@ -359,7 +362,8 @@ public struct FieldQueue: Sendable {
         var cleaned = false
         /// The user stopped the take (`takeStopped`, or a snapshot says so); its complete snapshot comes after its cleanup.
         var stopped = false
-        var speechTargets: [Int: FieldSpeechScheduling.Target] = [:]
+        /// The whole take's delivery while speaking (`FieldSpeechScheduling`).
+        var speechTarget = FieldSpeechScheduling.Target()
         var deferredSnapshot: LiveDictationSnapshot?
     }
     private(set) var runs: [LiveRun] = []
@@ -515,7 +519,7 @@ public struct FieldQueue: Sendable {
                 if at >= 0, at + known.count <= updated.count, updated[at..<(at + known.count)].elementsEqual(known) {
                     span.start = at; span.end = at + known.count
                 } else {
-                    span.lastText = known; span.parked = true
+                    span.lastText = known; span.parked = true; span.userActedParked = false
                 }
                 spans[id] = span
             }
@@ -543,11 +547,21 @@ public struct FieldQueue: Sendable {
         let targets = spans.sorted { $0.key < $1.key }.compactMap { id, span -> FieldRecovery.Target? in
             if config.prioritizeSpeech, isSpeaking, !foreground.contains(id) { return nil }
             guard span.parked, !span.anchor, !span.userChanged, !span.edited, !span.lastText.isEmpty else { return nil }
-            return .init(id: String(id), expected: String(span.lastText), before: String(span.lastBefore), after: String(span.lastAfter))
+            return .init(id: String(id), expected: String(span.lastText), before: String(span.lastBefore), after: String(span.lastAfter),
+                         repair: span.userActedParked ? nil : stoppedTakeText(of: id))
         }
         guard let request = recovery.begin(generation: recoveryGeneration, revision: recoveryRevision, targets: targets) else { return }
         recoveryRequest = request
         events.append(.resync(.recoveryRequested))
+    }
+
+    /// The text a stopped take's region wants: a region the queue lost after the take stopped is repaired to it when
+    /// what stands there is the keyboard's own stale typing (`FieldRecovery.Target.repair`).
+    private func stoppedTakeText(of spanID: Int) -> String? {
+        for run in runs where run.stopped || run.complete {
+            if let region = run.regions.first(where: { $0.spanID == spanID && !$0.abandoned }) { return desiredText(region, in: run) }
+        }
+        return nil
     }
 
     /// A background read gives back its lease before another queue item may use the cursor. Its parked targets
@@ -1155,6 +1169,7 @@ public struct FieldQueue: Sendable {
 
     private mutating func nextUser() -> Action? {
         while let item = userLane.first {
+            if !item.isMove { for (id, span) in spans where span.parked { spans[id]?.userActedParked = true } }
             switch item {
             case .input(let input, let retried):
                 if case .insert(let key) = input, let finish = finishWordBeforeKey(key) { userLane.removeFirst(); return finish }
@@ -1546,6 +1561,14 @@ public struct FieldQueue: Sendable {
     private mutating func nextLive() -> Action? {
         for ri in runs.indices { applyPending(ri) }
         for ri in runs.indices {
+            // A stopped take's region the queue lost: one look around before its final text is given up.
+            if runs[ri].stopped || runs[ri].complete, !(config.prioritizeSpeech && isSpeaking),
+               runs[ri].regions.contains(where: { region in
+                   !region.abandoned && spans[region.spanID].map { $0.parked && !$0.userActedParked && !$0.userChanged } == true
+               }) {
+                requestRecoveryIfNeeded()
+                if recoveryRequest != nil { return .wait }
+            }
             // The open region first: appends at the cursor, then revisions of closed regions.
             let order = runs[ri].regions.indices.sorted { a, b in
                 (runs[ri].regions[a].tEnd == nil ? 0 : 1, a) < (runs[ri].regions[b].tEnd == nil ? 0 : 1, b)
@@ -1662,16 +1685,19 @@ public struct FieldQueue: Sendable {
         if config.prioritizeSpeech {
             let speaking = !runs[ri].stopped && !snapshot.complete && snapshot.stopped != true
             let authoritative = snapshot
-            for index in snapshot.segments.indices {
-                let segment = snapshot.segments[index]
-                var target = runs[ri].speechTargets[segment.id] ?? .init()
-                // Joined cleanup can empty later segments. While speaking, raw new segments remain speech;
-                // previously observed segments keep their delivery projection until the take stops.
-                let text = speaking && segment.cleaned ? (segment.raw ?? segment.text) : segment.text
-                snapshot.segments[index].text = String(target.update(Array(text), speaking: speaking))
-                if speaking { snapshot.segments[index].cleaned = false; snapshot.segments[index].unit = nil }
-                runs[ri].speechTargets[segment.id] = target
+            if speaking {
+                // Joined cleanup can empty later segments. While speaking, its raw words remain speech.
+                for index in snapshot.segments.indices {
+                    let segment = snapshot.segments[index]
+                    if segment.cleaned { snapshot.segments[index].text = segment.raw ?? segment.text }
+                    snapshot.segments[index].cleaned = false; snapshot.segments[index].unit = nil
+                }
             }
+            // What is new speech is decided on the take's whole text, never per segment: the app re-splits segments
+            // while speaking, and a re-split of delivered words is no new speech (as on the Mac).
+            let joined = Array(Self.target(of: snapshot))
+            let delivery = runs[ri].speechTarget.update(joined, speaking: speaking)
+            if delivery != joined { Self.project(&snapshot, onto: delivery) }
             runs[ri].deferredSnapshot = speaking && snapshot != authoritative ? authoritative : nil
         }
         runs[ri].version = snapshot.version
@@ -1881,9 +1907,36 @@ public struct FieldQueue: Sendable {
     }
 
     /// A snapshot's text: its segments, trimmed, joined by a space (none before a line break).
-    static func target(of snapshot: LiveDictationSnapshot) -> String {
+    static func target(of snapshot: LiveDictationSnapshot) -> String { joined(snapshot.segments) }
+
+    /// The snapshot's segments made to show `delivery` (the take's text as delivered while speaking): the trailing
+    /// segments the delivery ends with keep their text, the delivered words before them stand in the first segment
+    /// and the segments between show nothing. Segment ids past every one seen stay new speech only where delivered.
+    static func project(_ snapshot: inout LiveDictationSnapshot, onto delivery: [Character]) {
+        let segments = snapshot.segments
+        guard !segments.isEmpty else { return }
+        let whole = String(delivery)
+        func shown(keeping k: Int) -> [LiveSegment]? {
+            let tail = joined(segments[k...])
+            guard whole.hasSuffix(tail) else { return nil }
+            var head = segments[0]
+            head.text = String(whole.dropLast(tail.count))
+            let projected = [head] + segments[1..<k].map { var s = $0; s.text = ""; return s } + segments[k...]
+            return joined(projected) == whole ? projected : nil
+        }
+        var best = shown(keeping: segments.count)
+        var k = segments.count - 1
+        while k >= 1, let projected = shown(keeping: k) { best = projected; k -= 1 }
+        if let best {
+            snapshot.segments = best
+        } else {
+            snapshot.segments = segments.enumerated().map { i, s in var s = s; s.text = i == 0 ? whole : ""; return s }
+        }
+    }
+
+    static func joined(_ segments: some Sequence<LiveSegment>) -> String {
         var raw = ""
-        for segment in snapshot.segments {
+        for segment in segments {
             let text = segment.text.trimmingCharacters(in: .whitespaces)
             guard !text.isEmpty else { continue }
             if let last = raw.last, !last.isWhitespace, let first = text.first, !first.isNewline { raw += " " }
@@ -2299,7 +2352,7 @@ public struct FieldQueue: Sendable {
                 span.lastBefore = Array(text[max(0, span.start - Self.contextChars)..<span.start])
                 span.lastAfter = Array(text[span.end..<min(text.count, span.end + Self.contextChars)])
             }
-            span.parked = true; spans[id] = span
+            span.parked = true; span.userActedParked = false; spans[id] = span
         }
         let oldText = text, oldCursor = cursor, oldUser = userCursor
         seed(report)

@@ -37,8 +37,13 @@ public struct FieldRecovery: Sendable {
         public var landed: String?
         public var before: String
         public var after: String
-        public init(id: String, expected: String, landed: String? = nil, before: String = "", after: String = "") {
+        /// The final text a stopped take wants here. Set only when nobody else typed since the target was lost: then
+        /// text that changed between the target's unchanged neighbours, made only of the keyboard's own words (or
+        /// pieces of them), is its own stale typing, and is placed to be repaired to this text.
+        public var repair: String?
+        public init(id: String, expected: String, landed: String? = nil, before: String = "", after: String = "", repair: String? = nil) {
             self.id = id; self.expected = expected; self.landed = landed; self.before = before; self.after = after
+            self.repair = repair
         }
     }
     public struct Request: Sendable, Equatable {
@@ -61,7 +66,7 @@ public struct FieldRecovery: Sendable {
 
     public mutating func begin(generation: String, revision: UInt64, targets: [Target]) -> Request? {
         guard !targets.isEmpty else { return nil }
-        let signature = generation + ":" + String(revision) + ":" + targets.map { $0.id + "=" + $0.expected }.joined(separator: "|")
+        let signature = generation + ":" + String(revision) + ":" + targets.map { $0.id + ($0.repair == nil ? "=" : "~") + $0.expected }.joined(separator: "|")
         guard attempted.filter({ $0 == signature }).count < Self.maxAttempts else { return nil }
         attempted.append(signature)
         if attempted.count > 64 { attempted.removeFirst() }
@@ -93,9 +98,53 @@ public struct FieldRecovery: Sendable {
                     if placements.count > 1 { return .stop(id: target.id, .ambiguous) }
                 }
             }
-            guard let placement = placements.first else { return .stop(id: target.id, .changed) }
+            guard let placement = placements.first else {
+                if let repair = target.repair, let stale = Self.stalePlacement(target, repair: repair, in: chars, completeDocument: completeDocument) {
+                    return .replan(stale)
+                }
+                return .stop(id: target.id, .changed)
+            }
             return .replan(placement)
         }
+    }
+
+    /// The keyboard's own stale typing between a target's unchanged neighbours (each one unique, or the edge of a
+    /// complete read): most of the target's words still stand there, and every word there is one of the keyboard's
+    /// words or a piece of one. Anything else (new words, most of it gone) is someone's change and is left alone.
+    static func stalePlacement(_ target: Target, repair: String, in chars: [Character], completeDocument: Bool) -> Placement? {
+        let before = Array(target.before), after = Array(target.after)
+        let start: Int, end: Int
+        if before.isEmpty {
+            guard completeDocument else { return nil }
+            start = 0
+        } else {
+            let found = occurrences(of: before, in: chars)
+            guard found.count == 1 else { return nil }
+            start = found[0] + before.count
+        }
+        if after.isEmpty {
+            guard completeDocument else { return nil }
+            end = chars.count
+        } else {
+            let found = occurrences(of: after, in: Array(chars[start...]))
+            guard found.count == 1 else { return nil }
+            end = start + found[0]
+        }
+        let middle = Array(chars[start..<end])
+        let seen = words(middle), expected = words(Array(target.expected))
+        guard !seen.isEmpty, 2 * seen.count >= expected.count else { return nil }
+        let own = Set(expected + words(Array(repair)) + words(Array(target.landed ?? "")))
+        guard seen.allSatisfy({ word in own.contains(word) || own.contains { $0.hasPrefix(word) || $0.hasSuffix(word) } }) else { return nil }
+        return Placement(id: target.id, range: start..<end, text: String(middle))
+    }
+
+    private static func words(_ text: [Character]) -> [String] {
+        var result: [String] = [], word = ""
+        for c in text {
+            if c.isLetter || c.isNumber { word.append(c) } else if !word.isEmpty { result.append(word.lowercased()); word = "" }
+        }
+        if !word.isEmpty { result.append(word.lowercased()) }
+        return result
     }
     /// Linear grapheme search, stopping at the second occurrence. Long repetitive documents must not turn a
     /// bounded read into quadratic work, and UTF-16 substring matches must not split an emoji or combining cluster.
