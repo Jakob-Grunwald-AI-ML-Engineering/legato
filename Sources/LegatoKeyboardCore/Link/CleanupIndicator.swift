@@ -11,20 +11,23 @@ public struct CleanupIndicator: Sendable, Equatable {
     public private(set) var since: Date?
     /// The newest complete version of the run seen, and the last version the field showed (by run).
     private var completeVersion: Int?
+    private var failedRunID: String?
     private var shown: (runID: String, version: Int)?
 
     public init() {}
 
     public var isActive: Bool { runID != nil }
+    public var isApplying: Bool { isActive && completeVersion != nil }
 
     /// The user stopped the take while its run was being typed.
     public mutating func stopped(runID: String, at now: Date) {
-        guard self.runID != runID else { return }
+        guard self.runID != runID, failedRunID != runID else { return }
         self.runID = runID; since = now; completeVersion = nil
     }
 
     /// A snapshot the keyboard took on: another run's ends the wait (a new take); a complete one not shown yet starts it.
     public mutating func received(_ snapshot: LiveDictationSnapshot, at now: Date) {
+        guard failedRunID != snapshot.runID else { return }
         if let runID, runID != snapshot.runID { clear() }
         guard snapshot.complete else { return }
         if let shown, shown.runID == snapshot.runID, shown.version >= snapshot.version { return }
@@ -39,16 +42,23 @@ public struct CleanupIndicator: Sendable, Equatable {
         clear()
     }
 
-    /// The bound ran out.
-    public mutating func expire(now: Date) {
-        guard let since, now.timeIntervalSince(since) >= Self.limit else { return }
+    /// A delivery failure is terminal for this take; polling its snapshot cannot restart the spinner.
+    public mutating func failed(runID: String) {
+        guard self.runID == runID else { return }
         clear()
+        failedRunID = runID
     }
 
-    public mutating func clear() { runID = nil; since = nil; completeVersion = nil }
+    /// The bound ran out.
+    public mutating func expire(now: Date) {
+        guard let since, let runID, now.timeIntervalSince(since) >= Self.limit else { return }
+        failed(runID: runID)
+    }
+
+    public mutating func clear() { runID = nil; since = nil; completeVersion = nil; failedRunID = nil }
 
     public static func == (a: Self, b: Self) -> Bool {
         a.runID == b.runID && a.since == b.since && a.completeVersion == b.completeVersion
-            && a.shown?.runID == b.shown?.runID && a.shown?.version == b.shown?.version
+            && a.failedRunID == b.failedRunID && a.shown?.runID == b.shown?.runID && a.shown?.version == b.shown?.version
     }
 }

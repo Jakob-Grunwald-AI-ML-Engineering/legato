@@ -51,3 +51,32 @@ import Testing
         #expect(!indicator.isActive, "no cleanup came")
     }
 }
+
+@Suite struct CleanupDeliveryStatusTests {
+    @Test func completedCleanupWaitsAsApplyingAndFailureCannotRestartFromPolling() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let snapshot = LiveDictationSnapshot(runID: "take", version: 2,
+            segments: [.init(id: 0, text: "Clean words.", cleaned: true, final: true)], complete: true)
+        var indicator = CleanupIndicator()
+        indicator.stopped(runID: "take", at: now)
+        #expect(indicator.isActive && !indicator.isApplying)
+        indicator.received(snapshot, at: now)
+        #expect(indicator.isApplying)
+        indicator.failed(runID: "take")
+        indicator.received(snapshot, at: now.addingTimeInterval(1))
+        #expect(!indicator.isActive && !indicator.isApplying)
+        indicator.stopped(runID: "next", at: now.addingTimeInterval(2))
+        #expect(indicator.isActive && !indicator.isApplying)
+    }
+
+    @Test func aDeliveryDeadlineIsTerminalForThatTake() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let snapshot = LiveDictationSnapshot(runID: "take", version: 2,
+            segments: [.init(id: 0, text: "Clean words.", cleaned: true, final: true)], complete: true)
+        var indicator = CleanupIndicator()
+        indicator.received(snapshot, at: now)
+        indicator.expire(now: now.addingTimeInterval(CleanupIndicator.limit))
+        indicator.received(snapshot, at: now.addingTimeInterval(CleanupIndicator.limit + 1))
+        #expect(!indicator.isActive)
+    }
+}

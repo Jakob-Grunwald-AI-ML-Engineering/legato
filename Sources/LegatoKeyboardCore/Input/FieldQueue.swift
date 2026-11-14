@@ -152,16 +152,19 @@ public struct FieldQueue: Sendable {
         public var keysWaitForTake: Bool
         /// Adapter settlement floor for optimistic insert/delete reports; independent of typewriter pacing.
         public var editConfirmationMs: Double
+        /// Automatic deletes must outlive optimistic proxy echoes before another destructive step.
+        public var deleteConfirmationMs: Double
         /// The adapter can supply a bounded, self-verifying cursor read on request.
         public var canReadAround: Bool
         /// Production speech delivery keeps backward revisions behind the incoming speaking head.
         public var prioritizeSpeech: Bool
         public init(animated: Bool = true, movesByCharacters: Bool = false, capitalization: AutoCapitalizationType = .none,
                     keysWaitForTake: Bool = true, editConfirmationMs: Double = FieldQueue.charMs, canReadAround: Bool = false,
-                    prioritizeSpeech: Bool = false) {
+                    prioritizeSpeech: Bool = false, deleteConfirmationMs: Double = FieldQueue.charMs) {
             self.animated = animated; self.movesByCharacters = movesByCharacters; self.capitalization = capitalization
             self.keysWaitForTake = keysWaitForTake
             self.editConfirmationMs = editConfirmationMs
+            self.deleteConfirmationMs = deleteConfirmationMs
             self.canReadAround = canReadAround
             self.prioritizeSpeech = prioritizeSpeech
         }
@@ -464,7 +467,10 @@ public struct FieldQueue: Sendable {
     private var recovery = FieldRecovery()
     private var recoveryGeneration = UUID().uuidString
     public private(set) var recoveryRevision: UInt64 = 0
-    public private(set) var recoveryRequest: FieldRecovery.Request?
+    private var recoveryWaitMs = 0.0
+    public private(set) var recoveryRequest: FieldRecovery.Request? {
+        didSet { if recoveryRequest?.id != oldValue?.id { recoveryWaitMs = 0 } }
+    }
     public private(set) var speechRevision: UInt64 = 0
     /// Positive ambiguity in the known model remains relevant even when the proxy exposes just one nearby copy.
     /// A model's absence of a match makes no claim about unobserved text elsewhere in the field.
@@ -791,6 +797,13 @@ public struct FieldQueue: Sendable {
         guard !ownsRead else { return .wait }
         coordinator.advance(elapsedMs)
         stepElapsedMs = elapsedMs
+        if let request = recoveryRequest {
+            recoveryWaitMs += max(0, elapsedMs)
+            // The adapter normally answers. An orphaned or superseded read must still terminate.
+            if recoveryWaitMs >= 2 * FieldRecovery.budgetMs + Self.confirmLimitMs, inFlight == nil {
+                completeRecovery(request, report: nil, restored: false)
+            }
+        }
         sinceSendMs += elapsedMs
         if userLane.isEmpty {
             keyHeldMs = 0; keyTypedByMs = 0; keyCutWord = false
@@ -1924,8 +1937,14 @@ public struct FieldQueue: Sendable {
                                _ apply: (inout FieldQueue) -> Void = { _ in }) -> Action {
         let isCursorMove: Bool
         if case .move = op { isCursorMove = true } else { isCursorMove = false }
+        let editSettle: Double
+        if case .deleteBackward = op, lane != .user {
+            editSettle = max(config.editConfirmationMs, config.deleteConfirmationMs)
+        } else {
+            editSettle = config.editConfirmationMs
+        }
         guard coordinator.begin(isCursorMove ? .move : .edit,
-                                settleMs: anywhere ? Self.transitMs : isCursorMove ? Self.moveSettleMs : config.editConfirmationMs,
+                                settleMs: anywhere ? Self.transitMs : isCursorMove ? Self.moveSettleMs : editSettle,
                                 transitMs: Self.transitMs) else { return .wait }
         let pre = ModelState(text: text, cursor: cursor, userCursor: userCursor, selection: selection, spans: spans)
         if let moveTo { cursor = moveTo } else { apply(&self) }
