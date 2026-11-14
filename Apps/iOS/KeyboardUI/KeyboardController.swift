@@ -202,11 +202,12 @@ final class KeyboardController {
     /// the dictation status (`dictationStatus`); nil when there is nothing to say.
     var statusText: String? {
         liveRecoveryNotice ?? hint ?? instructionPresentation?.text ?? meetingNotice ?? takeStatus
-            ?? (cleanup.isActive ? Self.cleaningUp : nil) ?? dictatingStatus ?? dictationStatus
+            ?? (cleanup.isActive ? (cleanup.isApplying ? Self.applyingEdits : Self.cleaningUp) : nil) ?? dictatingStatus ?? dictationStatus
     }
     static let cleaningUp = "Cleaning up…"
+    static let applyingEdits = "Applying edits…"
     /// The row says the take's cleanup is pending or still landing: it shows a spinner too.
-    var isCleaningUp: Bool { statusText == Self.cleaningUp }
+    var isCleaningUp: Bool { statusText == Self.cleaningUp || statusText == Self.applyingEdits }
 
     /// From a live take's stop until its cleanup landed in the field (`CleanupIndicator`).
     private(set) var cleanup = CleanupIndicator()
@@ -222,7 +223,15 @@ final class KeyboardController {
             cleanupExpiry = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(CleanupIndicator.limit))
                 guard !Task.isCancelled else { return }
-                self?.updateCleanup { $0.expire(now: Date()) }
+                guard let self, let runID = self.cleanup.runID else { return }
+                self.updateCleanup { $0.expire(now: Date()) }
+                if !self.cleanup.isActive {
+                    self.queue.cancelRun(runID)
+                    self.handle(self.queue.drainEvents())
+                    self.liveRecoveryDismissed = false
+                    self.liveRecoveryNotice = "Edits couldn't finish. Check Legato's History for the take."
+                    self.syncRowTakeover()
+                }
             }
         }
         if !next.isActive { cleanupExpiry?.cancel(); cleanupExpiry = nil }
@@ -765,6 +774,7 @@ final class KeyboardController {
         queue.config.movesByCharacters = charactersField != nil && charactersField == id
         queue.config.capitalization = autocapitalization
         queue.config.canReadAround = true
+        queue.config.deleteConfirmationMs = FieldQueue.transitMs
         queue.config.prioritizeSpeech = true
     }
 
@@ -854,6 +864,9 @@ final class KeyboardController {
         }
         if let open = queue.openRegion { sessionSpan.track(runID: open.runID, anchor: open.anchor, region: open.text) }
         startTickerIfNeeded()
+        // A recovery request may replace the one a running task captured while homing.
+        // Schedule from pending state as well as its one-shot event.
+        beginQueueRecovery()
     }
 
     /// What the queue reports: acknowledgements, drops and the live run's progress go to their owners.
@@ -914,11 +927,14 @@ final class KeyboardController {
                 trace?("queue dropped reason=\(drop.reason.rawValue) kind=\(drop.kind?.rawValue ?? "live")")
                 if let completion = editCompletions.removeValue(forKey: drop.id) { completion(event) }
                 else if drop.id == enqueuedHostEditID { enqueuedHostEditID = nil; hostEditLanded(drop.id, applied: false) }
-                else if drop.runID != nil, drop.reason == .unplaceable {
+                else if drop.reason == .unplaceable, drop.runID != nil || drop.id.hasPrefix("stray:") {
+                    if let runID = drop.runID { updateCleanup { $0.failed(runID: runID) } }
                     // Dictated words the field could not take: the take is in History. Text the user edited or deleted
                     // themselves (or an instruction rewrote) is no drop worth telling.
                     liveRecoveryDismissed = false
-                    liveRecoveryNotice = "Some dictated words didn't fit. The take is in Legato's History."
+                    liveRecoveryNotice = drop.runID == nil
+                        ? "Couldn't safely finish the interrupted edit."
+                        : "Some edits couldn't finish. Check Legato's History for the take."
                     syncRowTakeover()
                 }
             case .liveApplied(let runID, let version, let complete):
@@ -1248,13 +1264,17 @@ final class KeyboardController {
     /// A mismatch gets one bounded look around, under the queue's own cursor lease. Reading is separate from
     /// changing: only shared policy may turn its evidence into new minimal edits after restoration was verified.
     private func beginQueueRecovery() {
-        guard recoveryTask == nil, let request = queue.recoveryRequest else { return }
+        guard recoveryTask == nil, isVisible, !isTornDown, let request = queue.recoveryRequest else { return }
         let taskID = UUID(), fieldID = document.documentID
         recoveryTaskID = taskID
         recoveryTask = Task { [weak self] in
             guard let self else { return }
             defer {
-                if self.recoveryTaskID == taskID { self.recoveryTask = nil; self.recoveryTaskID = nil }
+                if self.recoveryTaskID == taskID {
+                    self.recoveryTask = nil; self.recoveryTaskID = nil
+                    // A newer request may have replaced this task's request during pauseQueue.
+                    self.beginQueueRecovery()
+                }
             }
             guard let lease = await self.pauseQueue() else {
                 self.queue.completeRecovery(request, report: nil, restored: false)
