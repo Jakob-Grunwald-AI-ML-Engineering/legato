@@ -187,6 +187,11 @@ import UIKit
             guard !command.args.isEmpty else { throw Usage.invalid }
             return KeyboardHarnessModel.shared.setDocument(command.args.joined(separator: " "))
         }
+        // A key of the in-app keyboard, pressed as the user would: `harness-key <character>|space|delete|return`.
+        harness.register("harness-key") { command in
+            guard command.args.count == 1, let key = command.args.first, !key.isEmpty else { throw Usage.invalid }
+            return KeyboardHarnessModel.shared.pressKey(key)
+        }
         // A tap in the field: the cursor goes to this UTF-16 offset.
         harness.register("harness-cursor") { command in
             guard command.args.count == 1, let offset = Int(command.args[0]), offset >= 0 else { throw Usage.invalid }
