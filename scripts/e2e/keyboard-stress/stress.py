@@ -341,7 +341,12 @@ class Sim:
         raise RuntimeError("cannot find the app's container: is the build installed?")
 
     def tap_key(self, ident: str) -> None:
-        r = self.run(["axe", "tap", "--id", ident, "--udid", self.udid], 30)
+        # The keyboard's accessibility tree is now and then caught mid-redraw (part of the keys missing): try again.
+        for attempt in range(6):
+            r = self.run(["axe", "tap", "--id", ident, "--udid", self.udid], 30)
+            if r.returncode == 0 or "No accessibility element matched" not in r.stdout + r.stderr:
+                break
+            time.sleep(0.15)
         if r.returncode != 0:
             raise RuntimeError(f"axe tap {ident} failed: {(r.stdout + r.stderr).strip()[:200]}")
 
@@ -624,6 +629,10 @@ def check(res: Result, args) -> None:
             res.cleaned = "raw"
             if not res.dropped:
                 res.failures.append(("5", "cleanup never landed (raw transcript in the field) and the journal shows no `dropped`"))
+        elif cursor_inputs and res.dropped:
+            # The user moved the caret during the take: Legato edits nothing of it from then on (no swap), keeps it
+            # as typed and says so (`dropped`: the cleaned take is in History).
+            res.cleaned = "kept"
         else:
             res.cleaned = "wrong"
             res.failures.append(("3", ("(caret moved) " if cursor_moves else "") + "field != cleaned text: " + short_diff(expected, text)))
@@ -637,7 +646,11 @@ def check(res: Result, args) -> None:
             want, have = typed_keys.count(c), text.lower().count(c)
             if have != want:
                 res.failures.append(("4", f"user key {c!r}: typed {want}, field has {have}"))
-        first = inputs[0] if inputs else None
+        # A key the keyboard got before it typed anything of the take (its first words not heard yet) is text the take
+        # follows, like text typed before the mic: the take's own edits do not come after it.
+        first_live = next((i for i, e in enumerate(entries) if e.get("kind") == "sent" and e.get("lane") == "live"), None)
+        during = [i for i in inputs if first_live is not None and i > first_live]
+        first = during[0] if during else None
         if first is not None:
             stop = next((i for i, e in enumerate(entries) if e.get("kind") == "live" and e.get("snapshot", {}).get("complete")), len(entries))
             bad = []
