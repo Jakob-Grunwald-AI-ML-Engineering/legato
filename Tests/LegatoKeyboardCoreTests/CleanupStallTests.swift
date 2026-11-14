@@ -24,6 +24,61 @@ import Testing
         #expect(deleted <= 5)
     }
 
+    private func interruptedCleanup(seed: UInt64) -> QueueRig {
+        let prefix = "Keep this note. "
+        let raw = "the meeting starts soon"
+        var field = FakeField(prefix)
+        field.hostDelays = true
+        field.rng = SeededGenerator(seed: seed)
+        var rig = QueueRig(field, config: .init(animated: true, deleteConfirmationMs: FieldQueue.transitMs))
+        rig.queue.enqueue(snap(1, raw))
+        let rawLanded = rig.drain()
+        #expect(rawLanded)
+        rig.queue.enqueue(snap(2, raw.capitalized, complete: true))
+        var sawIssuedInsert = false
+        for _ in 0..<500 {
+            let count = rig.sent.count
+            rig.tick()
+            if rig.sent.count > count, rig.sent.last?.op == .insert("S") {
+                sawIssuedInsert = true
+                break
+            }
+        }
+        #expect(sawIssuedInsert)
+        rig.field.tap(at: 9)
+        rig.queue.paused = true
+        rig.run(ms: 400)
+        // A bounded recovery read may restore BEFORE the stray character, as in native Safari.
+        rig.field.tap(at: 9)
+        rig.run(ms: 250)
+        rig.queue.paused = false
+        return rig
+    }
+
+    @Test(arguments: [UInt64(7), 19, 42])
+    func aTapAndRecoveryReadOnTheOtherSideOfAnIssuedInsertPreserveTheUnrelatedPrefix(seed: UInt64) {
+        var rig = interruptedCleanup(seed: seed)
+        let finished = rig.drain()
+        #expect(finished)
+        #expect(rig.field.string.hasPrefix("Keep this note. "))
+        #expect(!rig.field.string.hasPrefix("Keep thisS"))
+        #expect(!rig.field.deletions.contains { $0.origin == .initial && $0.by != .outside })
+    }
+
+    @Test func missingOwnershipWindowsReleaseWaitingTypingWithAnExplicitUnresolvedFailure() {
+        var rig = interruptedCleanup(seed: 7)
+        rig.field.window = 0
+        let requested = rig.clockMs
+        rig.queue.enqueue(.insert("Q"))
+        rig.run(ms: 3_000)
+        let key = rig.sent.first { $0.ms >= requested && $0.op == .insert("Q") }
+        #expect(key != nil)
+        #expect((key?.ms ?? .infinity) - requested <= FieldQueue.userBoundMs + FieldQueue.transitMs + rig.tickMs)
+        #expect(rig.drops.contains { $0.id.hasPrefix("stray:") && $0.reason == .unplaceable })
+        #expect(!rig.field.deletions.contains { $0.origin == .initial && $0.by != .outside })
+        #expect(rig.queue.isIdle)
+    }
+
     private func waitingQueue() -> FieldQueue {
         var queue = FieldQueue(config: .init(animated: false, canReadAround: true))
         _ = queue.step(report: .init(before: "Another paragraph. "), elapsedMs: 0)

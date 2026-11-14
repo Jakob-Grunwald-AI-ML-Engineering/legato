@@ -927,12 +927,14 @@ final class KeyboardController {
                 trace?("queue dropped reason=\(drop.reason.rawValue) kind=\(drop.kind?.rawValue ?? "live")")
                 if let completion = editCompletions.removeValue(forKey: drop.id) { completion(event) }
                 else if drop.id == enqueuedHostEditID { enqueuedHostEditID = nil; hostEditLanded(drop.id, applied: false) }
-                else if let runID = drop.runID, drop.reason == .unplaceable {
-                    updateCleanup { $0.failed(runID: runID) }
+                else if drop.reason == .unplaceable, drop.runID != nil || drop.id.hasPrefix("stray:") {
+                    if let runID = drop.runID { updateCleanup { $0.failed(runID: runID) } }
                     // Dictated words the field could not take: the take is in History. Text the user edited or deleted
                     // themselves (or an instruction rewrote) is no drop worth telling.
                     liveRecoveryDismissed = false
-                    liveRecoveryNotice = "Some edits couldn't finish. Check Legato's History for the take."
+                    liveRecoveryNotice = drop.runID == nil
+                        ? "Couldn't safely finish the interrupted edit."
+                        : "Some edits couldn't finish. Check Legato's History for the take."
                     syncRowTakeover()
                 }
             case .liveApplied(let runID, let version, let complete):

@@ -605,9 +605,17 @@ public struct FieldQueue: Sendable {
     /// The ops sent lately (within the confirm window): any of them may have landed where the user tapped meanwhile.
     private var recentSends: [Sent] = []
     private var tapRace: (sends: [Sent], ageMs: Double)?
-    /// Characters of the keyboard's own that landed where the user tapped: they come out before anything else.
-    private var strayChars = 0
-    private var strayLane = Lane.live
+    /// A proved misplaced insertion, anchored by the unchanged text around it. A read or resync may
+    /// move the caret to either side; a character count alone never authorizes compensating deletes.
+    private struct StrayInsertion: Sendable, Equatable {
+        var text: String
+        var before: String
+        var after: String
+        var lane: Lane
+        var runID: String?
+        var elapsedMs = 0.0
+    }
+    private var strayInsertion: StrayInsertion?
     private var lastSendConfirmed = true
     private var lastSentOp: ShadowOp?
     /// How far the last paced insert went past its pace (the tick's overshoot), counted toward the next.
@@ -632,7 +640,7 @@ public struct FieldQueue: Sendable {
     public var isSpeaking: Bool { runs.contains { !$0.stopped && !$0.complete } }
 
     public var isIdle: Bool {
-        recoveryRequest == nil && inFlight == nil && unit == nil && userLane.isEmpty
+        recoveryRequest == nil && strayInsertion == nil && tapRace == nil && inFlight == nil && unit == nil && userLane.isEmpty
             && (editLane.isEmpty || config.prioritizeSpeech && isSpeaking)
             && (!revealDue || config.prioritizeSpeech && isSpeaking) && !runs.contains(where: { runNeedsWork($0) })
     }
@@ -804,7 +812,14 @@ public struct FieldQueue: Sendable {
                 completeRecovery(request, report: nil, restored: false)
             }
         }
+        if !paused, var stray = strayInsertion {
+            stray.elapsedMs += max(0, elapsedMs)
+            strayInsertion = stray
+            let limit = userLane.isEmpty ? Self.confirmLimitMs : Self.userBoundMs
+            if stray.elapsedMs >= limit { refuseStrayInsertion() }
+        }
         sinceSendMs += elapsedMs
+
         if userLane.isEmpty {
             keyHeldMs = 0; keyTypedByMs = 0; keyCutWord = false
         } else {
@@ -981,14 +996,24 @@ public struct FieldQueue: Sendable {
             return .wait
         }
         // User input first; a running unit gives the caret back first.
-        if strayChars > 0, selection == 0 {
-            // The keyboard's own text that landed where the user tapped comes out first (the caret is right after it).
-            let count = strayChars
-            strayChars = 0
+        if let stray = strayInsertion, selection == 0 {
             abortUnit()
-            return send(.deleteBackward(count), lane: strayLane) { q in
-                q.removeRange(q.cursor - count, q.cursor, owner: -1)
-                q.userCursor = q.cursor
+            let places = FieldMatch.positions(in: text, reportedBefore: stray.before + stray.text, reportedAfter: stray.after)
+            guard places.count == 1, let end = places.first, end >= stray.text.count,
+                  String(text[(end - stray.text.count)..<end]) == stray.text else {
+                // The ownership evidence no longer locates the inserted text. Never undo at today's caret.
+                refuseStrayInsertion()
+                return .wait
+            }
+            guard let report = lastReport, consistent(report) else { return .wait }
+            if cursor != end { return send(.move(units(to: end)), lane: stray.lane, moveTo: end) }
+            // Independent readback must show the owned characters immediately before the settled caret.
+            guard report.before.hasSuffix(stray.text),
+                  FieldMatch.confirms(expectedBefore: stray.before + stray.text, expectedAfter: stray.after,
+                                      reportedBefore: report.before, reportedAfter: report.after) else { return .wait }
+            strayInsertion = nil
+            return send(.deleteBackward(stray.text.count), lane: stray.lane) { q in
+                q.removeRange(end - stray.text.count, end, owner: -1)
             }
         }
         if !userLane.isEmpty {
@@ -999,6 +1024,9 @@ public struct FieldQueue: Sendable {
             if keysWait, let action = flushBeforeKeys() { return action }
             if let action = nextUser() { return action }
         }
+        // A tap can redirect an already-issued OS write. Reconcile its landing before any
+        // further automated jump/edit, rather than racing a second operation against that write.
+        if tapRace != nil { return .wait }
         if quietAfterMove {
             // Ops sent before the tap may still be landing where the user tapped: nothing of the keyboard's own
             // goes until the field holds still and shows what the model expects.
@@ -2427,7 +2455,7 @@ public struct FieldQueue: Sendable {
 
     /// The last inserts that were on their way at the tap (one or several of one lane) show right before the tapped
     /// caret: they landed there, not where they were sent for. The model takes them there (and back out where they were
-    /// meant to go). The user's own keys stay; the keyboard's own text comes out again (`strayChars`), and its region
+    /// meant to go). The user's own keys stay; the keyboard's own text comes out again (`strayInsertion`), and its region
     /// makes that change again where it belongs.
     private mutating func tapRaceLanded(_ report: Report) -> Bool {
         guard let race = tapRace, report.selected == nil, let last = race.sends.last else { return false }
@@ -2444,12 +2472,29 @@ public struct FieldQueue: Sendable {
             restore(sent.pre)
             cursor = p; userCursor = p; selection = 0
             insertAtCursor(Array(key), owner: -1)
-            if last.lane == .user { userCursor = cursor } else { userCursor = p; strayChars = key.count; strayLane = last.lane }
+            if last.lane == .user { userCursor = cursor } else {
+                userCursor = p
+                strayInsertion = StrayInsertion(text: key,
+                    before: String(sent.pre.text[max(0, p - Self.relocateChars)..<p]),
+                    after: String(sent.pre.text[p..<min(sent.pre.text.count, p + Self.relocateChars)]), lane: last.lane,
+                    runID: last.lane == .live ? runs.last?.runID : nil)
+            }
             tapRace = nil
             lagging = []
             return true
         }
         return false
+    }
+
+    /// Never keep typing captive to missing ownership evidence. An uncertain repair is a failed delivery,
+    /// not permission to delete at a new caret or to continue the interrupted take's automatic edits.
+    private mutating func refuseStrayInsertion() {
+        guard let stray = strayInsertion else { return }
+        strayInsertion = nil
+        if let runID = stray.runID { cancelRun(runID) }
+        events.append(.resync(.recoveryRefused))
+        events.append(.dropped(Drop(id: "stray:" + UUID().uuidString, runID: stray.runID, kind: nil,
+                                    reason: .unplaceable, text: stray.text, partial: nil)))
     }
 
     /// The delete that was on its way at the tap landed there: the report shows the text before it with the characters
