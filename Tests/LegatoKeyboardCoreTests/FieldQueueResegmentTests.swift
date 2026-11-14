@@ -15,6 +15,15 @@ import Testing
         text.lowercased().split { !($0.isLetter || $0.isNumber) }.filter { $0 == word }.count
     }
 
+    /// A revision that still waits (an earlier word changed) is published again, its end the same: the punctuation after
+    /// the last delivered word is delivered once (UAT stress: "some..", "larder.....").
+    @Test func aRepeatedRevisionDeliversItsEndOnce() {
+        var speech = FieldQueue.SpeechDelivery()
+        speech.update(Array("hollow basket teapot more three"))
+        for _ in 0..<3 { speech.update(Array("hollow basket biscuit more three some.")) }
+        #expect(String(speech.delivered) == "hollow basket teapot more three some.")
+    }
+
     private var provisional: [[LiveSegment]] {
         [
             [seg(0, "Fine,")],

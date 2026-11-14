@@ -1489,7 +1489,14 @@ public struct FieldQueue: Sendable {
             guard let at = matches[a.count - 1] else { return nil }
             let recent = max(0, a.count - 4)..<(a.count - 1)
             guard recent.filter({ matches[$0] != nil }).count >= min(2, recent.count) else { return nil }
-            return new[at].end
+            // What stands after the last word in the delivered text is delivered too, where the revision has it as well
+            // ("some." delivered, "some." again): it is not typed a second time.
+            var end = new[at].end
+            for c in delivered[last.end...] {
+                guard end < text.count, text[end] == c else { break }
+                end += 1
+            }
+            return end
         }
     }
 
