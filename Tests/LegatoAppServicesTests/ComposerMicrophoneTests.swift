@@ -125,3 +125,18 @@ private actor MicrophoneAdmissionGate {
     #expect(session.isArmed)
     await session.releaseMicrophone()
 }
+
+/// The retained microphone policy from the retired composition test: foreground capture continues,
+/// while backgrounding releases it when retention is disabled.
+@MainActor @Test func microphoneBackgroundOptOutKeepsForegroundTakeThenReleasesCapture() async throws {
+    let mic = GateMicrophone()
+    let host = MicrophoneHost(microphone: mic, activateAudioSession: {})
+    await host.arm()
+    #expect(await host.holdWarmInput())
+    host.setRoute(.dictation)
+    await host.setKeepMicrophoneActive(false)
+    #expect(host.isListening && host.isArmed)
+    await host.prepareForBackground()
+    #expect(!host.isListening && !host.isArmed)
+    #expect(await mic.stops > 0)
+}

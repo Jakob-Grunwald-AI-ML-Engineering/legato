@@ -125,4 +125,3 @@ private struct HeldRig {
         #expect(r.log.count("deactivate") == 1 && !r.inner.isActive)
     }
 }
-

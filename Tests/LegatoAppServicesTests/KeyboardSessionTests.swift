@@ -281,6 +281,7 @@ import LegatoSoniox
 }
 
 actor GateMicrophone: AudioSource {
+    var stops = 0
     var routes = 0
     var starts = 0
     private var continuation: AsyncStream<AudioChunk>.Continuation?
@@ -292,7 +293,7 @@ actor GateMicrophone: AudioSource {
     }
     func emit(sample: Float = 0.1) { continuation?.yield(AudioChunk(samples: Array(repeating: sample, count: 320), format: .init(sampleRate: 16000, channelCount: 1))) }
     func detach() async { continuation?.finish(); continuation = nil }
-    func stop() async { continuation?.finish(); continuation = nil }
+    func stop() async { stops += 1; continuation?.finish(); continuation = nil }
 }
 
 final class SocketBox: Sendable {

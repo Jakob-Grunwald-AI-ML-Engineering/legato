@@ -9,7 +9,7 @@ import LegatoComposerDoc
 import Observation
 import UIKit
 
-/// The retained host shell. Composer participants replace this placeholder in later legs.
+/// Owns iOS dictation, microphone admission, meetings and their app presentation.
 @MainActor @Observable
 final class AppController {
     enum ToggleOutcome: Sendable, Equatable {
@@ -26,7 +26,7 @@ final class AppController {
     private let holdActivity: HoldActivityPresenter
     let meetings: IOSMeetingController
     var notice: String {
-        if meetings.isActive { return "Meeting recording. Stop the meeting to use dictation; your draft is kept." }
+        if meetings.isActive { return "Meeting recording. Stop the meeting to use dictation." }
         return microphone.error ?? (microphone.microphoneRecovering ? "Reconnecting microphone…" : microphone.status.capitalized)
     }
     var historyRevision = 0
@@ -136,12 +136,15 @@ final class AppController {
         }
         guard !meetings.isActive else { return .failed("Stop the meeting before dictating.") }
         if keyboardSession.route != .idle { await keyboardSession.closeGate(); return .stopped(nil) }
-        if keyboardSession.isOpen, microphone.isArmed {
+        if !microphone.isArmed {
+            guard UIApplication.shared.applicationState == .active else { return .needsForeground(.backgroundStartRefused) }
+            await readyMicrophone()
+            guard microphone.isArmed else { return .failed(microphone.error ?? "Microphone could not start.") }
+        }
+        if keyboardSession.isOpen {
             return await keyboardSession.openGate() ? .started : .failed(keyboardSession.dictationNotice ?? "Dictation could not start.")
         }
-        guard UIApplication.shared.applicationState == .active || microphone.isArmed else { return .needsForeground(.backgroundStartRefused) }
-        await readyMicrophone()
-        return microphone.isArmed ? .started : .failed(microphone.error ?? "Microphone could not start.")
+        return .started
     }
     func copy(_ text: String) { UIPasteboard.general.string = text }
     func recentEntries(limit: Int = 100) async -> [DictationEntry] { (try? await history.recent(limit: limit)) ?? [] }

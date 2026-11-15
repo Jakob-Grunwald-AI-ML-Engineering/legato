@@ -183,7 +183,7 @@ import LegatoCore
     private func invalidateMicrophoneAdmission() {
         microphoneEpoch = UUID()
         microphonePreparation?.task.cancel(); microphonePreparation = nil
-        
+
         microphoneMonitor?.cancel(); microphoneMonitor = nil
         microphoneRecovering = false
     }
