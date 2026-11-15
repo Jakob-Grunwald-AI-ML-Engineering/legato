@@ -3,7 +3,7 @@ import SwiftUI
 import UIKit
 
 /// The ABC surface, which dictates into the target field: the word row (live words while dictating), the tool row
-/// (undo, redo, the magic key and the dictation mic) and the native key grid, at the pre-offshoot
+/// (the magic key, the dictation mic, undo, redo) and the native key grid, at the pre-offshoot
 /// height (`KeyboardHeights.height`). Reuses the original keyboard's touch surface, repeat-delete, cursor pan,
 /// alternates and field traits. Geometry: `KeyboardMetrics.swift`.
 struct TypingFallbackView: View {
@@ -34,8 +34,7 @@ struct TypingFallbackView: View {
                     WordRowView(controller: controller, slots: WordRowLayout.visibleSlots(width: Double(g.wordRowFrame.width)))
                         .accessibilityIdentifier("typing.predictions")
                 }
-                place(g.hotkeyFrame(buttons: Self.toolKeys)) { toolKeys }
-                place(g.micFrame(buttons: Self.toolKeys)) { MicKey(controller: controller) }
+                place(g.toolRowFrame) { toolKeys(gap: g.gap) }
             }
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
             .onAppear { controller.wordRow.contextChanged() }
@@ -48,14 +47,13 @@ struct TypingFallbackView: View {
         }
     }
 
-    /// Undo, redo and the magic key; the mic is the fourth key of the row.
-    private static let toolKeys = 3
-
-    private var toolKeys: some View {
-        HStack(spacing: 6) {
+    /// Left to right: the magic key, the dictation mic, undo, redo; four equal keys.
+    private func toolKeys(gap: CGFloat) -> some View {
+        HStack(spacing: gap) {
+            MagicKey(controller: controller)
+            MicKey(controller: controller)
             key("Undo", symbol: "arrow.uturn.backward", id: "keyboard.hotkey.undo", enabled: controller.canUndo, action: controller.undo)
             key("Redo", symbol: "arrow.uturn.forward", id: "keyboard.hotkey.redo", enabled: controller.canRedo, action: controller.redo)
-            MagicKey(controller: controller)
         }
     }
 

@@ -101,20 +101,10 @@ struct KeyGeometry {
     // MARK: Prediction and tool rows
 
     var pillSize: CGSize { CGSize(width: 81, height: keyHeight) }
-    func toolWidth(buttons: Int) -> CGFloat {
-        (size.width - 2 * marginX - CGFloat(buttons) * gap) / CGFloat(buttons + 1)
-    }
-
-    func micFrame(buttons: Int) -> CGRect {
-        let width = toolWidth(buttons: buttons)
-        return CGRect(x: size.width - marginX - width,
-                      y: CGFloat(KeyboardHeights.toolRowTop(landscape: landscape)) * vScale,
-                      width: width, height: keyHeight)
-    }
-
-    func hotkeyFrame(buttons: Int) -> CGRect {
-        let mic = micFrame(buttons: buttons)
-        return CGRect(x: marginX, y: mic.minY, width: mic.minX - gap - marginX, height: keyHeight)
+    /// The tool row between the side margins; its keys split it equally, `gap` apart.
+    var toolRowFrame: CGRect {
+        CGRect(x: marginX, y: CGFloat(KeyboardHeights.toolRowTop(landscape: landscape)) * vScale,
+               width: size.width - 2 * marginX, height: keyHeight)
     }
 
     var wordRowFrame: CGRect {
