@@ -8,7 +8,7 @@ import LegatoAudio
 @MainActor @Test func composerReusesArmedMicrophoneWithoutReactivatingBackgroundSession() async throws {
     let mic = ComposerTestMicrophone()
     var activations = 0
-    let session = ComposerSession(microphone: mic, activateAudioSession: {
+    let session = MicrophoneHost(microphone: mic, activateAudioSession: {
         activations += 1
         if activations > 1 { throw NSError(domain: NSOSStatusErrorDomain, code: 560_557_684) }
     })
@@ -23,7 +23,7 @@ import LegatoAudio
 
 @MainActor @Test func composerDisabledBackgroundLeaseReleasesIdleMicAndStopsOnBackground() async throws {
     let mic = ComposerTestMicrophone()
-    let session = ComposerSession(microphone: mic, activateAudioSession: {})
+    let session = MicrophoneHost(microphone: mic, activateAudioSession: {})
     await session.arm()
     await session.setKeepMicrophoneActive(false)
     #expect(!session.isArmed)
@@ -35,7 +35,7 @@ import LegatoAudio
 }
 
 @MainActor @Test func composerBackgroundRefusalGivesForegroundRecoveryInstruction() async {
-    let session = ComposerSession(microphone: ComposerTestMicrophone(), activateAudioSession: {
+    let session = MicrophoneHost(microphone: ComposerTestMicrophone(), activateAudioSession: {
         throw NSError(domain: NSOSStatusErrorDomain, code: 560_557_684)
     })
     await session.arm()
@@ -45,25 +45,10 @@ import LegatoAudio
     #expect(!session.isArmed)
 }
 
-@MainActor @Test func composerBackgroundOptOutStopsNewInputWithoutDiscardingDraft() async throws {
-    let mic = ComposerTestMicrophone()
-    let session = ComposerSession(microphone: mic, activateAudioSession: {})
-    await session.arm()
-    let room = Room()
-    await session.receive(try await room.publish(channel: .session, participant: .ui, payload: .object(["state": .string("listening")])))
-    await session.setKeepMicrophoneActive(false)
-    #expect(session.isListening, "Disabling retention must not interrupt a foreground session")
-    await session.prepareForBackground()
-    #expect(!session.isListening)
-    #expect(!session.isArmed)
-    #expect(session.status == "trailing", "Background opt-out drains instead of discarding agent work")
-    #expect(await mic.stops > 0)
-}
-
 @MainActor @Test func composerLostArmedRouteRebuildsWithoutReconfiguringBackgroundSession() async throws {
     let mic = ComposerTestMicrophone()
     var activations = 0
-    let session = ComposerSession(microphone: mic, activateAudioSession: { activations += 1 })
+    let session = MicrophoneHost(microphone: mic, activateAudioSession: { activations += 1 })
     await session.arm()
     await mic.loseRoute()
     _ = try await session.prepareMicrophoneStream()
@@ -89,7 +74,7 @@ private actor ComposerTestMicrophone: AudioSource {
 
 @MainActor @Test func transientStartupCancellationRetriesWithoutShowingSwiftError() async {
     let mic = TransientMicrophone()
-    let session = ComposerSession(microphone: mic, activateAudioSession: {})
+    let session = MicrophoneHost(microphone: mic, activateAudioSession: {})
     await session.arm()
     #expect(session.isArmed)
     #expect(!session.microphoneRecovering)
@@ -101,7 +86,7 @@ private actor ComposerTestMicrophone: AudioSource {
 @MainActor @Test func releasingDuringAdmissionCannotRearmOrPublishAnError() async throws {
     let admission = MicrophoneAdmissionGate()
     let mic = TransientMicrophone()
-    let session = ComposerSession(microphone: mic, activateAudioSession: { await admission.wait() })
+    let session = MicrophoneHost(microphone: mic, activateAudioSession: { await admission.wait() })
     let arm = Task { await session.arm() }
     while !(await admission.waiting) { await Task.yield() }
     await session.releaseMicrophone()
@@ -132,7 +117,7 @@ private actor MicrophoneAdmissionGate {
 
 @MainActor @Test func repeatedArmDoesNotStealTheCurrentAudioStream() async {
     let mic = ComposerTestMicrophone()
-    let session = ComposerSession(microphone: mic, activateAudioSession: {})
+    let session = MicrophoneHost(microphone: mic, activateAudioSession: {})
     await session.arm()
     await session.arm()
     #expect(await mic.starts == 1)

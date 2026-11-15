@@ -7,10 +7,10 @@ struct ToggleDictationControl: ControlWidget {
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(kind: "de.gruenwald.legato.toggle-dictation") {
             ControlWidgetButton(action: ToggleDictationIntent()) {
-                Label("Dictate", systemImage: "mic.fill")
+                Label("Record", systemImage: "mic.fill")
             }
         }
-        .displayName("Legato dictation")
-        .description("Starts dictation, or stops it when already running.")
+        .displayName("Legato recording")
+        .description("Uses the Meeting or Dictation action chosen in Legato Settings.")
     }
 }

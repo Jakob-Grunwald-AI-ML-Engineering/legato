@@ -1,5 +1,7 @@
 # Direct field editing
 
+Dictation and Magic deliver through the field queues below. The retired composition document, draft Insert workflow and whole-field refine path are no longer producers; iOS uses lightweight dictation status alongside the separate typed-line, live-dictation and instruction links.
+
 ## iOS: one queue owns the field
 
 Every write the keyboard makes goes through one queue per field (`FieldQueue`). That includes the user's keys, deletes, space-bar cursor pans, word-row and undo edits, live dictation and Soniox revisions, typed lines, the host's text, cleanup and Magic. Nothing else inserts, deletes or moves the cursor, so the queue is the only source of truth for where the cursor is. The one exception is a cursor walk that reads the field for an instruction. It runs only while the queue is paused with nothing in flight and the caret back at the user's cursor.

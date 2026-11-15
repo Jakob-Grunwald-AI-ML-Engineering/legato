@@ -28,13 +28,14 @@ final class IOSMeetingController {
     var selectedID: UUID?
     var openRequests = 0
     private let keyboard: KeyboardSession
-    private let composer: ComposerSession
+    private let microphone: MicrophoneHost
     private let publishReservation: (Bool) -> Void
     @ObservationIgnored private var input: AutomaticInputSource?
     @ObservationIgnored private var lastInputDiagnostics: AutomaticInputDiagnostics?
     @ObservationIgnored private var snapshots: Task<Void, Never>?
     @ObservationIgnored private var ticker: Task<Void, Never>?
     @ObservationIgnored private var searchTask: Task<Void, Never>?
+    @ObservationIgnored private var preparation: Task<Void, Never>?
     @ObservationIgnored private var startTask: Task<Void, Never>?
     @ObservationIgnored private var stopRequested = false
     @ObservationIgnored private var interruptedStart = false
@@ -43,9 +44,9 @@ final class IOSMeetingController {
     @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
     @ObservationIgnored private var backgroundTasks: [UUID: UIBackgroundTaskIdentifier] = [:]
 
-    init(root: URL, vocabularyURL: URL?, keyboard: KeyboardSession, composer: ComposerSession,
+    init(root: URL, vocabularyURL: URL?, keyboard: KeyboardSession, microphone: MicrophoneHost,
          publishReservation: @escaping (Bool) -> Void) {
-        self.keyboard = keyboard; self.composer = composer; self.publishReservation = publishReservation
+        self.keyboard = keyboard; self.microphone = microphone; self.publishReservation = publishReservation
         #if LEGATO_INTERNAL
         let fixture = IOSMeetingFixture.current
         fixtureMode = fixture != nil
@@ -69,7 +70,7 @@ final class IOSMeetingController {
                 await self.stop(interrupted: true)
             }
         }
-        Task {
+        preparation = Task {
             // Dismiss stale activities from a process that died. Their Stop intent cannot restart capture.
             for stale in Activity<MeetingAttributes>.activities { await stale.end(nil, dismissalPolicy: .immediate) }
             await services.recover()
@@ -77,6 +78,8 @@ final class IOSMeetingController {
             ready = true
         }
     }
+
+    func prepare() async { await preparation?.value }
 
     private static func production(root: URL, vocabularyURL: URL?) -> MeetingServices {
         MeetingServices(store: MeetingStore(root: root), settings: MeetingSettings(defaults: AppGroup.defaults),
@@ -98,12 +101,12 @@ final class IOSMeetingController {
             notice = "Finish or cancel voice profile setup first."; return
         }
         guard ready, phase == .idle, UIApplication.shared.applicationState == .active else { return }
-        guard !composer.isListening, composer.status != "starting", keyboard.route == .idle else {
+        guard !microphone.isListening, microphone.status != "starting", keyboard.route == .idle else {
             notice = "Stop dictation before starting a meeting. Your draft will be kept."; return
         }
         phase = .starting; notice = nil; stopRequested = false; interruptedStart = false
         // Reserve synchronously before any await: keyboard requests cannot slip into the handoff.
-        composer.microphoneReserved = true
+        microphone.microphoneReserved = true
         publishReservation(true)
         startTask = Task {
             await keyboard.suspendForMeeting()
@@ -168,16 +171,7 @@ final class IOSMeetingController {
     /// The system permission alert can return before UIKit has finished reactivating the app.
     /// Wait only for that transition; backgrounding and explicit Stop always cancel admission.
     private func foregroundAfterPermission() async throws {
-        let deadline = ContinuousClock.now + .seconds(3)
-        while UIApplication.shared.applicationState == .inactive, ContinuousClock.now < deadline {
-            try Task.checkCancellation()
-            guard !stopRequested else { throw CancellationError() }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        guard !stopRequested, UIApplication.shared.applicationState != .background else { throw CancellationError() }
-        guard UIApplication.shared.applicationState == .active else {
-            throw NSError(domain: "Meeting", code: 2, userInfo: [NSLocalizedDescriptionKey: "Return to Legato and tap Record again. Recording has not started."])
-        }
+        try await IOSForegroundAdmission.waitUntilActive(cancelled: { self.stopRequested })
     }
 
     /// Stops only. A stop during permission/start wins once that operation returns.
@@ -272,7 +266,7 @@ final class IOSMeetingController {
     func diagnostics() async -> [String: Any] {
         var value: [String: Any] = ["phase": String(describing: phase), "appState": UIApplication.shared.applicationState.rawValue,
             "fixture": fixtureMode, "elapsed": elapsed, "activeMeetingID": (services.activeMeetingID?.uuidString as Any?) ?? NSNull(),
-            "microphoneReserved": composer.microphoneReserved, "keyboardSuspended": keyboard.meetingSuspended,
+            "microphoneReserved": microphone.microphoneReserved, "keyboardSuspended": keyboard.meetingSuspended,
             "activityState": activityID.flatMap { id in Activity<MeetingAttributes>.activities.first(where: { $0.id == id }).map { String(describing: $0.activityState) } } ?? "none"]
         if let diagnostics = input?.diagnostics ?? lastInputDiagnostics,
            let data = try? JSONEncoder().encode(diagnostics) {

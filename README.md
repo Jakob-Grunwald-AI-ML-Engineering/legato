@@ -5,9 +5,11 @@ Open-source, on-device dictation and meeting notes for iOS and macOS.
 - Streaming transcription, fully offline (Apple SpeechTranscriber, FluidAudio: Parakeet / Nemotron)
 - Mixed German/English in one utterance
 - Background audio keeps playing while you dictate
-- iOS: Action Button / Control Center trigger, custom keyboard without the app hop
+- iOS: Action Button / Control Center trigger, dictation and Magic in the custom keyboard; companion tabs for History, Meetings and Settings
 - macOS: menu-bar app, [direct-to-field dictation and Magic](docs/mac-field-magic.md), global shortcuts, meeting notes (Soniox transcript with speakers from system audio + mic, Claude summary) in a Meetings window with client/project filing
 - Summaries: Apple Foundation Models, local MLX, or Claude (opt-in)
+
+The dedicated composition editor has been retired. See [Dictation, Magic and the iOS companion](docs/composer.md) for current runtime ownership and historical-session recovery.
 
 Licensed under Apache-2.0.
 

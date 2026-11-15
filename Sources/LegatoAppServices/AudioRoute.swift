@@ -1,7 +1,8 @@
 import Foundation
+import LegatoKeyboardCore
 
 /// Where microphone audio goes while a keyboard session holds the warm input. `idle` discards it.
-public enum AudioRoute: String, Sendable, Codable, CaseIterable { case idle, dictation, agent }
+public typealias AudioRoute = LegatoKeyboardCore.AudioRoute
 
 /// The mic key's gate. The surface on screen decides which route a tap opens; a tap never opens
 /// another surface's route, and leaving a surface closes whatever was open.
@@ -17,7 +18,7 @@ public struct AudioGate: Sendable, Equatable {
     /// The route a tap opens on the current surface; never `idle`.
     public private(set) var surface: AudioRoute
     public private(set) var route = AudioRoute.idle
-    public init(surface: AudioRoute = .agent) { self.surface = surface == .idle ? .agent : surface }
+    public init(surface: AudioRoute = .dictation) { self.surface = surface == .idle ? .dictation : surface }
 
     /// A tap opens the current surface's route, or finalizes the open one.
     public mutating func tap() -> Action {
@@ -33,7 +34,7 @@ public struct AudioGate: Sendable, Equatable {
     }
     /// A different surface: abandon the open route (if any) and re-route later taps.
     public mutating func show(_ value: AudioRoute) -> Action? {
-        let next = value == .idle ? AudioRoute.agent : value
+        let next = value == .idle ? AudioRoute.dictation : value
         guard next != surface else { return nil }
         surface = next
         return abandon()

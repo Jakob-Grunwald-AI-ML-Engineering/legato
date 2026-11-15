@@ -29,19 +29,18 @@ import LegatoComposerDoc
     #expect(values == Array(1...100).map(Int64.init))
 }
 
-@Test func documentCapabilityAndSegmentAppend() async throws {
+@Test func segmentsPublishWordsWithoutDocumentMutation() async throws {
     let room = Room()
-    await #expect(throws: RoomError.documentChannelRequiresCapability) {
+    await #expect(throws: RoomError.retiredDocumentChannel) {
         try await room.publish(channel: .docOps, participant: .document, payload: .null)
     }
-    _ = try await room.publishSegment(words: [Word(text: "Hello")])
-    _ = try await room.publishSegment(words: [Word(text: "world")])
-    let snapshot = await room.documentSnapshot
-    #expect(snapshot.lines.map(\.text) == ["Hello", "world"])
-    var other = ComposerDocument()
-    _ = try other.appendSegment(words: [Word(text: "owned")])
-    let published = try await room.publishDocument(other.snapshotPublication)
-    #expect(published.channel == .docSnapshot)
+    let stream = await room.subscribe(participant: .logger, channels: [.asrSegment])
+    var events = stream.makeAsyncIterator()
+    let words = [Word(text: "Hello", confidence: 0.42, language: "en")]
+    let sent = try await room.publishSegment(words: words)
+    #expect(await events.next() == sent)
+    #expect(try sent.payload["words"]?.decode([Word].self) == words)
+    await #expect(throws: RoomError.invalidSegment) { try await room.publishSegment(words: []) }
 }
 
 @Test func slowUISubscriberDropsOnlyItsOwnOldEvents() async throws {
@@ -55,28 +54,26 @@ import LegatoComposerDoc
     for number in 1...200 { #expect(await agentIterator.next()?.seq == Int64(number)) }
 }
 
-@Test func lifecycleDrainsThenFinalPassAndImmediateInsert() async throws {
+@Test func lifecycleDrainsTranscriptionThenFinishes() async throws {
     let room = Room(clock: { 55 })
-    await room.setAgentBusy(.liveAgent, busy: true)
-    try await room.micOff()
+    try await room.micOff(transcriberDraining: true)
     #expect(await room.state == .trailing)
-    await room.setAgentBusy(.liveAgent, busy: false)
+    await room.finishTranscription()
     #expect(await room.state == .finalPass)
-    let snapshot = try await room.insert()
-    #expect(snapshot.text == "")
+    try await room.finishFinalPass()
     #expect(await room.state == .done)
-    await #expect(throws: RoomError.sessionEnded) {
-        try await room.publishSegment(words: [Word(text: "late")])
-    }
+    await #expect(throws: RoomError.sessionEnded) { try await room.publishSegment(words: [Word(text: "late")]) }
 }
 
-@Test func interceptedSegmentDoesNotAppendUntilReleased() async throws {
+@Test func interceptedSegmentMustBeAcknowledgedBeforeDrainCompletes() async throws {
     let room = Room(segmentRouting: .intercepted)
-    let words = [Word(text: "normal")]
-    let event = try await room.publishSegment(words: words)
-    #expect(await room.documentSnapshot.lines.isEmpty)
-    _ = try await room.appendSegment(words: words, causedBy: event.id)
-    #expect(await room.documentSnapshot.text == "normal")
+    let event = try await room.publishSegment(words: [Word(text: "normal")])
+    try await room.micOff()
+    #expect(await room.state == .trailing)
+    await room.resolveSegment("unknown")
+    #expect(await room.state == .trailing)
+    await room.resolveSegment(event.id)
+    #expect(await room.state == .finalPass)
 }
 
 @Test func loggerRoundTripsAndRedactsSecrets() async throws {
@@ -91,8 +88,7 @@ import LegatoComposerDoc
     let all = try String(contentsOf: log.roomURL, encoding: .utf8)
     #expect(!all.contains("private-test-key"))
     #expect(all.contains("[REDACTED]"))
-    _ = try await room.insert()
-    #expect(FileManager.default.fileExists(atPath: log.finalURL.path))
+    try await room.cancel()
     #expect(log.audioURL.lastPathComponent == "audio.m4a")
 }
 
@@ -110,17 +106,14 @@ import LegatoComposerDoc
     #expect(raw.contains("asr.started") && !raw.contains("partial") && !raw.contains("asr.raw-tail"))
 }
 
-@Test func finalPassWaitsForTranscriberAndAgents() async throws {
+@Test func finalPassWaitsForTranscriber() async throws {
     let room = Room(clock: { 77 })
     let events = await room.subscribe(participant: .logger, channels: [.session])
     var iterator = events.makeAsyncIterator()
     try await room.micOff(transcriberDraining: true)
     #expect(await room.state == .trailing)
     _ = try await room.publishSegment(words: [Word(text: "last")])
-    await room.setAgentBusy(.liveAgent, busy: true)
     await room.finishTranscription()
-    #expect(await room.state == .trailing)
-    await room.setAgentBusy(.liveAgent, busy: false)
     #expect(await room.state == .finalPass)
     try await room.finishFinalPass()
     #expect(await room.state == .done)
@@ -132,25 +125,19 @@ import LegatoComposerDoc
     #expect(names == [.string("mic.off"), .string("final.pass"), .string("cancel.work"), .string("done")])
 }
 
-@Test func cancelAndInsertWorkAtEveryState() async throws {
+@Test func cancelWorksAtEveryState() async throws {
     for desiredState in [SessionState.listening, .trailing, .finalPass, .done] {
-        for cancel in [false, true] {
-            let room = Room()
-            _ = try await room.publishSegment(words: [Word(text: "current")])
-            if desiredState == .trailing {
-                await room.setAgentBusy(.liveAgent, busy: true)
-                try await room.micOff()
-            } else if desiredState == .finalPass || desiredState == .done {
-                try await room.micOff()
-                if desiredState == .done { try await room.finishFinalPass() }
-            }
-            #expect(await room.state == desiredState)
-            if cancel { try await room.cancel() } else { #expect(try await room.insert().text == "current") }
-            #expect(await room.state == .done)
-            await #expect(throws: RoomError.sessionEnded) {
-                try await room.applyDocument([], origin: .agent, versions: [:])
-            }
+        let room = Room()
+        _ = try await room.publishSegment(words: [Word(text: "current")])
+        if desiredState == .trailing { try await room.micOff(transcriberDraining: true) }
+        else if desiredState == .finalPass || desiredState == .done {
+            try await room.micOff()
+            if desiredState == .done { try await room.finishFinalPass() }
         }
+        #expect(await room.state == desiredState)
+        try await room.cancel()
+        #expect(await room.state == .done)
+        await #expect(throws: RoomError.sessionEnded) { try await room.publishSegment(words: [Word(text: "late")]) }
     }
 }
 
@@ -165,41 +152,12 @@ import LegatoComposerDoc
             payload: .object(["nested": .array([.null, .bool(true), .number(0.42), .string("ä\nline")])]))
     }
     _ = try await room.publishSegment(words: [Word(text: "content")])
-    _ = try await room.insert()
+    try await room.cancel()
     var delivered: [Envelope] = []
     for await event in stream { delivered.append(event) }
     let raw = try String(contentsOf: log.roomURL, encoding: .utf8)
     let replayed = try raw.split(separator: "\n").map { try JSONDecoder().decode(Envelope.self, from: Data($0.utf8)) }
     #expect(replayed == delivered)
-    #expect(Set(replayed.map(\.channel)) == Set(Channel.allCases))
-    #expect(try String(contentsOf: log.finalURL, encoding: .utf8) == "content")
+    #expect(Set(replayed.map(\.channel)) == Set(Channel.allCases.filter { !$0.isDocument }))
     #expect(await room.loggingError == nil)
-}
-
-@Test func resumableRoomPreservesDocumentSubscriptionsAndFinalLogAcrossTakes() async throws {
-    let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: root) }
-    let log = try SessionLog(rootDirectory: root)
-    let room = Room(log: log, resumable: true)
-    let events = await room.subscribe(participant: .logger, channels: [.session])
-    _ = try await room.publishSegment(words: [Word(text: "First draft")])
-    try await room.micOff(transcriberDraining: true)
-    await #expect(throws: RoomError.invalidLifecycleTransition) { try await room.resume() }
-    #expect(await room.state == .trailing)
-    await room.finishTranscription()
-    try await room.finishFinalPass()
-    #expect(await room.state == .paused)
-    #expect(try String(contentsOf: log.finalURL, encoding: .utf8) == "First draft")
-    try await room.resume()
-    _ = try await room.publishSegment(words: [Word(text: "Continue editing")])
-    #expect(await room.documentSnapshot.lines.map(\.text) == ["First draft", "Continue editing"])
-    try await room.micOff()
-    try await room.finishFinalPass()
-    #expect(await room.state == .paused)
-    try await room.cancel()
-    var names: [String] = []
-    for await event in events {
-        if case .string(let name) = event.payload["event"] { names.append(name) }
-    }
-    #expect(names == ["mic.off", "final.pass", "paused", "mic.on", "mic.off", "final.pass", "paused", "cancel.work", "done"])
 }

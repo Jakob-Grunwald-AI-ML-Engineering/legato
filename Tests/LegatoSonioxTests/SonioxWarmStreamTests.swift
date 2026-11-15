@@ -38,6 +38,8 @@ import LegatoRoom
 
     @Test func closeDropsUnsegmentedWordsWithoutErrorOrFinalize() async throws {
         let room = Room()
+        let segments = await room.subscribe(participant: .logger, channels: [.asrSegment])
+        var speech = segments.makeAsyncIterator()
         let socket = FakeSocket()
         let tails = await room.subscribe(participant: .ui, channels: [.asrTail], buffering: .unbounded)
         var tail = tails.makeAsyncIterator()
@@ -47,7 +49,8 @@ import LegatoRoom
         _ = await tail.next()
         await client.close()
         #expect(await tail.next()?.payload["text"] == .string(""))
-        #expect(await room.documentSnapshot.lines.isEmpty, "Half-spoken words are dropped, never committed")
+        try await room.cancel()
+        #expect(await speech.next() == nil, "Half-spoken words are dropped, never committed")
         let sent = await socket.sent()
         #expect(!sent.contains(.text(#"{"type":"finalize"}"#)))
         #expect(!(await client.isStreaming))

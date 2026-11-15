@@ -243,7 +243,7 @@ if [ "$mode" = release-check ]; then
     harness-state harness-visible harness-hidden harness-retry harness-insert-raw harness-clear harness-key
     harness.edit LegatoHarnessAppearance LegatoHarnessKeyboardType LegatoHarnessReturn LegatoHarnessGlobe LegatoHarnessLandscape
     LegatoHarnessAutocap LegatoHarnessSuggestions LegatoHarnessSystemField kbd.geometry kbd.view systemfield.document
-    harness-mic-hop-retry dictation-debug-stream dictation-debug-mode dictation-debug-model dictation-debug-replay dictation-debug-replay-cancel dictation-debug-fail-take composer-debug-seed
+    harness-mic-hop-retry dictation-debug-stream dictation-debug-mode dictation-debug-model dictation-debug-replay dictation-debug-replay-cancel dictation-debug-fail-take microphone-arm
 )
   scan() { # every Mach-O file in the bundle: the app, the widget and keyboard extensions, frameworks
     find "$1" -type f -print0 | xargs -0 file | grep -F 'Mach-O' | cut -d: -f1 | tr '\n' '\0' | xargs -0 strings -a
@@ -388,7 +388,7 @@ begin() {
 await_host_open() {
   local deadline=$((SECONDS + 10)) value=""
   while :; do
-    bridge composer-state && value="$(jq -r '.keyboardSession.open' <<< "$REPLY")"
+    bridge keyboard-state && value="$(jq -r '.open' <<< "$REPLY")"
     [ "$value" = "$1" ] && return 0
     [ "$SECONDS" -lt "$deadline" ] || return 1
     sleep 0.3

@@ -16,22 +16,7 @@ struct DictationAttributes: ActivityAttributes {
             case held
             /// Capture is being restored; the microphone is not ready yet.
             case recovering
-            /// The text waits for the Insert and Copy buttons.
-            case result
-            /// Terminal: the text was typed into the Legato keyboard's field.
-            case inserted
-            /// An Insert found no Legato keyboard acting; the buttons stay.
-            case insertFailed
-            /// Terminal: the text is on the clipboard.
-            case copied
-            /// Terminal: tapping the activity opens the app, which copies the last transcript.
-            case tapToCopy
-            /// Terminal: nothing usable came out of the run.
-            case failed
-
             var isRunning: Bool { self == .starting || self == .listening }
-            /// The activity shows the Insert and Copy buttons (mirrors `DictationPhase.offersResultActions`).
-            var offersResultActions: Bool { self == .result || self == .insertFailed }
         }
 
         var startedAt: Date
@@ -41,5 +26,4 @@ struct DictationAttributes: ActivityAttributes {
     }
 
     /// Opened by tapping an activity in the `tapToCopy` phase; the app copies the last transcript.
-    static let copyLastURL = URL(string: "\(RuntimeIdentity.current.urlScheme)://copy-last")!
 }

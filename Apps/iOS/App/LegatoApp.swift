@@ -3,7 +3,7 @@ import SwiftUI
 
 struct LegatoShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
-        AppShortcut(intent: ToggleDictationIntent(), phrases: ["Toggle \(.applicationName) dictation", "Dictate with \(.applicationName)"], shortTitle: "Toggle dictation", systemImageName: "mic.fill")
+        AppShortcut(intent: ToggleDictationIntent(), phrases: ["Toggle \(.applicationName) dictation", "Dictate with \(.applicationName)"], shortTitle: "Toggle recording", systemImageName: "mic.fill")
     }
 }
 
@@ -23,7 +23,7 @@ struct LegatoApp: App {
                 #endif
             }.onOpenURL { url in Task { await controller.handle(url) } }
                 .onChange(of: scenePhase) { _, phase in
-                    if phase == .background { Task { await controller.composer.prepareForBackground() } }
+                    if phase == .background { Task { await controller.prepareForBackground() } }
                 }
         }
     }

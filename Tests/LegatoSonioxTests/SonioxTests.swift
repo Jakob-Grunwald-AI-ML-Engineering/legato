@@ -24,6 +24,8 @@ import LegatoRoom
     @Test func muteGatesAudioButKeepsSocketAndDrainsProviderBacklog() async throws {
         let room = Room()
         let socket = FakeSocket()
+        let segments = await room.subscribe(participant: .logger, channels: [.asrSegment])
+        var speech = segments.makeAsyncIterator()
         let tails = await room.subscribe(participant: .ui, channels: [.asrTail], buffering: .unbounded)
         var events = tails.makeAsyncIterator()
         let client = SonioxClient(room: room, socket: socket, keepaliveInterval: .milliseconds(5))
@@ -35,7 +37,7 @@ import LegatoRoom
         try await client.sendAudio(muted)
         await socket.feed(#"{"tokens":[{"text":"Backlog","is_final":true},{"text":"<fin>","is_final":true}]}"#)
         _ = await events.next()
-        #expect(await room.documentSnapshot.lines.first?.text == "Backlog")
+        #expect(try await segmentText(speech.next()) == "Backlog")
         #expect(await room.state == .listening)
         try await Task.sleep(for: .milliseconds(25))
         #expect(await socket.sent().contains(.text(#"{"type":"keepalive"}"#)))
@@ -47,46 +49,6 @@ import LegatoRoom
         #expect(!sent.contains(.text("")), "Muting cannot send end-of-stream or close the provider")
         await client.cancel()
     }
-    @Test func targetedDraftFlushesLatestPartialOnceAfterPauses() async throws {
-        let room = Room(segmentRouting: .intercepted)
-        try await room.appendSegment(words: [Word(id: "target", text: "Alex")])
-        let line = try #require(await room.documentSnapshot.lines.first)
-        let binder = HintBinder(room: room)
-        await binder.start()
-        let tails = await room.subscribe(participant: .ui, channels: [.asrTail], buffering: .unbounded)
-        var tail = tails.makeAsyncIterator()
-        let hints = await room.subscribe(participant: .logger, channels: [.hint])
-        var hint = hints.makeAsyncIterator()
-        try await binder.tap(lineID: line.id, wordID: "target", timestamp: 100.05)
-        _ = await tail.next() // Clear any general partial text at selection.
-        let client = SonioxClient(room: room, audioOrigin: 100)
-        try await client.startDebug()
-        try await client.injectDebugFrame(#"{"tokens":[{"text":" Replace this name","is_final":false}]}"#)
-        #expect(await tail.next()?.payload["text"] == .string(""))
-        try await client.injectDebugFrame(#"{"tokens":[{"text":"Use Morgan.","is_final":true,"start_ms":100,"end_ms":400}]}"#)
-        #expect(await tail.next()?.payload["text"] == .string(""))
-        #expect(await room.documentSnapshot.text == "Alex")
-        try await client.injectDebugFrame(#"{"tokens":[{"text":"Use the surname too.","is_final":true,"start_ms":450,"end_ms":800}]}"#)
-        #expect(await tail.next()?.payload["text"] == .string(""))
-        #expect(await room.documentSnapshot.text == "Alex")
-        // Both punctuation segments already emptied the segmenter's words array.
-        try await client.injectDebugFrame(#"{"tokens":[{"text":"<end>","is_final":true}]}"#)
-        _ = await tail.next()
-        try await client.injectDebugFrame(#"{"tokens":[{"text":" Make it brief","is_final":false,"start_ms":900,"end_ms":1100}]}"#)
-        _ = await tail.next()
-        #expect(await binder.requestSend(timestamp: 101.2))
-        try await client.finalizeChunk()
-        let event = try #require(await hint.next())
-        #expect(event.payload["text"] == .string("Use Morgan. Use the surname too. Make it brief"))
-        _ = await tail.next()
-        try await client.injectDebugFrame(#"{"tokens":[{"text":"ordinary.","is_final":true,"start_ms":2000,"end_ms":2100}]}"#)
-        _ = await tail.next()
-        #expect(await room.documentSnapshot.text == "Alex", "Speech outside the quote is an instruction, never draft text")
-        #expect(await binder.hasUnsentInstruction)
-        await client.cancel()
-        await binder.stop()
-    }
-
     @Test func silenceAfterPunctuationStillEmitsAnOrderedBoundary() {
         var segmenter = Segmenter()
         _ = segmenter.ingest([.init(text: "First.", isFinal: true, startMs: 0, endMs: 100)])
@@ -174,6 +136,8 @@ import LegatoRoom
     @Test func protocolFinalizationKeepaliveAndErrors() async throws {
         let socket = FakeSocket()
         let room = Room()
+        let segments = await room.subscribe(participant: .logger, channels: [.asrSegment])
+        var speech = segments.makeAsyncIterator()
         let tails = await room.subscribe(participant: .ui, channels: [.asrTail])
         var tailEvents = tails.makeAsyncIterator()
         let client = SonioxClient(room: room, config: SonioxConfig(), socket: socket, keepaliveInterval: .milliseconds(5))
@@ -181,7 +145,7 @@ import LegatoRoom
         await socket.feed("{\"tokens\":[{\"text\":\"speculative\",\"is_final\":false}]}")
         let tail = await tailEvents.next()
         #expect(tail?.payload["text"] == .string("speculative"))
-        #expect(await room.documentSnapshot.lines.isEmpty)
+
         try await Task.sleep(for: .milliseconds(25))
         let finishing = Task { try await client.finish() }
         while !(await socket.sent()).contains(.text("{\"type\":\"finalize\"}")) { await Task.yield() }
@@ -189,6 +153,8 @@ import LegatoRoom
         while !(await socket.sent()).contains(.text("")) { await Task.yield() }
         await socket.feed("{\"finished\":true}")
         try await finishing.value
+        try await room.cancel()
+        #expect(await speech.next() == nil)
         #expect(await socket.sent().contains(.text("{\"type\":\"keepalive\"}")))
         for code in [401, 402, 408, 413, 429] {
             #expect(!SonioxError.provider(code).localizedDescription.isEmpty)

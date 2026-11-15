@@ -338,13 +338,13 @@ private struct UnwritableHistory: HistoryStore {
 
 @MainActor @Suite(.timeLimit(.minutes(1))) struct KeyboardSessionInstructionTests {
     @Test func theMagicToggleRoutesSpeechAwayFromTheFieldAndReleasingItRuns() async throws {
-        let composer = ComposerSession(microphone: GateMicrophone(), activateAudioSession: {})
+        let composer = MicrophoneHost(microphone: GateMicrophone(), activateAudioSession: {})
         await composer.arm()
         let sink = RecordingSink(), sockets = SocketBox()
         let field = FakeField(text: "hey see you at nine", sessionLength: 19)
         let instruction = InstructionSession(runner: FixedRunner(reply: "SCOPE: session\nHey, see you at nine."))
         instruction.field = field
-        let keyboard = KeyboardSession(composer: composer, sink: sink, instruction: instruction, sonioxKey: { "test" },
+        let keyboard = KeyboardSession(microphone: composer, sink: sink, instruction: instruction, sonioxKey: { "test" },
                                        makeSocket: { sockets.make() }, warmConnection: {})
         keyboard.update(visible: true, surface: .dictation)
         await keyboard.settle()

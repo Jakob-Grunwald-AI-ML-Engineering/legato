@@ -26,7 +26,7 @@ public struct DictationDelivery: Sendable, Equatable {
 }
 
 /// Where a take is: collecting lines, cleaning them in one call, or holding them raw after cleanup failed twice.
-public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cleaning, failed }
+public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
 
 /// The host's end of dictation. Per the send setting, either the whole take is held while the user speaks and
 /// cleaned in ONE cleanup-only call (on stop, or after a pause), or (line by line) every finalized line goes

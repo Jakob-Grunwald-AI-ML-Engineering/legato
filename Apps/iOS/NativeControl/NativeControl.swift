@@ -66,8 +66,8 @@ import XCTest
                 app.buttons["Done"].tap()
                 app.navigationBars.buttons.firstMatch.tap()
             }
-            app.tabBars.buttons["Compose"].tap()
-            XCTAssertTrue(app.buttons["Compose"].exists)
+            app.tabBars.buttons["History"].tap()
+            XCTAssertTrue(app.navigationBars["History"].exists)
         case "tree": break
         case "keyboard":
             app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 42, dy: 820)).press(forDuration: 1.2)

@@ -13,7 +13,7 @@ import LegatoCore
 @MainActor final class RouteRecorder {
     var events: [String] = []
     var routeAtTake: AudioRoute?
-    weak var composer: ComposerSession?
+    weak var composer: MicrophoneHost?
     /// A refusing policy still returns normally: refusal is logged by the policy and the take carries on.
     var policy: InputRoutePolicy {
         InputRoutePolicy(
@@ -28,13 +28,13 @@ import LegatoCore
     let sink = RecordingSink()
     let recorder = RouteRecorder()
 
-    private func open(policy: InputRoutePolicy?) async throws -> (ComposerSession, KeyboardSession) {
-        let composer = ComposerSession(microphone: mic, activateAudioSession: {})
+    private func open(policy: InputRoutePolicy?) async throws -> (MicrophoneHost, KeyboardSession) {
+        let composer = MicrophoneHost(microphone: mic, activateAudioSession: {})
         recorder.composer = composer
         if let policy { composer.inputRoute = policy }
         await composer.arm()
         let sockets = self.sockets
-        let keyboard = KeyboardSession(composer: composer, sink: sink, sonioxKey: { "test" },
+        let keyboard = KeyboardSession(microphone: composer, sink: sink, sonioxKey: { "test" },
                                        makeSocket: { sockets.make() }, warmConnection: {})
         keyboard.update(visible: true, surface: .dictation)
         await keyboard.settle()
@@ -68,11 +68,11 @@ import LegatoCore
     }
 
     @Test func aTakeThatCannotStartReturnsToTheIdleInput() async throws {
-        let composer = ComposerSession(microphone: mic, activateAudioSession: {})
+        let composer = MicrophoneHost(microphone: mic, activateAudioSession: {})
         composer.inputRoute = recorder.policy
         await composer.arm()
         let sockets = self.sockets
-        let keyboard = KeyboardSession(composer: composer, sink: sink, sonioxKey: { "" },
+        let keyboard = KeyboardSession(microphone: composer, sink: sink, sonioxKey: { "" },
                                        makeSocket: { sockets.make() }, warmConnection: {})
         keyboard.update(visible: true, surface: .dictation)
         await keyboard.settle()

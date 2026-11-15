@@ -2,30 +2,25 @@ import Foundation
 import LegatoComposerDoc
 
 public enum RoomError: Error, Equatable {
-    case documentChannelRequiresCapability, sessionEnded, invalidSegment, invalidLifecycleTransition
+    case retiredDocumentChannel, sessionEnded, invalidSegment, invalidLifecycleTransition
 }
 
-/// One composition, optionally spanning multiple microphone activations. All envelope assignment and document mutations run on this actor.
+/// Ordered ASR events and transcription draining shared by dictation and meetings.
 public actor Room {
     private var sequence: Int64 = 0
     private var subscribers: [UUID: (Set<Channel>, AsyncStream<Envelope>.Continuation)] = [:]
-    private var document = ComposerDocument()
-    private var provisional: [Int: ProvisionalEdit] = [:]
     private var lifecycle = SessionLifecycle()
     private var transcriberDraining = false
     private var pendingSegments: Set<String> = []
     private let clock: @Sendable () -> Double
     private let log: SessionLog?
     private let segmentRouting: SegmentRouting
-    private let resumable: Bool
-    private let drainOnly: Bool
     private let logsTail: Bool
     public private(set) var loggingError: String?
     public var state: SessionState { lifecycle.state }
-    public var documentSnapshot: DocumentSnapshot { document.snapshot }
-    public init(log: SessionLog? = nil, segmentRouting: SegmentRouting = .automatic, resumable: Bool = false, drainOnly: Bool = false, logsTail: Bool = true,
+    public init(log: SessionLog? = nil, segmentRouting: SegmentRouting = .automatic, logsTail: Bool = true,
                 clock: @escaping @Sendable () -> Double = { ProcessInfo.processInfo.systemUptime }) {
-        self.log = log; self.segmentRouting = segmentRouting; self.resumable = resumable; self.drainOnly = drainOnly; self.logsTail = logsTail; self.clock = clock
+        self.log = log; self.segmentRouting = segmentRouting; self.logsTail = logsTail; self.clock = clock
     }
 
     public func subscribe(participant: Participant, channels: Set<Channel>, buffering: SubscriptionBuffer? = nil) -> AsyncStream<Envelope> {
@@ -48,10 +43,10 @@ public actor Room {
 
     @discardableResult public func publish(channel: Channel, participant: Participant, payload: JSONValue,
         tOrigin: Double? = nil, baseRev: Int? = nil, causedBy: String? = nil) throws -> Envelope {
-        guard !channel.isDocument else { throw RoomError.documentChannelRequiresCapability }
+        guard !channel.isDocument else { throw RoomError.retiredDocumentChannel }
         try requireActive()
-        // In intercepted sessions only the binder publishes the general partial transcript.
-        if channel == .asrTail, participant != .hintBinder, case .intercepted = segmentRouting {
+        // Intercepted ASR consumers receive the provider tail directly.
+        if channel == .asrTail, case .intercepted = segmentRouting {
             return emit(channel: .asrRawTail, participant: participant, payload: payload,
                         tOrigin: tOrigin, baseRev: baseRev, causedBy: causedBy)
         }
@@ -61,26 +56,11 @@ public actor Room {
             }
             let envelope = emit(channel: channel, participant: participant, payload: payload,
                                 tOrigin: tOrigin, baseRev: baseRev, causedBy: causedBy)
-            if segmentRouting == .automatic { _ = try appendSegment(words: words, causedBy: envelope.id) }
-            else { pendingSegments.insert(envelope.id) }
+            if segmentRouting == .intercepted { pendingSegments.insert(envelope.id) }
             return envelope
         }
         return emit(channel: channel, participant: participant, payload: payload,
                     tOrigin: tOrigin, baseRev: baseRev, causedBy: causedBy)
-    }
-
-    /// Operational acknowledgement only: successful Clear/Insert may already have ended
-    /// subscriptions. Retain their terminal result in the owning session log without
-    /// reopening the Room or granting a document mutation capability.
-    public func recordHostAction(stage: String, actionID: String, instructionID: String, action: String,
-                                 sessionToken: String, succeeded: Bool? = nil, message: String? = nil) {
-        guard ["queued", "result"].contains(stage), ["clear_composer", "insert_draft"].contains(action) else { return }
-        var fields: [String: JSONValue] = ["event": .string("host.action." + stage),
-            "actionID": .string(actionID), "instructionID": .string(instructionID),
-            "action": .string(action), "sessionToken": .string(sessionToken)]
-        if let succeeded { fields["succeeded"] = .bool(succeeded) }
-        if let message { fields["message"] = .string(message) }
-        _ = emit(channel: .agentStatus, participant: .ui, payload: .object(fields))
     }
 
     /// Payload: {"words":[Word]}. Extra segment timing/threshold fields may be sent via publish.
@@ -89,100 +69,9 @@ public actor Room {
                     payload: .object(["words": try .encoding(words)]), tOrigin: tOrigin, causedBy: causedBy)
     }
 
-    @discardableResult public func appendSegment(words: [Word], causedBy: String? = nil, resolve: Bool = true) throws -> Transaction {
-        try requireActive()
-        guard !words.isEmpty else { throw RoomError.invalidSegment }
-        let transaction = try document.appendSegment(words: words)
-        publishTransaction(transaction, causedBy: causedBy)
-        if resolve, let causedBy { resolveSegment(causedBy) }
-        return transaction
-    }
-
-    /// A routed hint consumes an ASR segment without appending it to the document.
+    /// A consumer acknowledges a segment after processing it so transcription can drain.
     public func resolveSegment(_ envelopeID: String) {
         guard pendingSegments.remove(envelopeID) != nil else { return }
-        advanceToFinalPass()
-    }
-
-    @discardableResult public func applyDocument(_ ops: [DocOp], origin: TransactionOrigin,
-        versions: [String: Int], groupID: String? = nil, causedBy: String? = nil, idSeed: String? = nil) throws -> Transaction {
-        try requireActive()
-        let transaction = try document.apply(ops, origin: origin, versions: versions, groupID: groupID, idSeed: idSeed)
-        publishTransaction(transaction, causedBy: causedBy)
-        return transaction
-    }
-
-    @discardableResult public func undoDocument(transactionID: String, causedBy: String? = nil) throws -> Transaction {
-        try requireActive()
-        let transaction = try document.undo(transactionID: transactionID)
-        publishTransaction(transaction, causedBy: causedBy)
-        return transaction
-    }
-
-    private func publishTransaction(_ transaction: Transaction, causedBy: String?) {
-        guard let publication = document.publication(for: transaction) else { return }
-        _ = try? publishDocument(publication, causedBy: causedBy)
-        _ = try? publishDocument(document.snapshotPublication, causedBy: causedBy)
-        // The preview rides on top of every authoritative change, so a snapshot never flickers back under it.
-        if !provisional.isEmpty { emitProvisional() }
-    }
-
-    /// A streamed tool call's edit so far, keyed by its content block. Display only: it never touches the
-    /// document, its ids or its versions. Edits that no longer apply (the real call landed, a version moved) are skipped.
-    public struct ProvisionalEdit: Sendable {
-        public var op: DocOp, versions: [String: Int], idSeed: String
-        public init(op: DocOp, versions: [String: Int], idSeed: String) { self.op = op; self.versions = versions; self.idSeed = idSeed }
-    }
-    public func setProvisional(block: Int, _ edit: ProvisionalEdit?) {
-        guard state != .done else { return }
-        if provisional[block] == nil && edit == nil { return }
-        provisional[block] = edit
-        emitProvisional()
-    }
-    /// Drops one block's preview (its authoritative call ran) or, with nil, every preview (turn end, failure, cancel).
-    public func dropProvisional(block: Int? = nil) {
-        guard !provisional.isEmpty else { return }
-        if let block { provisional[block] = nil } else { provisional = [:] }
-        emitProvisional()
-    }
-    public var hasProvisional: Bool { !provisional.isEmpty }
-    /// `agent.status` event `draft.provisional`: the previewed snapshot (at the authoritative revision); `clear` marks the authoritative one.
-    /// Never logged, as it fires many times a second.
-    private func emitProvisional() {
-        let (preview, applied) = renderProvisional()
-        var payload: [String: JSONValue] = ["event": .string("draft.provisional")]
-        if !applied { payload["clear"] = .bool(true) }
-        if let value = try? JSONValue.encoding(preview) { payload["snapshot"] = value }
-        emit(channel: .agentStatus, participant: .liveAgent, payload: .object(payload), logged: false)
-    }
-    /// The draft as shown: the authoritative document with every live preview applied on top.
-    public var draftSnapshot: DocumentSnapshot { renderProvisional().0 }
-    private func renderProvisional() -> (DocumentSnapshot, Bool) {
-        var preview = document, applied = false
-        for key in provisional.keys.sorted() {
-            guard let edit = provisional[key] else { continue }
-            if (try? preview.apply([edit.op], origin: .agent, versions: edit.versions, idSeed: edit.idSeed)) != nil { applied = true }
-        }
-        return (applied ? DocumentSnapshot(revision: document.revision, lines: preview.lines) : document.snapshot, applied)
-    }
-
-    /// A publication can only be minted by ComposerDocument; arbitrary doc payloads are rejected.
-    @discardableResult public func publishDocument(_ publication: DocumentPublication, causedBy: String? = nil) throws -> Envelope {
-        try requireActive()
-        switch publication.event {
-        case .ops(let transaction):
-            return emit(channel: .docOps, participant: .document, payload: try .encoding(transaction),
-                        baseRev: transaction.revision, causedBy: causedBy)
-        case .snapshot(let snapshot):
-            return emit(channel: .docSnapshot, participant: .document, payload: try .encoding(snapshot),
-                        baseRev: snapshot.revision, causedBy: causedBy)
-        }
-    }
-
-    public func setAgentBusy(_ participant: Participant, busy: Bool) {
-        guard participant == .liveAgent || participant == .restructureAgent, state != .done else { return }
-        lifecycle.setBusy(participant, busy: busy)
-        _ = emit(channel: .agentStatus, participant: participant, payload: .object(["busy": .bool(busy)]))
         advanceToFinalPass()
     }
 
@@ -192,7 +81,7 @@ public actor Room {
         guard state == .listening else { return }
         self.transcriberDraining = transcriberDraining
         lifecycle.micOff()
-        sessionEvent("mic.off", fields: ["drainOnly": .bool(drainOnly)])
+        sessionEvent("mic.off")
         advanceToFinalPass()
     }
 
@@ -203,41 +92,21 @@ public actor Room {
 
     private func advanceToFinalPass() {
         guard !transcriberDraining, pendingSegments.isEmpty, lifecycle.beginFinalPassIfReady() else { return }
-        sessionEvent("final.pass", fields: ["drainOnly": .bool(drainOnly)])
+        sessionEvent("final.pass")
     }
 
     public func finishFinalPass() throws {
         try requireActive()
         guard state == .finalPass else { throw RoomError.invalidLifecycleTransition }
-        if resumable {
-            lifecycle.pause()
-            sessionEvent("paused")
-            do { try log?.finish(document.snapshot.text) } catch { loggingError = String(describing: error) }
-        } else { finish(reason: "complete") }
+        finish(reason: "complete")
     }
 
-    /// Resume the same composition after its final pass, retaining all subscribers and history.
-    public func resume() throws {
-        try requireActive()
-        guard resumable, state == .paused else { throw RoomError.invalidLifecycleTransition }
-        lifecycle.resume()
-        sessionEvent("mic.on")
-    }
-
-    /// Returns the current text immediately; cancellation is an event, never an awaited agent task.
-    public func insert() throws -> DocumentSnapshot {
-        let snapshot = document.snapshot
-        if state != .done { finish(reason: "insert") }
-        return snapshot
-    }
     public func cancel() throws { if state != .done { finish(reason: "cancel") } }
 
     private func finish(reason: String) {
-        dropProvisional()
         lifecycle.finish()
         sessionEvent("cancel.work", fields: ["reason": .string(reason)])
         sessionEvent("done", fields: ["reason": .string(reason)])
-        do { try log?.finish(document.snapshot.text) } catch { loggingError = String(describing: error) }
         for (_, continuation) in subscribers.values { continuation.finish() }
         subscribers.removeAll()
     }

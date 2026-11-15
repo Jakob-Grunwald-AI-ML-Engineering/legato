@@ -8,6 +8,8 @@ import LegatoRoom
     @Test func uncertainAndMatchingSpeechReachRoomWithoutWaiting() async throws {
         for score: Float in [0.1, 0.3, 0.5, 0.8] {
             let room = Room(), socket = FakeSocket()
+            let segments = await room.subscribe(participant: .logger, channels: [.asrSegment])
+            var speech = segments.makeAsyncIterator()
             let tails = await room.subscribe(participant: .ui, channels: [.asrTail], buffering: .unbounded)
             var iterator = tails.makeAsyncIterator()
             let client = SonioxClient(room: room, socket: socket, voiceIsolationEnabled: true, voiceMatcher: { _ in score })
@@ -17,7 +19,7 @@ import LegatoRoom
             #expect(await iterator.next()?.payload["text"] == .string(" my words"))
             await socket.feed(#"{"tokens":[{"text":" my words.","is_final":true,"start_ms":100,"end_ms":1000},{"text":"<end>","is_final":true}]}"#)
             _ = await iterator.next()
-            #expect(await room.documentSnapshot.text == "my words.")
+            #expect(try await segmentText(speech.next()) == "my words.")
             #expect(await socket.sent().contains(.binary(audio)))
             await client.close()
         }
@@ -25,6 +27,8 @@ import LegatoRoom
     @Test func offAndMeetingsBypassMatcherAndPreserveUntimedText() async throws {
         for meeting in [false, true] {
             let room = Room(), socket = FakeSocket()
+            let segments = await room.subscribe(participant: .logger, channels: [.asrSegment])
+            var speech = segments.makeAsyncIterator()
             let tails = await room.subscribe(participant: .ui, channels: [.asrTail], buffering: .unbounded)
             var iterator = tails.makeAsyncIterator()
             let client = SonioxClient(room: room, config: SonioxConfig(diarization: meeting), socket: socket,
@@ -32,7 +36,7 @@ import LegatoRoom
             try await client.start(apiKey: "test")
             await socket.feed(#"{"tokens":[{"text":"Everyone.","is_final":true},{"text":"<end>","is_final":true}]}"#)
             _ = await iterator.next()
-            #expect(await room.documentSnapshot.text == "Everyone.")
+            #expect(try await segmentText(speech.next()) == "Everyone.")
             await client.close()
         }
     }
@@ -107,6 +111,8 @@ import LegatoRoom
     }
     @Test func matcherFailureShowsUnavailableAndContinuesDictation() async throws {
         let room = Room(), socket = FakeSocket()
+        let segments = await room.subscribe(participant: .logger, channels: [.asrSegment])
+        var speech = segments.makeAsyncIterator()
         let events = await room.subscribe(participant: .ui, channels: [.session], buffering: .unbounded)
         var iterator = events.makeAsyncIterator()
         let tails = await room.subscribe(participant: .ui, channels: [.asrTail], buffering: .unbounded)
@@ -121,10 +127,10 @@ import LegatoRoom
         }
         #expect(await client.lastFailure == nil)
         #expect(await client.isStreaming)
-        #expect(await room.documentSnapshot.text == "Keep my words.")
+        #expect(try await segmentText(speech.next()) == "Keep my words.")
         await socket.feed(#"{"tokens":[{"text":" Still listening.","is_final":true,"start_ms":1000,"end_ms":1500},{"text":"<end>","is_final":true}]}"#)
         _ = await tail.next()
-        #expect(await room.documentSnapshot.text.contains("Still listening."))
+        #expect(try await segmentText(speech.next()) == "Still listening.")
         await client.close()
     }
 }

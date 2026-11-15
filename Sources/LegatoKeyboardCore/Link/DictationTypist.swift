@@ -9,13 +9,15 @@ import Foundation
 /// - A line starts against the cursor as it is then: it gets a separating space and the sentence capital the
 ///   text before the cursor calls for (`AutoCapitalizer`), so lines after a cursor move land correctly.
 /// - A user edit (`interrupt`) or a context that is not the echo of the typist's own inserts (`OwnEditEcho`, given
-///   `TypewriterReveal.settleLimitMs` to catch up) stops the rest of the current line; what is typed stays and the
+///   `DictationTypist.settleLimitMs` to catch up) stops the rest of the current line; what is typed stays and the
 ///   following lines go in at the new cursor.
 /// - A line is acknowledged once typed or stopped, never typed twice: lines at or below `typedThrough` are ignored.
 /// - A `retracted` line (its streamed text was taken back) is erased: when the field still ends with
 ///   exactly what was typed for it, those characters are deleted (`Step.deletes`); otherwise it is left. Either
 ///   way it is acknowledged.
 public struct DictationTypist: Sendable, Equatable {
+    /// Retained host-context settlement allowance from the original typewriter.
+    public static let settleLimitMs = 250.0
     public struct Step: Sendable, Equatable {
         public var inserts: [String] = []
         /// Characters to delete backward before anything else (the erase of a retracted line).
@@ -139,7 +141,7 @@ public struct DictationTypist: Sendable, Equatable {
             guard var current = active else { break }
             if !OwnEditEcho.isSame(expected: current.expected, reported: contextBefore) {
                 current.waitedMs += elapsedMs
-                if current.waitedMs < TypewriterReveal.settleLimitMs { active = current; return step }
+                if current.waitedMs < DictationTypist.settleLimitMs { active = current; return step }
                 // Not the echo of our own inserts: the user moved on. The rest of this line is dropped.
                 active = nil
                 typedThrough = max(typedThrough, current.seq); step.acknowledged = typedThrough

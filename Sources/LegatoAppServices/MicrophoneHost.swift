@@ -53,7 +53,7 @@ import LegatoCore
     /// Set by the host before handing the microphone to a meeting. Every admission path observes it.
     public var microphoneReserved = false
 
-    /// Release capture and warm streams while keeping the composition, history and writer intact.
+    /// Release capture and warm streams before handing the microphone to a meeting.
     public func suspendMicrophoneForMeeting() async {
         microphoneReserved = true
         invalidateMicrophoneAdmission()
@@ -192,7 +192,7 @@ import LegatoCore
         keepMicrophoneActive = value
         if !value, !isListening { invalidateMicrophoneAdmission(); isArmed = false; await mic.stop(); deactivateMicrophoneSession(); onChange?() }
     }
-    /// Opting out stops new input on backgrounding, preserving the draft and final agent work.
+    /// Opting out stops capture on backgrounding.
     public func prepareForBackground() async {
 
         guard !keepMicrophoneActive else { return }
@@ -228,7 +228,7 @@ import LegatoCore
     func preferTakeInput() async { await inputRoute.preferTake() }
     /// The hold is idle again (hold established, take closed): the built-in mic.
     func preferIdleInput() async { await inputRoute.preferIdle() }
-    /// The gate. Opening `agent` happens through `start`, which begins the take; `idle` only stops routing.
+    /// Buffer capture while a take connection is preparing.
     func beginTakeBuffer(for target: AudioRoute) {
         pendingAudioRoute = target; takeAudioBuffer.removeAll(); takeBufferFailure = nil
     }
@@ -260,7 +260,6 @@ import LegatoCore
             guard let pcm = try? converter.convert(chunk) else { return }
             if routedAudioAt == nil { routedAudioAt = ProcessInfo.processInfo.systemUptime }
             await dictationAudio?(pcm)
-        case .agent: return
         }
     }
     private func warmInputEnded(_ token: UUID) {
@@ -269,7 +268,7 @@ import LegatoCore
         isArmed = false; microphoneRecovering = false
         let wasRouting = route != .idle
         route = .idle
-        if wasRouting, isListening { fail(AutomaticInputError.noPCM) }
+        if wasRouting { fail(AutomaticInputError.noPCM) }
         onChange?()
     }
     func releaseWarmInput() async {
@@ -281,8 +280,7 @@ import LegatoCore
         if isListening { return }
         if isArmed && keepMicrophoneActive { await mic.detach() } else { isArmed = false; await mic.stop(); deactivateMicrophoneSession() }
     }
-    /// The keyboard went away: end the composition (History keeps it), its writer conversation, cleanup
-    /// context and delivered-topic reference, and release the held input.
+    /// The keyboard went away: release its warm input stream.
     func endKeyboardSession() async {
         route = .idle
         await releaseWarmInput()

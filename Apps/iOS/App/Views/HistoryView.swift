@@ -48,6 +48,6 @@ struct HistoryView: View {
         }
         .navigationTitle("History")
         // Reloads on appear and whenever the composer or backfill stores a new revision.
-        .task(id: controller.composer.historyRevision + controller.dictation.historyRevision + controller.keyboardSession.instruction.historyRevision) { entries = await controller.recentEntries() }
+        .task(id: controller.historyRevision + controller.dictation.historyRevision + controller.keyboardSession.instruction.historyRevision) { entries = await controller.recentEntries() }
     }
 }

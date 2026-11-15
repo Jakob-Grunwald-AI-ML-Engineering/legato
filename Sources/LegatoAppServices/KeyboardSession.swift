@@ -9,17 +9,8 @@ import LegatoRoom
 import LegatoSoniox
 import LegatoVocabulary
 
-/// One keyboard appearance on the host. Appearing pre-warms the held microphone input (audio discarded
-/// while the gate is idle), the current surface's Soniox stream and the Claude connection; the microphone
-/// surface also builds its composition (cleanup pipeline and writer). A mic tap only opens the gate.
-/// Disappearing closes everything: composition, writer conversation, cleanup and dictation context.
-///
-/// Surfaces decide routes: typing → `dictation`, whose finalized lines go to a `DictationRouteSink`
-/// through a Room of their own; microphone → `agent`, the existing composition. Dictation audio never
-/// reaches the composition.
-///
-/// On the dictation route the keyboard's magic toggle tags speech (`SpeechModeSink`): dictation goes to the sink,
-/// instruction speech to `instruction`, which runs it when the toggle goes off.
+/// One keyboard appearance owns a pre-warmed ASR connection and a dictation gate.
+/// MicrophoneHost owns capture; the speech-mode switch sends words to dictation or Magic.
 @MainActor @Observable public final class KeyboardSession {
     public private(set) var isOpen = false
     public private(set) var meetingSuspended = false
@@ -71,7 +62,7 @@ import LegatoVocabulary
     @ObservationIgnored private let warmConnection: @Sendable () async -> Void
     @ObservationIgnored private let now: @MainActor () -> Double
     @ObservationIgnored private var gate = AudioGate()
-    @ObservationIgnored private var desired: (visible: Bool, surface: AudioRoute) = (false, .agent)
+    @ObservationIgnored private var desired: (visible: Bool, surface: AudioRoute) = (false, .dictation)
     @ObservationIgnored private var reconciling: Task<Void, Never>?
     /// Presence transitions and gate operations run strictly one after another, in arrival order.
     @ObservationIgnored private var queue: Task<Void, Never>?
@@ -138,7 +129,7 @@ import LegatoVocabulary
     /// The keyboard's presence, read on every host link pass. Transitions run one at a time, in order.
     public func update(visible: Bool, surface: AudioRoute) {
         guard !meetingSuspended else { return }
-        desired = (visible, surface == .idle || surface == .agent ? .dictation : surface)
+        desired = (visible, surface == .idle ? .dictation : surface)
         guard reconciling == nil, visible != isOpen || (visible && desired.surface != gate.surface) else { return }
         reconciling = Task { [weak self] in
             while let self, await self.serial({ await self.reconcileStep() }) {}
@@ -203,7 +194,6 @@ import LegatoVocabulary
 
     private func warm(_ surface: AudioRoute) async {
         switch surface {
-        case .agent: break
         case .dictation:
             openDictation()
             // Cleanup's connection and prompt cache are warm before the first spoken line needs them.
@@ -242,7 +232,6 @@ import LegatoVocabulary
         // Before any chunk routes: the headset's mic for this take (the idle hold prefers the built-in one).
         await microphone.preferTakeInput()
         switch surface {
-        case .agent: return false
         case .dictation:
             // A take of its own: its words never join the previous take's run (which may still be ending).
             modeSink.beginTake()
@@ -283,12 +272,10 @@ import LegatoVocabulary
         routeClosedAt = now()
         switch action {
         case .open: break
-        case .finalize(.agent): microphone.setRoute(.idle)
         case .finalize(.dictation):
             microphone.setRoute(.idle)
             await dictation.finalizeTake()
             finishDictationTake(waitingForWords: true)
-        case .abandon(.agent): microphone.setRoute(.idle)
         case .abandon(.dictation):
             microphone.setRoute(.idle)
             // Drop half-spoken words: close without finalizing. Delivered lines stay with the sink.
@@ -420,7 +407,7 @@ import LegatoVocabulary
         Self.log.info("probe.tap.tail route=\(result.route.rawValue, privacy: .public) warm=\(result.warm ? 1 : 0) idleS=\(result.idleS ?? -1) tapToGateMs=\(result.tapToGateMs) tapToAudioMs=\(result.tapToAudioMs ?? -1) tapToTailMs=\(result.tapToTailMs)")
     }
 
-    var diagnostics: [String: Any] {
+    public var diagnostics: [String: Any] {
         ["open": isOpen, "surface": gate.surface.rawValue, "route": gate.route.rawValue, "speechMode": modeSink.target.rawValue,
          "dictationStreamLive": dictation.isLive, "dictationReconnects": dictation.reconnects,
          "probes": probes.map(\.fields)]
