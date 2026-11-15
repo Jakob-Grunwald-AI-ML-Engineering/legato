@@ -9,3 +9,4 @@ build/
 .claude/worktrees/
 Apps/iOS/Gen/
 Apps/iOS/*.xcodeproj
+__pycache__/
