@@ -250,8 +250,8 @@ final class KeyboardController {
     /// The take's cleanup runs, or failed and holds the raw text: the word row says so.
     private var takeStatus: String? {
         switch takePhase {
-        case "cleaning": return Self.cleaningUp
-        case "failed": return "Couldn't clean up. Text held."
+        case .cleaning: return Self.cleaningUp
+        case .failed: return "Couldn't clean up. Text held."
         default: return nil
         }
     }
