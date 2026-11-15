@@ -10,113 +10,48 @@ import Testing
         body(suite, defaults)
     }
 
-    @Test func retainedKeyboardsRefreshTheLatestGlobalChoiceOnAppearance() {
-        withDefaults { suite, defaults in
-            var first = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: defaults))
-            var retained = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: UserDefaults(suiteName: suite)!))
-            first.toggle()
-            retained.setStripEnabled(true)
-            #expect(retained.mode == .full)
-            retained.setStripEnabled(true)
-            #expect(retained.mode == .full)
-            retained.toggle()
-            first.setStripEnabled(true)
-            #expect(first.mode == .strip)
+    @Test func aFirstLaunchShowsTheFullKeyboardWithACollapseControl() {
+        withDefaults { _, defaults in
+            let expansion = KeyboardExpansion(persistence: .init(defaults: defaults))
+            #expect(expansion.mode == .full)
+            #expect(expansion.control == .collapse)
         }
+        #expect(KeyboardExpansion().mode == .full)
     }
 
-    @Test func expandedChoiceSurvivesRecreatingTheKeyboardAndDefaults() {
-        withDefaults { suite, defaults in
-            var first = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: defaults))
-            first.toggle()
-            let recreated = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: UserDefaults(suiteName: suite)!))
-            #expect(recreated.mode == .full)
-            #expect(recreated.control == .collapse)
-        }
-    }
-
-    @Test func collapsedChoiceSurvivesRecreatingTheKeyboardAndDefaults() {
-        withDefaults { suite, defaults in
-            var first = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: defaults))
-            first.toggle()
-            var expanded = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: UserDefaults(suiteName: suite)!))
-            #expect(expanded.mode == .full)
-            expanded.toggle()
-            let recreated = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: UserDefaults(suiteName: suite)!))
-            #expect(recreated.mode == .strip)
-            #expect(recreated.control == .expand)
-        }
-    }
-
-    @Test func disabledCompactSettingOverridesAndResetsTheRememberedChoice() {
-        withDefaults { suite, defaults in
-            var first = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: defaults))
-            first.toggle()
-            #expect(KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: defaults)).mode == .full)
-            let disabled = KeyboardExpansion(stripEnabled: false, persistence: .init(defaults: UserDefaults(suiteName: suite)!))
-            #expect(disabled.mode == .full)
-            #expect(disabled.control == nil)
-            let enabled = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: UserDefaults(suiteName: suite)!))
-            #expect(enabled.mode == .strip)
-        }
-    }
-
-    @Test func changingTheSettingPersistsTheCollapsedReset() {
-        withDefaults { suite, defaults in
-            var first = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: defaults))
-            first.toggle()
-            var expanded = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: UserDefaults(suiteName: suite)!))
-            #expect(expanded.mode == .full)
-            expanded.setStripEnabled(false)
-            expanded.setStripEnabled(true)
-            let recreated = KeyboardExpansion(stripEnabled: true, persistence: .init(defaults: UserDefaults(suiteName: suite)!))
-            #expect(recreated.mode == .strip)
-        }
-    }
-
-    @Test func withoutTheStripSettingTheKeyboardIsFullAndHasNoToggle() {
-        let expansion = KeyboardExpansion(stripEnabled: false)
-        #expect(expansion.mode == .full)
-        #expect(expansion.control == nil)
-    }
-
-    @Test func withTheStripSettingASessionStartsCollapsedWithAnExpandControl() {
-        let expansion = KeyboardExpansion(stripEnabled: true)
+    @Test func togglingCollapsesAndExpandsAgain() {
+        var expansion = KeyboardExpansion()
+        expansion.toggle()
         #expect(expansion.mode == .strip)
         #expect(expansion.control == .expand)
-    }
-
-    @Test func togglingExpandsAndCollapsesAgain() {
-        var expansion = KeyboardExpansion(stripEnabled: true)
         expansion.toggle()
         #expect(expansion.mode == .full)
         #expect(expansion.control == .collapse)
-        expansion.toggle()
-        #expect(expansion.mode == .strip)
-        #expect(expansion.control == .expand)
     }
 
-    @Test func togglingWithoutTheStripSettingDoesNothing() {
-        var expansion = KeyboardExpansion(stripEnabled: false)
-        expansion.toggle()
-        #expect(expansion.mode == .full)
-        #expect(expansion.control == nil)
+    @Test func theLastChoiceSurvivesRecreatingTheKeyboard() {
+        withDefaults { suite, defaults in
+            var first = KeyboardExpansion(persistence: .init(defaults: defaults))
+            first.toggle()
+            var recreated = KeyboardExpansion(persistence: .init(defaults: UserDefaults(suiteName: suite)!))
+            #expect(recreated.mode == .strip)
+            recreated.toggle()
+            #expect(KeyboardExpansion(persistence: .init(defaults: UserDefaults(suiteName: suite)!)).mode == .full)
+        }
     }
 
-    @Test func changingTheSettingStartsASessionAgainCollapsed() {
-        var expansion = KeyboardExpansion(stripEnabled: true)
-        expansion.toggle()
-        expansion.setStripEnabled(false)
-        #expect(expansion.mode == .full)
-        expansion.setStripEnabled(true)
-        #expect(expansion.mode == .strip)
-    }
-
-    @Test func theSameSettingKeepsTheExpandedState() {
-        var expansion = KeyboardExpansion(stripEnabled: true)
-        expansion.toggle()
-        expansion.setStripEnabled(true)
-        #expect(expansion.mode == .full)
+    @Test func retainedKeyboardsReloadTheLatestGlobalChoice() {
+        withDefaults { suite, defaults in
+            var first = KeyboardExpansion(persistence: .init(defaults: defaults))
+            var retained = KeyboardExpansion(persistence: .init(defaults: UserDefaults(suiteName: suite)!))
+            first.toggle()
+            #expect(retained.mode == .full)
+            retained.reload()
+            #expect(retained.mode == .strip)
+            retained.toggle()
+            first.reload()
+            #expect(first.mode == .full)
+        }
     }
 
     // MARK: height
@@ -147,24 +82,18 @@ import Testing
     }
 
     @Test func aSwipeUpOnTheStripExpandsAndASwipeDownOnTheFullKeyboardCollapses() {
-        var expansion = KeyboardExpansion(stripEnabled: true)
-        #expect(expansion.swipeToggles(dx: 4, dy: -40))
-        expansion.toggle()
+        var expansion = KeyboardExpansion()
         #expect(expansion.swipeToggles(dx: -4, dy: 40))
+        expansion.toggle()
+        #expect(expansion.swipeToggles(dx: 4, dy: -40))
     }
 
     @Test func aSwipeTheOtherWayShortOrSidewaysDoesNothing() {
-        var expansion = KeyboardExpansion(stripEnabled: true)
-        #expect(!expansion.swipeToggles(dx: 0, dy: 40))
-        #expect(!expansion.swipeToggles(dx: 0, dy: -10))
-        #expect(!expansion.swipeToggles(dx: 60, dy: -40))
+        var expansion = KeyboardExpansion()
+        #expect(!expansion.swipeToggles(dx: 0, dy: -40))
+        #expect(!expansion.swipeToggles(dx: 0, dy: 10))
+        #expect(!expansion.swipeToggles(dx: 60, dy: 40))
         expansion.toggle()
-        #expect(!expansion.swipeToggles(dx: 0, dy: -40))
-    }
-
-    @Test func withoutTheStripSettingNoSwipeToggles() {
-        let expansion = KeyboardExpansion(stripEnabled: false)
-        #expect(!expansion.swipeToggles(dx: 0, dy: -40))
         #expect(!expansion.swipeToggles(dx: 0, dy: 40))
     }
 }

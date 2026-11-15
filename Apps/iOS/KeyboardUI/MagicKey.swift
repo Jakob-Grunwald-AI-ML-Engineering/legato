@@ -7,6 +7,8 @@ import SwiftUI
 /// it is given and is filled in the accent color while on.
 struct MagicKey: View {
     let controller: KeyboardController
+    /// Touch area beyond the drawn key on each side; the frame given includes it (the strip).
+    var hitInsets = EdgeInsets()
 
     /// This press has become a hold. It stays set until the next press, so the tap that ends the touch can tell.
     @State private var held = false
@@ -25,7 +27,7 @@ struct MagicKey: View {
         let magic = controller.magic
         let on = magic.isOn
         StripKey(
-            insets: EdgeInsets(),
+            insets: hitInsets,
             fill: on ? KeyColors.accent : KeyColors.key,
             pressedFill: on ? KeyColors.accent.withAlphaComponent(0.7) : KeyColors.pressed,
             onPress: press, onRelease: release, onTap: tap

@@ -115,3 +115,31 @@ struct StripReturnKey: View {
         .accessibilityAction { typing.tapReturn() }
     }
 }
+
+/// An undo or redo key of the strip: dimmed, and not acting, while there is nothing to do.
+struct StripHistoryKey: View {
+    let label: String
+    let symbol: String
+    let id: String
+    let enabled: Bool
+    let feedback: KeyFeedback
+    let insets: EdgeInsets
+    let action: () -> Void
+
+    var body: some View {
+        StripKey(
+            insets: insets,
+            onPress: { if enabled { feedback.tick() } },
+            onTap: { if enabled { action() } }
+        ) { _ in
+            Image(systemName: symbol)
+                .font(.system(size: 17))
+                .foregroundStyle(Color(uiColor: KeyColors.ink).opacity(enabled ? 1 : 0.35))
+        }
+        .accessibilityElement()
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityIdentifier(id)
+        .accessibilityAction { if enabled { action() } }
+    }
+}

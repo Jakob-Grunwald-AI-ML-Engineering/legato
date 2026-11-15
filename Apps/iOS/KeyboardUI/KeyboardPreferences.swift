@@ -2,12 +2,10 @@ import Foundation
 import LegatoKeyboardCore
 
 /// The typing settings the app writes (Settings > Keyboard) and the keyboard reads, in the App Group.
-/// Haptics and clicks default to on; the keyboard additionally needs Full Access to use them. The strip
-/// ("Compact keyboard") defaults to off.
+/// Haptics and clicks default to on; the keyboard additionally needs Full Access to use them.
 struct KeyboardPreferences: Equatable {
     static let hapticsKey = "keyboardHaptics"
     static let clicksKey = "keyboardClicks"
-    static let stripKey = "keyboardStrip"
     /// The height experiment's starting height (points). Read in DEBUG builds only.
     static let stripHeightKey = "keyboardStripHeight"
 
@@ -15,10 +13,9 @@ struct KeyboardPreferences: Equatable {
     var clicks = true
     var automaticAutoFill = AutoFillHandoff.defaultEnabled
     var emojiSystemSwitcher = false
-    var strip = false
     var stripHeight = StripHeight.standard
 
-    /// The extension owns its last layout. Local defaults work with or without Full Access.
+    /// The extension owns its last layout (strip or full). Local defaults work with or without Full Access.
     /// Only a boolean is retained, never document text.
     static func expansionPersistence() -> KeyboardExpansionPersistence {
         KeyboardExpansionPersistence(defaults: .standard)
@@ -35,7 +32,6 @@ struct KeyboardPreferences: Equatable {
             clicks: defaults.object(forKey: clicksKey) as? Bool ?? true,
             automaticAutoFill: defaults.object(forKey: AutoFillHandoff.preferenceKey) as? Bool ?? AutoFillHandoff.defaultEnabled,
             emojiSystemSwitcher: EmojiKeyboardBehavior.usesSystemSwitcher(in: defaults),
-            strip: defaults.object(forKey: stripKey) as? Bool ?? false,
             stripHeight: StripHeight.resolve(stored: stored))
     }
 }

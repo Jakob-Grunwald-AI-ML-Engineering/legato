@@ -118,6 +118,32 @@ struct KeyGeometry {
     var popupScale: CGFloat { (landscape ? 0.78 : 1) * vScale }
 }
 
+/// The strip's vertical geometry for a view of `size` and a strip row height (`StripHeight`): the word row on
+/// top, then the row of keys, each key drawn at the full keyboard's native key height (the strip's own height
+/// would scale it down) and centered in the row with the same gap above and below as the grid has.
+struct StripGeometry {
+    let landscape: Bool
+    /// The word row above the key row; 0 for the debug heights that leave nothing to touch.
+    let wordRowHeight: CGFloat
+    /// The row of keys: what the view has left under the word row.
+    let rowHeight: CGFloat
+    /// A key's drawn height, and the space above and below it inside the row.
+    let controlHeight: CGFloat
+    let top: CGFloat
+    let bottom: CGFloat
+
+    init(size: CGSize, stripHeight: Double) {
+        landscape = KeyGeometry.isLandscape(width: size.width)
+        let keyRow = StripHeight.keyRowHeight(row: stripHeight, landscape: landscape)
+        wordRowHeight = CGFloat(StripHeight.requested(row: stripHeight, landscape: landscape) - keyRow)
+        rowHeight = max(size.height - wordRowHeight, 0)
+        let pill = KeyGeometry(size: CGSize(width: size.width, height: KeyGeometry.height(landscape: landscape))).pillSize
+        controlHeight = max(min(rowHeight - (landscape ? 10 : 11), pill.height), 0)
+        bottom = min(landscape ? 4 : 3, max(rowHeight - controlHeight, 0))
+        top = max(rowHeight - controlHeight - bottom, 0)
+    }
+}
+
 /// The key colors, light and dark, from the system keyboard.
 enum KeyColors {
     static let key = UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.165) : .white }

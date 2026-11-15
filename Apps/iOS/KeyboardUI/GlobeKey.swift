@@ -36,6 +36,12 @@ struct GlobeKey: UIViewRepresentable {
         return button
     }
 
+    /// Takes the frame it is given: the button's own intrinsic width (symbol plus insets) is wider than a
+    /// narrow strip key.
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UIButton, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 44, height: proposal.height ?? 43)
+    }
+
     func updateUIView(_ button: UIButton, context: Context) {
         let selector = #selector(UIInputViewController.handleInputModeList(from:with:))
         if let old = context.coordinator.target {

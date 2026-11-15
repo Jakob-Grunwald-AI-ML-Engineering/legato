@@ -106,13 +106,6 @@ enum Settings {
         set { EmojiKeyboardBehavior.setUsesSystemSwitcher(newValue, in: AppGroup.defaults) }
     }
 
-    /// The compact keyboard: one row with the dictation status, the mic key and a chevron that expands to the
-    /// full keyboard. The keyboard reads the same key (`KeyboardPreferences`). Default off.
-    static var keyboardStrip: Bool {
-        get { AppGroup.defaults.object(forKey: KeyboardPreferences.stripKey) as? Bool ?? false }
-        set { AppGroup.defaults.set(newValue, forKey: KeyboardPreferences.stripKey) }
-    }
-
     /// Debug experiment: the height (points) a strip session starts with, one of `StripHeight.candidates`.
     /// The keyboard honours it in DEBUG builds only (a long press on its status text steps through them).
     static var keyboardStripHeight: Double {
