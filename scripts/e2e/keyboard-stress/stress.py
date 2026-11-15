@@ -606,10 +606,15 @@ def words_missing_after(take: Take, text: str, acted_wall: float | None, speed: 
         late = first_seen.get(ms, 0) / speed > acted_wall + margin
         for w in ws:
             spoken.append((w, late and shown[ms] == set(ws)))
+    # The words after the action go on at the caret, which may be anywhere in the take: they are looked for on their own.
+    start = next((i for i, (_, counted) in enumerate(spoken) if counted), None)
+    if start is None:
+        return []
+    after = spoken[start:]
     have = re.findall(r"[a-z']+", text.lower())
-    sm = difflib.SequenceMatcher(None, [w for w, _ in spoken], have, autojunk=False)
+    sm = difflib.SequenceMatcher(None, [w for w, _ in after], have, autojunk=False)
     matched = {i for blk in sm.get_matching_blocks() for i in range(blk.a, blk.a + blk.size)}
-    return [w for i, (w, counted) in enumerate(spoken) if counted and i not in matched]
+    return [w for i, (w, counted) in enumerate(after) if counted and i not in matched]
 
 
 def check(res: Result, args) -> None:
