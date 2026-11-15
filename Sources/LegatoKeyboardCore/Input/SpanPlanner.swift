@@ -47,10 +47,10 @@ public enum SpanPlanner {
     /// The Mac's gap between typed graphemes for `ops` of them still to go, after `fixedMs` of settles the work needs
     /// anyway: spread over the budget, between the Mac's floor and the calm pace; straight to that floor once `ops`
     /// reaches `behindOps`.
-    public static func macPaceMs(ops: Int, fixedMs: Double = 0) -> Double {
+    public static func macPaceMs(ops: Int, fixedMs: Double = 0, floor: Double = macFloorMs) -> Double {
         guard ops > 0 else { return calmMs }
-        guard ops < behindOps else { return macFloorMs }
-        return min(calmMs, max(macFloorMs, (budgetMs - fixedMs) / Double(ops)))
+        guard ops < behindOps else { return floor }
+        return min(calmMs, max(floor, (budgetMs - fixedMs) / Double(ops)))
     }
 
     /// The Mac's curve, never faster than the field's confirmation (`floorMs`).

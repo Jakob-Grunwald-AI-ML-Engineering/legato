@@ -197,7 +197,7 @@ import LegatoMac
         editor.begin()
         target.selection = .init(location: 0, length: 0)
         await editor.applyLive(snapshot("new words", complete: true))
-        #expect(target.value == "new wordsKeep this")
+        #expect(target.value == "new words Keep this")
         #expect(copied.isEmpty)
     }
     @Test func focusLossNeverRebindsToAnotherFieldAndFinalTextIsRecovered() async {
@@ -651,7 +651,7 @@ import LegatoMac
         var polls = 0
         let stalled = await editor.stream {
             polls += 1
-            return .init(text: "Partly clean", isFinal: false, stalled: polls > 1)
+            return .init(snapshot: .init(runID: "buffered", version: polls, segments: [.init(id: 0, text: "Partly clean", final: false)]), stalled: polls > 1)
         }
         #expect(stalled)
         await editor.finish()
@@ -660,7 +660,7 @@ import LegatoMac
         #expect(editor.panel.take.text == "Partly clean")
         // Insert as-is: the partial is taken back and the raw take arrives as one final delivery.
         editor.retractStreamed()
-        _ = await editor.stream { .init(text: "partly raw", isFinal: true) }
+        _ = await editor.stream { .init(snapshot: .init(runID: "raw", version: 1, segments: [.init(id: 0, text: "partly raw", final: true)], complete: true)) }
         await editor.finish()
         #expect(inserts == ["First line.", " partly raw"])
     }
@@ -672,7 +672,7 @@ import LegatoMac
         var polls = 0
         _ = await editor.stream {
             polls += 1
-            return polls == 1 ? .init(text: "partial", isFinal: false) : .init(text: "partial", isFinal: true, retracted: true)
+            return polls == 1 ? .init(snapshot: .init(runID: "partial", version: polls, segments: [.init(id: 0, text: "partial", final: false)])) : .init(snapshot: .init(runID: "partial", version: polls, segments: [.init(id: 0, text: "partial", final: true)], complete: true), retracted: true)
         }
         await editor.queue.whenIdle()
         #expect(target.value == "Before old after")

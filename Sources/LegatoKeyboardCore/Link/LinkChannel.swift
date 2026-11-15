@@ -26,10 +26,6 @@ public enum LinkChannel {
         public static let refined = "link.refined"
         /// keyboard -> app: one `ChoiceRecord` per key, `link.choice.<uuid>` (the app removes each once read).
         public static let choicePrefix = "link.choice."
-        /// app -> keyboard: `DictationPublication`.
-        public static let dictation = "link.dictation"
-        /// keyboard -> app: `DictationAck`.
-        public static let dictationAck = "link.dictation.ack"
         /// app -> keyboard: `LiveDictationSnapshot` (the live send mode's run target).
         public static let dictationLive = "link.dictation.live"
         /// keyboard -> app: `LiveDictationAck`.

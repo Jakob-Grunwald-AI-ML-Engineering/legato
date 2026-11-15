@@ -47,16 +47,12 @@ import LegatoVocabulary
     @ObservationIgnored private let microphone: MicrophoneHost
     @ObservationIgnored private let sink: any DictationRouteSink
     /// In front of `sink`: speech in instruction mode goes to `instruction` instead.
-    @ObservationIgnored private let modeSink: SpeechModeSink
+    @ObservationIgnored private let speechRoute: DictationRouteSession
     /// The keyboard's instruction mode (the magic toggle's speech, its run, the strip).
     @ObservationIgnored public let instruction: InstructionSession
-    /// The live run being ended for an instruction (`finishLiveRun`), awaited before the field is read.
-    @ObservationIgnored private var finishingDictation: Task<Void, Never>?
     /// The magic toggle as the keyboard last reported it: only a change acts (a debug override then stays).
     @ObservationIgnored private var reportedMagic = MagicToggle.off
-    /// Applies the toggle's change when the stream's cut does not come through in time.
-    @ObservationIgnored private var cutTimeout: Task<Void, Never>?
-    public var speechMode: SpeechMode { modeSink.target }
+    public var speechMode: SpeechMode { speechRoute.speechMode }
     @ObservationIgnored private let sonioxKey: @MainActor () -> String
     @ObservationIgnored private let makeSocket: @Sendable () -> any SonioxSocket
     @ObservationIgnored private let warmConnection: @Sendable () async -> Void
@@ -67,7 +63,7 @@ import LegatoVocabulary
     /// Presence transitions and gate operations run strictly one after another, in arrival order.
     @ObservationIgnored private var queue: Task<Void, Never>?
     /// The dictation route's Soniox side (Room, held connection, take, lines into the sink).
-    @ObservationIgnored private let dictation: DictationEngine
+    private var dictation: DictationEngine { speechRoute.engine }
     @ObservationIgnored private var probe = TapLatencyProbe()
     @ObservationIgnored private var routeClosedAt: Double?
     /// Waits for the stopped take's last words, then has the sink clean and write the take once.
@@ -99,30 +95,10 @@ import LegatoVocabulary
         self.microphone = microphone; self.sink = sink; self.sonioxKey = sonioxKey; self.makeSocket = makeSocket
         self.warmConnection = warmConnection; self.now = now
         self.instruction = instruction ?? InstructionSession(runner: InstructionRunner(client: MessagesStream(keyStore: KeychainKeyStore()), model: { .haiku }))
-        modeSink = SpeechModeSink(dictation: sink)
-        dictation = DictationEngine(sink: modeSink, sonioxKey: sonioxKey, makeSocket: makeSocket, vocabularyURL: microphone.vocabularyURL, now: now)
-        let instructionSession = self.instruction
-        modeSink.onInstructionLine = { line in instructionSession.hear(line) }
-        modeSink.onInstructionTail = { text in instructionSession.hearTail(text) }
-        let pipeline = sink as? DictationPipeline
-        modeSink.onTransition = { [weak self] transition in
-            if transition.to == .instruction {
-                instructionSession.begin()
-                // Every dictation word before the cut is in: the run ends now (its held cleanup and whole-take pass run
-                // while the instruction is spoken), and nothing of the instruction's speech can join it.
-                if let pipeline { self?.finishingDictation = Task { await pipeline.finishLiveRun() } }
-            } else { instructionSession.end() }
-        }
-        if instructionSession.beforeRun == nil, let pipeline {
-            // The dictation just before the instruction lands first (a live run's cleanup is held until its end), then
-            // the field is read.
-            instructionSession.beforeRun = { [weak self] in
-                if let finishing = self?.finishingDictation { await finishing.value } else { await pipeline.finishLiveRun() }
-                self?.finishingDictation = nil
-                _ = await pipeline.settle(timeout: .seconds(3))
-                try? await Task.sleep(for: .milliseconds(150))
-            }
-        }
+        speechRoute = DictationRouteSession(sink: sink, instruction: self.instruction, sonioxKey: sonioxKey,
+                                           makeSocket: makeSocket, vocabularyURL: microphone.vocabularyURL, now: now)
+        // The keyboard's field link needs time to observe the settled run before Magic reads it.
+        speechRoute.afterDictationSettled = { try? await Task.sleep(for: .milliseconds(150)) }
         dictation.onTail = { [weak self] text in self?.observeTail(text, route: .dictation) }
     }
 
@@ -182,10 +158,9 @@ import LegatoVocabulary
         #if DEBUG || LEGATO_INTERNAL
         debugTakeOpen = false
         #endif
-        cutTimeout?.cancel(); cutTimeout = nil; reportedMagic = .off
+        reportedMagic = .off
         await closeDictation()
-        await modeSink.reset()
-        instruction.reset()
+        await speechRoute.reset()
         dictation.resetSequence()
         microphone.dictationAudio = nil
         await microphone.endKeyboardSession()
@@ -234,7 +209,7 @@ import LegatoVocabulary
         switch surface {
         case .dictation:
             // A take of its own: its words never join the previous take's run (which may still be ending).
-            modeSink.beginTake()
+            speechRoute.beginTake()
             await dictation.activate()
             if let failure = microphone.takeBufferFailure {
                 await dictation.abandonTake()
@@ -300,21 +275,8 @@ import LegatoVocabulary
     /// through. Words on their way when it changes keep the mode they were spoken in (the stream is cut first).
     public func setMagic(_ toggle: MagicToggle) {
         guard isOpen, !meetingSuspended else { return }
-        let mode: SpeechMode = toggle.isOn ? .instruction : .dictation
-        guard mode != modeSink.target else { return }
-        let dictation = self.dictation
         let cut = gate.route == .dictation || dictation.hasActiveTake || dictation.isReplaying
-        modeSink.toggle(to: mode, cut: cut)
-        guard cut else { return }
-        Task { [weak self] in
-            if !(await dictation.finalizeChunk()) { self?.modeSink.flushCuts() }
-        }
-        cutTimeout?.cancel()
-        cutTimeout = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(2))
-            guard !Task.isCancelled else { return }
-            self?.modeSink.flushCuts()
-        }
+        speechRoute.setMagic(toggle.isOn, cut: cut)
     }
 
     /// A tap on the instruction strip.
@@ -369,13 +331,13 @@ import LegatoVocabulary
     private func beginDebugTake() {
         guard !debugTakeOpen else { return }
         debugTakeOpen = true
-        modeSink.beginTake()
+        speechRoute.beginTake()
     }
     /// Debug bridge: replays a recorded Soniox token timeline into the dictation route (no microphone), then ends the
     /// take as the mic key's stop does. Returns when the take is written.
     public func debugDictationReplay(_ timeline: DictationReplayTimeline, speed: Double = 1) async throws {
         guard isOpen, gate.surface == .dictation else { throw DebugDictationError.notOnDictationSurface }
-        modeSink.beginTake()
+        speechRoute.beginTake()
         debugTakeOpen = false
         try await dictation.debugReplay(timeline, speed: speed)
         await dictation.waitForFinish(timeout: .seconds(3))
@@ -408,7 +370,7 @@ import LegatoVocabulary
     }
 
     public var diagnostics: [String: Any] {
-        ["open": isOpen, "surface": gate.surface.rawValue, "route": gate.route.rawValue, "speechMode": modeSink.target.rawValue,
+        ["open": isOpen, "surface": gate.surface.rawValue, "route": gate.route.rawValue, "speechMode": speechRoute.speechMode.rawValue,
          "dictationStreamLive": dictation.isLive, "dictationReconnects": dictation.reconnects,
          "probes": probes.map(\.fields)]
     }

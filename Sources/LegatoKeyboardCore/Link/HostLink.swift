@@ -1,7 +1,7 @@
 import Foundation
 
 /// Publishes host liveness, microphone capture state and request admission.
-/// Dictated text travels only through DictationLink and LiveDictationLink.
+/// Dictated text travels only through LiveDictationLink.
 @MainActor
 public final class HostLink {
     /// Acts on an accepted request (start, stop or end the keep-alive).

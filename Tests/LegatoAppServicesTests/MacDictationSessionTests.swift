@@ -268,7 +268,7 @@ final class FailingStreamCleaner: SentenceCleaning {
         // The take cleanup's own 4 s timeout is wall-clock: on a starved runner it fired before the first stream
         // answered, the cleaner moved on to the second (whole) stream, and the take never failed. Only the stream fails here.
         let session = make(cleaner: cleaner, mode: .onStop, takeTimeout: { _ in .seconds(3600) })
-        var seen: [DictationStreamState] = [], retracted = 0
+        var seen: [DictationSnapshotState] = [], retracted = 0
         session.deliverStream = { poll in
             // Follows the take like the field writer: until it is final, retracted or stalled.
             while let state = poll() {

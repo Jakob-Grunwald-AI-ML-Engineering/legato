@@ -21,6 +21,8 @@ public struct EditHistory: Sendable, Equatable {
 
     public enum Kind: Sendable, Equatable {
         case text
+        /// A scoped Magic edit; the queue verifies its scope again when undo or redo lands.
+        case scoped(forward: FieldQueue.Edit, inverse: FieldQueue.Edit)
         /// A dictation version swap: undo shows `from`, redo shows `to`.
         case version(from: Int, to: Int)
     }
@@ -44,6 +46,7 @@ public struct EditHistory: Sendable, Equatable {
     public enum Step: Sendable, Equatable {
         /// Apply this edit at the cursor.
         case edit(WordEdit)
+        case scoped(FieldQueue.Edit)
         /// Show this dictation version (`versions.show`).
         case version(Int)
     }
@@ -128,6 +131,22 @@ public struct EditHistory: Sendable, Equatable {
         append(Entry(removed: "", inserted: "", kind: .version(from: from, to: to)))
     }
 
+    /// Records a confirmed scoped edit in the same history as typing and dictation. Its inverse carries the
+    /// exact confirmed scope; no absolute cursor position is trusted when it is applied later.
+    public mutating func recordScoped(forward: FieldQueue.Edit, inverse: FieldQueue.Edit) {
+        closeGroup()
+        if let last = entries.last, case .scoped(let previous, _) = last.kind,
+           previous.target == (forward.selected ?? forward.before + forward.after),
+           (previous.selected ?? previous.before + previous.after) == forward.target {
+            entries.removeLast()
+            redoEntries.append(last)
+            return
+        }
+        redoEntries = []
+        append(Entry(removed: forward.selected ?? forward.before + forward.after,
+                     inserted: forward.target, kind: .scoped(forward: forward, inverse: inverse)))
+    }
+
     // MARK: Undo and redo
 
     /// The step that undoes the newest entry, or nil when there is none or the guard failed (history cleared).
@@ -135,6 +154,10 @@ public struct EditHistory: Sendable, Equatable {
         closeGroup()
         guard let entry = entries.last else { return nil }
         switch entry.kind {
+        case .scoped(_, var inverse):
+            entries.removeLast(); redoEntries.append(entry)
+            inverse.id = UUID().uuidString
+            return .scoped(inverse)
         case .version(let from, _):
             entries.removeLast()
             redoEntries.append(entry)
@@ -152,6 +175,10 @@ public struct EditHistory: Sendable, Equatable {
         closeGroup()
         guard let entry = redoEntries.last else { return nil }
         switch entry.kind {
+        case .scoped(var forward, _):
+            redoEntries.removeLast(); entries.append(entry)
+            forward.id = UUID().uuidString
+            return .scoped(forward)
         case .version(_, let to):
             redoEntries.removeLast()
             entries.append(entry)

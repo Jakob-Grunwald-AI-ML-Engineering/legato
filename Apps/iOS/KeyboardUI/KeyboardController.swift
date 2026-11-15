@@ -17,9 +17,6 @@ import os
 final class KeyboardController {
     @ObservationIgnored private var correctionCapture: CorrectionCapture?
     @ObservationIgnored private var correctionPoll: Task<Void, Never>?
-    @ObservationIgnored private var correctionSources: [String: (raw: String, text: String)] = [:]
-    @ObservationIgnored private var correctionOwnWriteAt = Date.distantPast
-    @ObservationIgnored private var correctionKeyAt = Date.distantPast
 
     @ObservationIgnored let document: any TextDocument
     @ObservationIgnored private let link: LinkClient
@@ -70,7 +67,7 @@ final class KeyboardController {
     /// The version of the last dictation the field holds, when known.
     var shownVersionIndex: Int? { nil }
     /// The keyboard's own edits, for ↶ ↷ (`EditHistory`); `undoAvailable` and `redoAvailable` mirror it for the views.
-    @ObservationIgnored private var history = EditHistory()
+
     private(set) var undoAvailable = false
     private(set) var redoAvailable = false
     @ObservationIgnored private var lastDocumentID: String?
@@ -335,7 +332,6 @@ final class KeyboardController {
             while !Task.isCancelled {
                 guard let self else { return }
                 self.pollDictationStatus()
-                self.receiveDictation()
                 self.receiveLiveDictation()
                 self.receiveInstruction()
                 try? await Task.sleep(for: .milliseconds(100))
@@ -446,13 +442,13 @@ final class KeyboardController {
             if lastDocumentID != nil, instructionPresentation?.keystrokeAction != nil { settleInstructionRow() }
             typing.closeEmojiPanel()
             lastDocumentID = id
-            history.clear()
+            queue.history.clear()
             lastDictationTexts = [] // the dictation belongs to the field it landed in
             syncHistory()
             wordRow.fieldChanged()
         }
         if wordRow.contextChanged() {
-            history.cursorMoved()
+            queue.history.cursorMoved()
             wordRow.interruptTyping()
             settleInstructionRowOnMove()
         }
@@ -547,7 +543,6 @@ final class KeyboardController {
         recoveryTask?.cancel(); recoveryTask = nil; recoveryTaskID = nil
         cursorReadID = nil
         correctionCapture?.reset()
-        correctionSources = [:]
         // The field changed or the keyboard went away: nothing more of a take's cleanup lands here.
         updateCleanup { $0.clear() }
         queue.reset()
@@ -655,16 +650,15 @@ final class KeyboardController {
             switch event {
             case .sent(_, let lane):
                 if lane == .user {
-                    correctionKeyAt = Date()
+                    correctionCapture?.userWrite()
                 }
                 else {
-                    correctionCapture?.reset()
-                    correctionOwnWriteAt = Date()
+                    correctionCapture?.ownWrite()
                 }
                 liveStats.applies += lane == .live ? 1 : 0
                 if lane != .user {
                     // The keyboard's own text is no typing: what was typed so far is learned, the tracked context is gone.
-                    history.cursorMoved()
+                    queue.history.cursorMoved()
                     wordRow.interruptTyping()
                     typing.hostEdited()
                 }
@@ -673,7 +667,6 @@ final class KeyboardController {
             case .resync(let kind):
                 if kind == .reseeded || kind == .cursorMoved {
                     // The user moved on (or the host changed the field): the typed line stops where it is.
-                    interruptDictation()
                     sessionSpan.broken()
                 }
                 if kind == .reseeded { liveStats.drifts += 1; liveStats.lastDrift = kind.rawValue }
@@ -688,6 +681,11 @@ final class KeyboardController {
                 if let completion = editCompletions.removeValue(forKey: drop.id) { completion(event) }
                 else if drop.reason != .reset, drop.runID != nil || drop.id.hasPrefix("stray:") {
                     if let runID = drop.runID { updateCleanup { $0.failed(runID: runID) } }
+                    if let snapshot = liveSnapshot, snapshot.runID == drop.runID, snapshot.complete {
+                        // Terminally refused buffered takes leave the outbox too; History retains their text.
+                        link.writeLiveDictationAck(.init(runID: snapshot.runID, version: snapshot.version, complete: true, stats: liveStats))
+                    }
+
                     // The take's final text could not stand whole in the field (the user typed or moved since, or the
                     // field did not show it as typed): the field keeps what it has, the cleaned take is in History.
                     liveRecoveryDismissed = false
@@ -698,9 +696,7 @@ final class KeyboardController {
                 }
             case .liveApplied(let runID, let version, let complete):
                 if complete, let snapshot = liveSnapshot, snapshot.runID == runID {
-                    correctionSources[runID] = (
-                        snapshot.rawText ?? LiveSegment.joined(snapshot.segments.map { $0.raw ?? $0.text }),
-                        LiveSegment.joined(snapshot.segments.map(\.text)))
+                    correctionCapture?.watch(dictationID: runID, raw: snapshot.rawText ?? snapshot.text, inserted: snapshot.text)
                 }
                 updateCleanup { $0.applied(runID: runID, version: version, complete: complete) }
                 guard runID == liveSnapshot?.runID, version != liveAckedVersion else { break }
@@ -719,7 +715,7 @@ final class KeyboardController {
     }
 
     private func startTickerIfNeeded() {
-        let needed = !queue.isIdle || typist.needsTicks
+        let needed = !queue.isIdle
         guard needed, !isTornDown, isVisible else { return stopTicker() }
         guard ticker == nil else { return }
         ticker = Task { [weak self] in
@@ -738,10 +734,9 @@ final class KeyboardController {
     }
 
     private func tick(elapsedMs: Double) {
-        if typist.needsTicks { dictationStep(elapsedMs: elapsedMs) }
         cancelRevokedInstructionEdits()
         pump()
-        if queue.isIdle, !typist.needsTicks { stopTicker() }
+        if queue.isIdle { stopTicker() }
     }
 
     private func stopTicker() {
@@ -751,93 +746,18 @@ final class KeyboardController {
 
     // MARK: Dictation
 
-    /// Lines the app cleaned, typed one by one (`DictationTypist`, through the queue); acknowledged on the link as they finish.
-    @ObservationIgnored private var typist = DictationTypist()
-    @ObservationIgnored private var lastDictation: DictationPublication?
-
-    /// Called with the composer poll: a new publication of lines joins the queue.
-    private func receiveDictation() {
-        guard let publication = link.readDictation(), publication != lastDictation else { return }
-        lastDictation = publication
-        typist.accept(publication, acknowledged: link.readDictationAck())
-        dictationStep(elapsedMs: 0)
-    }
-
-    /// A key, a completion or a cursor move: the rest of the line being typed is dropped and the following lines go
-    /// in at the new cursor. (A live run's region is closed by the queue itself.)
-    private func interruptDictation() {
-        guard let upTo = typist.interrupt() else { return }
-        acknowledgeDictation(upTo: upTo)
-        trace?("dictation interrupted")
-    }
-
-    /// A key while a line is being typed (#268): the rest of the line heard so far goes to the queue first, one grapheme
-    /// an edit (the queue holds the key behind them, bounded); the following lines go in at the new cursor.
-    private func finishDictationLine() {
-        guard typist.needsTicks, document.documentID != nil else { return interruptDictation() }
-        syncQueueField()
-        let context = queueContextBefore
-        let step = typist.finishLine(contextBefore: context)
-        if !step.inserts.isEmpty {
-            let expected = context + step.inserts.joined()
-            wordRow.willApplyOwnEdit(expectedContextBefore: expected)
-            for grapheme in step.inserts { enqueue(FieldQueue.Edit(kind: .typist, target: grapheme, atCursor: true)) }
-            typing.ownEdit(contextBefore: expected)
-            trace?("dictation line finished before a key graphemes=\(step.inserts.count)")
-        }
-        if let upTo = step.acknowledged { acknowledgeDictation(upTo: upTo) }
-    }
-
-    private func acknowledgeDictation(upTo: Int) {
-        if let publication = lastDictation {
-            for line in publication.lines where line.seq <= upTo && line.final && !line.retracted {
-                correctionSources[line.lineID] = (line.raw, line.text)
-            }
-        }
-        guard let sessionID = typist.sessionID else { return }
-        link.writeDictationAck(.init(sessionID: sessionID, upTo: upTo))
-    }
-
-    private func dictationStep(elapsedMs: Double, flush: Bool = false) {
-        guard !isTornDown, typist.needsTicks, document.documentID != nil else { return }
-        syncQueueField()
-        // The typist plans against the field as the queue will leave it (its own inserts included), so a cursor move
-        // shows as a context that is not its echo.
-        let context = queueContextBefore
-        let step = flush
-            ? typist.flush(contextBefore: context, capitalization: autocapitalization)
-            : typist.step(contextBefore: context, elapsedMs: elapsedMs, capitalization: autocapitalization,
-                          animated: !UIAccessibility.isReduceMotionEnabled)
-        if step.deletes > 0 {
-            // A failed take's partial text, taken back (the typist saw the field still end with exactly that).
-            let expected = String(context.dropLast(step.deletes))
-            wordRow.willApplyOwnEdit(expectedContextBefore: expected)
-            enqueue(FieldQueue.Edit(kind: .typist, before: String(context.suffix(step.deletes)), target: ""))
-            typing.ownEdit(contextBefore: expected)
-        }
-        if !step.inserts.isEmpty {
-            let text = step.inserts.joined()
-            let expected = String(context.dropLast(step.deletes)) + text
-            wordRow.willApplyOwnEdit(expectedContextBefore: expected)
-            enqueue(FieldQueue.Edit(kind: .typist, target: text, atCursor: true))
-            typing.ownEdit(contextBefore: expected)
-        }
-        if let upTo = step.acknowledged { acknowledgeDictation(upTo: upTo) }
-        pump()
-    }
-
     /// Read-only: proxy windows must still contain the delivered scope and its unchanged boundaries.
     /// Unreadable, secure, hidden or newly focused fields stop collection. Our queue writes never teach.
     private func observeCorrections() {
         guard isVisible, !isTornDown, !document.isSecureTextEntry, document.documentID == queueDocumentID else {
-            correctionCapture?.reset(); correctionSources = [:]; return
+            correctionCapture?.reset(); return
         }
-        guard queue.isIdle, !queue.ownsRead, !queue.paused, !typist.needsTicks, !isFieldBusy,
-              Date().timeIntervalSince(correctionOwnWriteAt) >= 0.15 else { return }
+        guard queue.isIdle, !queue.ownsRead, !queue.paused, !isFieldBusy,
+              correctionCapture?.canObserve() == true else { return }
         armCorrections()
         let report = currentReport
         let snapshot = report.before + (report.selected ?? "") + report.after
-        correctionCapture?.observe(snapshot, origin: Date().timeIntervalSince(correctionKeyAt) < 2 ? .keyboard : .observedHost)
+        correctionCapture?.observeSettled(snapshot)
     }
 
     private func armCorrections() {
@@ -845,13 +765,8 @@ final class KeyboardController {
               !document.isSecureTextEntry, document.documentID == queueDocumentID else { return }
         let report = currentReport
         let snapshot = report.before + (report.selected ?? "") + report.after
-        if !correctionSources.isEmpty {
-            for (id, source) in correctionSources {
-                correctionCapture?.arm(dictationID: id, raw: source.raw, inserted: source.text,
-                    snapshot: snapshot, platform: "iOS", locale: Locale.current.identifier, isIdle: queue.isIdle)
-            }
-            correctionSources = [:]
-        }
+        correctionCapture?.armPending(snapshot: snapshot, platform: "iOS", locale: Locale.current.identifier,
+                                      isIdle: queue.isIdle, unmatched: .discard)
     }
 
     // MARK: Live dictation
@@ -885,6 +800,7 @@ final class KeyboardController {
             liveSeen = snapshot
             if snapshot.complete, !blockedLiveCompleted {
                 blockedLiveCompleted = true
+                link.writeLiveDictationAck(.init(runID: snapshot.runID, version: snapshot.version, complete: true, stats: liveStats))
                 if !liveRecoveryDismissed {
                     liveRecoveryNotice = "The full take is in Legato's History."
                     syncRowTakeover()
@@ -1489,6 +1405,17 @@ final class KeyboardController {
         case .applied(_, let cursor)?:
             let newBefore = String(decoding: Array(edit.target.utf16.prefix(cursor)), as: UTF16.self)
             if edit.selected == nil { sessionSpan.edited(before: edit.before, newBefore: newBefore) } else { sessionSpan.broken() }
+            var forward = queued
+            forward.readID = nil
+            if edit.selected != nil {
+                forward.before = edit.scopeText; forward.after = ""; forward.selected = nil
+            }
+            let inverse = FieldQueue.Edit(kind: .undo, before: newBefore,
+                after: String(decoding: Array(edit.target.utf16.dropFirst(cursor)), as: UTF16.self),
+                target: edit.scopeText, cursorAtEnd: false, paced: true)
+            queue.history.recordScoped(forward: forward, inverse: inverse)
+            syncHistory()
+
             trace?("instruction edit applied ms=\(ms) chars=\(edit.scopeText.count)->\(edit.target.count)")
             link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: true, cursor: cursor))
         case .dropped(let drop)?:
@@ -1537,7 +1464,7 @@ final class KeyboardController {
 
     func cursorPanBegan() {
         userPreemptsFieldRead()
-        history.cursorMoved()
+        queue.history.cursorMoved()
         wordRow.cursorPanBegan()
         syncHistory()
     }
@@ -1562,16 +1489,15 @@ final class KeyboardController {
     @discardableResult
     func type(_ text: String, contextBefore: String? = nil) -> Bool {
         userPreemptsFieldRead()
-        finishDictationLine()
         beforeUserEdit()
         let before = contextBefore ?? typing.contextBefore
         let selected = document.selectedText
         enqueue(.insert(text))
         if let selected, !selected.isEmpty {
-            history.record(removed: selected, inserted: text, at: Date(), contextBefore: before + text) // the key replaced the selection
+            queue.history.record(removed: selected, inserted: text, at: Date(), contextBefore: before + text) // the key replaced the selection
             wordRow.interruptTyping()
         } else {
-            history.typed(text, at: Date(), contextBefore: before + text)
+            queue.history.typed(text, at: Date(), contextBefore: before + text)
             wordRow.typed(text)
         }
         syncHistory()
@@ -1582,7 +1508,6 @@ final class KeyboardController {
 
     func deleteBackward(contextBefore: String? = nil) {
         userPreemptsFieldRead()
-        finishDictationLine()
         beforeUserEdit()
         let before = contextBefore ?? typing.contextBefore
         let selected = document.selectedText
@@ -1590,10 +1515,10 @@ final class KeyboardController {
         let remaining = deletesSelection ? before : String(before.dropLast())
         enqueue(.deleteBackward)
         if let selected, deletesSelection {
-            history.record(removed: selected, inserted: "", at: Date(), contextBefore: before)
+            queue.history.record(removed: selected, inserted: "", at: Date(), contextBefore: before)
             wordRow.interruptTyping()
         } else if let last = before.last {
-            history.deleted(String(last), at: Date(), contextBefore: remaining)
+            queue.history.deleted(String(last), at: Date(), contextBefore: remaining)
             wordRow.deletedTyped()
         }
         syncHistory()
@@ -1607,7 +1532,6 @@ final class KeyboardController {
     /// counts as typed text. `record: false` is for undo and redo, which move the history themselves.
     func applyEdit(_ edit: WordEdit, removed: String, asTyping: Bool, record: Bool = true) {
         userPreemptsFieldRead()
-        interruptDictation()
         beforeUserEdit()
         let before = typing.contextBefore
         let after = document.contextAfter
@@ -1624,13 +1548,13 @@ final class KeyboardController {
         enqueue(queued, user: true) { [weak self] outcome in
             guard let self else { return }
             guard case .applied? = outcome else {
-                if !record { self.history.clear(); self.syncHistory() }
+                if !record { self.queue.history.clear(); self.syncHistory() }
                 self.show("The text changed, so nothing was edited.")
                 return
             }
             if asTyping { self.wordRow.completed(deleting: edit.deleteCount, with: edit.insert) }
             self.wordRow.willApplyOwnEdit(expectedContextBefore: expected)
-            if record { self.history.record(removed: removed, inserted: edit.insert, at: Date(), contextBefore: expected) }
+            if record { self.queue.history.record(removed: removed, inserted: edit.insert, at: Date(), contextBefore: expected) }
             self.syncHistory()
             self.typing.ownEdit(contextBefore: expected)
             if asTyping || !record { self.wordRow.keystroke(contextBefore: expected) }
@@ -1651,15 +1575,15 @@ final class KeyboardController {
     var canRedo: Bool { redoAvailable && !runActive }
 
     private func syncHistory() {
-        if undoAvailable != history.canUndo { undoAvailable = history.canUndo }
-        if redoAvailable != history.canRedo { redoAvailable = history.canRedo }
+        if undoAvailable != queue.history.canUndo { undoAvailable = queue.history.canUndo }
+        if redoAvailable != queue.history.canRedo { redoAvailable = queue.history.canRedo }
     }
 
     func undo() {
         guard canUndo else { return }
         userPreemptsFieldRead()
         prepareHistoryStep(discardingTyped: true)
-        guard let step = history.undo(contextBefore: typing.contextBefore) else { return historyRefused() }
+        guard let step = queue.history.undo(contextBefore: typing.contextBefore) else { return historyRefused() }
         syncHistory()
         run(step, undoing: true)
     }
@@ -1668,7 +1592,7 @@ final class KeyboardController {
         guard canRedo else { return }
         userPreemptsFieldRead()
         prepareHistoryStep(discardingTyped: false)
-        guard let step = history.redo(contextBefore: typing.contextBefore) else { return historyRefused() }
+        guard let step = queue.history.redo(contextBefore: typing.contextBefore) else { return historyRefused() }
         syncHistory()
         run(step, undoing: false)
     }
@@ -1688,8 +1612,18 @@ final class KeyboardController {
         switch step {
         case .edit(let edit):
             applyEdit(edit, removed: "", asTyping: false, record: false)
+        case .scoped(var edit):
+            edit.id = UUID().uuidString
+            enqueue(edit, completion: { [weak self] event in
+                guard let self else { return }
+                if case .applied = event {} else {
+                    if undoing { self.queue.history.revertUndo() } else { self.queue.history.revertRedo() }
+                }
+                self.syncHistory()
+            })
+            pump()
         case .version:
-            if undoing { history.revertUndo() } else { history.revertRedo() }
+            if undoing { queue.history.revertUndo() } else { queue.history.revertRedo() }
             syncHistory()
         }
     }

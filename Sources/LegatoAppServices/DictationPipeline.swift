@@ -25,6 +25,18 @@ public struct DictationDelivery: Sendable, Equatable {
     public var isTake = false
 }
 
+/// A whole-text snapshot plus the buffered cleaner's recovery state.
+public struct DictationSnapshotState: Sendable, Equatable {
+    public var snapshot: LiveDictationSnapshot
+    public var stalled: Bool
+    public var retracted: Bool
+    public var text: String { snapshot.text }
+    public var isFinal: Bool { snapshot.complete }
+    public init(snapshot: LiveDictationSnapshot, stalled: Bool = false, retracted: Bool = false) {
+        self.snapshot = snapshot; self.stalled = stalled; self.retracted = retracted
+    }
+}
+
 /// Where a take is: collecting lines, cleaning them in one call, or holding them raw after cleanup failed twice.
 public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
 
@@ -43,6 +55,26 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     public private(set) var sessionID = UUID().uuidString
     /// Lines not yet acknowledged, in speaking order.
     public private(set) var outbox: [DictationDelivery] = []
+    @ObservationIgnored private var deliveryStates: [String: (DictationDelivery, LiveDictationSnapshot)] = [:]
+    /// Buffered and live takes use the same whole-text contract. Only the first unacknowledged take is published.
+    public var deliverySnapshot: LiveDictationSnapshot? { outbox.first.map { snapshot(for: $0) } }
+    public func snapshot(for delivery: DictationDelivery) -> LiveDictationSnapshot {
+        if let previous = deliveryStates[delivery.lineID], previous.0 == delivery { return previous.1 }
+        let version = (deliveryStates[delivery.lineID]?.1.version ?? 0) + 1
+        var snapshot = LiveDictationSnapshot(runID: delivery.lineID, version: version,
+            segments: [.init(id: 0, text: delivery.retracted ? "" : delivery.text, cleaned: delivery.cleaned, final: delivery.final)],
+            complete: delivery.final, stopped: true, rawText: delivery.raw)
+        snapshot.text = delivery.retracted ? "" : delivery.text
+        deliveryStates[delivery.lineID] = (delivery, snapshot)
+        return snapshot
+    }
+    public func acknowledgeDelivery(_ ack: LiveDictationAck) {
+        guard ack.complete, let first = outbox.first, first.lineID == ack.runID,
+              first.final, snapshot(for: first).version == ack.version else { return }
+        deliveryStates[first.lineID] = nil
+        acknowledge(sessionID: sessionID, upTo: first.sequence)
+    }
+
     /// Lines received and not yet delivered to the outbox (in cleanup).
     public private(set) var pending = 0
     /// Why lines went raw, newest last (no dictated text), for diagnostics.
@@ -216,7 +248,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         partialSeq = nil
         pipeline = nil; terms = nil; lastWarm = nil
         sessionID = UUID().uuidString
-        outbox = []; fallbacks = []; pending = 0
+        outbox = []; deliveryStates = [:]; fallbacks = []; pending = 0
         nextTakeSequence = 0; takeLines = []
         endLiveRun()
         if let kept { failedText = kept; takePhase = .failed }
@@ -544,17 +576,6 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
                                        "chars": run.snapshot.segments.reduce(0) { $0 + $1.text.count }])
     }
 
-    /// The cleanup call or nil once `timeout` passed.
-    nonisolated private static func race(cleaner: any SentenceCleaning, input: SentenceCleanupInput, timeout: Duration) async -> Result<String, any Error>? {
-        await withTaskGroup(of: Result<String, any Error>?.self) { group in
-            group.addTask { do { return .success(try await cleaner.clean(input).text) } catch { return .failure(error) } }
-            group.addTask { try? await Task.sleep(for: timeout); return nil }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
-        }
-    }
-
     private func wholeInput(_ raw: String) async -> SentenceCleanupInput {
         .init(sentenceID: "\(sessionID)-whole-\(liveCleanupSequence)", sequence: liveCleanupSequence, text: raw,
               vocabulary: Array(await loadTerms().prefix(200)), dictation: .init(previousLines: [], textBeforeCursor: String(liveAnchor.suffix(600))))
@@ -568,16 +589,13 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         if let scripted = debugStreamCleaner { cleaner = scripted }
         #endif
         let started = ContinuousClock.now, raw = input.text
-        let result = await Self.race(cleaner: cleaner, input: input, timeout: liveTimeout)
-        var text: String?, reason = "timeout"
+        let timeout = liveTimeout
+        let result = await DictationTakeCleaner(cleaner: cleaner, timeout: { _ in timeout }).cleanRevision(input)
+        var text: String?, reason = "failed"
         switch result {
-        case .success(let cleaned):
-            let empty = cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !cleaned.contains(where: \.isNewline)
-            let accepted = empty ? DictationCleanupGuard.acceptsDrop(raw: raw)
-                : DictationTakeGuard.accepts(raw: raw, cleaned: cleaned)
-            if accepted { text = empty ? "" : cleaned } else { reason = "rejected" }
-        case .failure: reason = "failed"
-        case nil: break
+        case .cleaned(let cleaned): text = cleaned
+        case .failed(let why): reason = why
+        case .unavailable: break
         }
         let parts = started.duration(to: .now).components
         diagnostics?("live2.whole", ["late": late, "landed": text != nil, "reason": text == nil ? reason : "", "changed": text.map { $0 != raw } as Any,

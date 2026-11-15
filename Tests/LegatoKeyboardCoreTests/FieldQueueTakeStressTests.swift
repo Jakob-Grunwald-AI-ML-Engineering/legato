@@ -273,7 +273,7 @@ struct TakeSession {
         let reported = rig.drops.contains { $0.runID == "t" && $0.reason != .reset }
         let chars = Array(initial)
         let before = String(chars[..<caret]), after = String(chars[caret...])
-        var typed = DictationTypist.prepare(clean, contextBefore: before, capitalization: .none)
+        var typed = FieldInsertion.prepare(clean, contextBefore: before, capitalization: .none)
         let closing: Set<Character> = [",", ".", ";", ":", "!", "?", ")", "]", "}", "%", "…", "\u{2019}", "\u{201D}"]
         if let next = after.first, !next.isWhitespace, !closing.contains(next), !typed.isEmpty { typed += " " }
         // The field contradicted the queue's model with nobody acting (the model was wrong: Safari's block echo reads a

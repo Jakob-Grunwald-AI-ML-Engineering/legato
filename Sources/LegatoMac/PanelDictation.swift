@@ -1,4 +1,5 @@
 import Foundation
+import LegatoKeyboardCore
 
 /// Where a take's words show while it runs: in the field itself (live editing), or in the notch panel, typed into
 /// the app once when the take ends. Stored in the Mac app's standard defaults (Settings → Shortcut → Send dictation).
@@ -119,16 +120,14 @@ public struct PanelTake: Sendable, Equatable {
 
     /// The space (or nothing) between a field's `previous` character and `text`.
     public static func separator(before text: String, after previous: Character?) -> String {
-        space(before: text, after: previous, first: true)
+        FieldInsertion.separator(before: text, after: previous)
     }
 
     /// A space unless `text` starts with whitespace or closing punctuation, or `previous` is whitespace or opening
     /// punctuation. No previous character: none in an empty field (`first`), one after earlier unknown text.
     static func space(before text: String, after previous: Character?, first: Bool) -> String {
-        guard let next = text.first, !next.isWhitespace, !".,;:!?)]}%".contains(next) else { return "" }
-        guard let previous else { return first ? "" : " " }
-        if previous.isWhitespace || "([{\"'“‘„«¿¡".contains(previous) { return "" }
-        return " "
+        if previous == nil, !first { return FieldInsertion.separator(before: text, after: "x") }
+        return FieldInsertion.separator(before: text, after: previous)
     }
 
     private mutating func update(id: String, text: String, finished: Bool) {

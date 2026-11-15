@@ -93,6 +93,19 @@ struct CorrectionRecordTests {
         #expect(whenIdle)
     }
 
+    @MainActor @Test func pendingSourceSurvivesOwnWritesButNotAFieldReset() {
+        let capture = CorrectionCapture(store: CorrectionStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)))
+        capture.watch(dictationID: "take", raw: "hello john", inserted: "Hello John.")
+        capture.ownWrite(now: start)
+        #expect(!capture.canObserve(now: start.addingTimeInterval(0.1)))
+        #expect(capture.canObserve(now: start.addingTimeInterval(0.2)))
+        #expect(capture.armPending(snapshot: "Hello John.", platform: "test", locale: "en", isIdle: false, unmatched: .retain) == 0)
+        #expect(capture.armPending(snapshot: "Hello John.", platform: "test", locale: "en", isIdle: true, unmatched: .retain) == 1)
+        capture.watch(dictationID: "next", raw: "hello john", inserted: "Hello John.")
+        capture.reset()
+        #expect(capture.armPending(snapshot: "Hello John.", platform: "test", locale: "en", isIdle: true, unmatched: .retain) == 0)
+    }
+
     @Test func independentWritersAndDeletePreserveOtherEvidence() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

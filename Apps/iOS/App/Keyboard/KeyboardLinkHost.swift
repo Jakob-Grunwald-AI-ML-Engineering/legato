@@ -25,7 +25,6 @@ final class KeyboardLinkHost {
     private var publishedStatus: DictationStatus?
     /// Open while the keyboard is on screen; its surface decides where a mic tap routes audio.
     private(set) var keyboardSession: KeyboardSession?
-    private var dictationPublished: (sessionID: String, lines: [DictationDelivery])?
     /// Live dictation (the send mode `live`): the run's snapshot goes to the link at most every `minPublishInterval`
     /// (the latest wins), and the keyboard's ack is only read for diagnostics.
     private var liveLatest: LiveDictationSnapshot?
@@ -41,25 +40,16 @@ final class KeyboardLinkHost {
         dictation.contextBefore = { [weak self] in self?.link.keyboardPresence()?.contextBefore ?? "" }
         guard let backing = UserDefaultsLinkStore() else { return }
         let channel = DictationStatusLink(store: LinkStore(backing))
-        let dictationChannel = DictationLink(store: LinkStore(backing))
-        // Cleaned lines wait here until the keyboard acknowledges having typed them. A streaming take grows the same
-        // line: the pipeline announces growth at most every ~30 ms, which publishes at once (the loop below only
-        // catches what changed otherwise).
-        let publishDictation: @MainActor () -> Void = { [weak self, weak dictation] in
-            guard let self, let dictation else { return }
-            if self.dictationPublished?.sessionID != dictation.sessionID || self.dictationPublished?.lines != dictation.outbox {
-                self.dictationPublished = (dictation.sessionID, dictation.outbox)
-                dictationChannel.publish(.init(sessionID: dictation.sessionID, lines: dictation.outbox.map {
-                    .init(lineID: $0.lineID, seq: $0.sequence, raw: $0.raw, text: $0.text, status: $0.cleaned ? .cleaned : .raw,
-                          final: $0.final, retracted: $0.retracted)
-                }))
-            }
-        }
-        dictation.onChange = publishDictation
         let instructionChannel = InstructionFieldChannel(store: LinkStore(backing))
         self.instructionChannel = instructionChannel
         keyboardSession.instruction.field = instructionChannel
         let liveChannel = LiveDictationLink(store: LinkStore(backing))
+        let publishDictation: @MainActor () -> Void = { [weak self, weak dictation] in
+            guard let self, let dictation, dictation.mode != .live else { return }
+            self.publishLive(dictation.deliverySnapshot, through: liveChannel, diagnostics: dictation.diagnostics)
+        }
+        dictation.onChange = publishDictation
+
         dictation.onLiveChange = { [weak self, weak dictation] snapshot in
             self?.publishLive(snapshot, through: liveChannel, diagnostics: dictation?.diagnostics)
         }
@@ -75,8 +65,8 @@ final class KeyboardLinkHost {
                     for intent in instructionChannel.drainIntents() { session.handle(intent) }
                 }
                 do {
-                    if let ack = dictationChannel.acknowledged() { dictation.acknowledge(sessionID: ack.sessionID, upTo: ack.upTo) }
                     let liveAck = liveChannel.acknowledged()
+                    if let liveAck { dictation.acknowledgeDelivery(liveAck) }
                     // The user split the live run into pieces (a list typed line by line): each is cleaned on its own.
                     if let liveAck, liveAck != self.liveAckSeen, let pieces = liveAck.pieces {
                         await dictation.livePieces(runID: liveAck.runID, startingAt: pieces)
