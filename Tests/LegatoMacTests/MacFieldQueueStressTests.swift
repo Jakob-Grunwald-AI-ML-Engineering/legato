@@ -1200,7 +1200,7 @@ private struct SeededRandom {
         again.live(runID: "s", version: 2, text: "Ahoj")
         await again.whenIdle()
         field.settle(all: true)
-        #expect(field.string == "Ahojthe cat is here and the sea is calm today")
+        #expect(field.string == "Ahoj the cat is here and the sea is calm today")
         #expect(field.keysSent - keys == 2, "\(field.trail.suffix(12).joined(separator: "\n"))") // Backspace, "y"
         #expect(field.caretSets - sets == 2) // there and back
     }
