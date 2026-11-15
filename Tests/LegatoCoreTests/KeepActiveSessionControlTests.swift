@@ -39,15 +39,11 @@ private struct HeldRig {
             isRefusal: { ($0 as? TestError)?.tag == "refused" })
     }
 
-    /// A fresh session per dictation, like the app builds them, all over the one control.
-    func session(_ policy: AudioPolicy = .duckOthers) -> DictationSession {
-        DictationSession(engine: engine, source: source, sessionControl: control, history: history, policy: policy)
-    }
-
     func run(_ policy: AudioPolicy = .duckOthers) async throws {
-        let s = session(policy)
-        try await s.start()
-        _ = try await s.stop()
+        try control.activate(policy.sessionConfig)
+        _ = try await source.start(format: .init(sampleRate: 16000, channelCount: 1))
+        await source.stop()
+        control.deactivate()
     }
 }
 
@@ -130,41 +126,3 @@ private struct HeldRig {
     }
 }
 
-@MainActor
-@Suite struct HeldSessionCoordinatorTests {
-    /// The device bug end to end: no keep-ready lease, the keep-active switch holds the audio session, and
-    /// a press in the background must start without opening the app.
-    @Test func aBackgroundPressOnAHeldSessionStartsWithoutAHop() async throws {
-        let keep = Switch(true)
-        let r = CoordinatorRig(script: [.init(text: "hello", isFinal: true)], wrapControl: { fake in
-            fake.refuseActivationWhileActive(with: HeldRig.refused)
-            return KeepActiveSessionControl(
-                inner: fake, keepActive: { keep.isOn }, isRefusal: { ($0 as? TestError)?.tag == "refused" })
-        })
-        r.environment.context = StartContext(inBackground: true, otherAudioPlaying: false, audioPolicy: .duckMusicPauseSpoken)
-        #expect(await r.coordinator.toggle() == .started)
-        #expect(await r.coordinator.toggle() == .stopped("hello"))
-        #expect(r.control.isActive) // left active
-
-        #expect(await r.coordinator.toggle() == .started) // the second background press
-        #expect(r.log.events.filter { $0.hasPrefix("fallback:") }.isEmpty)
-        #expect(r.log.count("activity.dismiss") == 0)
-        #expect(r.log.count("activate") == 1)
-        #expect(await r.coordinator.toggle() == .stopped("hello"))
-    }
-
-    @Test func aDifferentSelectedPolicyInTheBackgroundAlsoStartsOnTheHeldSession() async throws {
-        let r = CoordinatorRig(script: [.init(text: "hello", isFinal: true)], wrapControl: { fake in
-            fake.refuseActivationWhileActive(with: HeldRig.refused)
-            return KeepActiveSessionControl(
-                inner: fake, keepActive: { true }, isRefusal: { ($0 as? TestError)?.tag == "refused" })
-        })
-        r.environment.context = StartContext(inBackground: true, otherAudioPlaying: false, audioPolicy: .duckMusicPauseSpoken)
-        #expect(await r.coordinator.toggle() == .started)
-        _ = await r.coordinator.toggle()
-        r.environment.context = StartContext(inBackground: true, otherAudioPlaying: false, audioPolicy: .duckOthers)
-        #expect(await r.coordinator.toggle() == .started) // reconfigure refused, carried on in place
-        #expect(r.log.events.filter { $0.hasPrefix("fallback:") }.isEmpty)
-        _ = await r.coordinator.toggle()
-    }
-}

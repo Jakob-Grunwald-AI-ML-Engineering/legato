@@ -130,7 +130,6 @@ public final class UnrestrictedStartEnvironment: StartEnvironment {
 /// armed after a run (zero: released at once). Called once per attempt that has no held session to reuse
 /// (more than once when a refused background start falls back to the default policy, or a foreground
 /// start is retried), so no session or mic outlives its keep-alive.
-public typealias DictationSessionFactory = @MainActor (_ policy: AudioPolicy, _ linger: Linger) -> DictationSession
 
 /// Where a run's text goes.
 public enum DictationTarget: Sendable, Equatable {

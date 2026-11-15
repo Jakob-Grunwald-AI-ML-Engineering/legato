@@ -73,7 +73,7 @@ final class FailingStreamCleaner: SentenceCleaning {
 
     private func make(key: String = "test", cleaner: any SentenceCleaning = Cleaner(), timeout: Duration = .milliseconds(2500),
                       context: @escaping @MainActor () -> String = { "" },
-                      mode: DictationSendSetting.Mode = .lineByLine, clock: any Clock<Duration> = ContinuousClock(),
+                      mode: DictationSendSetting.Mode = .onStop, clock: any Clock<Duration> = ContinuousClock(),
                       takeTimeout: (@Sendable (Int) -> Duration)? = nil) -> MacDictationSession {
         let pipeline = DictationPipeline(cleaner: cleaner, timeout: timeout, sendMode: { mode }, pauseSeconds: { 5 }, clock: clock,
                                          takeTimeout: takeTimeout)
@@ -263,14 +263,7 @@ final class FailingStreamCleaner: SentenceCleaning {
         #expect(session.pipeline.countdownDeadline == nil)
     }
 
-    @Test func lineByLineStillTypesEachLineAsItIsCleaned() async throws {
-        let session = make(mode: .lineByLine)
-        try await session.debugLine("erste")
-        try await session.debugLine("zweite")
-        try await until { typed.lines.count == 2 }
-        #expect(typed.lines == ["Erste.", "Zweite."] && session.pipeline.takeLines.isEmpty)
-        await session.debugStop()
-    }
+
 
     @Test func aWholeTakeStreamsAndAFailedOneStaysOpenUntilRetryRetractsIt() async throws {
         let cleaner = FailingStreamCleaner()

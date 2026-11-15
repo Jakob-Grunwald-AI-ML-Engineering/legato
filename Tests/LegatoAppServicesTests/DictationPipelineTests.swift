@@ -128,57 +128,15 @@ private actor LiveHistory: HistoryStore {
         #expect(await history.recent(limit: 10).isEmpty)
     }
 
-    @Test func cleanedLinesWaitInTheOutboxUntilAcknowledgedAndNeverReturn() async throws {
-        let pipeline = DictationPipeline(cleaner: StubCleaner())
-        var changes = 0
-        pipeline.onChange = { changes += 1 }
-        await pipeline.receive(routeLine(0, "hello there"))
-        await pipeline.receive(routeLine(1, "second one"))
-        try await until { pipeline.outbox.count == 2 }
-        #expect(pipeline.outbox.map(\.text) == ["Hello There.", "Second One."])
-        #expect(pipeline.outbox.map(\.sequence) == [0, 1] && pipeline.outbox.allSatisfy(\.cleaned))
-        let session = pipeline.sessionID
 
-        pipeline.acknowledge(sessionID: "another-session", upTo: 5)
-        #expect(pipeline.outbox.count == 2, "An ack for another session changes nothing")
-        pipeline.acknowledge(sessionID: session, upTo: 0)
-        #expect(pipeline.outbox.map(\.sequence) == [1])
-        pipeline.acknowledge(sessionID: session, upTo: 0)
-        pipeline.acknowledge(sessionID: session, upTo: 1)
-        #expect(pipeline.outbox.isEmpty && changes >= 4)
-    }
 
-    @Test func aSlowCleanupFallsBackToTheRawLineAndTheContextIsThePresenceText() async throws {
-        let cleaner = StubCleaner(slow: [0])
-        let pipeline = DictationPipeline(cleaner: cleaner, vocabulary: { ["Legato"] }, timeout: .milliseconds(40))
-        pipeline.contextBefore = { "Hi Anna, " }
-        await pipeline.receive(routeLine(0, "uh i am late"))
-        await pipeline.receive(routeLine(1, "see you soon"))
-        try await until { pipeline.outbox.count == 2 }
-        #expect(pipeline.outbox[0].text == "uh i am late" && !pipeline.outbox[0].cleaned, "Timeout: the raw line, in order")
-        #expect(pipeline.outbox[1].cleaned)
-        #expect(pipeline.fallbacks == ["timeout"])
-        let first = cleaner.inputs.withLock { $0 }.first { $0.sequence == 0 }
-        #expect(first?.dictation?.textBeforeCursor == "Hi Anna, " && first?.vocabulary == ["Legato"])
-    }
 
-    @Test func resetStartsANewSessionWithoutContextAndDropsPendingLines() async throws {
-        let cleaner = StubCleaner(slow: [0])
-        let pipeline = DictationPipeline(cleaner: cleaner)
-        let before = pipeline.sessionID
-        await pipeline.receive(routeLine(0, "never arrives"))
-        await pipeline.reset()
-        #expect(pipeline.sessionID != before && pipeline.outbox.isEmpty)
-        await pipeline.receive(routeLine(0, "fresh start"))
-        try await until { pipeline.outbox.count == 1 }
-        #expect(pipeline.outbox[0].lineID.hasPrefix(pipeline.sessionID))
-        let last = cleaner.inputs.withLock { $0 }.last
-        #expect(last?.dictation?.previousLines == [], "Cleanup context is reset per keyboard session")
-    }
+
+
 
     @Test func warmingIsThrottledToTheCacheLifetime() async {
         let cleaner = StubCleaner()
-        let pipeline = DictationPipeline(cleaner: cleaner)
+        let pipeline = DictationPipeline(cleaner: cleaner, supportsLive: true)
         await pipeline.warm(); await pipeline.warm()
         #expect(cleaner.warms.withLock { $0 } == 1)
         await pipeline.reset()
@@ -188,18 +146,7 @@ private actor LiveHistory: HistoryStore {
 }
 
 extension DictationPipelineTests {
-    @Test func lineByLineDeliversAfterLinesWentToAnotherSendMode() async throws {
-        nonisolated(unsafe) var mode = DictationSendSetting.Mode.lineByLine
-        let pipeline = DictationPipeline(cleaner: StubCleaner(), sendMode: { mode })
-        await pipeline.receive(routeLine(0, "first"))
-        try await until { pipeline.outbox.count == 1 }
-        mode = .onStop // the route keeps counting lines the cleanup pipeline never sees
-        await pipeline.receive(routeLine(1, "held"))
-        await pipeline.receive(routeLine(2, "held too"))
-        mode = .lineByLine
-        await pipeline.receive(routeLine(3, "fourth"))
-        try await until { pipeline.outbox.contains { $0.sequence == 3 } }
-    }
+
 }
 
 @MainActor @Suite(.timeLimit(.minutes(1))) struct LiveDictationPipelineTests {
@@ -283,17 +230,7 @@ extension DictationPipelineTests {
         #expect(last == .some(nil), "The link's run is removed")
     }
 
-    @Test func switchingFromLiveToLineByLineKeepsDeliveringLines() async throws {
-        nonisolated(unsafe) var mode = DictationSendSetting.Mode.live
-        let pipeline = DictationPipeline(cleaner: StubCleaner(), sendMode: { mode }, supportsLive: true, liveTimeout: .milliseconds(200))
-        await pipeline.receive(routeLine(0, "first"))
-        await pipeline.receive(routeLine(1, "second"))
-        try await until { pipeline.pending == 0 }
-        mode = .lineByLine
-        await pipeline.receive(routeLine(2, "third"))
-        try await until { pipeline.outbox.count == 1 }
-        #expect(pipeline.outbox[0].sequence == 2 && pipeline.outbox[0].text == "Third.")
-    }
+
 
     @Test func sentencesAreCleanedAgainstTheTextBeforeTheRunNotTheFieldTheRunIsTyping() async throws {
         let cleaner = StubCleaner(slow: [0])
@@ -560,12 +497,7 @@ extension DictationPipelineTests {
         #expect(pipeline.liveRun?.snapshot.segments.map(\.text) == [sentence.uppercased(), sentence.uppercased()])
     }
 
-    @Test func lineByLineStopWaitsForTheLastLineToBeCleaned() async {
-        let pipeline = DictationPipeline(cleaner: StubCleaner(), sendMode: { .lineByLine })
-        await pipeline.receive(routeLine(0, "one"))
-        await pipeline.finishTake()
-        #expect(pipeline.outbox.map(\.text) == ["One."])
-    }
+
 
     @Test func withoutLiveSupportTheSettingActsAsOnStop() async {
         let pipeline = live(supportsLive: false)

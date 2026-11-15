@@ -152,11 +152,9 @@ public struct FieldReadReply: Codable, Sendable, Equatable {
     /// The failure lies in how this app shows its text (its windows never agreed): reading again cannot help.
     public var lasting: Bool?
     public var documentID: String?
-    public var revision: FieldRevision?
     public init(id: String, state: State, above: String = "", below: String = "", selection: String? = nil, sessionLength: Int = 0,
                 stop: FieldStop = .unread, stopBelow: FieldStop? = nil, moreAbove: Bool = false, moreBelow: Bool = false, error: String? = nil,
-                documentID: String? = nil, revision: FieldRevision? = nil) {
-        self.revision = revision
+                documentID: String? = nil) {
         self.id = id; self.state = state; self.above = above; self.below = below; self.selection = selection
         self.sessionLength = sessionLength; self.stop = stop; self.stopBelow = stopBelow; self.moreAbove = moreAbove; self.moreBelow = moreBelow
         self.error = error; self.documentID = documentID
@@ -168,7 +166,6 @@ public struct FieldReadReply: Codable, Sendable, Equatable {
 /// keyboard checks that the field still shows it (the windows around the cursor agree), character-diffs `target` into it
 /// (`ShadowEditPlanner`), and answers on `link.instruction.edit.ack`. Undo is the same edit the other way round.
 public struct ScopedEdit: Codable, Sendable, Equatable {
-    public var revision: FieldRevision?
     public var id: String
     public var instructionID: String
     public var documentID: String?
@@ -178,8 +175,7 @@ public struct ScopedEdit: Codable, Sendable, Equatable {
     public var target: String
     public var at: Date
     public init(id: String = UUID().uuidString, instructionID: String, documentID: String?, before: String, after: String,
-                selected: String? = nil, target: String, at: Date = Date(), revision: FieldRevision? = nil) {
-        self.revision = revision
+                selected: String? = nil, target: String, at: Date = Date()) {
         self.id = id; self.instructionID = instructionID; self.documentID = documentID
         self.before = before; self.after = after; self.selected = selected; self.target = target; self.at = at
     }
@@ -189,7 +185,6 @@ public struct ScopedEdit: Codable, Sendable, Equatable {
 
 /// keyboard -> app (`link.instruction.edit.ack`).
 public struct ScopedEditAck: Codable, Sendable, Equatable {
-    public var revision: FieldRevision?
     public var id: String
     public var applied: Bool
     /// Where the cursor ended, in UTF-16 units into `target` (the undo splits the target there), or into `partial`.
@@ -202,8 +197,7 @@ public struct ScopedEditAck: Codable, Sendable, Equatable {
     public var partial: String?
     /// Ops went out and the edit stopped before the end; without `partial` the field's text is unknown.
     public var stopped: Bool?
-    public init(id: String, applied: Bool, cursor: Int? = nil, reason: String? = nil, partial: String? = nil, stopped: Bool? = nil, revision: FieldRevision? = nil) {
-        self.revision = revision
+    public init(id: String, applied: Bool, cursor: Int? = nil, reason: String? = nil, partial: String? = nil, stopped: Bool? = nil) {
         self.id = id; self.applied = applied; self.cursor = cursor; self.reason = reason; self.partial = partial; self.stopped = stopped
     }
 }

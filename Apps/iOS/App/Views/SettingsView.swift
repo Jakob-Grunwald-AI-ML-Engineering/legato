@@ -75,7 +75,6 @@ struct SettingsView: View {
                     Text("As you speak").tag(DictationSendSetting.Mode.live.rawValue)
                     Text("On stop").tag(DictationSendSetting.Mode.onStop.rawValue)
                     Text("After a pause").tag(DictationSendSetting.Mode.afterPause.rawValue)
-                    Text("Line by line").tag(DictationSendSetting.Mode.lineByLine.rawValue)
                 }.accessibilityIdentifier("settings.dictationSend")
                 if dictationSend == DictationSendSetting.Mode.afterPause.rawValue {
                     Stepper(value: Binding(get: { DictationSendSetting.clampedPause(dictationPause) },
@@ -84,13 +83,13 @@ struct SettingsView: View {
                         LabeledContent("Pause before sending", value: "\(Int(DictationSendSetting.clampedPause(dictationPause))) s")
                     }.accessibilityIdentifier("settings.dictationPause")
                 }
-                if dictationSend == DictationSendSetting.Mode.live.rawValue || dictationSend == DictationSendSetting.Mode.lineByLine.rawValue {
+                if dictationSend == DictationSendSetting.Mode.live.rawValue {
                     Picker("Dictation cleanup model", selection: $cleanupModel) {
                         ForEach(ModelChoice.cleanupChoices, id: \.settingValue) { Text($0.label).tag($0.settingValue) }
                     }.accessibilityIdentifier("settings.dictationCleanupModel")
                 }
             } header: { Text("Dictation") } footer: {
-                Text("As you speak types your words into the field at once and corrects single words as they firm up; each finished sentence is then tidied in place. On stop holds the whole take and types it once, cleaned as one text, when you stop. After a pause also types when you stop speaking for the pause. Line by line cleans and types each sentence as you speak. Haiku is quicker, Sonnet more careful.")
+                Text("As you speak types your words into the field at once and corrects single words as they firm up; each finished sentence is then tidied in place. On stop holds the whole take and types it once, cleaned as one text, when you stop. After a pause also types when you stop speaking for the pause. Haiku is quicker, Sonnet more careful.")
             }
             Section {
                 Picker("Send instructions", selection: $instructionSend) {

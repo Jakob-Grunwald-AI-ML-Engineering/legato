@@ -10,12 +10,12 @@ import LegatoSoniox
 import LegatoVocabulary
 
 /// One keyboard appearance on the host. Appearing pre-warms the held microphone input (audio discarded
-/// while the gate is idle), the current surface's Soniox stream and the Claude connection; the composer
+/// while the gate is idle), the current surface's Soniox stream and the Claude connection; the microphone
 /// surface also builds its composition (cleanup pipeline and writer). A mic tap only opens the gate.
 /// Disappearing closes everything: composition, writer conversation, cleanup and dictation context.
 ///
 /// Surfaces decide routes: typing → `dictation`, whose finalized lines go to a `DictationRouteSink`
-/// through a Room of their own; composer → `agent`, the existing composition. Dictation audio never
+/// through a Room of their own; microphone → `agent`, the existing composition. Dictation audio never
 /// reaches the composition.
 ///
 /// On the dictation route the keyboard's magic toggle tags speech (`SpeechModeSink`): dictation goes to the sink,
@@ -27,7 +27,7 @@ import LegatoVocabulary
     /// Serialize a microphone handoff after queued presence and take operations. Keep the draft intact.
     public func suspendForMeeting() async {
         meetingSuspended = true
-        composer.microphoneReserved = true
+        microphone.microphoneReserved = true
         desired.visible = false
         await settle()
         await serial { [self] in
@@ -35,13 +35,13 @@ import LegatoVocabulary
             await takeFinish?.value
             await closeDictation()
             isOpen = false
-            composer.dictationAudio = nil
-            await composer.suspendMicrophoneForMeeting()
+            microphone.dictationAudio = nil
+            await microphone.suspendMicrophoneForMeeting()
         }
     }
 
     /// A stopped meeting never implicitly rearms the microphone. A new explicit arm is required.
-    public func finishMeeting() { meetingSuspended = false; composer.microphoneReserved = false }
+    public func finishMeeting() { meetingSuspended = false; microphone.microphoneReserved = false }
     public var surface: AudioRoute { gate.surface }
     public var route: AudioRoute { gate.route }
     /// The dictation route's uncommitted words.
@@ -53,7 +53,7 @@ import LegatoVocabulary
     public private(set) var dictationNoticeID = 0
     /// Mic tap → first live tail, newest last (bounded).
     public private(set) var probes: [TapLatencyProbe.Result] = []
-    @ObservationIgnored private let composer: ComposerSession
+    @ObservationIgnored private let microphone: MicrophoneHost
     @ObservationIgnored private let sink: any DictationRouteSink
     /// In front of `sink`: speech in instruction mode goes to `instruction` instead.
     @ObservationIgnored private let modeSink: SpeechModeSink
@@ -89,28 +89,27 @@ import LegatoVocabulary
     #endif
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "keyboard-session")
 
-    public convenience init(composer: ComposerSession, sink: any DictationRouteSink = DiscardingDictationSink(), instruction: InstructionSession? = nil) {
-        self.init(composer: composer, sink: sink, instruction: instruction ?? InstructionSession(vocabularyURL: composer.vocabularyURL),
+    public convenience init(microphone: MicrophoneHost, sink: any DictationRouteSink = DiscardingDictationSink(), instruction: InstructionSession? = nil) {
+        self.init(microphone: microphone, sink: sink, instruction: instruction ?? InstructionSession(vocabularyURL: microphone.vocabularyURL),
                   sonioxKey: { (try? KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey()) ?? "" },
                   makeSocket: { URLSessionSonioxSocket() }, warmConnection: { await Self.warmClaudeConnection() })
     }
     #if DEBUG || LEGATO_INTERNAL
     /// Native keyboard acceptance with synthetic speech and an injected instruction runner. Neither provider can connect.
-    public static func offlineFixture(composer: ComposerSession, sink: any DictationRouteSink, instruction: InstructionSession) -> KeyboardSession {
-        KeyboardSession(composer: composer, sink: sink, instruction: instruction, sonioxKey: { "" },
+    public static func offlineFixture(microphone: MicrophoneHost, sink: any DictationRouteSink, instruction: InstructionSession) -> KeyboardSession {
+        KeyboardSession(microphone: microphone, sink: sink, instruction: instruction, sonioxKey: { "" },
                         makeSocket: { OfflineKeyboardSocket() }, warmConnection: {})
     }
     #endif
 
-    init(composer: ComposerSession, sink: any DictationRouteSink, instruction: InstructionSession? = nil, sonioxKey: @escaping @MainActor () -> String,
+    init(microphone: MicrophoneHost, sink: any DictationRouteSink, instruction: InstructionSession? = nil, sonioxKey: @escaping @MainActor () -> String,
          makeSocket: @escaping @Sendable () -> any SonioxSocket, warmConnection: @escaping @Sendable () async -> Void,
          now: @escaping @MainActor () -> Double = { ProcessInfo.processInfo.systemUptime }) {
-        self.composer = composer; self.sink = sink; self.sonioxKey = sonioxKey; self.makeSocket = makeSocket
+        self.microphone = microphone; self.sink = sink; self.sonioxKey = sonioxKey; self.makeSocket = makeSocket
         self.warmConnection = warmConnection; self.now = now
         self.instruction = instruction ?? InstructionSession(runner: InstructionRunner(client: MessagesStream(keyStore: KeychainKeyStore()), model: { .haiku }))
         modeSink = SpeechModeSink(dictation: sink)
-        composer.makeSocket = makeSocket
-        dictation = DictationEngine(sink: modeSink, sonioxKey: sonioxKey, makeSocket: makeSocket, vocabularyURL: composer.vocabularyURL, now: now)
+        dictation = DictationEngine(sink: modeSink, sonioxKey: sonioxKey, makeSocket: makeSocket, vocabularyURL: microphone.vocabularyURL, now: now)
         let instructionSession = self.instruction
         modeSink.onInstructionLine = { line in instructionSession.hear(line) }
         modeSink.onInstructionTail = { text in instructionSession.hearTail(text) }
@@ -134,14 +133,12 @@ import LegatoVocabulary
             }
         }
         dictation.onTail = { [weak self] text in self?.observeTail(text, route: .dictation) }
-        composer.onTail = { [weak self] text in self?.observeTail(text, route: .agent) }
-        composer.keyboardDiagnostics = { [weak self] in self?.diagnostics ?? [:] }
     }
 
     /// The keyboard's presence, read on every host link pass. Transitions run one at a time, in order.
     public func update(visible: Bool, surface: AudioRoute) {
         guard !meetingSuspended else { return }
-        desired = (visible, surface == .idle ? .agent : surface)
+        desired = (visible, surface == .idle || surface == .agent ? .dictation : surface)
         guard reconciling == nil, visible != isOpen || (visible && desired.surface != gate.surface) else { return }
         reconciling = Task { [weak self] in
             while let self, await self.serial({ await self.reconcileStep() }) {}
@@ -159,14 +156,6 @@ import LegatoVocabulary
         queue = Task { _ = await task.value }
         return await task.value
     }
-    /// The composition was cleared (✕, New topic): build the next one now so the next tap stays warm.
-    public func rewarm() async {
-        await serial { [weak self] in
-            guard let self, !self.meetingSuspended, self.isOpen, self.gate.surface == .agent else { return }
-            await self.composer.prepareComposition()
-        }
-    }
-
     private func reconcileStep() async -> Bool {
         let target = desired
         if meetingSuspended { return false }
@@ -186,12 +175,12 @@ import LegatoVocabulary
     private func open(surface: AudioRoute) async {
         isOpen = true
         gate = AudioGate(surface: surface); probe.cancel(); routeClosedAt = nil
-        composer.dictationAudio = { [weak self] pcm in await self?.sendDictation(pcm) }
+        microphone.dictationAudio = { [weak self] pcm in await self?.sendDictation(pcm) }
         let warmConnection = self.warmConnection
         Task.detached { await warmConnection() }
-        _ = await composer.holdWarmInput()
+        _ = await microphone.holdWarmInput()
         await warm(surface)
-        Self.log.info("keyboard.session.open surface=\(surface.rawValue, privacy: .public) input=\(self.composer.holdsWarmInput ? 1 : 0)")
+        Self.log.info("keyboard.session.open surface=\(surface.rawValue, privacy: .public) input=\(self.microphone.holdsWarmInput ? 1 : 0)")
     }
 
     private func close() async {
@@ -207,14 +196,14 @@ import LegatoVocabulary
         await modeSink.reset()
         instruction.reset()
         dictation.resetSequence()
-        composer.dictationAudio = nil
-        await composer.endKeyboardSession()
+        microphone.dictationAudio = nil
+        await microphone.endKeyboardSession()
         Self.log.info("keyboard.session.close")
     }
 
     private func warm(_ surface: AudioRoute) async {
         switch surface {
-        case .agent: await composer.prepareComposition()
+        case .agent: break
         case .dictation:
             openDictation()
             // Cleanup's connection and prompt cache are warm before the first spoken line needs them.
@@ -225,7 +214,6 @@ import LegatoVocabulary
     }
     private func cool(except surface: AudioRoute) async {
         if surface != .dictation { await closeDictation() }
-        if surface != .agent { await composer.closeAgentStream() }
     }
 
     // MARK: Gate
@@ -241,47 +229,41 @@ import LegatoVocabulary
     }
     private func performOpen(tapAt: Date?) async -> Bool {
         guard !VoiceEnrollmentController.shared.isBusy else { return false }
-        guard !meetingSuspended, !composer.microphoneReserved, isOpen else { return false }
+        guard !meetingSuspended, !microphone.microphoneReserved, isOpen else { return false }
         guard gate.route == .idle else { return true }
         let tapped = now() - max(0, tapAt.map { Date().timeIntervalSince($0) } ?? 0)
-        if !composer.holdsWarmInput, !(await composer.holdWarmInput()) { return false }
+        if !microphone.holdsWarmInput, !(await microphone.holdWarmInput()) { return false }
         let surface = gate.surface
-        let warmSince = surface == .agent ? composer.agentWarmSince : dictation.liveSince
+        let warmSince = dictation.liveSince
         probe.tapped(route: surface, at: tapped, warm: warmSince != nil,
                      idleS: warmSince.map { now() - max($0, routeClosedAt ?? $0) })
         _ = gate.tap()
-        composer.beginTakeBuffer(for: surface)
+        microphone.beginTakeBuffer(for: surface)
         // Before any chunk routes: the headset's mic for this take (the idle hold prefers the built-in one).
-        await composer.preferTakeInput()
+        await microphone.preferTakeInput()
         switch surface {
-        case .agent:
-            await composer.start()
-            guard composer.isListening else {
-                composer.discardTakeBuffer()
-                _ = gate.close(); probe.cancel(); await composer.preferIdleInput()
-                return composer.error == nil
-            }
+        case .agent: return false
         case .dictation:
             // A take of its own: its words never join the previous take's run (which may still be ending).
             modeSink.beginTake()
             await dictation.activate()
-            if let failure = composer.takeBufferFailure {
+            if let failure = microphone.takeBufferFailure {
                 await dictation.abandonTake()
-                composer.discardTakeBuffer(); _ = gate.close(); probe.cancel()
+                microphone.discardTakeBuffer(); _ = gate.close(); probe.cancel()
                 dictationNotice = failure.localizedDescription; dictationNoticeID += 1
                 return true
             }
             guard dictation.hasActiveTake else {
                 // No stream to talk to (no or unreachable Soniox): do not pretend to listen.
-                composer.discardTakeBuffer()
-                _ = gate.close(); probe.cancel(); await composer.preferIdleInput()
+                microphone.discardTakeBuffer()
+                _ = gate.close(); probe.cancel(); await microphone.preferIdleInput()
                 dictationNotice = sonioxKey().isEmpty
                     ? "Add your Soniox key in the Legato app to dictate."
                     : "Can't reach Soniox. Check your connection and key, then try again."
                 dictationNoticeID += 1
                 return true
             }
-            composer.setRoute(.dictation)
+            microphone.setRoute(.dictation)
         case .idle: break
         }
         probe.gateOpened(at: now())
@@ -301,20 +283,20 @@ import LegatoVocabulary
         routeClosedAt = now()
         switch action {
         case .open: break
-        case .finalize(.agent): await composer.finalizeTake()
+        case .finalize(.agent): microphone.setRoute(.idle)
         case .finalize(.dictation):
-            composer.setRoute(.idle)
+            microphone.setRoute(.idle)
             await dictation.finalizeTake()
             finishDictationTake(waitingForWords: true)
-        case .abandon(.agent): await composer.abandonTake()
+        case .abandon(.agent): microphone.setRoute(.idle)
         case .abandon(.dictation):
-            composer.setRoute(.idle)
+            microphone.setRoute(.idle)
             // Drop half-spoken words: close without finalizing. Delivered lines stay with the sink.
             await dictation.abandonTake()
-        case .finalize(.idle), .abandon(.idle): composer.setRoute(.idle)
+        case .finalize(.idle), .abandon(.idle): microphone.setRoute(.idle)
         }
         // Closing (or abandoning) a take: back to the built-in mic so the headset leaves call mode.
-        if case .open = action {} else { await composer.preferIdleInput() }
+        if case .open = action {} else { await microphone.preferIdleInput() }
         probe.cancel()
     }
 
@@ -369,7 +351,7 @@ import LegatoVocabulary
     private func closeDictation() async { await dictation.close() }
     private func sendDictation(_ pcm: Data) async {
         guard gate.route == .dictation else { return }
-        if let rate = composer.routedAudioAt { probe.audioRouted(at: rate) }
+        if let rate = microphone.routedAudioAt { probe.audioRouted(at: rate) }
         await dictation.send(pcm)
     }
 
@@ -431,12 +413,11 @@ import LegatoVocabulary
     // MARK: Probe
 
     private func observeTail(_ text: String, route: AudioRoute) {
-        if let audio = composer.routedAudioAt { probe.audioRouted(at: audio) }
+        if let audio = microphone.routedAudioAt { probe.audioRouted(at: audio) }
         guard let result = probe.tail(text, route: route, at: now()) else { return }
         probes.append(result)
         if probes.count > 20 { probes.removeFirst(probes.count - 20) }
         Self.log.info("probe.tap.tail route=\(result.route.rawValue, privacy: .public) warm=\(result.warm ? 1 : 0) idleS=\(result.idleS ?? -1) tapToGateMs=\(result.tapToGateMs) tapToAudioMs=\(result.tapToAudioMs ?? -1) tapToTailMs=\(result.tapToTailMs)")
-        composer.traceProbe(result)
     }
 
     var diagnostics: [String: Any] {

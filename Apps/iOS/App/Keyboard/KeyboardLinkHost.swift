@@ -185,7 +185,7 @@ final class KeyboardLinkHost: TranscriptSink {
                 value.instructionCountdownDeadline = composer.instructionCountdownDeadline
                 value.audioRoute = (self.keyboardSession?.isOpen == true ? self.keyboardSession?.route : nil)?.rawValue ?? composer.route.rawValue
                 value.dictationTail = self.keyboardSession?.dictationTail
-                if let dictation, dictation.mode != .lineByLine, self.keyboardSession?.isOpen == true {
+                if let dictation, self.keyboardSession?.isOpen == true {
                     value.dictationTake = dictation.takeDisplay
                     value.dictationTakePhase = dictation.takePhase.rawValue
                     value.dictationCountdownStart = dictation.countdownStart

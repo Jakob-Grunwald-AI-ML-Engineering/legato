@@ -12,6 +12,9 @@ import UIKit
 /// The retained host shell. Composer participants replace this placeholder in later legs.
 @MainActor @Observable
 final class AppController {
+    enum ToggleOutcome: Sendable, Equatable {
+        case started, stopped(String?), needsOnboarding(ReadinessIssue), needsForeground(ForegroundReason), failed(String), busy
+    }
     static let shared = AppController()
     let vocabulary: VocabularyService
     let keyboardHost: KeyboardLinkHost?
@@ -115,7 +118,7 @@ final class AppController {
             preferTake: { if Settings.airpodsIdleBuiltIn { PreferredInputRoute.apply(.bluetooth) } })
     }
 
-    func toggle(afterForegroundHop: ForegroundReason? = nil) async -> DictationCoordinator.Outcome {
+    func toggle(afterForegroundHop: ForegroundReason? = nil) async -> ToggleOutcome {
         guard !meetings.fixtureMode else { return .failed("Offline meetings fixture: use the Meetings tab. Composer drafts can be seeded for acceptance.") }
         guard !meetings.isActive else { return .failed("Stop the meeting before dictating. Your draft is kept.") }
         if composer.isListening { await composer.stop() }

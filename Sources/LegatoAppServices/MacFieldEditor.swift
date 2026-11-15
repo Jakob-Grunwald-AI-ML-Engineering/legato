@@ -513,7 +513,7 @@ import LegatoMac
         return FieldReadReply(id: instructionID, state: .done, above: above, below: below, selection: selected,
                               sessionLength: sessionLength, stop: aboveStop,
                               stopBelow: belowStop, moreAbove: aboveStop == .cap,
-                              moreBelow: belowStop == .cap, documentID: documentID, revision: nil)
+                              moreBelow: belowStop == .cap, documentID: documentID)
     }
 
     /// Magic's result (or its undo) goes to the queue as one edit of the text it read; the user's typing or clicks
@@ -547,7 +547,7 @@ import LegatoMac
         switch result {
         case .applied(let landed):
             instructionCursor = UTF16Range(location: landed.end, length: 0)
-            return .init(id: edit.id, applied: true, cursor: edit.target.utf16.count, revision: nil)
+            return .init(id: edit.id, applied: true, cursor: edit.target.utf16.count)
         case .stopped:
             return .init(id: edit.id, applied: false,
                          reason: "Editing stopped. Some changes may remain in the field; check it before retrying.",

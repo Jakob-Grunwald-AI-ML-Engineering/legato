@@ -214,7 +214,6 @@ struct SettingsView: View {
                     Text("Live").tag(DictationSendSetting.Mode.live)
                     Text("On stop").tag(DictationSendSetting.Mode.onStop)
                     Text("After a pause").tag(DictationSendSetting.Mode.afterPause)
-                    Text("Line by line").tag(DictationSendSetting.Mode.lineByLine)
                 }.labelsHidden().pickerStyle(.segmented)
                 if settings.dictationSend == .afterPause {
                     Stepper(value: Binding(get: { DictationSendSetting.clampedPause(settings.dictationPause) },

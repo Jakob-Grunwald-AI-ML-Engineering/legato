@@ -169,7 +169,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
     }
     public init(recentTakes: RecentTakesStore = RecentTakesStore(), history: (any HistoryStore)? = nil, cleaner: any SentenceCleaning, vocabulary: @escaping @Sendable () async -> [String] = { [] },
                 timeout: Duration = .milliseconds(2500),
-                sendMode: @escaping @MainActor () -> DictationSendSetting.Mode = { .lineByLine },
+                sendMode: @escaping @MainActor () -> DictationSendSetting.Mode = { .live },
                 pauseSeconds: @escaping @MainActor () -> Double = { DictationSendSetting.defaultPause },
                 clock: any Clock<Duration> = ContinuousClock(),
                 takeTimeout: (@Sendable (Int) -> Duration)? = nil,
@@ -183,7 +183,7 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
         self.streamTime = Self.elapsedTime(on: clock)
     }
 
-    /// The send setting now; `lineByLine` keeps the per-line path. `live` only where `supportsLive` (else `onStop`).
+    /// The send setting now; `live` only where `supportsLive` (else `onStop`).
     public var mode: DictationSendSetting.Mode {
         let mode = sendMode()
         return mode == .live && !supportsLive ? .onStop : mode
@@ -197,16 +197,13 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
             await receiveLive(raw, sequence: line.sequence, forced: Self.forcedSplits.contains(line.reason), remainingTail: line.remainingTail)
             return
         }
-        if mode != .lineByLine { bufferLine(raw); return }
-        pending += 1
-        let pipeline = await current()
-        await pipeline.submit(sequence: line.sequence, lineID: "\(sessionID)-\(line.sequence)", raw: raw, textBefore: contextBefore())
+        bufferLine(raw)
     }
 
     public func warm() async {
         if let lastWarm, Date().timeIntervalSince(lastWarm) < Self.warmInterval { return }
         lastWarm = Date()
-        if mode == .lineByLine || mode == .live { await current().warm() } else { await cleaner.warmDictationTake() }
+        if mode == .live { await current().warm() } else { await cleaner.warmDictationTake() }
     }
 
     /// A new session: drops the outbox, lines in cleanup and the unsent take. `keepFailedTake` keeps the raw text
@@ -334,8 +331,6 @@ public enum DictationTakePhase: String, Sendable, Equatable { case buffering, cl
                 liveTakeOpen = false
             }
             await finishLive()
-        // The last line is still in cleanup: the stop is done when it has been handed to the keyboard.
-        case .lineByLine: _ = await settle()
         default: await sendTake()
         }
     }
