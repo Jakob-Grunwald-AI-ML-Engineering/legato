@@ -66,13 +66,18 @@ final class KeyboardViewController: UIInputViewController {
         controller.onLayoutChange = { [weak self] reason in self?.layoutChanged(reason: reason) }
     }
 
-    /// The height the keyboard asks for: the pre-offshoot keyboard (word row, tool row, native grid), 297 pt in portrait. By width, as
+    /// The height the keyboard asks for: the pre-offshoot keyboard (word row, tool row, native grid), 297 pt in portrait,
+    /// or the strip's (word row plus one row of keys) while collapsed. By width, as
     /// `KeyGeometry` does: a portrait keyboard (402 x 297) is wider than tall too.
     private var requestedHeight: CGFloat {
-        KeyGeometry.isLandscape(width: view.bounds.width) ? Self.landscapeHeight : Self.portraitHeight
+        let landscape = KeyGeometry.isLandscape(width: view.bounds.width)
+        if let controller, controller.mode == .strip {
+            return CGFloat(StripHeight.requested(row: controller.stripHeight, landscape: landscape))
+        }
+        return landscape ? Self.landscapeHeight : Self.portraitHeight
     }
 
-    /// The strip height changed (the chevron, the setting): resize
+    /// The layout changed (the chevron, a swipe, the debug height): resize
     /// with the content's cross-fade, and log the height asked for against the one laid out.
     private func layoutChanged(reason: String) {
         #if DEBUG

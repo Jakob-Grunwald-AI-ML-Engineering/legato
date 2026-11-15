@@ -81,8 +81,8 @@ final class KeyboardController {
     /// Fills the word row (completions, predictions, alternatives) and learns from typing.
     @ObservationIgnored private(set) var wordRow: SuggestionController!
 
-    /// Strip or full keyboard, and the chevron that switches; restores the last user choice.
-    private(set) var expansion = KeyboardExpansion(stripEnabled: false)
+    /// Strip or full keyboard, and the chevron that switches; restores the last user choice (initially full).
+    private(set) var expansion = KeyboardExpansion()
     /// The strip's height in points; the debug long press steps it through `StripHeight.candidates`.
     private(set) var stripHeight = StripHeight.standard
     /// The extension re-sizes its view when the mode or the strip height changed (`reason` is for the log).
@@ -132,9 +132,7 @@ final class KeyboardController {
         self.hasFullAccess = hasFullAccess
         self.preferences = preferences
         let current = preferences()
-        expansion = KeyboardExpansion(
-            stripEnabled: current.strip,
-            persistence: expansionPersistence ?? KeyboardPreferences.expansionPersistence())
+        expansion = KeyboardExpansion(persistence: expansionPersistence ?? KeyboardPreferences.expansionPersistence())
         stripHeight = current.stripHeight
         emojiSystemSwitcher = current.emojiSystemSwitcher
         cursor = link.readApplied()
@@ -158,34 +156,29 @@ final class KeyboardController {
 
     var mode: KeyboardMode { expansion.mode }
 
-    /// Re-reads the strip setting. Turning it on or off starts a session over (collapsed with it on); the
-    /// strip height comes from the setting only then, so the debug long press survives the keyboard
-    /// appearing again.
+    /// Re-reads the settings and the last layout, which another retained keyboard controller may have changed.
     func refreshPreferences() {
         let current = preferences()
         if emojiSystemSwitcher != current.emojiSystemSwitcher {
             emojiSystemSwitcher = current.emojiSystemSwitcher
             typing?.closeEmojiPanel()
         }
-        let changed = expansion.stripEnabled != current.strip
         let previousMode = expansion.mode
-        expansion.setStripEnabled(current.strip)
-        if changed { stripHeight = current.stripHeight }
-        guard changed || previousMode != expansion.mode else { return }
+        expansion.reload()
+        guard previousMode != expansion.mode else { return }
         typing?.closeEmojiPanel()
-        onLayoutChange?(changed ? "setting" : "restored")
+        onLayoutChange?("restored")
     }
 
     /// The chevron: strip to full keyboard and back.
     func toggleExpansion() {
-        guard expansion.control != nil else { return }
         typing.closeEmojiPanel()
         expansion.toggle()
         trace?("expansion mode=\(expansion.mode == .strip ? "strip" : "full")")
         onLayoutChange?("toggle")
     }
 
-    /// A finished drag on the strip or the top bar: toggles when `KeyboardExpansion.swipeToggles` says so.
+    /// A drag on the strip or the full keyboard's top rows: toggles when `KeyboardExpansion.swipeToggles` says so.
     func swiped(dx: Double, dy: Double) {
         if expansion.swipeToggles(dx: dx, dy: dy) { toggleExpansion() }
     }

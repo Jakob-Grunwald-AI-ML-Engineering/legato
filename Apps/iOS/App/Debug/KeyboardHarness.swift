@@ -16,7 +16,7 @@ import UIKit
 /// - `-LegatoHarnessAutocap NO`: no auto-capitalization (lowercase letters, to compare with the system keyboard).
 /// - `-LegatoHarnessSuggestions a,b,c`: fill the word row's slots, whatever is typed.
 /// - `-LegatoHarnessGlobe YES`: show the globe key.
-/// - `-LegatoHarnessStrip YES`: the compact strip (word row above the strip's row) at its requested height.
+/// - `-LegatoHarnessStrip YES`: start collapsed to the compact strip (the harness always starts with the full keyboard otherwise).
 /// - `-LegatoHarnessLandscape YES`: lay the keyboard out 874 pt wide (landscape height), turned a quarter
 ///   turn so it fits the portrait screen (the screenshot is turned back).
 ///
@@ -169,19 +169,24 @@ final class KeyboardHarnessModel {
         ("double-space-after-punctuation", "ok mode:numbers , space space mode:letters x"),
     ]
 
+    /// The harness never keeps a layout between launches (the extension's last choice lives in the app's own defaults).
+    private static func freshPersistence() -> KeyboardExpansionPersistence {
+        let suite = "LegatoHarnessExpansion"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        return KeyboardExpansionPersistence(defaults: defaults)
+    }
+
     private init() {
         let document = self.document
         let link = LinkClient()
         self.link = link
         controller = KeyboardController(
             document: document, link: link, hasFullAccess: { true },
-            preferences: {
-                var preferences = KeyboardPreferences.load()
-                if ["YES", "TRUE", "1"].contains(UserDefaults.standard.string(forKey: "LegatoHarnessStrip")?.uppercased() ?? "") {
-                    preferences.strip = true
-                }
-                return preferences
-            }, correctionStore: AppController.shared.corrections)
+            expansionPersistence: Self.freshPersistence(), correctionStore: AppController.shared.corrections)
+        if ["YES", "TRUE", "1"].contains(UserDefaults.standard.string(forKey: "LegatoHarnessStrip")?.uppercased() ?? "") {
+            controller.toggleExpansion()
+        }
         controller.trace = { message in E2E.log("harness \(message) doc=\(E2E.quote(document.text))") }
         controller.beforeStartWatch = { await E2E.waitForStartWatch() }
         document.onChange = { [weak controller] in controller?.documentDidChange() }
@@ -326,7 +331,7 @@ struct KeyboardHarness: View {
                     let length = geometry.size.height
                     VStack(spacing: 0) {
                         HarnessTextView(textView: model.document.textView).padding(8)
-                        keyboard.frame(height: KeyboardHeights.height(landscape: true)).background(Self.backdrop)
+                        keyboard.frame(height: keyboardHeight(landscape: true)).background(Self.backdrop)
                     }
                     .frame(width: length, height: geometry.size.width)
                     .background(.background)
@@ -338,7 +343,7 @@ struct KeyboardHarness: View {
                 VStack(spacing: 0) {
                     HarnessTextView(textView: model.document.textView).padding(8)
                     VStack(spacing: 0) {
-                        keyboard.frame(height: portraitHeight)
+                        keyboard.frame(height: keyboardHeight(landscape: false))
                         Color.clear.frame(height: Self.systemArea)
                     }
                     .background(Self.backdrop)
@@ -353,8 +358,13 @@ struct KeyboardHarness: View {
         .onDisappear { if !Self.flag("LegatoHarnessSystemField") { model.controller.disappeared() } }
     }
 
-    /// The harness uses the extension's portrait height.
-    private var portraitHeight: CGFloat { CGFloat(KeyboardHeights.height(landscape: false)) }
+    /// The harness uses the extension's height for the layout shown (`KeyboardViewController.requestedHeight`).
+    private func keyboardHeight(landscape: Bool) -> CGFloat {
+        let controller = model.controller
+        return CGFloat(controller.mode == .strip
+            ? StripHeight.requested(row: controller.stripHeight, landscape: landscape)
+            : KeyboardHeights.height(landscape: landscape))
+    }
 
     private var keyboard: some View {
         KeyboardRootView(controller: model.controller)

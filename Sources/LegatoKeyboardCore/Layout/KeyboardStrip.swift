@@ -4,7 +4,7 @@ import Foundation
 public enum KeyboardMode: Sendable, Equatable {
     /// The typing keyboard.
     case full
-    /// One row (`StripRow`): chevron, globe key (when iOS asks for it), hotkeys (undo, redo, Refine), delete, return, mic key. The "Compact keyboard" setting.
+    /// One row (`StripRow`): chevron, globe key (when iOS asks for it), magic, mic, undo, redo, delete, return.
     case strip
 }
 
@@ -12,76 +12,61 @@ public enum KeyboardMode: Sendable, Equatable {
 public enum ExpansionControl: Sendable, Equatable {
     /// Chevron up, on the strip: open the full keyboard.
     case expand
-    /// Chevron down, on the full keyboard of a strip session: back to the strip.
+    /// Chevron down, on the full keyboard: back to the strip.
     case collapse
 }
 
-/// Stores only the last keyboard layout. UserDefaults is thread-safe.
+/// Stores only the last keyboard layout, as "collapsed": a missing value is the full keyboard, which is what
+/// a first launch shows. UserDefaults is thread-safe.
 public final class KeyboardExpansionPersistence: @unchecked Sendable {
     private let defaults: UserDefaults
-    private let key = "keyboardExpanded"
+    private let key = "keyboardCollapsed"
 
     public init(defaults: UserDefaults) {
         self.defaults = defaults
     }
 
-    fileprivate var expanded: Bool {
+    fileprivate var collapsed: Bool {
         get { defaults.bool(forKey: key) }
         set { defaults.set(newValue, forKey: key) }
     }
 }
 
-/// Whether the keyboard is collapsed to the strip or expanded. With the strip setting on, restores
-/// the last choice (initially collapsed); with it off the keyboard is always full and has no control.
+/// Whether the keyboard is collapsed to the strip or expanded to the full keyboard. The chevron is always
+/// there; the last choice is restored (initially expanded).
 public struct KeyboardExpansion: Sendable, Equatable {
-    public private(set) var stripEnabled: Bool
-    private var expanded = false
+    private var collapsed = false
     private let persistence: KeyboardExpansionPersistence?
 
-    public init(stripEnabled: Bool, persistence: KeyboardExpansionPersistence? = nil) {
-        self.stripEnabled = stripEnabled
+    public init(persistence: KeyboardExpansionPersistence? = nil) {
         self.persistence = persistence
-        expanded = stripEnabled && (persistence?.expanded ?? false)
-        if !stripEnabled { persistence?.expanded = false }
+        collapsed = persistence?.collapsed ?? false
     }
 
-    public static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.stripEnabled == rhs.stripEnabled && lhs.expanded == rhs.expanded
-    }
+    public static func == (lhs: Self, rhs: Self) -> Bool { lhs.collapsed == rhs.collapsed }
 
-    public var mode: KeyboardMode { stripEnabled && !expanded ? .strip : .full }
+    public var mode: KeyboardMode { collapsed ? .strip : .full }
 
-    public var control: ExpansionControl? {
-        guard stripEnabled else { return nil }
-        return expanded ? .collapse : .expand
-    }
+    public var control: ExpansionControl { collapsed ? .expand : .collapse }
 
     public mutating func toggle() {
-        guard stripEnabled else { return }
-        expanded.toggle()
-        persistence?.expanded = expanded
+        collapsed.toggle()
+        persistence?.collapsed = collapsed
     }
 
     /// The least vertical travel, in points, that counts as a swipe.
     public static let swipeDistance = 16.0
 
-    /// Whether a drag (screen points, y down) on the strip or the full keyboard's top bar toggles: up on the
+    /// Whether a drag (screen points, y down) on the strip or the full keyboard's top rows toggles: up on the
     /// strip expands, down on the full keyboard collapses; it must be long enough and more vertical than not.
     public func swipeToggles(dx: Double, dy: Double) -> Bool {
-        guard let control, abs(dy) >= Self.swipeDistance, abs(dy) > abs(dx) else { return false }
+        guard abs(dy) >= Self.swipeDistance, abs(dy) > abs(dx) else { return false }
         return control == .expand ? dy < 0 : dy > 0
     }
 
-    /// The setting as the app last stored it. A change starts a new session (collapsed); the same value
-    /// reloads the global last choice, including choices made by another retained keyboard controller.
-    public mutating func setStripEnabled(_ enabled: Bool) {
-        guard enabled != stripEnabled else {
-            if enabled, let persistence { expanded = persistence.expanded }
-            return
-        }
-        stripEnabled = enabled
-        expanded = false
-        persistence?.expanded = false
+    /// Re-reads the stored layout, which another retained keyboard controller may have changed.
+    public mutating func reload() {
+        if let persistence { collapsed = persistence.collapsed }
     }
 }
 

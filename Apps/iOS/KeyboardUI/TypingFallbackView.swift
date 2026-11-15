@@ -3,7 +3,7 @@ import SwiftUI
 import UIKit
 
 /// The ABC surface, which dictates into the target field: the word row (live words while dictating), the tool row
-/// (the magic key, the dictation mic, undo, redo) and the native key grid, at the pre-offshoot
+/// (the collapse chevron, the magic key, the dictation mic, undo, redo) and the native key grid, at the pre-offshoot
 /// height (`KeyboardHeights.height`). Reuses the original keyboard's touch surface, repeat-delete, cursor pan,
 /// alternates and field traits. Geometry: `KeyboardMetrics.swift`.
 struct TypingFallbackView: View {
@@ -16,6 +16,12 @@ struct TypingFallbackView: View {
             let layout = controller.typing.layout
             let frames = layout.frames(in: geometry.size, landscapeScreenWidth: screenWidth)
             ZStack(alignment: .topLeading) {
+                // Under everything: the area above the first row takes a swipe down (collapse), also where the
+                // rows have no key. Not clear: the keyboard gets no touches on fully clear pixels. The grid only
+                // takes touches from the first row down.
+                place(CGRect(x: 0, y: 0, width: geometry.size.width, height: g.firstRowTop)) {
+                    Color.black.opacity(0.001).expansionSwipe(controller)
+                }
                 if controller.typing.showsEmojiPanel {
                     place(CGRect(x: 0, y: g.firstRowTop, width: geometry.size.width, height: max(geometry.size.height - g.firstRowTop, 0))) {
                         EmojiPickerView(typing: controller.typing, controller: controller)
@@ -33,6 +39,7 @@ struct TypingFallbackView: View {
                 place(g.wordRowFrame) {
                     WordRowView(controller: controller, slots: WordRowLayout.visibleSlots(width: Double(g.wordRowFrame.width)))
                         .accessibilityIdentifier("typing.predictions")
+                        .expansionSwipe(controller)
                 }
                 place(g.toolRowFrame) { toolKeys(gap: g.gap) }
             }
@@ -47,11 +54,12 @@ struct TypingFallbackView: View {
         }
     }
 
-    /// Left to right: the magic key, the dictation mic, undo, redo; four equal keys.
+    /// Left to right: the chevron that collapses to the strip, the magic key, the dictation mic, undo, redo; five equal keys.
     private func toolKeys(gap: CGFloat) -> some View {
         HStack(spacing: gap) {
-            MagicKey(controller: controller)
-            MicKey(controller: controller)
+            ExpansionKey(controller: controller, symbol: "chevron.down").expansionSwipe(controller)
+            MagicKey(controller: controller).expansionSwipe(controller)
+            MicKey(controller: controller).expansionSwipe(controller)
             key("Undo", symbol: "arrow.uturn.backward", id: "keyboard.hotkey.undo", enabled: controller.canUndo, action: controller.undo)
             key("Redo", symbol: "arrow.uturn.forward", id: "keyboard.hotkey.redo", enabled: controller.canRedo, action: controller.redo)
         }
@@ -68,6 +76,7 @@ struct TypingFallbackView: View {
         }
         .buttonStyle(KeyButtonStyle())
         .disabled(!enabled)
+        .expansionSwipe(controller)
         .accessibilityLabel(label)
         .accessibilityIdentifier(id)
     }
