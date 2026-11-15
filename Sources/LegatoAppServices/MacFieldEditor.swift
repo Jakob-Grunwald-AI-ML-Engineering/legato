@@ -81,6 +81,7 @@ import LegatoMac
     private var target: (any TextTarget)?
     /// The bound field is a password field: its takes are not kept in History (the host gates the pipeline's writes).
     public private(set) var passwordField = false
+    public var canCleanField: Bool { target != nil && !panel.active && !passwordField }
     private var documentID = UUID().uuidString
     private var activeInstructionID: String?
     private var streamedRunID: String?
@@ -91,9 +92,11 @@ import LegatoMac
     private var instructionCursor: UTF16Range?
     private var readText: String?
     private var readRange: UTF16Range?
+    private var voiceActive = true
     public init(capture: @escaping @MainActor () -> FocusedField) { self.capture = capture }
 
     public func begin() {
+        voiceActive = true
         correctionCapture?.reset()
         sessionGeneration += 1
         retain(panel.take.text)
@@ -273,6 +276,11 @@ import LegatoMac
 
     // MARK: Dictation
 
+    public func speechActivity(_ active: Bool) {
+        voiceActive = active
+        if let runID = streamedRunID { queue.setSpeaking(active, runID: runID) }
+    }
+
     /// Every live snapshot goes to the queue (or the panel); the queue coalesces to the newest per run.
     public func enqueueLive(_ snapshot: LiveDictationSnapshot?) {
         guard let snapshot else { return }
@@ -292,7 +300,7 @@ import LegatoMac
             return
         }
         queue.live(runID: snapshot.runID, version: snapshot.version, text: Self.body(of: snapshot), complete: snapshot.complete,
-                   speaking: !snapshot.complete && snapshot.stopped != true && !sessionEnded)
+                   speaking: voiceActive && !snapshot.complete && snapshot.stopped != true && !sessionEnded)
     }
     public func applyLive(_ snapshot: LiveDictationSnapshot?) async {
         enqueueLive(snapshot)
@@ -478,13 +486,15 @@ import LegatoMac
         }
         let length = try target.textLength()
         guard selection.location >= 0, selection.end <= length else { throw InstructionFailure.unreadable("The field changed. Nothing was edited.") }
-        let cap = FieldReader.defaultCap
+        // Automatic cleanup must not silently omit the start of a long take. AX can read the
+        // document without moving the caret; Magic retains its bounded context contract.
+        let cap = kind == .cleanup ? length : FieldReader.defaultCap
         guard selection.length <= cap else { throw InstructionFailure.unreadable("The selection is too long. Select a smaller passage.") }
         let room = cap - selection.length
         let afterLength = min(length - selection.end, room / 3)
         let beforeLength = min(selection.location, room - afterLength)
-        let lower = selection.location - beforeLength
-        let upper = min(length, selection.end + room - beforeLength)
+        let lower = kind == .cleanup ? 0 : selection.location - beforeLength
+        let upper = kind == .cleanup ? length : min(length, selection.end + room - beforeLength)
         let range = UTF16Range(location: lower, length: upper - lower)
         let snapshot = try target.text(in: range)
         guard snapshot.utf16.count == range.length, try target.selectedRange() == selection else {
@@ -497,10 +507,10 @@ import LegatoMac
         let selected = selection.length > 0 ? captured.substring(with: NSRange(location: selection.location - lower, length: selection.length)) : nil
         var aboveStop: FieldStop = lower == 0 ? .start : .cap
         var belowStop: FieldStop = upper == length ? .start : .cap
-        if let stop = FieldReader.structuralStop(in: above, atFieldStart: lower == 0) {
+        if kind != .cleanup, let stop = FieldReader.structuralStop(in: above, atFieldStart: lower == 0) {
             above = String(above[stop.index...]); aboveStop = stop.kind
         }
-        if let stop = FieldReader.structuralStopBelow(in: below) {
+        if kind != .cleanup, let stop = FieldReader.structuralStopBelow(in: below) {
             below = String(below[..<stop.index]); belowStop = stop.kind
         }
         activeInstructionID = instructionID
@@ -520,6 +530,7 @@ import LegatoMac
     public func apply(_ edit: ScopedEdit) async -> ScopedEditAck? {
         func refused(_ reason: String) -> ScopedEditAck { .init(id: edit.id, applied: false, reason: reason) }
         guard edit.documentID == documentID, let target else { return refused("The focused field changed. Nothing was edited.") }
+        guard activeInstructionID == edit.instructionID else { return refused("A newer field read owns this edit. Nothing was edited.") }
         guard let anchor = readSelection ?? instructionCursor else { return refused("The field changed. Nothing was edited.") }
         let range: UTF16Range
         if let selected = edit.selected {

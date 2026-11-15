@@ -153,6 +153,79 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     @ObservationIgnored public private(set) var liveRun: LiveDictationRun?
     /// The run's snapshot changed (nil: no run, remove it from the link). Called on every change; the host throttles.
     @ObservationIgnored public var onLiveChange: (@MainActor (LiveDictationSnapshot?) -> Void)?
+    @ObservationIgnored public var onSpeechActivity: (@MainActor (Bool) -> Void)?
+    @ObservationIgnored public private(set) var fieldCleanup: FieldCleanupSession?
+    @ObservationIgnored private var voiceActive = true
+    @ObservationIgnored private var cleanupDuringPauses = false
+    @ObservationIgnored public var cleanupFieldAvailable: @MainActor () -> Bool = { true }
+    @ObservationIgnored private var fieldEntry: (id: UUID, raw: String)?
+    public private(set) var fieldCleanupOutcome: CleanupFieldOutcome?
+
+    /// Production field hosts use the same field cleanup owner. Hosts without a readable field
+    /// retain transcript cleanup (buffered delivery and panel-only integrations).
+    public func attachCleanupField(_ field: any InstructionField, duringPauses: Bool) {
+        let cleanup = FieldCleanupSession()
+        cleanup.field = field
+        cleanupDuringPauses = duringPauses
+        cleanup.canApply = { [weak self] in
+            guard let self else { return false }
+            return self.mode != .live || self.liveRun?.complete == true || (self.cleanupDuringPauses && !self.voiceActive)
+        }
+        cleanup.clean = { [weak self] text, final in
+            guard let self else { return nil }
+            var client: any SentenceCleaning = self.cleaner
+            #if DEBUG || LEGATO_INTERNAL
+            if self.debugFailTakes > 0 { self.debugFailTakes -= 1; return nil }
+            if let scripted = self.debugStreamCleaner { client = scripted }
+            #endif
+            let cleaner = DictationTakeCleaner(cleaner: client, timeout: self.takeTimeout ?? { DictationTakeLimits.timeout(characters: $0) })
+            let terms = Array(await self.loadTerms().prefix(200))
+            let clean: @MainActor (String) async -> String? = { part in
+                let result = await cleaner.clean(.init(takeID: UUID().uuidString, text: part,
+                    vocabulary: terms, fieldDocument: true))
+                if case .cleaned(let text) = result { return text }
+                if case .unavailable = result { return part }
+                return nil
+            }
+            return final ? await clean(text) : await FieldCleanupChunks.clean(text, using: clean)
+        }
+        cleanup.onResult = { [weak self] source, confirmed, status in
+            guard let self else { return }
+            let capture = self.fieldEntry ?? self.liveRun.flatMap { run in UUID(uuidString: run.runID).map { (id: $0, raw: run.wholeRaw.text) } }
+            guard let capture else { return }
+            let id = capture.id, raw = capture.raw
+            self.fieldCleanupOutcome = .init(runID: id.uuidString, revision: (self.fieldCleanupOutcome?.revision ?? 0) + 1, status: status)
+            self.onChange?()
+            guard let history = self.history, self.keepsTakes() else { return }
+            await self.liveHistoryWrite?.value
+            guard self.fieldEntry?.id == id || self.liveRun?.runID == id.uuidString else { return }
+            var entry = (self.lastLiveHistory?.id == id ? self.lastLiveHistory : nil) ?? DictationEntry(id: id, date: Date(), text: raw,
+                localeIdentifier: Locale.current.identifier, engineID: "dictation", duration: 0)
+            guard entry.id == id else { return }
+            entry.rawText = raw
+            entry.text = raw
+            entry.cleanupSourceText = source.isEmpty ? nil : source
+            entry.cleanupResultText = confirmed.isEmpty ? nil : confirmed
+            entry.cleanupFieldStatus = status
+            self.lastLiveHistory = entry
+            try? await history.upsert(entry)
+            self.historyRevision += 1
+        }
+        cleanup.diagnostics = { [weak self] event, fields in self?.diagnostics?(event, fields) }
+        fieldCleanup = cleanup
+    }
+
+    public func boundary(_ reason: String) {
+        guard mode == .live, reason == "endpoint" else { return }
+        setVoiceActive(false)
+        if cleanupDuringPauses { fieldCleanup?.request() }
+    }
+
+    private func setVoiceActive(_ active: Bool) {
+        guard voiceActive != active else { return }
+        voiceActive = active
+        onSpeechActivity?(active)
+    }
     /// Counts and timings, never text: `live2.*` lines for the internal builds' diagnostics.
     @ObservationIgnored public var diagnostics: (@MainActor (_ event: String, _ fields: [String: Any]) -> Void)?
     @ObservationIgnored private var liveSubmitted: [Int: ContinuousClock.Instant] = [:]
@@ -235,13 +308,14 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     public func warm() async {
         if let lastWarm, Date().timeIntervalSince(lastWarm) < Self.warmInterval { return }
         lastWarm = Date()
-        if mode == .live { await current().warm() } else { await cleaner.warmDictationTake() }
+        if mode == .live, fieldCleanup == nil { await current().warm() } else { await cleaner.warmDictationTake() }
     }
 
     /// A new session: drops the outbox, lines in cleanup and the unsent take. `keepFailedTake` keeps the raw text
     /// of a take whose cleanup failed, so it is neither lost nor inserted without the user's choice.
     public func reset() async { await reset(keepFailedTake: false) }
     public func reset(keepFailedTake: Bool) async {
+        fieldCleanup?.reset()
         let old = pipeline
         let kept = keepFailedTake ? failedText : nil
         cancelTake()
@@ -318,6 +392,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
 
     /// New speech (a line or a live tail): the quiet timer of "after a pause" restarts from here.
     public func speechActivity() {
+        if mode == .live { setVoiceActive(true) }
         clearCountdown()
         guard mode == .afterPause, !suppressed, !takeLines.isEmpty, takePhase != .cleaning else { return }
         let delay = DictationSendSetting.clampedPause(pauseSeconds())
@@ -393,6 +468,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// still ends (its stop waits for its last words and cleanup) has the new take's speech wait until it is complete.
     public func beginTake() {
         guard mode == .live else { return }
+        setVoiceActive(true)
         if held != nil { held?.append(.begin); return }
         let stopComing = liveTakeOpen
         liveTakeOpen = true
@@ -435,6 +511,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     private static let forcedSplits: Set<String> = ["words", "duration"]
 
     private func receiveLive(_ raw: String, sequence: Int, forced: Bool, remainingTail: String? = nil) async {
+        setVoiceActive(true)
         var run = currentLiveRun()
         let unit = run.addFinal(key: sequence, text: raw, closes: !forced)
         // Commit the final and the provider update's residual words in one publication. A segment
@@ -442,6 +519,10 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         if let remainingTail { run.setHead(remainingTail) }
         let pieces = run.drainSplitUnits()
         publishLive(run)
+        if let cleanup = fieldCleanup, cleanupFieldAvailable() {
+            if run.complete { cleanup.request(final: true) }
+            return
+        }
         for piece in pieces { await submitLive(piece.text, key: piece.key, run: run) }
         // A cut-short segment waits for the rest of its sentence, a pause fragment for the rest of its unit; the unit
         // is cleaned once, whole.
@@ -535,6 +616,21 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         let speakingDeadline = stoppedAt + Self.speakingGrace
         while let run = liveRun, !run.complete, run.isSpeaking, ContinuousClock.now < speakingDeadline {
             try? await Task.sleep(for: .milliseconds(20))
+        }
+        if let cleanup = fieldCleanup, cleanupFieldAvailable(), var run = liveRun, !run.complete {
+            let generation = takeGeneration
+            // Complete raw delivery first. The field read waits for the queue, then cleans what is
+            // actually there, including text typed between the dictated words.
+            run.finish()
+            liveFinishedAt = .now
+            publishLive(run)
+            setVoiceActive(false)
+            takePhase = .cleaning; onChange?()
+            cleanup.request(final: true)
+            await cleanup.settle()
+            guard generation == takeGeneration else { return }
+            takePhase = .buffering; onChange?()
+            return
         }
         // The open unit (words since the last sentence end) is cleaned now; the wait below covers it.
         if var run = liveRun, !run.complete, let open = run.flush() {
@@ -641,6 +737,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         // A segment can reach the sink after the take's end was seen (its event is still on its way): it belongs to the run.
         let late = straggler && liveFinishedAt.map { $0.duration(to: .now) < Self.liveStragglerGrace } == true
         if let run = liveRun, !run.complete || late { return run }
+        fieldCleanup?.reset()
         liveHistoryFallbacks = []
         let run = LiveDictationRun()
         liveRun = run
@@ -713,6 +810,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         onChange?()
     }
     private func cancelTake() {
+        fieldCleanup?.reset(); fieldEntry = nil
         // A take cut short keeps what it typed: its delivery is final as it stands.
         for i in outbox.indices where !outbox[i].final { outbox[i].final = true }
         streamSeq = nil; streamed = ""
@@ -724,6 +822,27 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     }
 
     private func runTake(_ raw: String) async {
+        if let cleanup = fieldCleanup, cleanupFieldAvailable() {
+            cleanup.reset()
+            let id = takeEntry?.raw == raw ? takeEntry?.id ?? UUID() : UUID()
+            takeEntry = (raw, id); fieldEntry = (id, raw)
+            cleaningText = raw; takePhase = .cleaning
+            await save(id: id, raw: raw, text: raw)
+            onChange?()
+            let generation = takeGeneration
+            let task = Task { @MainActor [weak self] in
+                cleanup.request(final: true, pendingText: raw)
+                await cleanup.settle()
+                guard let self, generation == self.takeGeneration else { return }
+                self.fieldEntry = nil; self.cleaningText = nil; self.takeTask = nil
+                self.failedText = cleanup.lastApplied ? nil : raw
+                self.takePhase = cleanup.lastApplied ? .buffering : .failed
+                self.onChange?()
+            }
+            takeTask = task
+            await task.value
+            return
+        }
         cleaningText = raw; takePhase = .cleaning
         onChange?()
         let generation = takeGeneration

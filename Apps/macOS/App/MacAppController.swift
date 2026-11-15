@@ -153,6 +153,9 @@ import Observation
         dictation.deliverStream = { [weak fieldEditor] poll in await fieldEditor?.stream(poll) ?? false }
         dictation.retractStream = { [weak fieldEditor] in fieldEditor?.retractStreamed() }
         pipeline.onLiveChange = { [weak fieldEditor] in fieldEditor?.enqueueLive($0) }
+        pipeline.attachCleanupField(fieldEditor, duringPauses: true)
+        pipeline.cleanupFieldAvailable = { [weak fieldEditor] in fieldEditor?.canCleanField == true }
+        pipeline.onSpeechActivity = { [weak fieldEditor] in fieldEditor?.speechActivity($0) }
         pipeline.keepsTakes = { [weak fieldEditor] in fieldEditor?.passwordField != true }
         pipeline.contextBefore = { [weak fieldEditor] in fieldEditor?.contextBeforeCursor() ?? "" }
     }
@@ -361,7 +364,7 @@ import Observation
         }
     }
     func refreshRecent() async { recent = (try? await history.recent(limit: 20)) ?? [] }
-    func copy(_ entry: DictationEntry) { paster.copy(entry.text) }
+    func copy(_ entry: DictationEntry) { paster.copy(entry.displayText) }
     func delete(_ entry: DictationEntry) { Task { try? await history.delete(id: entry.id); await refreshRecent() } }
 }
 

@@ -87,8 +87,8 @@ public struct SpeechModeRouter: Sendable, Equatable {
     }
     func speechActivity() { if router.current == .dictation { dictation.speechActivity() } }
     func boundary(_ reason: String) {
-        if let transition = router.boundary() { changed(transition) }
-        dictation.boundary(reason)
+        if reason == "finalize" || reason == "finished", let transition = router.boundary() { changed(transition) }
+        if router.current == .dictation { dictation.boundary(reason) }
     }
     /// A new keyboard session starts in dictation mode.
     func reset() async {

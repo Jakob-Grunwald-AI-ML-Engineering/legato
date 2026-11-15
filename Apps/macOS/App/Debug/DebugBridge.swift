@@ -40,6 +40,10 @@ import ApplicationServices
             await MacAppController.shared.dictation.debugStop()
             return MacAppController.shared.dictation.debugState
         }
+        harness.register("dictation-debug-pause") { _ in
+            MacAppController.shared.dictation.pipeline.boundary("endpoint")
+            return MacAppController.shared.dictation.debugState
+        }
         harness.register("dictation-toggle") { _ in
             MacAppController.shared.toggleDictation()
             try await Task.sleep(for: .milliseconds(300))

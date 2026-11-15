@@ -9,14 +9,14 @@ import Foundation
 ///   shortened still lands ("afterno" + "." → "afterno.").
 /// - The queue uses it for Magic over text Legato changed since the read (kept: Magic's result, incoming: the scope as
 ///   Legato left it).
-enum FieldMerge {
-    struct Result: Equatable {
-        var text: [Character]
+public enum FieldMerge {
+    public struct Result: Equatable, Sendable {
+        public var text: [Character]
         /// Incoming changes that touched kept's and were dropped.
-        var dropped: Int
+        public var dropped: Int
     }
 
-    static func rebase(base: [Character], kept: [Character], incoming: [Character]) -> Result {
+    public static func rebase(base: [Character], kept: [Character], incoming: [Character]) -> Result {
         guard incoming != base else { return Result(text: kept, dropped: 0) }
         guard kept != base else { return Result(text: incoming, dropped: 0) }
         let keptHunks = ShadowEditPlanner.diff(base, kept)
@@ -30,6 +30,12 @@ enum FieldMerge {
             text.replaceSubrange(start..<end, with: h.text)
         }
         return Result(text: text, dropped: dropped)
+    }
+
+    /// Follow a grapheme boundary through the same minimal changes used by scope rebasing.
+    /// `afterInsertion: false` leaves newly appended words outside a completed coverage range.
+    public static func position(_ offset: Int, from old: [Character], to new: [Character], afterInsertion: Bool) -> Int {
+        min(new.count, max(0, map(offset, through: ShadowEditPlanner.diff(old, new), after: afterInsertion)))
     }
 
     // MARK: Private

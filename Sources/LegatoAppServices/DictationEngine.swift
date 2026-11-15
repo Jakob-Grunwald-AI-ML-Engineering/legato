@@ -31,6 +31,7 @@ import LegatoVocabulary
     @ObservationIgnored private var sending = false
     @ObservationIgnored private var finishing: Task<Void, Never>?
     @ObservationIgnored private var lineSequence = 0
+    @ObservationIgnored private var activity = DictationActivity()
     #if DEBUG || LEGATO_INTERNAL
     /// The scripted stream of `debugReplay` while it runs.
     @ObservationIgnored private var replaying: SonioxClient?
@@ -92,11 +93,12 @@ import LegatoVocabulary
         guard active == nil, let stream else { return }
         guard let held = await stream.take() else { stream.warm(); return }
         stream.warm()
-        do { try await held.begin(backgroundText: sink.backgroundText); active = held } catch { await held.close() }
+        do { try await held.begin(backgroundText: sink.backgroundText); active = held; activity = DictationActivity() } catch { await held.close() }
     }
 
     /// Audio goes out in order; a take whose stream dropped continues on the next held connection.
     public func send(_ pcm: Data) async {
+        if activity.receive(pcm) { sink.speechActivity() }
         backlog.append(pcm)
         if backlog.count > 100 { backlog.removeFirst(backlog.count - 100) }
         await flush()
@@ -186,7 +188,8 @@ import LegatoVocabulary
             let remainingTail = try? event.payload["remainingTail"]?.decode(String.self)
             await deliver(words: words, reason: reason, remainingTail: remainingTail)
         case .asrBoundary:
-            if case .string(let reason) = event.payload["reason"], reason == "finalize" || reason == "finished" { sink.boundary(reason) }
+            if case .string(let reason) = event.payload["reason"],
+               reason == "finalize" || reason == "finished" || activity.boundary(reason) { sink.boundary(reason) }
         case .asrRawTail:
             let text = (try? event.payload["text"]?.decode(String.self)) ?? ""
             tail = text

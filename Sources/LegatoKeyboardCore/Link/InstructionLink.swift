@@ -101,6 +101,9 @@ public enum FieldStop: String, Codable, Sendable, Equatable {
 /// (a `reading` reply at once when it walks, then the result) and removes the request once read.
 public struct FieldReadRequest: Codable, Sendable, Equatable {
     public enum Kind: String, Codable, Sendable, Equatable {
+        /// A cleanup snapshot of the known field, without a cursor walk. Shares the same read
+        /// identity and conditional edit path as Magic; unknown text is never invented.
+        case cleanup
         /// The structural prefetch: selection, the session's text, the cursor paragraph, and above back to the nearest
         /// structural stop or the cap. Walks only when no session text exists and the field shows more than is known.
         case context

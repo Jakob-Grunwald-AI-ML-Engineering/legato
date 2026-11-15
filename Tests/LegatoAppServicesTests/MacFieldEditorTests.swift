@@ -118,6 +118,19 @@ import LegatoMac
 @MainActor private enum SnapshotVersion { static var value = 0 }
 
 @MainActor struct MacFieldEditorTests {
+    @Test func cleanupReadsTheWholeDocumentAtTheBeginningIncludingExistingParagraphs() async throws {
+        let text = "Draft\n\nOn Monday wrote:\n> quoted paragraph\n-- \nSignature\n" + String(repeating: "later words ", count: 400)
+        let target = EditorTarget(text)
+        target.selection = .init(location: 0, length: 0)
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.begin()
+        let read = try await editor.read(.cleanup, instructionID: "cleanup", reading: {})
+        #expect(read.above.isEmpty)
+        #expect(read.below == text)
+        #expect(read.stop == .start && read.stopBelow == .start)
+        #expect(target.selection == .init(location: 0, length: 0))
+    }
+
     private func snapshot(_ text: String, run: String = "one", complete: Bool = false) -> LiveDictationSnapshot {
         SnapshotVersion.value += 1
         return .init(runID: run, version: SnapshotVersion.value, segments: [.init(id: 0, text: text, final: complete)], complete: complete)

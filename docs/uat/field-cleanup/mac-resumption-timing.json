@@ -1,0 +1,40 @@
+{
+  "pauseID": "c1794785545-00000015-9456",
+  "observations": [
+    {
+      "event": "initial",
+      "t": 0,
+      "text": "manual introduction for timing. we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night."
+    },
+    {
+      "event": "field",
+      "t": 0.752674624993233,
+      "text": "Manual introduction for timing. we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night."
+    },
+    {
+      "event": "resumptionSent",
+      "t": 0.7526809169794433,
+      "id": "c1794785545-00000016-9480"
+    },
+    {
+      "event": "field",
+      "t": 1.0125217919994611,
+      "text": "Manual Introduction For Timing. We Should Prepare The Boat For A Longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night."
+    },
+    {
+      "event": "field",
+      "t": 1.2497787499742117,
+      "text": "Manual Introduction For Timing. We Should Prepare The Boat For A Longer Journey Tomorrow Morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night. resumptio"
+    },
+    {
+      "event": "field",
+      "t": 1.4768296249967534,
+      "text": "Manual Introduction For Timing. We Should Prepare The Boat For A Longer Journey Tomorrow Morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night. resumption marker arrive"
+    },
+    {
+      "event": "firstResumptionObserved",
+      "t": 1.4768296249967534,
+      "delayMs": 724.1580419940874
+    }
+  ]
+}

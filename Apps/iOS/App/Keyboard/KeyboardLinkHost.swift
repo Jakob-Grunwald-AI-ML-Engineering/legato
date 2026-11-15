@@ -43,6 +43,7 @@ final class KeyboardLinkHost {
         let instructionChannel = InstructionFieldChannel(store: LinkStore(backing))
         self.instructionChannel = instructionChannel
         keyboardSession.instruction.field = instructionChannel
+        dictation.attachCleanupField(instructionChannel, duringPauses: false)
         let liveChannel = LiveDictationLink(store: LinkStore(backing))
         let publishDictation: @MainActor () -> Void = { [weak self, weak dictation] in
             guard let self, let dictation, dictation.mode != .live else { return }
@@ -67,10 +68,6 @@ final class KeyboardLinkHost {
                 do {
                     let liveAck = liveChannel.acknowledged()
                     if let liveAck { dictation.acknowledgeDelivery(liveAck) }
-                    // The user split the live run into pieces (a list typed line by line): each is cleaned on its own.
-                    if let liveAck, liveAck != self.liveAckSeen, let pieces = liveAck.pieces {
-                        await dictation.livePieces(runID: liveAck.runID, startingAt: pieces)
-                    }
                     self.logLiveAck(liveAck, diagnostics: dictation.diagnostics)
                     publishDictation()
                 }
@@ -82,6 +79,7 @@ final class KeyboardLinkHost {
                     }
                 }
                 var value = DictationStatus()
+                value.fieldCleanupOutcome = dictation.fieldCleanupOutcome
                 value.audioRoute = self.keyboardSession?.route ?? .idle
                 value.dictationTail = self.keyboardSession?.dictationTail
                 value.dictationTake = dictation.takeDisplay
