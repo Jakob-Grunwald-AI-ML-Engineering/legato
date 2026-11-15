@@ -21,38 +21,39 @@ import UIKit
         harness.register("meeting-state") { _ in await AppController.shared.meetings.diagnostics() }
         harness.register("state") { _ in
             #if DEBUG
-            return AppController.shared.composer.debugState
+            return AppController.shared.microphone.debugState
             #else
-            return ["status": AppController.shared.composer.status]
+            return ["status": AppController.shared.microphone.status]
             #endif
         }
         #if DEBUG
-        for name in ComposerSession.debugCommands {
-            harness.register(name) { command in try await AppController.shared.composer.debugControl(name, args: command.args) }
+        harness.register("microphone-interrupt") { _ in
+            await AppController.shared.microphone.interruptMicrophoneForDiagnostics()
+            return AppController.shared.microphone.debugState
         }
         harness.register("microphone-arm") { _ in
             await AppController.shared.readyMicrophone()
-            return AppController.shared.composer.debugState
+            return AppController.shared.microphone.debugState
         }
         harness.register("microphone-release") { _ in
             await AppController.shared.releaseMicrophone()
-            return AppController.shared.composer.debugState
+            return AppController.shared.microphone.debugState
         }
         // The keyboard mic key's gate on the current surface (the typing surface has no mic key yet).
         harness.register("keyboard-tap") { _ in
             _ = await AppController.shared.keyboardSession.tap()
-            return AppController.shared.composer.debugState
+            return AppController.shared.microphone.debugState
         }
         // ABC dictation route without speech: a finalized line (or live partial) enters where Soniox lines do.
         harness.register("dictation-debug-line") { command in
             guard command.args.count == 1 else { throw Usage.invalid }
             try await AppController.shared.keyboardSession.debugDictationLine(command.args[0])
-            return AppController.shared.composer.debugState
+            return AppController.shared.microphone.debugState
         }
         harness.register("dictation-debug-tail") { command in
             guard command.args.count <= 1 else { throw Usage.invalid }
             try AppController.shared.keyboardSession.debugDictationTail(command.args.first ?? "")
-            return AppController.shared.composer.debugState
+            return AppController.shared.microphone.debugState
         }
         // Ends the take as the keyboard's mic key does (no microphone): the held take is cleaned and typed now.
         harness.register("dictation-debug-stop") { _ in
@@ -90,6 +91,7 @@ import UIKit
             AppGroup.defaults.set(model.settingValue, forKey: DictationSendSetting.cleanupModelKey)
             return AppController.shared.dictation.takeState
         }
+        harness.register("keyboard-state") { _ in AppController.shared.keyboardSession.diagnostics }
         harness.register("dictation-state") { _ in AppController.shared.dictation.takeState }
         // Instruction mode without the magic key: the toggle as the keyboard would set it (`off`, `latched`, `held`).
         // Speech then comes from `dictation-debug-replay` (an instruction fixture) or `dictation-debug-line`; `off` runs it.
@@ -143,12 +145,11 @@ import UIKit
         }
         harness.register("composer-import-keys") { command in
             guard command.args == ["credentials.json"] else { throw Usage.invalid }
-            return try ComposerSession.importDebugKeys(file: root.appending(path: "credentials.json"))
+            return try DebugCredentialImport.importDebugKeys(file: root.appending(path: "credentials.json"))
         }
         #endif
         harness.register("toggle") { _ in _ = await AppController.shared.toggle(); return ["status": AppController.shared.notice] }
-        harness.register("stop") { _ in await AppController.shared.stopIfRunning(); return ["status": AppController.shared.composer.status] }
-        harness.register("session-probe") { _ in try SessionProbe.start(); return nil }
+        harness.register("stop") { _ in await AppController.shared.stopIfRunning(); return ["status": AppController.shared.microphone.status] }
         harness.register("say") { command in
             guard let parsed = LegatoDevHarness.DebugMessages.parse(command.args, takesChoices: false) else { throw Usage.invalid }
             DebugMessages.shared.say(id: command.id, text: parsed.text); return nil
@@ -171,7 +172,7 @@ import UIKit
         }
         harness.register("harness-status") { _ in
             let model = KeyboardHarnessModel.shared
-            return ["text": model.document.text, "status": model.controller.dictationStatus ?? "Composer coming"]
+            return ["text": model.document.text, "status": model.controller.dictationStatus ?? "Ready"]
         }
         // The in-app keyboard (the real KeyboardController over a text view): what the field and the keys show.
         harness.register("harness-state") { _ in KeyboardHarnessModel.shared.state }

@@ -14,14 +14,16 @@ import os
 final class HoldActivityPresenter {
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "hold-activity")
 
-    private let composer: ComposerSession
+    private let microphone: MicrophoneHost
+    private let keyboard: KeyboardSession
     private let client = ActivityKitClient()
     private var planner = HoldActivityPlanner()
     private var queue: Task<Void, Never>?
     private var arming = false
 
-    init(composer: ComposerSession) {
-        self.composer = composer
+    init(microphone: MicrophoneHost, keyboard: KeyboardSession) {
+        self.microphone = microphone
+        self.keyboard = keyboard
         observe()
     }
 
@@ -30,18 +32,18 @@ final class HoldActivityPresenter {
     func arming(_ arm: () async -> Void) async {
         arming = true
         defer { arming = false }
-        if !composer.isArmed, let step = planner.plan(armed: true, listening: false, tail: "", recovering: true) {
+        if !microphone.isArmed, let step = planner.plan(armed: true, listening: false, tail: "", recovering: true) {
             Self.log.notice("request before audio activation")
             await enqueue(step).value
         }
         await arm()
-        Self.log.notice("armed=\(self.composer.isArmed, privacy: .public)")
+        Self.log.notice("armed=\(self.microphone.isArmed, privacy: .public)")
         reconcile()
     }
 
     private func observe() {
         withObservationTracking {
-            _ = composer.isArmed; _ = composer.status; _ = composer.tail; _ = composer.microphoneRecovering
+            _ = microphone.isArmed; _ = microphone.status; _ = keyboard.dictationTail; _ = keyboard.route; _ = microphone.microphoneRecovering
         } onChange: { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
@@ -52,8 +54,8 @@ final class HoldActivityPresenter {
     }
 
     private func reconcile() {
-        guard let step = planner.plan(armed: composer.isArmed, listening: composer.isListening, tail: composer.tail,
-                                      recovering: composer.microphoneRecovering) else { return }
+        guard let step = planner.plan(armed: microphone.isArmed, listening: keyboard.route != .idle, tail: keyboard.dictationTail,
+                                      recovering: microphone.microphoneRecovering) else { return }
         enqueue(step)
     }
 

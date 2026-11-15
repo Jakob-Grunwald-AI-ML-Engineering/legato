@@ -96,15 +96,7 @@ private actor TakeHistory: HistoryStore {
         #expect(pipeline.outbox.count == 1, "Nothing buffered, nothing sent")
     }
 
-    @Test func lineByLineKeepsThePerLinePath() async throws {
-        let cleaner = TakeCleaner()
-        let pipeline = make(cleaner, mode: .lineByLine)
-        await pipeline.receive(routeLine(0, "hello there"))
-        await pipeline.receive(routeLine(1, "second one"))
-        for _ in 0..<500 where pipeline.outbox.count < 2 { try await Task.sleep(for: .milliseconds(2)) }
-        #expect(pipeline.outbox.map(\.text) == ["Hello There.", "Second One."])
-        #expect(cleaner.takes.withLock { $0 }.isEmpty && pipeline.takeLines.isEmpty && pipeline.countdownDeadline == nil)
-    }
+
 
     @Test func afterAPauseTheQuietTimerRestartsOnActivitySendsAtTheDeadlineAndListeningContinues() async {
         let clock = VirtualClock()

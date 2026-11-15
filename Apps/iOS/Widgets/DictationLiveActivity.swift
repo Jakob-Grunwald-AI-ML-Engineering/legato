@@ -11,12 +11,6 @@ extension DictationAttributes.ContentState {
         case .finishing: "Finishing…"
         case .held: "Mic ready"
         case .recovering: "Reconnecting microphone…"
-        case .result: "Dictation ready"
-        case .inserted: "Inserted"
-        case .insertFailed: "Legato keyboard not active"
-        case .copied: "Copied"
-        case .tapToCopy: "Tap to copy"
-        case .failed: "Nothing recognized"
         }
     }
 
@@ -25,12 +19,6 @@ extension DictationAttributes.ContentState {
         case .starting, .listening, .finishing: "mic.fill"
         case .held: "waveform"
         case .recovering: "arrow.clockwise"
-        case .result: "text.bubble.fill"
-        case .inserted: "checkmark.circle.fill"
-        case .insertFailed: "keyboard"
-        case .copied: "checkmark.circle.fill"
-        case .tapToCopy: "doc.on.clipboard"
-        case .failed: "exclamationmark.triangle.fill"
         }
     }
 
@@ -39,12 +27,6 @@ extension DictationAttributes.ContentState {
         case .starting, .listening, .finishing: .red
         case .held: .indigo
         case .recovering: .orange
-        case .result: .blue
-        case .inserted: .green
-        case .insertFailed: .orange
-        case .copied: .green
-        case .tapToCopy: .blue
-        case .failed: .orange
         }
     }
 
@@ -55,14 +37,12 @@ extension DictationAttributes.ContentState {
     }
 
     /// Tapping a `tapToCopy` activity opens the app, which copies the last transcript.
-    var tapURL: URL? { phase == .tapToCopy ? DictationAttributes.copyLastURL : nil }
 }
 
 struct DictationLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: DictationAttributes.self) { context in
             LockScreenView(state: context.state)
-                .widgetURL(context.state.tapURL)
         } dynamicIsland: { context in
             let state = context.state
             if state.phase == .held || state.phase == .recovering { return heldIsland(state: state) }
@@ -86,7 +66,6 @@ struct DictationLiveActivity: Widget {
                             .font(.callout)
                             .lineLimit(3)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        if state.phase.offersResultActions { ResultButtons() }
                     }
                 }
             } compactLeading: {
@@ -100,7 +79,6 @@ struct DictationLiveActivity: Widget {
             } minimal: {
                 Image(systemName: state.symbol).foregroundStyle(state.tint)
             }
-            .widgetURL(state.tapURL)
         }
     }
 }
@@ -127,25 +105,8 @@ private struct LockScreenView: View {
                 .font(.callout)
                 .lineLimit(3)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if state.phase.offersResultActions { ResultButtons() }
         }
         .padding()
-    }
-}
-
-/// Insert (types the text into the Legato keyboard's field) and Copy (clipboard), both run in the app.
-private struct ResultButtons: View {
-    var body: some View {
-        HStack(spacing: 12) {
-            Button(intent: InsertDictationIntent()) {
-                Label("Insert", systemImage: "text.insert").frame(maxWidth: .infinity)
-            }
-            Button(intent: CopyDictationIntent()) {
-                Label("Copy", systemImage: "doc.on.doc").frame(maxWidth: .infinity)
-            }
-        }
-        .buttonStyle(.bordered)
-        .font(.subheadline.weight(.semibold))
     }
 }
 

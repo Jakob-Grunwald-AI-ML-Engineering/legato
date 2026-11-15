@@ -33,8 +33,6 @@ struct SettingsView: View {
     @Environment(MacAppController.self) private var controller
     @AppStorage("composer.liveModel") private var liveModel = ModelChoice.haiku.rawValue
     @AppStorage("composer.personalPrompt") private var personalPrompt = ""
-    @AppStorage(InstructionSendSetting.modeKey) private var instructionSend = InstructionSendSetting.Mode.manual.rawValue
-    @AppStorage(InstructionSendSetting.pauseKey) private var instructionPause = InstructionSendSetting.defaultPause
     @AppStorage("voiceIsolation.enabled") private var onlyMyVoice = false
     @AppStorage(PanelDictationSetting.key) private var panelMode = PanelDictationSetting.defaultMode.rawValue
     @State private var enrollment = VoiceEnrollmentController.shared
@@ -214,7 +212,6 @@ struct SettingsView: View {
                     Text("Live").tag(DictationSendSetting.Mode.live)
                     Text("On stop").tag(DictationSendSetting.Mode.onStop)
                     Text("After a pause").tag(DictationSendSetting.Mode.afterPause)
-                    Text("Line by line").tag(DictationSendSetting.Mode.lineByLine)
                 }.labelsHidden().pickerStyle(.segmented)
                 if settings.dictationSend == .afterPause {
                     Stepper(value: Binding(get: { DictationSendSetting.clampedPause(settings.dictationPause) },

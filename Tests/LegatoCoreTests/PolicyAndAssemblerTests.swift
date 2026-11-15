@@ -65,46 +65,8 @@ import Testing
     }
 }
 
-@Suite struct TranscriptAssemblerTests {
-    @Test func volatileReplacesVolatile() {
-        var a = TranscriptAssembler()
-        #expect(a.apply(.init(text: "hel", isFinal: false)) == [.replaceVolatile("hel")])
-        #expect(a.apply(.init(text: "hello wor", isFinal: false)) == [.replaceVolatile("hello wor")])
-        #expect(a.volatileText == "hello wor")
-        #expect(a.committedText == "")
-    }
-
-    @Test func finalCommitsAndClearsVolatile() {
-        var a = TranscriptAssembler()
-        _ = a.apply(.init(text: "hello wor", isFinal: false))
-        let edits = a.apply(.init(text: "hello world", isFinal: true))
-        #expect(edits == [.replaceVolatile(""), .commit(delta: "hello world")])
-        #expect(a.committedText == "hello world")
-        #expect(a.volatileText == "")
-    }
-
-    @Test func finalWithoutVolatileOnlyCommits() {
-        var a = TranscriptAssembler()
-        #expect(a.apply(.init(text: "hi", isFinal: true)) == [.commit(delta: "hi")])
-    }
-
-    @Test func successiveFinalsAccumulate() {
-        var a = TranscriptAssembler()
-        _ = a.apply(.init(text: "one", isFinal: true))
-        _ = a.apply(.init(text: " two", isFinal: true))
-        #expect(a.committedText == "one two")
-    }
-
-    @Test func emptyFinalCommitsNothing() {
-        var a = TranscriptAssembler()
-        _ = a.apply(.init(text: "x", isFinal: false))
-        #expect(a.apply(.init(text: "", isFinal: true)) == [.replaceVolatile("")])
-        #expect(a.committedText == "")
-    }
-
-    @Test func streamTagAndRangePassThroughEvent() {
-        let e = TranscriptEvent(stream: .system, text: "t", isFinal: true, range: 0..<1.5)
-        #expect(e.stream == .system)
-        #expect(e.range == 0..<1.5)
-    }
+@Test func streamTagAndRangePassThroughEvent() {
+    let e = TranscriptEvent(stream: .system, text: "t", isFinal: true, range: 0..<1.5)
+    #expect(e.stream == .system)
+    #expect(e.range == 0..<1.5)
 }

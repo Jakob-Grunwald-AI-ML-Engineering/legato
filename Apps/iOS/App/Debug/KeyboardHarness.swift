@@ -235,10 +235,10 @@ final class KeyboardHarnessModel {
 
     /// What the scenarios read: the field, the held take and the instruction strip's phase.
     var state: [String: Any] {
-        let published = controller.composer
+        let published = controller.dictationPresentation
         return ["text": document.text, "visible": controller.isVisible,
                 "magic": controller.magic.rawValue, "instruction": controller.instructionStrip?.phase.rawValue ?? "idle",
-                "takePhase": published.dictationTakePhase ?? "", "takeText": published.dictationTake ?? "",
+                "takePhase": published.dictationTakePhase?.rawValue ?? "", "takeText": published.dictationTake ?? "",
                 "takeFailed": controller.takeFailed, "status": controller.statusText ?? ""]
     }
 

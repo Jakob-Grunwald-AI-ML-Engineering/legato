@@ -8,9 +8,8 @@ public enum LinkChannel {
 
     /// App Group `UserDefaults` keys.
     public enum Key {
-        public static let composer = "link.composer"
-        public static let composerAck = "link.composer.ack"
-        public static let composerIntentPrefix = "link.composer.intent."
+        public static let dictationStatus = "link.dictation.status"
+        public static let dictationControlPrefix = "link.dictation.control."
         /// app -> keyboard: `HostState`.
         public static let host = "link.host"
         /// keyboard -> app: `KeyboardRequest`.
@@ -19,7 +18,7 @@ public enum LinkChannel {
         public static let ack = "link.ack"
         /// keyboard -> app: `KeyboardPresence`.
         public static let presence = "link.presence"
-        /// keyboard -> app: `AppliedCursor`.
+        /// Retired payload keys, cleared on host startup for privacy.
         public static let applied = "link.applied"
         /// keyboard -> app: `RefineRequest` (the app acks it on `ack`, and removes it once read).
         public static let refine = "link.refine"
@@ -51,26 +50,17 @@ public enum LinkChannel {
 
     /// Darwin notification names, one per key.
     public enum Note {
-        public static let composer = "\(RuntimeIdentity.current.notificationNamespace).link.composer"
-        public static let composerIntent = "\(RuntimeIdentity.current.notificationNamespace).link.composer.intent"
+        public static let dictationStatus = "\(RuntimeIdentity.current.notificationNamespace).link.dictation.status"
         public static let host = "\(RuntimeIdentity.current.notificationNamespace).link.host"
         public static let request = "\(RuntimeIdentity.current.notificationNamespace).link.request"
         public static let ack = "\(RuntimeIdentity.current.notificationNamespace).link.ack"
         public static let presence = "\(RuntimeIdentity.current.notificationNamespace).link.presence"
-        public static let applied = "\(RuntimeIdentity.current.notificationNamespace).link.applied"
-        public static let refine = "\(RuntimeIdentity.current.notificationNamespace).link.refine"
-        public static let refined = "\(RuntimeIdentity.current.notificationNamespace).link.refined"
         public static let choice = "\(RuntimeIdentity.current.notificationNamespace).link.choice"
-        public static let dictation = "\(RuntimeIdentity.current.notificationNamespace).link.dictation"
-        public static let dictationAck = "\(RuntimeIdentity.current.notificationNamespace).link.dictation.ack"
         public static let dictationLive = "\(RuntimeIdentity.current.notificationNamespace).link.dictation.live"
-        public static let dictationLiveAck = "\(RuntimeIdentity.current.notificationNamespace).link.dictation.live.ack"
         public static let instruction = "\(RuntimeIdentity.current.notificationNamespace).link.instruction"
         public static let instructionIntent = "\(RuntimeIdentity.current.notificationNamespace).link.instruction.intent"
         public static let read = "\(RuntimeIdentity.current.notificationNamespace).link.read"
-        public static let readAck = "\(RuntimeIdentity.current.notificationNamespace).link.read.ack"
         public static let instructionEdit = "\(RuntimeIdentity.current.notificationNamespace).link.instruction.edit"
-        public static let instructionEditAck = "\(RuntimeIdentity.current.notificationNamespace).link.instruction.edit.ack"
     }
 
     /// The host refreshes `beatAt` this often, only while a run or a lease exists.
@@ -85,19 +75,10 @@ public enum LinkChannel {
     public static let ackTimeout: TimeInterval = 0.6
     /// The host publishes state changes at most this often (phase changes go out immediately).
     public static let minPublishInterval: TimeInterval = 0.1
-    /// How long a finished run's text stays in `link.host` and `link.applied`, so a keyboard that was away
-    /// for a moment can still apply and confirm the final state. Then the text is removed from the link.
-    public static let finalTextRetention: TimeInterval = 5
-    /// A keyboard acts on an insert request (`HostState.insertAt`) only this long after it was made, so a
-    /// keyboard that appears later does not type text the user asked for minutes ago.
-    public static let insertMaxAge: TimeInterval = 10
     /// A request older than this is ignored (a leftover in the inbox).
     public static let requestMaxAge: TimeInterval = 10
     /// A choice record older than this is dropped unread (the app was away for a week).
     public static let choiceMaxAge: TimeInterval = 7 * 24 * 3600
-    /// How long the keyboard waits for a refined text once the app acked the request (a language model
-    /// that loads cold takes a while).
-    public static let refineTimeout: TimeInterval = 20
     /// How long the app waits for the keyboard's first answer to a field read (`reading` or the result).
     public static let readAckTimeout: TimeInterval = 1.5
     /// How long a field read that walks may take (a long field costs about 1.5 ms per character).

@@ -2,11 +2,9 @@ import SwiftUI
 
 struct RootView: View {
     let controller: AppController
-    @State private var tab = 0
+    @State private var tab = 1
     var body: some View {
         TabView(selection: $tab) {
-            NavigationStack { HomeView(controller: controller) }
-                .tabItem { Label("Compose", systemImage: "waveform") }.tag(0)
             NavigationStack { HistoryView(controller: controller) }
                 .tabItem { Label("History", systemImage: "clock") }.tag(1)
             NavigationStack { MeetingsView(controller: controller.meetings) }

@@ -1,3 +1,4 @@
+/// Legacy composition values remain decodable for historical session logs.
 public enum Channel: String, Codable, CaseIterable, Sendable {
     case asrTail = "asr.tail", asrSegment = "asr.segment", userIntent = "user.intent"
     case asrBoundary = "asr.boundary", asrRawTail = "asr.raw-tail"

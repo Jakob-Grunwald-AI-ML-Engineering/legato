@@ -180,29 +180,6 @@ enum AudioDiagnostics {
     }
 }
 
-/// The app's audio-session control: `AudioSessionController` inside LegatoCore's
-/// `KeepActiveSessionControl`, plus the internal-build diagnostics.
-///
-/// - Logs every activate/deactivate to `AudioDiagnostics` (`session.activate` carries the requested
-///   options and what was done: `activated`, `reused`, `reconfigured`, `keptCurrent`, `reactivated`).
-/// - `Settings.keepSessionActiveBetweenRuns`: a normal stop does not deactivate the session, so the
-///   next run finds it live. A background start must not re-run `setCategory` on it (iOS refuses with
-///   '!int'), so a held session is reused as is. While it is held, other apps' audio stays ducked or
-///   paused under the policy that was active. A system event (interruption, media reset, lost input)
-///   still deactivates: `release()`.
-///
-/// One instance lives for the whole process; sessions are built per dictation.
-extension KeepActiveSessionControl {
-    static func app() -> KeepActiveSessionControl {
-        KeepActiveSessionControl(
-            inner: AudioSessionController(observer: AudioDiagnostics.sessionStep),
-            keepActive: { Settings.keepSessionActiveBetweenRuns },
-            hasLiveInput: { !AVAudioSession.sharedInstance().currentRoute.inputs.isEmpty },
-            isRefusal: { SystemStartEnvironment.isRefusal($0) },
-            observer: AudioDiagnostics.sessionEvent)
-    }
-}
-
 extension AudioDiagnostics {
     static func sessionEvent(_ event: KeepActiveSessionControl.Event) {
         switch event {

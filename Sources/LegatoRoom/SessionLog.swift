@@ -4,7 +4,6 @@ import Foundation
 public final class SessionLog: Sendable {
     public let directory: URL
     public let roomURL: URL
-    public let finalURL: URL
     public let audioURL: URL
     private let secrets: [String]
     public init(rootDirectory: URL, sessionID: String = UUID().uuidString, secrets: [String] = []) throws {
@@ -13,7 +12,6 @@ public final class SessionLog: Sendable {
         }
         directory = rootDirectory.appendingPathComponent(sessionID, isDirectory: true)
         roomURL = directory.appendingPathComponent("room.jsonl")
-        finalURL = directory.appendingPathComponent("final.md")
         audioURL = directory.appendingPathComponent("audio.m4a")
         self.secrets = secrets.filter { !$0.isEmpty }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -29,9 +27,6 @@ public final class SessionLog: Sendable {
         defer { try? handle.close() }
         try handle.seekToEnd()
         try handle.write(contentsOf: data)
-    }
-    func finish(_ text: String) throws {
-        try redactString(text).write(to: finalURL, atomically: true, encoding: .utf8)
     }
     private func redacted(_ value: JSONValue) -> JSONValue {
         switch value {

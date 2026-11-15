@@ -1,14 +1,14 @@
 import Foundation
 import LegatoAgent
 
-/// When dictated text is written to the field: as it is spoken (`live`, iOS keyboard only), once per take (on
-/// stop, or after a quiet pause) or line by line.
+/// When dictated text is written to the field: as it is spoken (`live`), once per take (on
+/// stop, or after a quiet pause).
 /// Stored in `UserDefaults` (the Mac app's standard defaults; the iOS App Group, so keyboard and app agree) and
 /// read live by the host.
 public enum DictationSendSetting {
-    public enum Mode: String, CaseIterable, Sendable { case onStop, afterPause, lineByLine, live }
+    public enum Mode: String, CaseIterable, Sendable { case onStop, afterPause, live }
     public static let modeKey = "dictation.send"
-    /// Which model cleans each finished sentence in `live` and `lineByLine` (`haiku`, `sonnet`).
+    /// Which model cleans each finished sentence in `live` (`haiku`, `sonnet`).
     public static let cleanupModelKey = "dictation.cleanupModel"
     public static let pauseKey = "dictation.pause"
     public static let pauseRange: ClosedRange<Double> = 1.0...10.0

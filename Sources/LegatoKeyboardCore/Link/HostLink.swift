@@ -1,17 +1,7 @@
 import Foundation
 
-/// The app's end of the link, without any dictation or UIKit knowledge: publishes the run's state for
-/// the keyboard (`link.host`), answers the keyboard's requests (`link.request` -> `link.ack`) and
-/// reads what the keyboard reports (`link.presence`, `link.applied`).
-///
-/// Publishing: phase changes go out at once; text updates at most every `LinkChannel.minPublishInterval`
-/// (a held-back update is published when its window ends). While a run or a lease exists the state is
-/// re-published every `LinkChannel.beatInterval` with a fresh `beatAt`, so a keyboard can tell a live
-/// app from a dead one.
-///
-/// Dictated text does not stay in the App Group: a new link overwrites whatever an earlier process left
-/// in `link.host` (an app that died mid-run would otherwise leave "listening" and the run's text there),
-/// and a finished run's text leaves `link.host` and `link.applied` after `LinkChannel.finalTextRetention`.
+/// Publishes host liveness, microphone capture state and request admission.
+/// Dictated text travels only through DictationLink and LiveDictationLink.
 @MainActor
 public final class HostLink {
     /// Acts on an accepted request (start, stop or end the keep-alive).
@@ -30,11 +20,7 @@ public final class HostLink {
     private let ledger = RequestLedger()
 
     private var lastPublishAt: Date?
-    private var trailing: Task<Void, Never>?
     private var beat: Task<Void, Never>?
-    private var appliedWaiter: (runID: String, continuation: CheckedContinuation<Bool, Never>)?
-    private var appliedTimeout: Task<Void, Never>?
-    private var scrub: Task<Void, Never>?
     /// The accepted start still awaiting its result. Stop invalidates it before cancelling admission.
     private var pendingStartID: String?
     private var pendingStartRequests: Set<String> = []
@@ -50,7 +36,7 @@ public final class HostLink {
         self.now = now
         self.sleep = sleep
         state = HostState(
-            runID: nil, phase: .idle, target: .app, committed: "", volatile: "", seq: 0, beatAt: now(),
+            phase: .idle, seq: 0, beatAt: now(),
             leaseUntil: nil, acceptsRemoteStart: false)
         // Whatever an earlier process left behind is stale by definition: say "idle, no text" now.
         store.write(state, forKey: LinkChannel.Key.host)
@@ -64,117 +50,11 @@ public final class HostLink {
 
     // MARK: Publishing
 
-    /// `delivery`: how the run's cleaned text reaches the field (nil without cleanup); the keyboard needs
-    /// it from the start, because `.hold` keeps the field free while listening.
-    public func runStarted(id: String, target: HostTarget, delivery: HostDelivery? = nil) {
-        cancelScrub()
-        state.preparingRequestID = nil
-        state.runID = id
-        state.target = target
-        state.phase = .starting
-        state.committed = ""
-        state.volatile = ""
-        state.delivery = delivery
-        state.finalText = nil
-        state.insertAt = nil; state.insertDocumentID = nil
-        state.revision = nil
-        reportedSentBase = 0
-        reportedSentCount = 0
-        reportedSent = nil
-        publish()
-    }
-
-    /// Live cleanup's newest cleaned version of the run's text (`HostDelivery.live`): replaces the one
-    /// before (a keyboard needs only the newest), published at once.
-    public func revise(_ revision: HostRevision) {
-        guard state.runID != nil, revision.n > (state.revision?.n ?? 0) else { return }
-        state.revision = revision
-        publish()
-    }
-
-    /// The keyboard reported a sent boundary for the current run (`AppliedCursor.sentBase`: its field was
-    /// cleared, as by sending a message): the run ID, the boundary in `committed`, and the revision the field
-    /// showed for the text before it (0: raw). Called once per boundary, from `appliedDidChange()`, also after
-    /// the run's final state went out (a report on its way then still keeps the run off the clipboard).
-    public var onSent: (@MainActor (_ runID: String, _ boundary: Int, _ shownRevision: Int) -> Void)?
-    private var reportedSentBase = 0
-    private var reportedSentCount = 0
-    /// The last boundary reported, with the tentative text that went with it (`sentTentative(runID:boundary:)`).
-    private var reportedSent: (runID: String, boundary: Int, tentative: String)?
-
-    /// A stop began: published at once. Updates that still arrive while the engine finalizes keep the phase.
-    public func runFinishing() {
-        guard state.runID != nil, state.phase == .starting || state.phase == .listening else { return }
-        state.phase = .finishing
-        publish()
-    }
-
-    /// The user asked to insert `text` (the Live Activity's Insert button): published as the final state of
-    /// a run of its own, for the keyboard, flagged so a visible keyboard types it although it never followed
-    /// the run. Wakes the keyboard with the usual note; `awaitFinalApplied(runID:timeout:)` tells whether it
-    /// landed. Refused (false) while a run is going on: its text is the link's.
-    @discardableResult
-    public func publishInsert(runID: String, text: String, documentID: String? = nil) -> Bool {
-        guard !isRunning else { return false }
-        cancelScrub()
-        state.runID = runID
-        state.target = .keyboard
-        state.phase = .idle
-        state.committed = text
-        state.volatile = ""
-        state.delivery = nil // an insert is typed as it is: no cleanup swap, no hold
-        state.finalText = nil
-        state.revision = nil
-        state.insertAt = now()
-        state.insertDocumentID = documentID
-        publish()
-        scheduleScrub()
-        return true
-    }
-
-    public func update(committed: String, volatile: String) {
-        state.committed = committed
-        state.volatile = volatile
-        if state.phase != .listening, state.phase != .finishing {
-            state.phase = .listening
-            publish()
-        } else if let last = lastPublishAt, now().timeIntervalSince(last) < LinkChannel.minPublishInterval {
-            scheduleTrailing(after: last)
-        } else {
-            publish()
-        }
-    }
-
-    /// The run is over: the final state goes out at once, whatever was held back is dropped. `finalText`:
-    /// the post-processed text when it differs from the trimmed `committed` text.
-    public func runEnded(committed: String, finalText: String? = nil) {
-        state.phase = .idle
-        state.committed = committed
-        state.volatile = ""
-        state.finalText = finalText
-        publish()
-        scheduleScrub()
-    }
-
-    /// Removes the dictated text from the link: `link.host` goes back to "idle, no run, no text" (a lease
-    /// stays) and `link.applied` is deleted. Called when a finished run's retention ends, and when the
-    /// user deletes history. Does nothing while a run is going on.
-    public func scrubText() {
-        guard !isRunning else { return }
-        cancelScrub()
-        store.remove(forKey: LinkChannel.Key.applied)
-        store.remove(forKey: LinkChannel.Key.refine)
-        store.remove(forKey: LinkChannel.Key.refined)
-        guard state.runID != nil || !state.committed.isEmpty || !state.volatile.isEmpty || state.finalText != nil
-        else { return }
-        state.runID = nil
-        state.phase = .idle
-        state.committed = ""
-        state.volatile = ""
-        state.finalText = nil
-        state.delivery = nil
-        state.insertAt = nil; state.insertDocumentID = nil
-        state.revision = nil
+    /// Capture state only. Dictated text is owned by the dictation channels.
+    public func listeningChanged(_ listening: Bool) {
+        let phase: HostPhase = listening ? .listening : .idle
+        guard state.phase != phase else { return }
+        state.phase = phase
         publish()
     }
 
@@ -191,25 +71,9 @@ public final class HostLink {
         return fresh.sorted { $0.at < $1.at }
     }
 
-    /// Removes the queued word choices unread. For when the user deletes history; the retention timer's
-    /// ``scrubText()`` leaves them, since the app has not read them yet.
+    /// Removes unread queued word choices when the user deletes history.
     public func removePendingChoices() {
         for key in store.keys(withPrefix: LinkChannel.Key.choicePrefix) { store.remove(forKey: key) }
-    }
-
-    private func scheduleScrub() {
-        cancelScrub()
-        let sleep = self.sleep
-        scrub = Task { [weak self] in
-            do { try await sleep(.seconds(LinkChannel.finalTextRetention)) } catch { return }
-            guard !Task.isCancelled else { return }
-            self?.scrubText()
-        }
-    }
-
-    private func cancelScrub() {
-        scrub?.cancel()
-        scrub = nil
     }
 
     /// The mic lease between runs: `until` is when it ends, nil when it is not held.
@@ -241,8 +105,6 @@ public final class HostLink {
     }
 
     private func publish() {
-        trailing?.cancel()
-        trailing = nil
         let t = now()
         state.seq += 1
         state.beatAt = t
@@ -253,19 +115,8 @@ public final class HostLink {
         updateBeat()
     }
 
-    private func scheduleTrailing(after last: Date) {
-        guard trailing == nil else { return }
-        let wait = max(last.addingTimeInterval(LinkChannel.minPublishInterval).timeIntervalSince(now()), 0)
-        let sleep = self.sleep
-        trailing = Task { [weak self] in
-            do { try await sleep(.seconds(wait)) } catch { return }
-            guard !Task.isCancelled else { return }
-            self?.publish()
-        }
-    }
-
     private var isActive: Bool {
-        (state.runID != nil && state.phase != .idle) || state.preparingRequestID != nil || state.leaseUntil != nil || state.meetingRecording == true
+        (state.phase != .idle) || state.preparingRequestID != nil || state.leaseUntil != nil || state.meetingRecording == true
     }
 
     private func updateBeat() {
@@ -333,24 +184,6 @@ public final class HostLink {
         }
     }
 
-    /// Answers a refine request (`processRefine`) with the refined text, or nil when there is none.
-    public var onRefine: (@MainActor (String) async -> String?)?
-
-    /// Handles the keyboard's refine request (`link.refine`), on its Darwin note: a fresh request is acked
-    /// at once (the keyboard then waits up to `LinkChannel.refineTimeout`), removed from the store (it
-    /// carries dictated text), answered once (`onRefine`) and the reply written to `link.refined`.
-    public func processRefine() async {
-        guard let request = store.read(RefineRequest.self, forKey: LinkChannel.Key.refine),
-              now().timeIntervalSince(request.at) <= LinkChannel.requestMaxAge
-        else { return }
-        store.remove(forKey: LinkChannel.Key.refine)
-        acknowledge(request.id, .accepted)
-        guard ledger.admit(id: request.id) else { return } // a copy: already being answered
-        let text = await onRefine?(request.text) ?? nil
-        store.write(RefineReply(id: request.id, text: text), forKey: LinkChannel.Key.refined)
-        post(LinkChannel.Note.refined)
-    }
-
     /// What to do with a `legato://keyboard` URL.
     public enum URLAdmission: Sendable, Equatable {
         /// Our keyboard asked for this and nothing acted on it yet: act.
@@ -378,7 +211,7 @@ public final class HostLink {
     }
 
     /// A run is starting, listening or finishing (being stopped and post-processed).
-    private var isRunning: Bool { state.runID != nil && state.phase != .idle }
+    private var isRunning: Bool { state.phase != .idle }
 
     private func canAct(on command: RequestCommand) -> Bool {
         switch command {
@@ -414,60 +247,4 @@ public final class HostLink {
         store.read(KeyboardPresence.self, forKey: LinkChannel.Key.presence)?.isFresh(now: now()) ?? false
     }
 
-    /// Waits up to `timeout` for the keyboard to report that run `runID`'s final text is in the field.
-    public func awaitFinalApplied(runID: String, timeout: TimeInterval) async -> Bool {
-        if finalApplied(runID: runID) { return true }
-        resolveAppliedWaiter(false) // one waiter at a time
-        let sleep = self.sleep
-        return await withCheckedContinuation { continuation in
-            appliedWaiter = (runID, continuation)
-            appliedTimeout = Task { [weak self] in
-                do { try await sleep(.seconds(timeout)) } catch { return }
-                self?.resolveAppliedWaiter(false)
-            }
-        }
-    }
-
-    /// The Darwin note for `link.applied` arrived.
-    public func appliedDidChange() {
-        reportSentBoundary()
-        guard let waiter = appliedWaiter, finalApplied(runID: waiter.runID) else { return }
-        resolveAppliedWaiter(true)
-    }
-
-    private func reportSentBoundary() {
-        // Also once the run's final state is out: a report on its way then still counts (the app decides).
-        guard let runID = state.runID, let cursor = appliedCursor(), cursor.runID == runID,
-              cursor.sentBase > reportedSentBase || cursor.sentCount > reportedSentCount
-        else { return }
-        reportedSentBase = cursor.sentBase
-        reportedSentCount = cursor.sentCount
-        reportedSent = (runID, cursor.sentBase, cursor.sentTentative)
-        onSent?(runID, cursor.sentBase, cursor.sentShownRevision)
-    }
-
-    /// The tentative text that went with the boundary at `boundary` of run `runID` (`AppliedCursor.sentTentative`),
-    /// as last reported through `onSent`; "" for any other.
-    public func sentTentative(runID: String, boundary: Int) -> String {
-        guard let sent = reportedSent, sent.runID == runID, sent.boundary == boundary else { return "" }
-        return sent.tentative
-    }
-
-    /// What the keyboard last reported it applied (`link.applied`), whichever run it was for.
-    public func appliedCursor() -> AppliedCursor? {
-        store.read(AppliedCursor.self, forKey: LinkChannel.Key.applied)
-    }
-
-    private func finalApplied(runID: String) -> Bool {
-        guard let cursor = store.read(AppliedCursor.self, forKey: LinkChannel.Key.applied) else { return false }
-        return cursor.runID == runID && cursor.finalApplied
-    }
-
-    private func resolveAppliedWaiter(_ result: Bool) {
-        appliedTimeout?.cancel()
-        appliedTimeout = nil
-        guard let waiter = appliedWaiter else { return }
-        appliedWaiter = nil
-        waiter.continuation.resume(returning: result)
-    }
 }

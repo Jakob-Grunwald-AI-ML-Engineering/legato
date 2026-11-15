@@ -177,7 +177,7 @@ import LegatoVocabulary
         switch event.channel {
         case .session:
             if event.payload["event"] == .string("asr.voiceIsolation"), case .string(let state) = event.payload["status"] {
-                voiceIsolationStatus = ComposerSession.voiceIsolationMessage(state)
+                voiceIsolationStatus = Self.voiceIsolationMessage(state)
             }
         case .asrSegment:
             await room.resolveSegment(event.id)
@@ -240,4 +240,13 @@ import LegatoVocabulary
         if !text.isEmpty { sink.speechActivity() }
     }
     #endif
+    static func voiceIsolationMessage(_ state: String) -> String? {
+        switch state {
+        case "identifying": "Identifying your voice…"
+        case "matching": "Only your voice"
+        case "uncertain": "Voice uncertain — speech withheld"
+        default: nil
+        }
+    }
+
 }

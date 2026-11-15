@@ -18,8 +18,8 @@ import Foundation
 /// This file compiles into the app and the widget extension. Everything that touches LegatoKit sits
 /// inside `#if APP_TARGET`; the widget copy refuses to run.
 struct ToggleDictationIntent: AudioRecordingIntent, LiveActivityIntent {
-    static let title: LocalizedStringResource = "Toggle dictation"
-    static let description = IntentDescription("Starts dictation, or stops it when already running.")
+    static let title: LocalizedStringResource = "Toggle recording"
+    static let description = IntentDescription("Starts or stops the Meeting or Dictation action chosen in Legato Settings.")
     static var supportedModes: IntentModes { [.background, .foreground(.dynamic)] }
 
     init() {}

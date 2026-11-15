@@ -1,3 +1,4 @@
+/// Legacy composition values remain decodable for historical session logs.
 public enum Participant: String, Codable, CaseIterable, Sendable {
     case sentenceAgent, transcriber, segmenter, document, liveAgent, restructureAgent, alternatives, hintBinder, ui, logger
 }
@@ -7,5 +8,5 @@ public enum SubscriptionBuffer: Sendable {
     case newest(Int)
 }
 
-/// Attach HintBinder before starting audio, then release normal segments with Room.appendSegment.
+/// Intercepted consumers receive raw tails and acknowledge segments after processing.
 public enum SegmentRouting: Sendable { case automatic, intercepted }

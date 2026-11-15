@@ -7,20 +7,24 @@ import LegatoComposerDoc
 @Suite(.timeLimit(.minutes(1))) struct DebugInputTests {
     @Test func muteDrainsCommittedWordsAndResumesSameRoom() async throws {
         let room = Room()
+        let segments = await room.subscribe(participant: .logger, channels: [.asrSegment])
+        var speech = segments.makeAsyncIterator()
         let client = SonioxClient(room: room)
         try await client.startDebug()
         try await client.injectDebugFrame(#"{"tokens":[{"text":"Before","is_final":true}]}"#)
         try await client.setMuted(true)
-        #expect(await room.documentSnapshot.lines.first?.text == "Before")
+        #expect(try await segmentText(speech.next()) == "Before")
         await #expect(throws: SonioxError.inputMuted) {
             try await client.injectDebugFrame(#"{"tokens":[{"text":" Discarded.","is_final":true},{"text":"<end>","is_final":true}]}"#)
         }
-        #expect(await room.documentSnapshot.lines.map(\.text) == ["Before"])
+
         try await client.setMuted(true)
         try await client.setMuted(false)
         try await client.injectDebugFrame(#"{"tokens":[{"text":"After.","is_final":true},{"text":"<end>","is_final":true}]}"#)
-        #expect(await room.documentSnapshot.lines.map(\.text) == ["Before", "After."])
+        #expect(try await segmentText(speech.next()) == "After.")
         try await client.finish()
+        try await room.cancel()
+        #expect(await speech.next() == nil)
     }
     @Test func cancellingDebugInputRejectsFramesAndProductionStillRequiresKey() async throws {
         let client = SonioxClient(room: Room())
@@ -33,14 +37,14 @@ import LegatoComposerDoc
     }
     @Test func debugIngressUsesProviderDecodeAndKeepsPartialOutOfSegments() async throws {
         let room = Room(segmentRouting: .intercepted)
-        // Inspect decoder output before the binder selects which tail is safe for the general UI.
+        // Inspect decoder output directly, before dictation or meeting consumers process it.
         let stream = await room.subscribe(participant: .logger, channels: [.asrSegment, .asrRawTail], buffering: .unbounded)
         var events = stream.makeAsyncIterator()
         let client = SonioxClient(room: room, audioOrigin: 100)
         try await client.startDebug()
         try await client.injectDebugFrame(#"{"tokens":[{"text":"Hallo","is_final":false,"confidence":0.4,"language":"de","start_ms":200,"end_ms":400}]}"#)
-        #expect(await events.next()?.payload["text"] == .string("Hallo"))
-        #expect(await room.documentSnapshot.lines.isEmpty)
+        let partial = try #require(await events.next())
+        #expect(partial.channel == .asrRawTail && partial.payload["text"] == .string("Hallo"))
         try await client.injectDebugFrame(#"{"tokens":[{"text":"Hallo","is_final":true,"confidence":0.4,"language":"de","start_ms":200,"end_ms":400},{"text":"<end>","is_final":true}]}"#)
         let segment = try #require(await events.next())
         #expect(segment.channel == .asrSegment)

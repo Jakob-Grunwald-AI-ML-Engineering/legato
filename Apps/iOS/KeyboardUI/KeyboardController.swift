@@ -1,7 +1,6 @@
 import Foundation
 import LegatoCore
 import LegatoKeyboardCore
-import LegatoComposerDoc
 import Observation
 import UIKit
 import os
@@ -62,17 +61,14 @@ final class KeyboardController {
     private(set) var openAppRequestID = UUID().uuidString
     /// The versions of the last dictation that landed in this field (raw, cleaned, refinements), for the
     /// version keys; nil when there is none (a new run, the user typed, another field).
-    private(set) var versions: DictationVersions?
     /// A refine request is waiting for the app.
-    private(set) var isRefining = false
     /// The texts of the last dictation (raw, cleaned, refinements). Unlike `versions` they survive typing: the
     /// word row's alternatives come from them as long as the dictated words are in the field.
     @ObservationIgnored private(set) var lastDictationTexts: [String] = []
     /// The last dictation's versions, kept while the user types (`versions` is dropped then): undoing the
     /// typing makes a version swap possible again, and the swap is guarded by what the field holds.
-    @ObservationIgnored private var keptVersions: DictationVersions?
     /// The version of the last dictation the field holds, when known.
-    var shownVersionIndex: Int? { (versions ?? keptVersions)?.current }
+    var shownVersionIndex: Int? { nil }
     /// The keyboard's own edits, for ↶ ↷ (`EditHistory`); `undoAvailable` and `redoAvailable` mirror it for the views.
     @ObservationIgnored private var history = EditHistory()
     private(set) var undoAvailable = false
@@ -89,7 +85,6 @@ final class KeyboardController {
     @ObservationIgnored var onLayoutChange: (@MainActor (_ reason: String) -> Void)?
     @ObservationIgnored private let preferences: () -> KeyboardPreferences
 
-    @ObservationIgnored private var cursor: AppliedCursor?
     /// The one writer of the field (see the type's comment), and the field it belongs to.
     @ObservationIgnored private var queue = FieldQueue()
     @ObservationIgnored private var queueDocumentID: String?
@@ -100,15 +95,11 @@ final class KeyboardController {
     /// Completions of the user's edits (word row, undo, versions) and of instruction edits, by edit id.
     @ObservationIgnored private var editCompletions: [String: (FieldQueue.Event?) -> Void] = [:]
     /// The host-state edit already handed to the queue.
-    @ObservationIgnored private var enqueuedHostEditID: String?
     @ObservationIgnored private var journal = EditJournalFile()
     @ObservationIgnored private var lastJournaledReport: FieldQueue.Report?
     /// When the field counts as emptied by the host (a chat app's Send): a cleared field right after this
     /// keyboard's own edit is looked at again once the field's context has caught up (`clearRecheck`).
-    @ObservationIgnored private var clearWatch = ClearWatch()
-    @ObservationIgnored private var clearRecheck: Task<Void, Never>?
     /// Proposes the host's text a few characters at a time; the queue lands it. `ticker` drives both while work is left.
-    @ObservationIgnored private var reveal = TypewriterReveal()
     @ObservationIgnored private var ticker: Task<Void, Never>?
     @ObservationIgnored private var isTornDown = false
     private var forcedOpenAppUntil: Date?
@@ -118,7 +109,6 @@ final class KeyboardController {
     @ObservationIgnored var beforeStartWatch: (@MainActor () async -> Void)?
     #endif
     @ObservationIgnored private var heartbeat: Task<Void, Never>?
-    @ObservationIgnored private var reapply: Task<Void, Never>?
     @ObservationIgnored private var hintTimeout: Task<Void, Never>?
 
     init(
@@ -135,10 +125,9 @@ final class KeyboardController {
         expansion = KeyboardExpansion(persistence: expansionPersistence ?? KeyboardPreferences.expansionPersistence())
         stripHeight = current.stripHeight
         emojiSystemSwitcher = current.emojiSystemSwitcher
-        cursor = link.readApplied()
         host = link.readHost()
         link.observeHost { [weak self] in self?.hostDidChange() }
-        link.observeComposer { [weak self] in self?.composerNoteArrived() }
+        link.observeDictationStatus { [weak self] in self?.dictationStatusArrived() }
         link.observeLiveDictation { [weak self] in self?.receiveLiveDictation() }
         link.observeInstruction { [weak self] in self?.receiveInstruction() }
         if let correctionStore {
@@ -247,42 +236,42 @@ final class KeyboardController {
     }
 
     /// The held take's phase while one is held (`cleaning`, `failed`), else nil.
-    private var takePhase: String? {
-        guard let phase = composer.dictationTakePhase, phase != "buffering" else { return nil }
+    private var takePhase: DictationTakePhase? {
+        guard let phase = dictationPresentation.dictationTakePhase, phase != .buffering else { return nil }
         return phase
     }
     /// A failed take cleanup: the word row offers Retry and Insert as-is.
-    var takeFailed: Bool { takePhase == "failed" }
+    var takeFailed: Bool { takePhase == .failed }
     /// The countdown rim over the word row (after-a-pause mode), host uptime.
     var takeCountdown: (start: Double, deadline: Double)? {
-        guard let start = composer.dictationCountdownStart, let deadline = composer.dictationCountdownDeadline else { return nil }
+        guard let start = dictationPresentation.dictationCountdownStart, let deadline = dictationPresentation.dictationCountdownDeadline else { return nil }
         return (start, deadline)
     }
     /// The take's cleanup runs, or failed and holds the raw text: the word row says so.
     private var takeStatus: String? {
         switch takePhase {
-        case "cleaning": return Self.cleaningUp
-        case "failed": return "Couldn't clean up. Text held."
+        case .cleaning: return Self.cleaningUp
+        case .failed: return "Couldn't clean up. Text held."
         default: return nil
         }
     }
-    func retryTake() { composerIntent("dictation-retry") }
-    func insertTakeRaw() { composerIntent("dictation-insert-raw") }
+    func retryTake() { sendDictationControl(.retry) }
+    func insertTakeRaw() { sendDictationControl(.insertAsIs) }
 
     /// While dictating: the take held so far plus the live tail take the word row's place.
     private var dictatingStatus: String? {
         guard routeOpen else { return nil }
         // The live mode types the words into the field as they come: the row only says that it listens.
         if liveRunning { return "Listening…" }
-        let tail = (composer.dictationTail ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let spoken = [(composer.dictationTake ?? "").trimmingCharacters(in: .whitespacesAndNewlines), tail].filter { !$0.isEmpty }.joined(separator: " ")
+        let tail = (dictationPresentation.dictationTail ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let spoken = [(dictationPresentation.dictationTake ?? "").trimmingCharacters(in: .whitespacesAndNewlines), tail].filter { !$0.isEmpty }.joined(separator: " ")
         guard !spoken.isEmpty else { return "Listening…" }
         return spoken.count > 90 ? "…" + spoken.suffix(90) : spoken
     }
 
     /// A dictation or a Refine is running: the word row is taken over and ↶ ↷ are dimmed.
     var runActive: Bool {
-        if isRefining || pendingRemoteStartID != nil { return true }
+        if pendingRemoteStartID != nil { return true }
         guard let host, now.timeIntervalSince(host.beatAt) < LinkChannel.beatFreshness else { return false }
         return host.phase != .idle || host.preparingRequestID != nil
     }
@@ -304,7 +293,7 @@ final class KeyboardController {
     /// dictate. Believed only while the app keeps beating: an app that died mid-meeting leaves the flag behind.
     var meetingNotice: String? { host?.meetingNotice(now: Date()) }
 
-    private(set) var composer = ComposerPublication()
+    private(set) var dictationPresentation = DictationStatus()
     /// The last dictation notice (`dictationNoticeID`) already shown; the first publication seen only sets it.
     @ObservationIgnored private var seenDictationNoticeID: Int?
     /// The presence the app follows: visibility, field and the text before the cursor that the dictated lines are
@@ -315,56 +304,25 @@ final class KeyboardController {
                            magic: magic, magicAt: magicAt)
     }
     /// The host is sending audio somewhere (`dictation` or `agent`): the mic key stops it.
-    var routeOpen: Bool { (composer.audioRoute ?? "idle") != "idle" }
-    @ObservationIgnored private var composerPoll: Task<Void, Never>?
-    private let composerLink = UserDefaultsLinkStore().map { ComposerLink(store: LinkStore($0)) }
-    @ObservationIgnored private var composerReader = ComposerPublicationReader()
-    #if DEBUG || LEGATO_INTERNAL
-    @ObservationIgnored private var composerWatch = ComposerPollWatch()
-    private static let composerLog = Logger(subsystem: "de.gruenwald.legato", category: "keyboard-composer")
-    #endif
-    /// An action for the host's composer session (`stop`, `dictation-retry`, `dictation-insert-raw`).
-    func composerIntent(_ action: String) {
+    var routeOpen: Bool { dictationPresentation.audioRoute != .idle }
+    @ObservationIgnored private var statusPoll: Task<Void, Never>?
+    private let statusLink = UserDefaultsLinkStore().map { DictationStatusLink(store: LinkStore($0)) }
+    func sendDictationControl(_ action: DictationControl.Action) {
         guard fullAccess else { show("Allow Full Access to connect to Legato."); return }
-        composerLink?.send(.init(action: action))
-        DarwinObserver.post(LinkChannel.Note.composerIntent)
+        statusLink?.send(.init(action: action))
     }
-    /// One read of the stored composer publication, from the 100 ms poll and from the host's `Note.composer`.
-    private func pollComposer() {
-        #if DEBUG || LEGATO_INTERNAL
-        let now = ProcessInfo.processInfo.systemUptime
-        switch composerWatch.tick(at: now) {
-        case .staleAfterNote(let age)?:
-            Self.composerLog.error("composer.poll stale reason=note age=\(age, format: .fixed(precision: 1)) rev=\(self.composer.snapshot.revision) lines=\(self.composer.snapshot.lines.count) bytes=\(self.composerLink?.storedByteCount ?? -1) decodeFailBytes=\(self.composerReader.lastDecodeFailureBytes ?? 0)")
-        case .loopGap(let gap)?:
-            Self.composerLog.error("composer.poll stale reason=loop-gap gap=\(gap, format: .fixed(precision: 1)) rev=\(self.composer.snapshot.revision) lines=\(self.composer.snapshot.lines.count)")
-        case nil: break
-        }
-        #endif
-        guard let channel = composerLink, let value = composerReader.read(from: channel) else { return }
-        #if DEBUG || LEGATO_INTERNAL
-        composerWatch.delivered(at: now)
-        #endif
-        guard value != composer else { return }
-        #if DEBUG || LEGATO_INTERNAL
-        Self.composerLog.info("composer.read rev=\(value.snapshot.revision) session=\(value.sessionID ?? "-", privacy: .public) lines=\(value.snapshot.lines.count) tail=\(value.tail.count) insertion=\(value.successfulInsertionID ?? "-", privacy: .public) was=\(self.composer.snapshot.lines.count)")
-        #endif
-        if let id = value.dictationNoticeID, let seen = seenDictationNoticeID, id != seen, let text = value.dictationNotice {
-            show(text)
-        }
+    private func pollDictationStatus() {
+        guard let value = statusLink?.read(), value != dictationPresentation else { return }
+        if let id = value.dictationNoticeID, let seen = seenDictationNoticeID, id != seen, let text = value.dictationNotice { show(text) }
         seenDictationNoticeID = value.dictationNoticeID ?? seenDictationNoticeID
         let wasOpen = routeOpen
-        composer = value; composerLink?.acknowledge(value.snapshot.revision)
+        dictationPresentation = value
         if wasOpen, !routeOpen { noteStop() }
         syncRowTakeover()
     }
-    /// The host published: read now rather than at the next poll tick, and keep the note for the stall check.
-    private func composerNoteArrived() {
+    private func dictationStatusArrived() {
         guard isVisible, !isTornDown else { return }
-        #if DEBUG || LEGATO_INTERNAL
-        composerWatch.noteArrived(at: ProcessInfo.processInfo.systemUptime)
-        #endif
-        pollComposer()
+        pollDictationStatus()
     }
     // MARK: Visibility
 
@@ -372,22 +330,11 @@ final class KeyboardController {
     func appeared() {
         guard !isTornDown else { return }
         isVisible = true
-        composerPoll?.cancel()
-        // Every appearance reads the stored publication afresh, whatever bytes this reader saw before (#225).
-        composerReader.reset()
-        #if DEBUG || LEGATO_INTERNAL
-        Self.composerLog.info("composer.poll start session=\(self.composer.sessionID ?? "-", privacy: .public) rev=\(self.composer.snapshot.revision) lines=\(self.composer.snapshot.lines.count)")
-        #endif
-        #if DEBUG || LEGATO_INTERNAL
-        composerWatch.start(at: ProcessInfo.processInfo.systemUptime)
-        #endif
-        composerPoll = Task { [weak self] in
-            #if DEBUG || LEGATO_INTERNAL
-            defer { Self.composerLog.info("composer.poll stop cancelled=\(Task.isCancelled ? 1 : 0)") }
-            #endif
+        statusPoll?.cancel()
+        statusPoll = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                self.pollComposer()
+                self.pollDictationStatus()
                 self.receiveDictation()
                 self.receiveLiveDictation()
                 self.receiveInstruction()
@@ -439,7 +386,7 @@ final class KeyboardController {
         if let id = activeInstructionID { link.cancelInstruction(id) }
         // Nothing is left on its way to a field the keyboard no longer sees: pending edits report as dropped.
         resetQueue(reason: "hidden")
-        composerPoll?.cancel(); composerPoll = nil
+        statusPoll?.cancel(); statusPoll = nil
         remoteRequestID = nil
         pendingRemoteStartID = nil
         stopTicker()
@@ -450,8 +397,6 @@ final class KeyboardController {
         typing.disappeared()
         heartbeat?.cancel()
         heartbeat = nil
-        reapply?.cancel()
-        cancelClearRecheck()
         link.writePresence(visible: false, notify: true)
         trace?("visible value=0")
     }
@@ -466,8 +411,6 @@ final class KeyboardController {
         stopTicker()
         link.stopObserving()
         heartbeat?.cancel()
-        reapply?.cancel()
-        cancelClearRecheck()
         hintTimeout?.cancel()
         typing.disappeared()
     }
@@ -489,8 +432,6 @@ final class KeyboardController {
         if isVisible, !pumping { writePresence(notify: false) }
         refreshTraits()
         typing.documentChanged()
-        if let versions, versions.documentID != document.documentID { self.versions = nil }
-        if checkForClear() == .sent { applyHost() }
         trackContext()
         pump()
     }
@@ -506,7 +447,6 @@ final class KeyboardController {
             typing.closeEmojiPanel()
             lastDocumentID = id
             history.clear()
-            keptVersions = nil
             lastDictationTexts = [] // the dictation belongs to the field it landed in
             syncHistory()
             wordRow.fieldChanged()
@@ -523,82 +463,6 @@ final class KeyboardController {
             sessionSpan.broken()
             trace?("session ended by a change outside the keyboard")
         }
-    }
-
-    private enum ClearCheck { case none, held, sent }
-
-    /// Whether the host emptied the field (a chat app's Send), by `ClearWatch`: the dictation's versions are gone
-    /// with it, and a Live run that is still going gets a sent boundary, which the app is told about
-    /// (`link.applied`): the sent text is never cleaned again, typed or copied, and the rest of the run streams
-    /// into the empty field (`.sent`). An empty field right after this keyboard's own edit is looked at again
-    /// when the field's context has caught up; till then nothing of the run is typed (`.held`).
-    @discardableResult
-    private func checkForClear() -> ClearCheck {
-        let outcome = clearWatch.check(
-            state: host, cursor: reveal.cursorBeforeFieldClear(fallback: cursor), documentID: document.documentID, contextBefore: document.contextBefore,
-            hasText: document.hasText, now: Date())
-        switch outcome {
-        case .notCleared:
-            cancelClearRecheck()
-            return .none
-        case .recheck(let at):
-            scheduleClearRecheck(at: at)
-            return clearWatch.holds ? .held : .none
-        case .cleared(let sent):
-            return takeClear(sent)
-        }
-    }
-
-    /// The field was emptied: the dictation's versions are gone with it; a sent boundary is recorded and told.
-    /// The history goes with them only when the host emptied the field: after the keyboard's own edit (undo of the
-    /// first word, a held delete, undoing a dictation) it is still good, and redo is exactly what is wanted.
-    private func takeClear(_ sent: AppliedCursor?) -> ClearCheck {
-        cancelClearRecheck()
-        sessionSpan.broken() // the session's text left with the cleared field
-        if versions?.documentID == document.documentID { versions = nil }
-        if clearWatch.hostEmptiedField {
-            history.clear()
-            keptVersions = nil
-        }
-        syncHistory()
-        guard let sent else { return .none }
-        cursor = sent
-        link.writeApplied(sent, notify: true)
-        trace?("sent at=\(sent.sentBase) shown=\(sent.sentShownRevision) tentative=\(sent.sentTentative.count)")
-        return .sent
-    }
-
-    /// A key is about to land: a clear held for its recheck is taken first, from the field as it is before the
-    /// key (`ClearWatch.resolveHeld`), so the key cannot hide the host's Send.
-    private func resolveHeldClear() {
-        guard clearWatch.holds else { return }
-        let outcome = clearWatch.resolveHeld(
-            state: host, cursor: reveal.cursorBeforeFieldClear(fallback: cursor), documentID: document.documentID, contextBefore: document.contextBefore,
-            hasText: document.hasText)
-        switch outcome {
-        case .cleared(let sent): _ = takeClear(sent)
-        case .notCleared: cancelClearRecheck()
-        case .recheck: break
-        }
-    }
-
-    /// Looks at the field again at `at`, then carries on with the host's text (held back meanwhile).
-    private func scheduleClearRecheck(at: Date) {
-        clearRecheck?.cancel()
-        clearRecheck = Task { [weak self] in
-            let ms = max(0, at.timeIntervalSinceNow * 1000) + 5
-            try? await Task.sleep(for: .milliseconds(Int(ms.rounded(.up))))
-            guard !Task.isCancelled, let self, !self.isTornDown else { return }
-            self.clearRecheck = nil
-            self.trace?("sent recheck")
-            self.checkForClear()
-            self.applyHost()
-        }
-    }
-
-    private func cancelClearRecheck() {
-        clearRecheck?.cancel()
-        clearRecheck = nil
     }
 
     /// Reads the field's traits; only changed values are stored, so the keys redraw only when needed.
@@ -633,99 +497,6 @@ final class KeyboardController {
     private func hostDidChange() {
         guard !isTornDown else { return }
         reloadHost()
-        #if DEBUG
-        if let host, let insertAt = host.insertAt {
-            let latency = Int((Date().timeIntervalSince(insertAt) * 1000).rounded())
-            WakeProbeLog.log(
-                "recv", "run=\(host.runID?.prefix(8) ?? "-") seq=\(host.seq) latencyMs=\(latency) visible=\(isVisible ? 1 : 0)")
-        }
-        #endif
-        applyHost()
-    }
-
-    /// Brings the field in line with the host's text, when `HostApplyDecision` says so: only while visible,
-    /// only for a run the app marked for the keyboard, and for a run this keyboard never followed only when
-    /// its final text was asked for (the Live Activity's Insert). The last state of any other run it never
-    /// saw (an old dictation, seen again when the keyboard reappears) is not typed. A "running" state whose
-    /// beat has gone stale belongs to an app that died: its text is not typed either.
-    ///
-    /// `TypewriterReveal` proposes the text a little at a time against the queue's view of the field; the queue
-    /// lands each proposal and says when (`hostEditLanded`). `flush` (and Reduce Motion) proposes it all now;
-    /// `userLane`: the proposal goes ahead of later keys (text the user's key must come after).
-    private func applyHost(elapsedMs: Double = 0, flush: Bool = false, userLane: Bool = false) {
-        guard !isTornDown else { return }
-        let decision = HostApplyDecision.decide(
-            host: host, cursor: cursor, visible: isVisible, documentID: document.documentID, now: Date())
-        guard case .apply = decision, let host, checkForClear() != .held else {
-            #if DEBUG
-            if case .skip(let reason) = decision, host?.insertAt != nil {
-                WakeProbeLog.log("skip", "run=\(host?.runID?.prefix(8) ?? "-") reason=\(reason.rawValue)")
-            }
-            #endif
-            return
-        }
-        syncQueueField()
-        let before = cursor
-        let plan = reveal.plan(
-            state: host, cursor: cursor, contextBefore: queueContextBefore, documentID: document.documentID,
-            animated: !flush && !UIAccessibility.isReduceMotionEnabled, elapsedMs: elapsedMs,
-            hasSelection: document.selectedText?.isEmpty == false)
-        if let edit = reveal.pendingEdit, edit.id != enqueuedHostEditID {
-            enqueuedHostEditID = edit.id
-            enqueue(edit, user: userLane)
-        }
-        if let updated = plan.cursor, updated != before {
-            cursor = updated
-            link.writeApplied(updated, notify: elapsedMs == 0 || updated.finalApplied)
-        }
-        updateVersions(host)
-        startTickerIfNeeded()
-    }
-
-    /// The queue landed (or dropped) the host's proposal: its cursor is acknowledged, the next proposal may come.
-    private func hostEditLanded(_ id: String, applied: Bool) {
-        guard let host else { return }
-        let updated = applied ? reveal.landed(id) : reveal.dropped(id, state: host, cursor: cursor)
-        guard let updated else { return }
-        let before = cursor
-        cursor = updated
-        link.writeApplied(updated, notify: true)
-        if updated.finalApplied || before?.runID != updated.runID {
-            trace?("apply final=\(updated.finalApplied ? 1 : 0) replaced=\(updated.finalReplaced.map { $0 ? "1" : "0" } ?? "-")")
-        }
-        #if DEBUG
-        if host.insertAt != nil, updated.finalApplied {
-            WakeProbeLog.log("insert", "run=\(host.runID?.prefix(8) ?? "-") final=1")
-        }
-        #endif
-        updateVersions(host)
-        applyHost()
-    }
-
-    /// A new run drops the last dictation's versions; a run that landed here offers its own.
-    private func updateVersions(_ host: HostState) {
-        if host.phase != .idle {
-            if versions != nil, host.runID != versions?.runID { versions = nil }
-            if keptVersions != nil, host.runID != keptVersions?.runID { keptVersions = nil }
-            return
-        }
-        guard host.isFinal, versions?.runID != host.runID, keptVersions?.runID != host.runID,
-              let landed = DictationVersions.landed(state: host, cursor: cursor)
-        else { return }
-        versions = landed
-        keptVersions = landed
-        lastDictationTexts = landed.texts
-        recordDictation(landed)
-        trace?("versions count=\(landed.texts.count) current=\(landed.current)")
-    }
-
-    /// A dictation is one entry of the history, and its cleanup (the field showing a later version than the
-    /// raw text) another: undo steps from the cleaned text to the raw text, then removes the dictation.
-    private func recordDictation(_ landed: DictationVersions) {
-        let raw = landed.texts[0] + landed.trailing
-        if !raw.isEmpty { history.record(removed: "", inserted: raw, at: Date()) }
-        if landed.texts.count > 1, landed.current != 0 { history.recordVersion(from: 0, to: landed.current, at: Date()) }
-        syncHistory()
     }
 
     // MARK: Field queue
@@ -780,7 +551,6 @@ final class KeyboardController {
         // The field changed or the keyboard went away: nothing more of a take's cleanup lands here.
         updateCleanup { $0.clear() }
         queue.reset()
-        enqueuedHostEditID = nil
         var entry = EditJournal.Entry(t: Self.uptimeMs, kind: .reset, field: queueDocumentID)
         entry.reason = reason
         journal.write(entry)
@@ -891,7 +661,6 @@ final class KeyboardController {
                     correctionCapture?.reset()
                     correctionOwnWriteAt = Date()
                 }
-                clearWatch.ownEdit(at: Date())
                 liveStats.applies += lane == .live ? 1 : 0
                 if lane != .user {
                     // The keyboard's own text is no typing: what was typed so far is learned, the tracked context is gone.
@@ -899,7 +668,6 @@ final class KeyboardController {
                     wordRow.interruptTyping()
                     typing.hostEdited()
                 }
-                if lane == .live { versions = nil }
             case .confirmed(let waited):
                 if waited > 0 { liveStats.waits += 1 }
             case .resync(let kind):
@@ -915,11 +683,9 @@ final class KeyboardController {
                 break
             case .applied(let id, _):
                 if let completion = editCompletions.removeValue(forKey: id) { completion(event) }
-                else if id == enqueuedHostEditID { enqueuedHostEditID = nil; hostEditLanded(id, applied: true) }
             case .dropped(let drop):
                 trace?("queue dropped reason=\(drop.reason.rawValue) kind=\(drop.kind?.rawValue ?? "live")")
                 if let completion = editCompletions.removeValue(forKey: drop.id) { completion(event) }
-                else if drop.id == enqueuedHostEditID { enqueuedHostEditID = nil; hostEditLanded(drop.id, applied: false) }
                 else if drop.reason != .reset, drop.runID != nil || drop.id.hasPrefix("stray:") {
                     if let runID = drop.runID { updateCleanup { $0.failed(runID: runID) } }
                     // The take's final text could not stand whole in the field (the user typed or moved since, or the
@@ -953,7 +719,7 @@ final class KeyboardController {
     }
 
     private func startTickerIfNeeded() {
-        let needed = !queue.isIdle || reveal.needsTicks || typist.needsTicks
+        let needed = !queue.isIdle || typist.needsTicks
         guard needed, !isTornDown, isVisible else { return stopTicker() }
         guard ticker == nil else { return }
         ticker = Task { [weak self] in
@@ -972,11 +738,10 @@ final class KeyboardController {
     }
 
     private func tick(elapsedMs: Double) {
-        if reveal.needsTicks { applyHost(elapsedMs: elapsedMs) }
         if typist.needsTicks { dictationStep(elapsedMs: elapsedMs) }
         cancelRevokedInstructionEdits()
         pump()
-        if queue.isIdle, !reveal.needsTicks, !typist.needsTicks { stopTicker() }
+        if queue.isIdle, !typist.needsTicks { stopTicker() }
     }
 
     private func stopTicker() {
@@ -1018,7 +783,6 @@ final class KeyboardController {
             wordRow.willApplyOwnEdit(expectedContextBefore: expected)
             for grapheme in step.inserts { enqueue(FieldQueue.Edit(kind: .typist, target: grapheme, atCursor: true)) }
             typing.ownEdit(contextBefore: expected)
-            versions = nil
             trace?("dictation line finished before a key graphemes=\(step.inserts.count)")
         }
         if let upTo = step.acknowledged { acknowledgeDictation(upTo: upTo) }
@@ -1050,7 +814,6 @@ final class KeyboardController {
             wordRow.willApplyOwnEdit(expectedContextBefore: expected)
             enqueue(FieldQueue.Edit(kind: .typist, before: String(context.suffix(step.deletes)), target: ""))
             typing.ownEdit(contextBefore: expected)
-            versions = nil
         }
         if !step.inserts.isEmpty {
             let text = step.inserts.joined()
@@ -1058,7 +821,6 @@ final class KeyboardController {
             wordRow.willApplyOwnEdit(expectedContextBefore: expected)
             enqueue(FieldQueue.Edit(kind: .typist, target: text, atCursor: true))
             typing.ownEdit(contextBefore: expected)
-            versions = nil
         }
         if let upTo = step.acknowledged { acknowledgeDictation(upTo: upTo) }
         pump()
@@ -1070,7 +832,7 @@ final class KeyboardController {
         guard isVisible, !isTornDown, !document.isSecureTextEntry, document.documentID == queueDocumentID else {
             correctionCapture?.reset(); correctionSources = [:]; return
         }
-        guard queue.isIdle, !queue.ownsRead, !queue.paused, !typist.needsTicks, !reveal.needsTicks, !isFieldBusy,
+        guard queue.isIdle, !queue.ownsRead, !queue.paused, !typist.needsTicks, !isFieldBusy,
               Date().timeIntervalSince(correctionOwnWriteAt) >= 0.15 else { return }
         armCorrections()
         let report = currentReport
@@ -1722,7 +1484,6 @@ final class KeyboardController {
         queue.forgetRead(edit.instructionID)
         let ms = Int(Date().timeIntervalSince(started) * 1000)
         typing.hostEdited()
-        versions = nil
         fieldRead = nil
         switch outcome {
         case .applied(_, let cursor)?:
@@ -1800,15 +1561,12 @@ final class KeyboardController {
     /// dictation was revealing is finished in front of it). Returns false: the key itself is all that was typed.
     @discardableResult
     func type(_ text: String, contextBefore: String? = nil) -> Bool {
-        versions = nil // the user moved on from the dictation
         userPreemptsFieldRead()
         finishDictationLine()
-        resolveHeldClear()
         beforeUserEdit()
         let before = contextBefore ?? typing.contextBefore
         let selected = document.selectedText
         enqueue(.insert(text))
-        if text == "\n" { clearWatch.returnTyped(at: Date()) } else { clearWatch.ownEdit(at: Date()) }
         if let selected, !selected.isEmpty {
             history.record(removed: selected, inserted: text, at: Date(), contextBefore: before + text) // the key replaced the selection
             wordRow.interruptTyping()
@@ -1819,21 +1577,17 @@ final class KeyboardController {
         syncHistory()
         wordRow.keystroke(contextBefore: before + text)
         pump()
-        afterUserEdit()
         return false
     }
 
     func deleteBackward(contextBefore: String? = nil) {
-        versions = nil
         userPreemptsFieldRead()
         finishDictationLine()
-        resolveHeldClear()
         beforeUserEdit()
         let before = contextBefore ?? typing.contextBefore
         let selected = document.selectedText
         let deletesSelection = selected?.isEmpty == false
         let remaining = deletesSelection ? before : String(before.dropLast())
-        clearWatch.ownEdit(at: Date(), leavesFieldEmpty: remaining.isEmpty && document.contextAfter.isEmpty)
         enqueue(.deleteBackward)
         if let selected, deletesSelection {
             history.record(removed: selected, inserted: "", at: Date(), contextBefore: before)
@@ -1845,7 +1599,6 @@ final class KeyboardController {
         syncHistory()
         wordRow.keystroke(contextBefore: remaining)
         pump()
-        afterUserEdit()
     }
 
     /// One edit of the word row (a completion or a swap), or of undo and redo: the span around the cursor becomes
@@ -1855,7 +1608,6 @@ final class KeyboardController {
     func applyEdit(_ edit: WordEdit, removed: String, asTyping: Bool, record: Bool = true) {
         userPreemptsFieldRead()
         interruptDictation()
-        resolveHeldClear()
         beforeUserEdit()
         let before = typing.contextBefore
         let after = document.contextAfter
@@ -1866,7 +1618,6 @@ final class KeyboardController {
         guard old.count == edit.deleteCount, oldAfter.count <= old.count else {
             show("The word changed, so nothing was edited."); return
         }
-        versions = nil
         wordRow.interruptTyping()
         let queued = FieldQueue.Edit(kind: record ? .word : .undo, before: shown(String(old.dropLast(oldAfter.count))),
                                      after: shown(oldAfter), target: shown(edit.insert))
@@ -1883,7 +1634,6 @@ final class KeyboardController {
             self.syncHistory()
             self.typing.ownEdit(contextBefore: expected)
             if asTyping || !record { self.wordRow.keystroke(contextBefore: expected) }
-            self.afterUserEdit()
         }
         pump()
     }
@@ -1925,8 +1675,6 @@ final class KeyboardController {
 
     /// Undoing typing drops the typing buffer (what is taken back is not learned); a redo has nothing typed to lose.
     private func prepareHistoryStep(discardingTyped: Bool) {
-        resolveHeldClear()
-        if reveal.needsTicks { applyHost(flush: true, userLane: true) }
         if discardingTyped { wordRow.discardTyping() } else { wordRow.interruptTyping() }
     }
 
@@ -1940,61 +1688,29 @@ final class KeyboardController {
         switch step {
         case .edit(let edit):
             applyEdit(edit, removed: "", asTyping: false, record: false)
-        case .version(let index):
-            // A swap the field no longer allows leaves the entry where it was; the rest of the history is intact.
-            if !showVersion(at: index, record: false) {
-                if undoing { history.revertUndo() } else { history.revertRedo() }
-                syncHistory()
-            }
+        case .version:
+            if undoing { history.revertUndo() } else { history.revertRedo() }
+            syncHistory()
         }
     }
 
-    /// The user types into a run's text: the tentative text comes out first so the key lands after the
-    /// committed text; `applyHost` puts it back after the key. Both go ahead of the key in the queue.
     private func beforeUserEdit() {
         dismissLiveRecovery()
         settleInstructionRow()
-        // Committed text still to be revealed goes in first, so the key does not land in the middle of it.
-        if reveal.needsTicks { applyHost(flush: true, userLane: true) }
-        guard let current = cursor, let documentID = document.documentID, current.documentID == documentID,
-              let host, host.runID == current.runID, host.phase != .idle
-        else { return }
-        let context = queueContextBefore
-        let plan = ProxyEditPlanner.prepareForTyping(cursor: current, contextBefore: context)
-        let deletes = plan.ops.reduce(0) { if case .deleteBackward(let n) = $1 { $0 + n } else { $0 } }
-        if deletes > 0 {
-            enqueue(FieldQueue.Edit(kind: .host, before: String(context.suffix(deletes)), target: ""), user: true)
-        }
-        if let updated = plan.cursor, updated != current {
-            cursor = updated
-            link.writeApplied(updated)
-        }
-    }
-
-    /// The document's context settles a moment after an edit; planning against it right away would
-    /// misjudge the separator. The next host update would do too, but it can be a while off.
-    private func afterUserEdit() {
-        guard cursor != nil else { return }
-        reapply?.cancel()
-        reapply = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(120))
-            guard !Task.isCancelled else { return }
-            self?.applyHost()
-        }
     }
 
     // MARK: Mic key
 
     /// Whether the app is listening right now, rather than preparing resources or starting capture.
     var isCapturing: Bool {
-        if composer.status == "listening" || routeOpen { return true }
+        if routeOpen { return true }
         guard let host, now.timeIntervalSince(host.beatAt) < LinkChannel.beatFreshness else { return false }
         return host.phase == .listening
     }
 
     /// What tapping the mic key does now.
     var micMode: MicKeyMode {
-        if composer.status == "listening" { return .remote(.stop) }
+        if routeOpen { return .remote(.stop) }
         if pendingRemoteStartID != nil, hasFullAccess() { return .remote(.stop) }
         if let until = forcedOpenAppUntil, until > now, hasFullAccess() { return .openApp }
         return MicKeyMode.resolve(host: host, now: now, fullAccess: hasFullAccess())
@@ -2007,7 +1723,7 @@ final class KeyboardController {
     /// The mic key was tapped. In `.openApp` mode the key is a `Link` that opens the app by itself; this
     /// sends the same request over the link, for an app that is already running.
     func micTapped() {
-        if composer.status == "listening" || routeOpen { noteStop(); composerIntent("stop"); return }
+        if routeOpen { noteStop(); sendDictationControl(.stop); return }
         reloadHost()
         let mode = micMode
         switch mode {
@@ -2110,100 +1826,6 @@ final class KeyboardController {
         show("Legato needs to open. Tap the mic again.")
     }
 
-    // MARK: Versions
-
-    /// Swaps the dictation in the field for version `index`, only while the field still ends with the
-    /// version shown now. `record`: whether this is a new step of the history (Refine) rather than undo or redo.
-    @discardableResult
-    private func showVersion(at index: Int, record: Bool) -> Bool {
-        userPreemptsFieldRead()
-        guard var current = keptVersions ?? versions, current.texts.indices.contains(index) else { return false }
-        let from = current.current
-        guard current.documentID == document.documentID,
-              let ops = current.swapOps(to: index, contextBefore: typing.contextBefore)
-        else {
-            trace?("version swap=refused")
-            show("The text changed, so there is nothing to swap.")
-            return false
-        }
-        let before = typing.contextBefore
-        let expected = String(before.dropLast(current.shown.count)) + current.texts[index] + current.trailing
-        _ = ops // swapOps validates the current version's ownership; the queue makes the minimal edits.
-        let edit = FieldQueue.Edit(kind: .version, before: shown(current.shown), target: shown(current.texts[index] + current.trailing))
-        enqueue(edit, user: true) { [weak self] outcome in
-            guard let self else { return }
-            guard case .applied? = outcome else {
-                if !record { self.history.clear(); self.syncHistory() }
-                self.show("The text changed, so there is nothing to swap.")
-                return
-            }
-            self.wordRow.willApplyOwnEdit(expectedContextBefore: expected)
-            self.typing.ownEdit(contextBefore: expected)
-            current.show(index)
-            self.versions = current
-            self.keptVersions = current
-            if record, from != index {
-                self.history.recordVersion(from: from, to: index, at: Date())
-                self.syncHistory()
-            }
-            self.trace?("version index=\(index) of=\(current.texts.count)")
-        }
-        pump()
-        return true
-    }
-
-    /// Asks the app for a stronger rewrite (its message style) of the raw dictation and shows it as a new
-    /// version. The keyboard never runs a model itself; the app must be running (it acks at once).
-    func refine() {
-        guard !isRefining else { return }
-        guard hasFullAccess() else {
-            show("Turn on Allow Full Access for Legato in Settings > General > Keyboard to refine.")
-            return
-        }
-        guard let versions else {
-            show("Refine works on the dictation you just made.")
-            return
-        }
-        isRefining = true
-        let id = UUID().uuidString
-        let runID = versions.runID
-        link.sendRefine(versions.texts[0], id: id)
-        trace?("refine sent")
-        Task { [weak self] in
-            await self?.awaitRefinement(id: id, runID: runID)
-            self?.isRefining = false
-        }
-    }
-
-    private func awaitRefinement(id: String, runID: String) async {
-        let ack = await link.awaitAck(id: id, timeout: LinkChannel.ackTimeout)
-        guard ack == .accepted else {
-            trace?("refine ack=\(ack?.rawValue ?? "timeout")")
-            show("Open Legato to refine: it isn't running right now.")
-            return
-        }
-        guard let reply = await link.awaitRefined(id: id, timeout: LinkChannel.refineTimeout) else {
-            trace?("refine reply=timeout")
-            show("Refine took too long.")
-            return
-        }
-        guard let refined = reply.text else {
-            trace?("refine reply=none")
-            show("No better version.")
-            return
-        }
-        guard var current = versions, current.runID == runID else { return }
-        let index = current.add(refined)
-        versions = current
-        keptVersions = current
-        lastDictationTexts = current.texts
-        trace?("refine reply=text")
-        showVersion(at: index, record: true)
-    }
-
-    /// Refine can run: there is a dictation to refine and Full Access lets the keyboard ask the app.
-    var canRefine: Bool { versions != nil && fullAccess && !isRefining }
-
     // MARK: Status
 
     /// The top bar's dictation line: the live text while a `.hold` run listens (nothing is typed then),
@@ -2216,11 +1838,9 @@ final class KeyboardController {
         case .starting:
             return "Starting dictation…"
         case .listening:
-            let live = host.committed + host.volatile
-            guard host.delivery == .hold, !live.trimmingCharacters(in: .whitespaces).isEmpty else { return "Listening…" }
-            return live.count > 90 ? "…" + live.suffix(90) : live
+            return "Listening…"
         case .finishing:
-            return host.delivery == nil ? nil : "Cleaning up…"
+            return "Cleaning up…"
         case .idle:
             return nil
         }

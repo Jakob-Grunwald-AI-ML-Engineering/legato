@@ -73,7 +73,7 @@ final class FailingStreamCleaner: SentenceCleaning {
 
     private func make(key: String = "test", cleaner: any SentenceCleaning = Cleaner(), timeout: Duration = .milliseconds(2500),
                       context: @escaping @MainActor () -> String = { "" },
-                      mode: DictationSendSetting.Mode = .lineByLine, clock: any Clock<Duration> = ContinuousClock(),
+                      mode: DictationSendSetting.Mode = .onStop, clock: any Clock<Duration> = ContinuousClock(),
                       takeTimeout: (@Sendable (Int) -> Duration)? = nil) -> MacDictationSession {
         let pipeline = DictationPipeline(cleaner: cleaner, timeout: timeout, sendMode: { mode }, pauseSeconds: { 5 }, clock: clock,
                                          takeTimeout: takeTimeout)
@@ -114,7 +114,7 @@ final class FailingStreamCleaner: SentenceCleaning {
         await session.cancel()
     }
 
-    @Test func spokenLinesAreCleanedAndDeliveredInOrderThenStopFinalizes() async throws {
+    @Test func spokenSegmentsStayBufferedUntilStopThenDeliverOneOrderedTake() async throws {
         let session = make()
         session.ensureWarm()
         try await until { await sockets.last?.held == true }
@@ -126,61 +126,61 @@ final class FailingStreamCleaner: SentenceCleaning {
         try await until { session.tail == "hallo" }
         await socket.feed(#"{"tokens":[{"text":"hallo","is_final":true},{"text":" welt","is_final":true},{"text":"<end>","is_final":true}]}"#)
         await socket.feed(#"{"tokens":[{"text":"zweite","is_final":true},{"text":" zeile","is_final":true},{"text":"<end>","is_final":true}]}"#)
-        try await until { typed.lines.count == 2 }
-        #expect(typed.lines == ["Hallo welt.", "Zweite zeile."])
+        try await until { session.pipeline.takeLines.count == 2 }
+        #expect(typed.lines.isEmpty, "On stop buffers all segments until the take finishes")
         let stopping = Task { await session.stop() }
         try await until { await socket.sent.contains(.text(#"{"type":"finalize"}"#)) }
         #expect(await mic.stops == 1)
         await socket.feed(#"{"tokens":[{"text":"<fin>","is_final":true}]}"#)
         await socket.feed(#"{"finished":true}"#)
         await stopping.value
+        #expect(typed.lines == ["Hallo welt zweite zeile."], "Stop cleans the full take in speaking order and delivers once")
         #expect(session.phase == .idle)
     }
 
-    @Test func aSlowCleanupInsertsTheRawLineInOrder() async throws {
-        let session = make(cleaner: Cleaner(slow: ["uh erste"]), timeout: .milliseconds(40))
+    @Test func aSlowWholeTakeKeepsRawSpeechUntilExplicitInsertion() async throws {
+        let cleaner = Cleaner(takeDelay: .seconds(10))
+        let session = make(cleaner: cleaner, takeTimeout: { _ in .milliseconds(40) })
         try await session.debugLine("uh erste")
         try await session.debugLine("zweite")
-        try await until { typed.lines.count == 2 }
-        #expect(typed.lines == ["uh erste", "Zweite."], "Timeout: the raw line, still before the later one")
-        #expect(session.pipeline.fallbacks == ["timeout"])
+        #expect(typed.lines.isEmpty)
         await session.debugStop()
-        #expect(session.phase == .idle)
+        #expect(session.phase == .idle && session.pipeline.takePhase == .failed)
+        #expect(typed.lines.isEmpty, "A timed-out whole take requires an explicit recovery choice")
+        #expect(session.pipeline.fallbacks == ["take-timeout"])
+        #expect(cleaner.takes.withLock { $0.count } == 2, "One retry, then retain the take")
+        await session.pipeline.insertRaw()
+        try await until { typed.lines.count == 1 }
+        #expect(typed.lines == ["uh erste zweite"], "Insert as-is keeps all raw segments in speaking order")
+        await session.pipeline.insertRaw()
+        #expect(typed.lines.count == 1, "Recovery never inserts the same take twice")
     }
 
-    @Test func cleanupContextIsPreviousLinesPlusTheFieldAndResetsPerSession() async throws {
+    @Test func wholeTakeContextCapturesTheFieldAtStartAndRefreshesForTheNextTake() async throws {
         let cleaner = Cleaner()
         var field = "Hi Anna,"
         let session = make(cleaner: cleaner, context: { field })
         try await session.debugLine("eins")
-        try await until { typed.lines.count == 1 }
+        field = "changed while speaking"
         try await session.debugLine("zwei")
-        try await until { typed.lines.count == 2 }
-        let second = cleaner.inputs.withLock { $0 }.first { $0.text == "zwei" }
-        #expect(second?.dictation?.previousLines == ["Eins."] && second?.dictation?.textBeforeCursor == "Hi Anna,")
+        #expect(cleaner.takes.withLock { $0.isEmpty }, "Cleanup waits for the whole take")
         await session.debugStop()
+        let first = try #require(cleaner.takes.withLock { $0.first })
+        #expect(first.text == "eins zwei" && first.textBeforeCursor == "Hi Anna,")
+        #expect(first.recentTakes.isEmpty)
+        #expect(typed.lines == ["Eins zwei."])
 
         field = ""
         try await session.debugLine("drei")
-        try await until { typed.lines.count == 3 }
-        let third = cleaner.inputs.withLock { $0 }.first { $0.text == "drei" }
-        #expect(third?.dictation?.previousLines == [] && third?.dictation?.textBeforeCursor == "", "A new session starts without context")
         await session.debugStop()
+        let second = try #require(cleaner.takes.withLock { $0.last })
+        #expect(second.takeID != first.takeID && second.text == "drei")
+        #expect(second.textBeforeCursor.isEmpty, "A new take reads its own field context")
+        #expect(second.recentTakes.map(\.raw) == ["eins zwei"], "Prior takes are background, never part of the new text")
+        #expect(typed.lines == ["Eins zwei.", "Drei."])
+        #expect(cleaner.inputs.withLock { $0.isEmpty }, "On stop uses whole-take cleanup exclusively")
     }
 
-    @Test func aSessionNeverReachesTheComposer() async throws {
-        let composer = ComposerSession(microphone: mic, activateAudioSession: {})
-        let session = make()
-        session.ensureWarm()
-        try await until { await sockets.last?.held == true }
-        #expect(await session.start())
-        await mic.emit()
-        await sockets.at(0)?.feed(#"{"tokens":[{"text":"nur","is_final":true},{"text":" diktat","is_final":true},{"text":"<end>","is_final":true}]}"#)
-        try await until { typed.lines.count == 1 }
-        #expect(composer.snapshot.lines.isEmpty && composer.tail.isEmpty && composer.status == "idle", "Separate route and Room")
-        #expect(!composer.isListening)
-        await session.cancel()
-    }
 
     @Test func aFreshSessionClearsThePreviousFieldFailureNotice() async throws {
         let session = make()
@@ -263,15 +263,6 @@ final class FailingStreamCleaner: SentenceCleaning {
         #expect(session.pipeline.countdownDeadline == nil)
     }
 
-    @Test func lineByLineStillTypesEachLineAsItIsCleaned() async throws {
-        let session = make(mode: .lineByLine)
-        try await session.debugLine("erste")
-        try await session.debugLine("zweite")
-        try await until { typed.lines.count == 2 }
-        #expect(typed.lines == ["Erste.", "Zweite."] && session.pipeline.takeLines.isEmpty)
-        await session.debugStop()
-    }
-
     @Test func aWholeTakeStreamsAndAFailedOneStaysOpenUntilRetryRetractsIt() async throws {
         let cleaner = FailingStreamCleaner()
         // The take cleanup's own 4 s timeout is wall-clock: on a starved runner it fired before the first stream
@@ -306,16 +297,17 @@ final class FailingStreamCleaner: SentenceCleaning {
     @Test func magicSpeechNeverReachesTheDictationOutboxAndCancelResetsBothModes() async throws {
         let session = make()
         try await session.debugLine("before magic")
-        try await until { typed.lines.count == 1 }
+        #expect(typed.lines.isEmpty && session.pipeline.takeLines.count == 1)
         #expect(await session.startMagic())
         try await session.debugTail("make this")
         #expect(session.instruction.strip.transcript == "make this")
         try await session.debugLine("make this shorter")
         #expect(session.instruction.strip.transcript == "make this shorter")
-        #expect(typed.lines == ["Before magic."])
+        #expect(typed.lines.isEmpty && session.pipeline.takeLines.count == 1, "Magic speech never joins the buffered dictation take")
         #expect(session.pipeline.outbox.isEmpty)
         await session.cancel()
         #expect(session.speechMode == .dictation)
+        #expect(session.pipeline.takeLines.isEmpty && typed.lines.isEmpty, "Cancel discards the pending dictation and Magic speech")
         #expect(session.instruction.strip.phase == .idle)
         #expect(session.phase == .idle)
     }

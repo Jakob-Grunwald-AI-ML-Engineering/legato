@@ -89,31 +89,6 @@ private struct ChoiceRig {
         #expect(link.drainChoices(now: t0).count == 1)
     }
 
-    @Test func scrubbingTextKeepsPendingChoices() {
-        // The retention timer scrubs a finished run's text after a few seconds; choices the app has not read yet
-        // are not that text and must survive it.
-        let r = ChoiceRig()
-        r.store.write(r.choice(), forKey: LinkChannel.Key.choicePrefix + "1")
-        r.link.scrubText()
-        #expect(r.backing.keys(withPrefix: LinkChannel.Key.choicePrefix).count == 1)
-        #expect(r.link.drainChoices(now: t0).count == 1)
-    }
-
-    @Test func theRetentionTimerLeavesUnreadChoicesAlone() async {
-        let backing = MemoryLinkStore()
-        let store = LinkStore(backing)
-        let link = HostLink(store: store, post: { _ in }, now: { t0 }, sleep: { _ in })
-        store.write(ChoiceRecord(original: "a", chosen: "b", fromVocabulary: false, at: t0), forKey: LinkChannel.Key.choicePrefix + "1")
-        link.runStarted(id: "r", target: .keyboard)
-        link.runEnded(committed: "hello")
-        let deadline = ContinuousClock.now + .seconds(30)
-        while store.read(HostState.self, forKey: LinkChannel.Key.host)?.runID != nil,
-              ContinuousClock.now < deadline { await Task.yield() }
-        let scrubbed = store.read(HostState.self, forKey: LinkChannel.Key.host)
-        #expect(scrubbed?.runID == nil && scrubbed?.committed == "")
-        #expect(backing.keys(withPrefix: LinkChannel.Key.choicePrefix).count == 1)
-    }
-
     @Test func deletingHistoryRemovesPendingChoicesUnread() {
         let r = ChoiceRig()
         r.store.write(r.choice(), forKey: LinkChannel.Key.choicePrefix + "1")

@@ -153,7 +153,6 @@ extension InstructionRunner: InstructionRunning {}
                 self.setPhase(.running, id: id)
                 // The edit goes to the field that was read (the keyboard refuses it in another one).
                 let documentID = reply.documentID
-                var revision = reply.revision
                 let outcome = try await self.runner.run(instruction: instruction, context: Self.context(reply)) { @MainActor [weak self] kind in
                     guard let self else { throw CancellationError() }
                     try self.checkCurrent(generation, id: id)
@@ -161,14 +160,12 @@ extension InstructionRunner: InstructionRunning {}
                     let more = try await field.read(kind == .block ? .more : .toCap, instructionID: id) { [weak self] in self?.setPhase(.reading, id: id) }
                     try self.checkCurrent(generation, id: id)
                     guard more.documentID == documentID else { throw InstructionFailure.unreadable("The text field changed while Magic was reading it.") }
-                    revision = more.revision
                     self.setPhase(.running, id: id)
                     return Self.context(more)
                 }
                 try self.checkCurrent(generation, id: id)
-                var edit = ScopedEdit(instructionID: id, documentID: documentID, before: outcome.range.before, after: outcome.range.after,
+                let edit = ScopedEdit(instructionID: id, documentID: documentID, before: outcome.range.before, after: outcome.range.after,
                                       selected: outcome.range.selected, target: outcome.target)
-                edit.revision = revision
                 // Save both versions before any destructive host operation. A failed persistence aborts the write.
                 let recoveryID = UUID()
                 let recoveryDate = Date()
@@ -194,7 +191,6 @@ extension InstructionRunner: InstructionRunning {}
                     throw InstructionFailure.unreadable(reason + " Original and result are saved in History.")
                 }
                 guard self.strip.instructionID == id else { return }
-                edit.revision = ack.revision
                 self.landed = (edit, ack.cursor ?? edit.target.utf16.count)
                 self.words = []
                 self.update(InstructionStrip(instructionID: id, phase: .result, transcript: transcript, scope: outcome.scope.rawValue,
@@ -217,8 +213,7 @@ extension InstructionRunner: InstructionRunning {}
 
     private func undo() {
         guard let landed, task == nil, let id = strip.instructionID, let field else { return }
-        var edit = ScopedEditPlanner.undo(of: landed.edit, cursor: landed.cursor)
-        edit.revision = landed.edit.revision
+        let edit = ScopedEditPlanner.undo(of: landed.edit, cursor: landed.cursor)
         generation += 1
         let generation = self.generation
         task = Task { [weak self] in
@@ -245,8 +240,7 @@ extension InstructionRunner: InstructionRunning {}
     /// An edit stopped partway (the field did not keep up): the field shows `partial` where the scope was. `landed`
     /// becomes an edit from `original` to it, so undo puts `original` back; the instruction is not run again on its own.
     private func stranded(original: String, partial: String, documentID: String?, ack: ScopedEditAck, id: String) {
-        var edit = ScopedEdit(instructionID: id, documentID: documentID, before: original, after: "", target: partial)
-        edit.revision = ack.revision
+        let edit = ScopedEdit(instructionID: id, documentID: documentID, before: original, after: "", target: partial)
         landed = (edit, ack.cursor ?? partial.utf16.count)
         words = []
         update(InstructionStrip(instructionID: id, phase: .failed, transcript: strip.transcript, scope: strip.scope,

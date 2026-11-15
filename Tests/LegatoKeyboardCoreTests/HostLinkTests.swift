@@ -99,7 +99,6 @@ private struct Rig {
             store: store, post: { env.post($0) }, now: { env.now },
             sleep: { duration in
                 if duration == .seconds(LinkChannel.beatInterval) { try await env.beat.sleep(duration) }
-                else if duration == .seconds(LinkChannel.finalTextRetention) { try await env.retention.sleep(duration) }
                 else { try await env.other.sleep(duration) }
             })
         initialPosts = env.posts
@@ -114,8 +113,7 @@ private struct Rig {
     func send(_ command: RequestCommand, id: String = "req-1", age: TimeInterval = 0) {
         store.write(KeyboardRequest(id: id, command: command, at: env.now.addingTimeInterval(-age)), forKey: LinkChannel.Key.request)
     }
-    func report(_ cursor: AppliedCursor) { store.write(cursor, forKey: LinkChannel.Key.applied) }
-    var applied: AppliedCursor? { store.read(AppliedCursor.self, forKey: LinkChannel.Key.applied) }
+
 }
 
 @MainActor
@@ -143,141 +141,25 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         // not leave that for a keyboard to type into some later field.
         let backing = MemoryLinkStore()
         let old = Rig(backing: backing)
-        old.link.runStarted(id: "dead-run", target: .keyboard)
-        old.link.update(committed: "private words ", volatile: "more")
+        old.link.listeningChanged(true)
         #expect(old.host?.phase == .listening)
 
         let fresh = Rig(backing: backing)
         let host = fresh.host
-        #expect(host?.phase == .idle && host?.runID == nil)
-        #expect(host?.committed == "" && host?.volatile == "")
+        #expect(host?.phase == .idle)
         #expect(host?.leaseUntil == nil && host?.acceptsRemoteStart == false)
         #expect(fresh.initialPosts == [LinkChannel.Note.host]) // keyboards are told
     }
 
-    @Test func startingTheLinkRemovesTheDeadRunsAppliedCursor() {
-        let backing = MemoryLinkStore()
-        let old = Rig(backing: backing)
-        old.report(cursor(runID: "dead-run", committedCount: 5, volatile: "private"))
-        let fresh = Rig(backing: backing)
-        #expect(fresh.applied == nil)
-    }
-
     // MARK: publishing
-
-    @Test func aRunStartIsPublishedAtOnce() {
-        let r = Rig()
-        r.link.runStarted(id: "run-1", target: .keyboard)
-        let host = r.host
-        #expect(host?.runID == "run-1" && host?.phase == .starting && host?.target == .keyboard)
-        #expect(host?.committed == "" && host?.volatile == "" && host?.seq == 1)
-        #expect(host?.beatAt == t0 && host?.v == 1)
-        #expect(host?.acceptsRemoteStart == false && host?.leaseUntil == nil)
-        #expect(r.env.posts == [LinkChannel.Note.host])
-    }
-
-    @Test func theFirstUpdateMovesToListeningAtOnce() {
-        let r = Rig()
-        r.link.runStarted(id: "run-1", target: .keyboard)
-        r.link.update(committed: "hello ", volatile: "wor")
-        #expect(r.host?.phase == .listening)
-        #expect(r.host?.committed == "hello " && r.host?.volatile == "wor")
-        #expect(r.host?.seq == 2)
-    }
-
-    @Test func updatesInsideTheWindowAreCoalescedIntoOneTrailingPublish() async {
-        let r = Rig()
-        r.link.runStarted(id: "run-1", target: .keyboard)
-        r.link.update(committed: "", volatile: "a") // phase change: at once
-        r.env.advance(0.01)
-        r.link.update(committed: "", volatile: "ab")
-        r.env.advance(0.01)
-        r.link.update(committed: "", volatile: "abc")
-        #expect(r.host?.volatile == "a") // held back
-        #expect(r.env.count(LinkChannel.Note.host) == 2)
-        r.env.advance(0.08)
-        r.env.other.tick() // the window ends
-        #expect(await eventually { r.host?.volatile == "abc" })
-        #expect(r.host?.seq == 3) // one publish for both held updates
-        #expect(r.env.count(LinkChannel.Note.host) == 3)
-    }
-
-    @Test func anUpdateAfterTheWindowIsPublishedAtOnce() {
-        let r = Rig()
-        r.link.runStarted(id: "run-1", target: .keyboard)
-        r.link.update(committed: "", volatile: "a")
-        r.env.advance(LinkChannel.minPublishInterval + 0.01)
-        r.link.update(committed: "", volatile: "ab")
-        #expect(r.host?.volatile == "ab")
-    }
-
-    @Test func theFinalStateIsPublishedAtOnceAndDropsThePendingUpdate() async throws {
-        let r = Rig()
-        r.link.runStarted(id: "run-1", target: .keyboard)
-        r.link.update(committed: "", volatile: "a")
-        r.env.advance(0.01)
-        r.link.update(committed: "hello ", volatile: "wor") // held
-        #expect(await eventually { r.env.other.pendingCount == 1 })
-        r.link.runEnded(committed: "hello world ")
-        let host = try #require(r.host)
-        #expect(host.phase == .idle && host.runID == "run-1" && host.isFinal)
-        #expect(host.committed == "hello world " && host.volatile == "")
-        let seq = host.seq
-        #expect(await eventually { r.env.other.cancelledCount == 1 })
-        r.env.advance(0.2)
-        r.env.other.tick()
-        await Task.yield()
-        #expect(r.host?.seq == seq) // the held update never lands after the end
-    }
-
-    @Test func everyPublishIsReportedToTheObserverWithTheWrittenState() {
-        let r = Rig()
-        var seen: [HostState] = []
-        r.link.onPublish = { seen.append($0) }
-        r.link.runStarted(id: "run-1", target: .keyboard)
-        r.link.update(committed: "hi ", volatile: "")
-        #expect(seen.map(\.seq) == [1, 2])
-        #expect(seen.last == r.host)
-    }
-
-    // MARK: beat
-
-    @Test func theBeatIsRefreshedWhileARunIsActive() async {
-        let r = Rig()
-        r.link.runStarted(id: "run-1", target: .keyboard)
-        r.link.update(committed: "hi ", volatile: "")
-        r.env.advance(1)
-        r.env.beat.tick()
-        #expect(await eventually { r.host?.beatAt == t0.addingTimeInterval(1) })
-        #expect(r.host?.committed == "hi " && r.host?.phase == .listening)
-        let seq = r.host?.seq ?? 0
-        r.env.advance(1)
-        r.env.beat.tick()
-        #expect(await eventually { r.host?.beatAt == t0.addingTimeInterval(2) })
-        #expect(r.host?.seq == seq + 1)
-    }
-
-    @Test func theBeatStopsWhenNothingIsRunningAndNoLeaseIsHeld() async throws {
-        let r = Rig()
-        r.link.runStarted(id: "run-1", target: .keyboard)
-        #expect(await eventually { r.env.beat.pendingCount == 1 })
-        r.link.runEnded(committed: "hi ")
-        #expect(await eventually { r.env.beat.cancelledCount == 1 })
-        let seq = r.host?.seq
-        r.env.advance(1)
-        r.env.beat.tick()
-        await Task.yield()
-        #expect(r.host?.seq == seq && r.host?.beatAt == t0)
-    }
 
     @Test func aLeaseKeepsTheBeatGoingAndAllowsRemoteStart() async {
         let r = Rig()
-        r.link.runStarted(id: "run-1", target: .keyboard)
-        r.link.runEnded(committed: "hi ")
+        r.link.listeningChanged(true)
+        r.link.listeningChanged(false)
         let until = t0.addingTimeInterval(30)
         r.link.leaseChanged(until: until)
         #expect(r.host?.leaseUntil == until && r.host?.acceptsRemoteStart == true)
-        #expect(r.host?.phase == .idle && r.host?.committed == "hi ")
         r.env.advance(1)
         r.env.beat.tick()
         #expect(await eventually { r.host?.beatAt == t0.addingTimeInterval(1) })
@@ -286,7 +168,7 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
     @Test func endingTheLeaseStopsRemoteStartAndTheBeat() async throws {
         let r = Rig()
         r.link.leaseChanged(until: t0.addingTimeInterval(30))
-        #expect(r.host?.acceptsRemoteStart == true && r.host?.runID == nil)
+        #expect(r.host?.acceptsRemoteStart == true)
         #expect(await eventually { r.env.beat.pendingCount == 1 })
         r.link.leaseChanged(until: nil)
         #expect(await eventually { r.env.beat.cancelledCount == 1 })
@@ -296,13 +178,6 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         r.env.beat.tick()
         await Task.yield()
         #expect(r.host?.seq == seq)
-    }
-
-    @Test func aNewRunKeepsTheLeaseInTheState() {
-        let r = Rig()
-        r.link.leaseChanged(until: t0.addingTimeInterval(30))
-        r.link.runStarted(id: "run-2", target: .keyboard)
-        #expect(r.host?.leaseUntil == t0.addingTimeInterval(30) && r.host?.runID == "run-2")
     }
 
     @Test func aMeetingIsPublishedAndKeepsTheBeatGoing() async throws {
@@ -324,16 +199,6 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         #expect(r.host?.seq == seq)
     }
 
-    @Test func aMeetingStaysInTheStateAcrossRunsAndTheScrub() {
-        let r = Rig()
-        r.link.meetingChanged(active: true)
-        r.link.runStarted(id: "run-2", target: .keyboard)
-        #expect(r.host?.meetingRecording == true)
-        r.link.runEnded(committed: "x ")
-        r.link.scrubText()
-        #expect(r.host?.meetingRecording == true)
-    }
-
     @Test func aStartWhileAMeetingRecordsAsksTheKeyboardToHopSoTheAppCanSayWhy() async {
         let r = Rig()
         r.link.meetingChanged(active: true)
@@ -344,109 +209,6 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
     }
 
     // MARK: text does not outlive the run
-
-    private func finishedRun(_ r: Rig) {
-        r.link.runStarted(id: "run-1", target: .keyboard)
-        r.link.update(committed: "secret words ", volatile: "")
-        r.link.runEnded(committed: "secret words ")
-        r.report(cursor(runID: "run-1", committedCount: 13, volatile: "", finalApplied: true))
-    }
-
-    @Test func theFinalTextIsKeptForTheKeyboardThenScrubbedFromHostAndApplied() async {
-        let r = Rig()
-        finishedRun(r)
-        #expect(r.host?.committed == "secret words " && r.host?.isFinal == true) // the keyboard may still read it
-        #expect(r.applied != nil)
-        let posts = r.env.count(LinkChannel.Note.host)
-        r.env.retention.tick() // the retention window ends
-        #expect(await eventually { r.host?.committed == "" })
-        #expect(r.host?.volatile == "" && r.host?.runID == nil && r.host?.phase == .idle)
-        #expect(r.applied == nil)
-        #expect(r.env.count(LinkChannel.Note.host) == posts + 1) // and the keyboard is told
-    }
-
-    @Test func aLeaseSurvivesTheScrub() async {
-        let r = Rig()
-        let until = t0.addingTimeInterval(30)
-        finishedRun(r)
-        r.link.leaseChanged(until: until)
-        r.env.retention.tick()
-        #expect(await eventually { r.host?.committed == "" })
-        #expect(r.host?.leaseUntil == until && r.host?.acceptsRemoteStart == true)
-    }
-
-    @Test func aNewRunCancelsThePendingScrub() async throws {
-        let r = Rig()
-        finishedRun(r)
-        #expect(await eventually { r.env.retention.pendingCount == 1 })
-        r.link.runStarted(id: "run-2", target: .keyboard)
-        #expect(await eventually { r.env.retention.cancelledCount == 1 })
-        r.link.update(committed: "second ", volatile: "")
-        r.report(cursor(runID: "run-2", committedCount: 7))
-        r.env.retention.tick() // the old window ends: it must not wipe the new run
-        await Task.yield()
-        #expect(r.host?.runID == "run-2" && r.host?.committed == "second ")
-        #expect(r.applied?.runID == "run-2")
-    }
-
-    @Test func deletingHistoryScrubsAnIdleLinkAtOnce() {
-        let r = Rig()
-        finishedRun(r)
-        r.link.scrubText()
-        #expect(r.host?.committed == "" && r.host?.runID == nil)
-        #expect(r.applied == nil)
-    }
-
-    @Test func deletingHistoryDuringARunLeavesTheRunAlone() {
-        let r = Rig()
-        r.link.runStarted(id: "run-1", target: .keyboard)
-        r.link.update(committed: "live ", volatile: "words")
-        r.link.scrubText()
-        #expect(r.host?.runID == "run-1" && r.host?.committed == "live " && r.host?.volatile == "words")
-    }
-
-    // MARK: insert (the Live Activity's Insert button)
-
-    @Test func anInsertPublishesTheTextAsAFinalKeyboardStateFlaggedAsRequested() {
-        let r = Rig()
-        #expect(r.link.publishInsert(runID: "ins-1", text: "hello world"))
-        #expect(r.host?.runID == "ins-1" && r.host?.committed == "hello world" && r.host?.volatile == "")
-        #expect(r.host?.target == .keyboard && r.host?.isFinal == true)
-        #expect(r.host?.insertAt == r.env.now)
-        #expect(r.env.count(LinkChannel.Note.host) == 1) // the keyboard is woken once
-    }
-
-    @Test func anInsertDuringARunIsRefusedAndLeavesTheRunAlone() {
-        let r = Rig()
-        r.link.runStarted(id: "run-1", target: .keyboard)
-        r.link.update(committed: "live ", volatile: "words")
-        #expect(!r.link.publishInsert(runID: "ins-1", text: "other"))
-        #expect(r.host?.runID == "run-1" && r.host?.committed == "live " && r.host?.insertAt == nil)
-    }
-
-    @Test func theInsertedTextIsScrubbedWithItsFlagAfterTheRetentionWindow() async {
-        let r = Rig()
-        _ = r.link.publishInsert(runID: "ins-1", text: "hello world")
-        r.env.retention.tick()
-        #expect(await eventually { r.host?.committed == "" })
-        #expect(r.host?.insertAt == nil && r.host?.runID == nil)
-    }
-
-    @Test func aNewRunClearsTheInsertFlag() {
-        let r = Rig()
-        _ = r.link.publishInsert(runID: "ins-1", text: "hello world")
-        r.link.runStarted(id: "run-2", target: .keyboard)
-        #expect(r.host?.insertAt == nil)
-    }
-
-    @Test func theKeyboardsConfirmationOfAnInsertIsAwaitedLikeAnyFinalText() async {
-        let r = Rig()
-        _ = r.link.publishInsert(runID: "ins-1", text: "hello world")
-        r.report(cursor(runID: "ins-1", committedCount: 11, finalApplied: true))
-        #expect(await r.link.awaitFinalApplied(runID: "ins-1", timeout: 1))
-    }
-
-    // MARK: requests
 
     @Test func earlyAppCancellationPublishesDurableCompletionForAllAcceptedStartRequests() async throws {
         let r = Rig()
@@ -515,7 +277,7 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         let payload = try JSONSerialization.jsonObject(with: JSONEncoder().encode(r.link.state)) as? [String: Any]
         #expect(payload?["preparingRequestID"] as? String == "req-1")
         #expect(r.host?.phase == .idle)
-        #expect(r.host?.runID == nil)
+        #expect(r.host?.phase == .idle)
         #expect(MicKeyMode.resolve(host: r.host, now: r.env.now, fullAccess: true) == .remote(.stop))
         release.yield(()); release.finish()
         await start.value
@@ -711,7 +473,7 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
     @Test func aRemoteStopThatFailsIsNotAckedHop() async {
         // A stop that did nothing leaves the user where they are; there is nothing to open the app for.
         let r = Rig()
-        r.link.runStarted(id: "run-1", target: .keyboard)
+        r.link.listeningChanged(true)
         r.link.onRequest = { _ in false }
         r.send(.stop)
         await r.link.processInbox()
@@ -723,7 +485,7 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         r.send(.stop, id: "a")
         await r.link.processInbox()
         #expect(r.ack == KeyboardAck(id: "a", result: .hop) && r.received.requests.isEmpty)
-        r.link.runStarted(id: "run-1", target: .keyboard)
+        r.link.listeningChanged(true)
         r.send(.stop, id: "b")
         await r.link.processInbox()
         #expect(r.ack == KeyboardAck(id: "b", result: .accepted))
@@ -744,7 +506,7 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
 
     @Test func aStartWhileARunIsInProgressIsAcceptedWithoutActing() async {
         let r = Rig()
-        r.link.runStarted(id: "run-1", target: .keyboard)
+        r.link.listeningChanged(true)
         r.send(.start)
         await r.link.processInbox()
         #expect(r.ack == KeyboardAck(id: "req-1", result: .accepted))
@@ -796,51 +558,4 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         #expect(!r.link.keyboardIsVisible())
     }
 
-    // MARK: applied
-
-    @Test func theFinalConfirmationIsImmediateWhenTheKeyboardAlreadyReportedIt() async {
-        let r = Rig()
-        r.report(cursor(runID: "run-1", committedCount: 3, finalApplied: true))
-        #expect(await r.link.awaitFinalApplied(runID: "run-1", timeout: 0.5))
-    }
-
-    @Test func theFinalConfirmationArrivesWithTheKeyboardsReport() async {
-        let r = Rig()
-        r.report(cursor(runID: "run-1", committedCount: 1, finalApplied: false))
-        let waiting = Task { await r.link.awaitFinalApplied(runID: "run-1", timeout: 0.5) }
-        #expect(await eventually { r.env.other.pendingCount == 1 })
-        r.report(cursor(runID: "run-1", committedCount: 3, finalApplied: true))
-        r.link.appliedDidChange()
-        #expect(await waiting.value)
-    }
-
-    @Test func aReportForAnotherRunOrWithoutTheFinalFlagDoesNotConfirm() async {
-        let r = Rig()
-        let waiting = Task { await r.link.awaitFinalApplied(runID: "run-2", timeout: 0.5) }
-        #expect(await eventually { r.env.other.pendingCount == 1 })
-        r.report(cursor(runID: "run-1", finalApplied: true))
-        r.link.appliedDidChange()
-        r.report(cursor(runID: "run-2", finalApplied: false))
-        r.link.appliedDidChange()
-        #expect(await eventually { r.env.other.pendingCount == 1 })
-        r.env.other.tick() // the timeout
-        #expect(await waiting.value == false)
-    }
-
-    @Test func noReportWithinTheTimeoutMeansNotApplied() async {
-        let r = Rig()
-        let waiting = Task { await r.link.awaitFinalApplied(runID: "run-1", timeout: 0.5) }
-        #expect(await eventually { r.env.other.pendingCount == 1 })
-        r.env.other.tick()
-        #expect(await waiting.value == false)
-    }
-
-    @Test func aStaleConfirmationFromAnEarlierRunIsNotMistakenForThisOne() async {
-        let r = Rig()
-        r.report(cursor(runID: "run-1", finalApplied: true))
-        let waiting = Task { await r.link.awaitFinalApplied(runID: "run-2", timeout: 0.5) }
-        #expect(await eventually { r.env.other.pendingCount == 1 })
-        r.env.other.tick()
-        #expect(await waiting.value == false)
-    }
 }

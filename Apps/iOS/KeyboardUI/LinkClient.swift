@@ -25,9 +25,9 @@ final class LinkClient {
         })
     }
 
-    /// Calls `handler` on the main actor for every `link.composer` note (the app published the composer).
-    func observeComposer(_ handler: @escaping @MainActor () -> Void) {
-        observers.append(DarwinObserver(name: LinkChannel.Note.composer) {
+    /// Calls `handler` on the main actor for every dictation-status note.
+    func observeDictationStatus(_ handler: @escaping @MainActor () -> Void) {
+        observers.append(DarwinObserver(name: LinkChannel.Note.dictationStatus) {
             Task { @MainActor in handler() }
         })
     }
@@ -57,15 +57,6 @@ final class LinkClient {
         return store?.read(HostState.self, forKey: LinkChannel.Key.host)
     }
     func readAck() -> KeyboardAck? { store?.read(KeyboardAck.self, forKey: LinkChannel.Key.ack) }
-    func readApplied() -> AppliedCursor? { store?.read(AppliedCursor.self, forKey: LinkChannel.Key.applied) }
-
-    /// `notify`: also post the note. The app waits only for `finalApplied`, so the typewriter's per-tick
-    /// writes stay quiet until the last one.
-    func writeApplied(_ cursor: AppliedCursor, notify: Bool = true) {
-        store?.write(cursor, forKey: LinkChannel.Key.applied)
-        if notify { DarwinObserver.post(LinkChannel.Note.applied) }
-    }
-
     /// `notify`: also post the note (on a change of visibility; the 1 s refreshes stay quiet).
     func writePresence(visible: Bool, notify: Bool, documentID: String? = nil, surface: KeyboardSurface? = nil, contextBefore: String? = nil,
                        magic: MagicToggle? = nil, magicAt: Date? = nil) {
@@ -81,7 +72,6 @@ final class LinkClient {
     func writeDictationAck(_ ack: DictationAck) {
         guard let store else { return }
         DictationLink(store: store).acknowledge(ack)
-        DarwinObserver.post(LinkChannel.Note.dictationAck)
     }
 
     /// The live run the app wants in the field (`link.dictation.live`); nil when there is none.
@@ -111,13 +101,11 @@ final class LinkClient {
     func takeReadRequest() -> FieldReadRequest? { instruction?.takeRequest() }
     func writeReadReply(_ reply: FieldReadReply) {
         instruction?.reply(reply)
-        DarwinObserver.post(LinkChannel.Note.readAck)
     }
     /// The app's pending scoped edit, removed as it is taken.
     func takeInstructionEdit() -> ScopedEdit? { instruction?.takeEdit() }
     func writeInstructionEditAck(_ ack: ScopedEditAck) {
         instruction?.acknowledge(ack)
-        DarwinObserver.post(LinkChannel.Note.instructionEditAck)
     }
 
     func send(_ command: RequestCommand, id: String) {
@@ -125,30 +113,10 @@ final class LinkClient {
         DarwinObserver.post(LinkChannel.Note.request)
     }
 
-    /// Asks the app for a refined version of `text` (`link.refine`); the app acks `id` on `link.ack`.
-    func sendRefine(_ text: String, id: String) {
-        store?.write(RefineRequest(id: id, text: text, at: Date()), forKey: LinkChannel.Key.refine)
-        DarwinObserver.post(LinkChannel.Note.refine)
-    }
-
     /// Reports a word-row choice for the app to learn from (`link.choice.<uuid>`); no-op without the App Group.
     func writeChoice(_ record: ChoiceRecord) {
         guard let store else { return }
         ChoiceWriter.write(record, to: store)
-    }
-
-    /// The app's reply to refine request `id`, or nil when none arrives within `timeout`. The reply leaves
-    /// the App Group once read (it carries dictated text).
-    func awaitRefined(id: String, timeout: TimeInterval) async -> RefineReply? {
-        let deadline = ContinuousClock.now + .seconds(timeout)
-        repeat {
-            if let reply = store?.read(RefineReply.self, forKey: LinkChannel.Key.refined), reply.id == id {
-                store?.remove(forKey: LinkChannel.Key.refined)
-                return reply
-            }
-            try? await Task.sleep(for: .milliseconds(50))
-        } while ContinuousClock.now < deadline
-        return nil
     }
 
     /// The app's answer to request `id`, or nil when none arrives within `timeout`.

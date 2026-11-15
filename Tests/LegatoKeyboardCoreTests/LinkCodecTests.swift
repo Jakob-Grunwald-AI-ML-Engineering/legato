@@ -6,7 +6,7 @@ import Testing
     @Test func hostStateRoundTripsThroughTheStore() {
         let store = LinkStore(MemoryLinkStore())
         let state = HostState(
-            runID: "run-1", phase: .listening, target: .keyboard, committed: "hello ", volatile: "wor", seq: 7,
+            phase: .listening, seq: 7,
             beatAt: t0, leaseUntil: t0.addingTimeInterval(30), acceptsRemoteStart: true)
         store.write(state, forKey: LinkChannel.Key.host)
         #expect(store.read(HostState.self, forKey: LinkChannel.Key.host) == state)
@@ -22,13 +22,13 @@ import Testing
 
     @Test func theStoredHostStateHasTheDocumentedKeys() throws {
         let backing = MemoryLinkStore()
-        LinkStore(backing).write(hostState(committed: "a", volatile: "b"), forKey: LinkChannel.Key.host)
+        LinkStore(backing).write(hostState(), forKey: LinkChannel.Key.host)
         let data = try #require(backing.data(forKey: LinkChannel.Key.host))
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        for key in ["v", "runID", "phase", "target", "committed", "volatile", "seq", "beatAt", "acceptsRemoteStart"] {
+        for key in ["v", "phase", "seq", "beatAt", "acceptsRemoteStart"] {
             #expect(json[key] != nil, "missing \(key)")
         }
-        #expect(json["v"] as? Int == 1)
+        #expect(json["v"] as? Int == 2)
         #expect(json["phase"] as? String == "listening")
         #expect(json["leaseUntil"] == nil) // absent, not null
     }
@@ -59,9 +59,7 @@ import Testing
         let presence = KeyboardPresence(visible: true, at: t0)
         store.write(presence, forKey: LinkChannel.Key.presence)
         #expect(store.read(KeyboardPresence.self, forKey: LinkChannel.Key.presence) == presence)
-        let applied = cursor(committedCount: 3, volatile: "x", finalApplied: true)
-        store.write(applied, forKey: LinkChannel.Key.applied)
-        #expect(store.read(AppliedCursor.self, forKey: LinkChannel.Key.applied) == applied)
+
     }
 
     @Test func presenceIsFreshOnlyWhileVisibleAndRecent() {

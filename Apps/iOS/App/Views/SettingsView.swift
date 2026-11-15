@@ -8,17 +8,16 @@ import LegatoAppServices
 struct SettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
     let controller: AppController
-    @AppStorage("composer.liveModel") private var liveModel = ModelChoice.haiku.rawValue
-    @AppStorage("composer.personalPrompt") private var personalPrompt = ""
+    @AppStorage("microphone.liveModel") private var liveModel = ModelChoice.haiku.rawValue
+    @AppStorage("microphone.personalPrompt") private var personalPrompt = ""
     @AppStorage(DictationSendSetting.modeKey, store: AppGroup.defaults) private var dictationSend = DictationSendSetting.defaultMode.rawValue
     @AppStorage(DictationSendSetting.pauseKey, store: AppGroup.defaults) private var dictationPause = DictationSendSetting.defaultPause
     @AppStorage(DictationSendSetting.cleanupModelKey, store: AppGroup.defaults) private var cleanupModel = DictationSendSetting.defaultCleanupModel.settingValue
-    @AppStorage(InstructionSendSetting.modeKey) private var instructionSend = InstructionSendSetting.Mode.manual.rawValue
-    @AppStorage(InstructionSendSetting.pauseKey) private var instructionPause = InstructionSendSetting.defaultPause
     @AppStorage("voiceIsolation.enabled") private var onlyMyVoice = false
     @State private var enrollment = VoiceEnrollmentController.shared
     @State private var keepMicrophoneActive = ComposerMicrophonePreference.keepActive()
     @State private var combineMicrophoneInputs = ComposerMicrophonePreference.combineInputs()
+    @AppStorage(ShortcutActionSetting.key, store: AppGroup.defaults) private var shortcutAction = ShortcutActionSetting.Action.meeting.rawValue
     @State private var haptics = Settings.keyboardHaptics
     @State private var clicks = Settings.keyboardClicks
     @State private var microphoneAllowed = AVAudioApplication.shared.recordPermission == .granted
@@ -45,7 +44,7 @@ struct SettingsView: View {
                 Button("Cancel", role: .cancel) { enrollment.cancel() }
             } else {
                 Button(enrollment.hasProfile ? "Record replacement voice profile" : "Record voice profile") {
-                    enrollment.record(microphoneBusy: { controller.meetings.isActive || controller.composer.isArmed || controller.composer.holdsWarmInput || controller.composer.isListening || controller.composer.status == "starting" })
+                    enrollment.record(microphoneBusy: { controller.meetings.isActive || controller.microphone.isArmed || controller.microphone.holdsWarmInput || controller.microphone.isListening || controller.microphone.status == "starting" })
                 }.accessibilityIdentifier("settings.recordVoiceProfile")
                 if enrollment.hasProfile {
                     Button("Delete voice profile", role: .destructive) { enrollment.deleteProfile(); onlyMyVoice = false }
@@ -68,14 +67,13 @@ struct SettingsView: View {
                     LabeledContent("Personal instructions", value: personalPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Optional" : "Added")
                 }.accessibilityIdentifier("settings.personalInstructionsLink")
             } header: { Text("Instructions") } footer: {
-                Text("The model that follows your spoken instructions: the magic key on the keyboard and the Compose tab. Dictation cleanup has its own model below. Changes apply to your next session.")
+                Text("The model that follows your spoken instructions: the magic key on the keyboard. Dictation cleanup has its own model below. Changes apply to your next session.")
             }
             Section {
                 Picker("Send dictation", selection: $dictationSend) {
                     Text("As you speak").tag(DictationSendSetting.Mode.live.rawValue)
                     Text("On stop").tag(DictationSendSetting.Mode.onStop.rawValue)
                     Text("After a pause").tag(DictationSendSetting.Mode.afterPause.rawValue)
-                    Text("Line by line").tag(DictationSendSetting.Mode.lineByLine.rawValue)
                 }.accessibilityIdentifier("settings.dictationSend")
                 if dictationSend == DictationSendSetting.Mode.afterPause.rawValue {
                     Stepper(value: Binding(get: { DictationSendSetting.clampedPause(dictationPause) },
@@ -84,28 +82,13 @@ struct SettingsView: View {
                         LabeledContent("Pause before sending", value: "\(Int(DictationSendSetting.clampedPause(dictationPause))) s")
                     }.accessibilityIdentifier("settings.dictationPause")
                 }
-                if dictationSend == DictationSendSetting.Mode.live.rawValue || dictationSend == DictationSendSetting.Mode.lineByLine.rawValue {
+                if dictationSend == DictationSendSetting.Mode.live.rawValue {
                     Picker("Dictation cleanup model", selection: $cleanupModel) {
                         ForEach(ModelChoice.cleanupChoices, id: \.settingValue) { Text($0.label).tag($0.settingValue) }
                     }.accessibilityIdentifier("settings.dictationCleanupModel")
                 }
             } header: { Text("Dictation") } footer: {
-                Text("As you speak types your words into the field at once and corrects single words as they firm up; each finished sentence is then tidied in place. On stop holds the whole take and types it once, cleaned as one text, when you stop. After a pause also types when you stop speaking for the pause. Line by line cleans and types each sentence as you speak. Haiku is quicker, Sonnet more careful.")
-            }
-            Section {
-                Picker("Send instructions", selection: $instructionSend) {
-                    Text("Manual").tag(InstructionSendSetting.Mode.manual.rawValue)
-                    Text("Automatically after a pause").tag(InstructionSendSetting.Mode.automatic.rawValue)
-                }.accessibilityIdentifier("settings.instructionSend")
-                if instructionSend == InstructionSendSetting.Mode.automatic.rawValue {
-                    Stepper(value: Binding(get: { InstructionSendSetting.clampedPause(instructionPause) },
-                                           set: { instructionPause = InstructionSendSetting.clampedPause($0) }),
-                            in: InstructionSendSetting.pauseRange, step: InstructionSendSetting.pauseStep) {
-                        LabeledContent("Pause before sending", value: String(format: "%.1f s", InstructionSendSetting.clampedPause(instructionPause)))
-                    }.accessibilityIdentifier("settings.instructionPause")
-                }
-            } header: { Text("Compose tab") } footer: {
-                Text("In the Compose tab, speech builds one instruction until you tap Send in the strip. Automatic sends it after the pause; speaking again restarts the wait. On the keyboard, the magic key runs its instruction when you tap it off or let go.")
+                Text("As you speak types your words into the field at once and corrects single words as they firm up; each finished sentence is then tidied in place. On stop holds the whole take and types it once, cleaned as one text, when you stop. After a pause also types when you stop speaking for the pause. Haiku is quicker, Sonnet more careful.")
             }
             Section {
                 ProviderKeyRow(name: "Claude", service: "de.gruenwald.legato.claude")
@@ -114,6 +97,13 @@ struct SettingsView: View {
                 Text("Claude shapes your writing. Soniox transcribes your voice. Keys are stored securely on this device.")
             }
             Section {
+                Picker("Action Button and Control", selection: $shortcutAction) {
+                    Text("Meeting").tag(ShortcutActionSetting.Action.meeting.rawValue)
+                    Text("Dictation").tag(ShortcutActionSetting.Action.dictation.rawValue)
+                }.accessibilityIdentifier("settings.shortcutAction")
+            } footer: { Text("Meeting starts or stops a recording. Dictation starts a take when the keyboard is open; otherwise it readies the microphone.") }
+            Section {
+                NavigationLink("Practice keyboard") { KeyboardPracticeView() }
                 Toggle("Haptic feedback", isOn: $haptics)
                 Toggle("Key sounds", isOn: $clicks)
                 Button { openSettings() } label: { Label("Set up keyboard", systemImage: "keyboard") }
@@ -124,12 +114,12 @@ struct SettingsView: View {
                 Toggle("Keep microphone active in background", isOn: $keepMicrophoneActive)
                     .accessibilityIdentifier("settings.keepMicrophoneActive")
             } header: { Text("Background microphone") } footer: {
-                Text("Keeps a microphone session you enable available while using the keyboard or other apps. When off, switching away from Legato stops voice input. This switch never starts the microphone. Stop, clear and mute still control voice input.")
+                Text("Keeps a microphone session you enable available while using the keyboard or other apps. When off, switching away from Legato stops voice input. This switch never starts the microphone. Release microphone ends the hold.")
             }
             Section {
                 Toggle("Combine phone and headset microphones", isOn: $combineMicrophoneInputs)
                     .accessibilityIdentifier("settings.combineMicrophoneInputs")
-                if controller.composer.isArmed {
+                if controller.microphone.isArmed {
                     Button("Release microphone") { Task { await controller.releaseMicrophone() } }
                         .accessibilityIdentifier("settings.releaseMicrophone")
                 }
@@ -147,14 +137,15 @@ struct SettingsView: View {
                         AVAudioApplication.requestRecordPermission { allowed in Task { @MainActor in microphoneAllowed = allowed } }
                     } else { openSettings() }
                 }
-            } header: { Text("Setup") } footer: { Text("Microphone access is needed to compose by voice. You can change permissions in iOS Settings.") }
+            } header: { Text("Setup") } footer: { Text("Microphone access is needed to dictate. You can change permissions in iOS Settings.") }
         }
         .navigationTitle("Settings")
+        .onAppear { dictationSend = DictationSendSetting.mode(in: AppGroup.defaults).rawValue }
         .onDisappear { enrollment.cancel() }
         .onChange(of: scenePhase) { _, phase in if phase == .background { enrollment.cancel() } }
         .onChange(of: keepMicrophoneActive) { _, value in
             ComposerMicrophonePreference.setKeepActive(value)
-            Task { await controller.composer.setKeepMicrophoneActive(value) }
+            Task { await controller.microphone.setKeepMicrophoneActive(value) }
         }
         .onChange(of: combineMicrophoneInputs) { _, value in ComposerMicrophonePreference.setCombineInputs(value) }
         .onChange(of: haptics) { _, value in Settings.keyboardHaptics = value }

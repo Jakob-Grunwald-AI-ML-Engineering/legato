@@ -5,31 +5,27 @@ import LegatoCore
 import LegatoSoniox
 @testable import LegatoAppServices
 
-@Test func gateOpensOnlyTheSurfaceRouteAndSurfaceSwitchAbandons() {
-    var gate = AudioGate(surface: .dictation)
+@Test func gateOpensDictationAndAbandonsWhenKeyboardCloses() {
+    var gate = AudioGate()
     #expect(gate.tap() == .open(.dictation))
-    #expect(gate.route == .dictation)
-    #expect(gate.show(.agent) == .abandon(.dictation), "Leaving a surface drops its half-spoken words")
+    #expect(gate.tap() == .finalize(.dictation))
+    #expect(gate.tap() == .open(.dictation))
+    #expect(gate.abandon() == .abandon(.dictation))
     #expect(gate.route == .idle)
-    #expect(gate.tap() == .open(.agent), "Later taps follow the new surface")
-    #expect(gate.tap() == .finalize(.agent))
-    #expect(gate.show(.agent) == nil)
-    #expect(gate.show(.dictation) == nil, "Switching while idle has nothing to abandon")
     #expect(gate.abandon() == nil)
-    #expect(AudioGate(surface: .idle).surface == .agent)
 }
 
 @Test func probeMeasuresTapToFirstTailOncePerTap() {
     var probe = TapLatencyProbe()
-    probe.tapped(route: .agent, at: 10, warm: true, idleS: 120)
-    #expect(probe.tail("early", route: .agent, at: 10.01) == nil, "A tail before the gate opened is not this take's")
+    probe.tapped(route: .dictation, at: 10, warm: true, idleS: 120)
+    #expect(probe.tail("early", route: .dictation, at: 10.01) == nil, "A tail before the gate opened is not this take's")
     probe.gateOpened(at: 10.04)
     probe.audioRouted(at: 10.05)
-    #expect(probe.tail("  ", route: .agent, at: 10.1) == nil)
-    #expect(probe.tail("hi", route: .dictation, at: 10.1) == nil)
-    let result = probe.tail("hallo", route: .agent, at: 10.25)
-    #expect(result == .init(route: .agent, warm: true, idleS: 120, tapToGateMs: 40, tapToAudioMs: 50, tapToTailMs: 250))
-    #expect(probe.tail("hallo welt", route: .agent, at: 10.3) == nil)
+    #expect(probe.tail("  ", route: .dictation, at: 10.1) == nil)
+    #expect(probe.tail("hi", route: .idle, at: 10.1) == nil)
+    let result = probe.tail("hallo", route: .dictation, at: 10.25)
+    #expect(result == .init(route: .dictation, warm: true, idleS: 120, tapToGateMs: 40, tapToAudioMs: 50, tapToTailMs: 250))
+    #expect(probe.tail("hallo welt", route: .dictation, at: 10.3) == nil)
 }
 
 @MainActor @Suite(.timeLimit(.minutes(1))) struct KeyboardSessionDictationTests {
@@ -37,11 +33,11 @@ import LegatoSoniox
     let sockets = SocketBox()
     let sink = RecordingSink()
 
-    private func openOnTyping() async throws -> (ComposerSession, KeyboardSession) {
-        let composer = ComposerSession(microphone: mic, activateAudioSession: {})
+    private func openOnTyping() async throws -> (MicrophoneHost, KeyboardSession) {
+        let composer = MicrophoneHost(microphone: mic, activateAudioSession: {})
         await composer.arm()
         let sockets = self.sockets
-        let keyboard = KeyboardSession(composer: composer, sink: sink, sonioxKey: { "test" },
+        let keyboard = KeyboardSession(microphone: composer, sink: sink, sonioxKey: { "test" },
                                        makeSocket: { sockets.make() }, warmConnection: {})
         keyboard.update(visible: true, surface: .dictation)
         await keyboard.settle()
@@ -51,38 +47,33 @@ import LegatoSoniox
         return (composer, keyboard)
     }
 
-    @Test func meetingSuspensionKeepsDraftAndRejectsAllMicrophoneAdmission() async throws {
-        let composer = ComposerSession(microphone: mic, activateAudioSession: {})
-        try await composer.seedDebugDraft("Keep this draft for after the meeting.")
-        let draft = composer.snapshot
+    @Test func meetingSuspensionRejectsAllMicrophoneAdmission() async throws {
+        let composer = MicrophoneHost(microphone: mic, activateAudioSession: {})
         await composer.arm()
         let sockets = self.sockets
-        let keyboard = KeyboardSession(composer: composer, sink: sink, sonioxKey: { "test" },
+        let keyboard = KeyboardSession(microphone: composer, sink: sink, sonioxKey: { "test" },
             makeSocket: { sockets.make() }, warmConnection: {})
         keyboard.update(visible: true, surface: .dictation)
         await keyboard.settle()
         await keyboard.suspendForMeeting()
         let starts = await mic.starts
         let routes = await mic.routes
-        keyboard.update(visible: true, surface: .agent)
+        keyboard.update(visible: true, surface: .dictation)
         await keyboard.settle()
         #expect(!(await keyboard.openGate()))
         await composer.arm()
-        await composer.start()
         let afterStarts = await mic.starts
         let afterRoutes = await mic.routes
         #expect(afterStarts == starts && afterRoutes == routes)
         #expect(!composer.isArmed && !composer.holdsWarmInput && !keyboard.isOpen)
-        #expect(composer.snapshot == draft, "A meeting must never cancel the existing composition")
         keyboard.finishMeeting()
         #expect(!composer.isArmed, "Finishing a meeting never implicitly rearms the mic")
-        #expect(composer.snapshot == draft)
     }
 
     @Test func meetingReservationWinsAgainstAnArmingPermissionAwait() async throws {
         let permission = ConnectGate()
         var entered = false
-        let composer = ComposerSession(microphone: mic, activateAudioSession: { entered = true; await permission.wait() })
+        let composer = MicrophoneHost(microphone: mic, activateAudioSession: { entered = true; await permission.wait() })
         let arming = Task { await composer.arm() }
         try await until { entered }
         await composer.suspendMicrophoneForMeeting()
@@ -98,7 +89,7 @@ import LegatoSoniox
         #expect(sink.lines.map(\.text) == ["Hallo Welt"])
         try keyboard.debugDictationTail("und dann")
         #expect(keyboard.dictationTail == "und dann")
-        keyboard.update(visible: true, surface: .agent); await keyboard.settle()
+        keyboard.update(visible: false, surface: .dictation); await keyboard.settle()
         await #expect(throws: KeyboardSession.DebugDictationError.self) { try await keyboard.debugDictationLine("x") }
     }
 
@@ -143,10 +134,10 @@ import LegatoSoniox
     }
 
     @Test func aTapWithoutSonioxKeyStaysClosedAndSaysWhy() async throws {
-        let composer = ComposerSession(microphone: mic, activateAudioSession: {})
+        let composer = MicrophoneHost(microphone: mic, activateAudioSession: {})
         await composer.arm()
         let sockets = self.sockets
-        let keyboard = KeyboardSession(composer: composer, sink: sink, sonioxKey: { "" },
+        let keyboard = KeyboardSession(microphone: composer, sink: sink, sonioxKey: { "" },
                                        makeSocket: { sockets.make() }, warmConnection: {})
         keyboard.update(visible: true, surface: .dictation)
         await keyboard.settle()
@@ -184,7 +175,6 @@ import LegatoSoniox
         await socket.feed(#"{"tokens":[{"text":"Hallo","is_final":true},{"text":" Welt.","is_final":true}]}"#)
         try await until { sink.lines.count == 1 }
         #expect(sink.lines.first?.text == "Hallo Welt.")
-        #expect(composer.snapshot.lines.isEmpty && composer.tail.isEmpty, "Dictation audio never reaches the composition")
         await keyboard.closeGate()
         #expect(composer.route == .idle)
         try await until { await socket.sent.contains(.text(#"{"type":"finalize"}"#)) }
@@ -291,6 +281,7 @@ import LegatoSoniox
 }
 
 actor GateMicrophone: AudioSource {
+    var stops = 0
     var routes = 0
     var starts = 0
     private var continuation: AsyncStream<AudioChunk>.Continuation?
@@ -302,7 +293,7 @@ actor GateMicrophone: AudioSource {
     }
     func emit(sample: Float = 0.1) { continuation?.yield(AudioChunk(samples: Array(repeating: sample, count: 320), format: .init(sampleRate: 16000, channelCount: 1))) }
     func detach() async { continuation?.finish(); continuation = nil }
-    func stop() async { continuation?.finish(); continuation = nil }
+    func stop() async { stops += 1; continuation?.finish(); continuation = nil }
 }
 
 final class SocketBox: Sendable {

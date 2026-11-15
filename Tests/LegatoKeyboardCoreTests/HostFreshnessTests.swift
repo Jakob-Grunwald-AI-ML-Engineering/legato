@@ -8,7 +8,7 @@ import Testing
 
     @Test(arguments: [HostPhase.starting, .listening, .finishing])
     func aRunningStateWithAStaleBeatIsNotFollowed(phase: HostPhase) {
-        let stale = hostState(phase: phase, committed: "words", beatAt: now.addingTimeInterval(-LinkChannel.beatFreshness - 0.1))
+        let stale = hostState(phase: phase, beatAt: now.addingTimeInterval(-LinkChannel.beatFreshness - 0.1))
         #expect(!stale.isLive(now: now))
     }
 
@@ -16,18 +16,6 @@ import Testing
     func aRunningStateWithAFreshBeatIsFollowed(phase: HostPhase) {
         #expect(hostState(phase: phase, beatAt: now.addingTimeInterval(-2.4)).isLive(now: now))
         #expect(hostState(phase: phase, beatAt: now).isLive(now: now))
-    }
-
-    @Test func anIdleStateIsFollowedWhateverItsAge() {
-        // The final state of a run that ended: the beat stops with the run, so it is always old.
-        #expect(hostState(phase: .idle, committed: "words", beatAt: now.addingTimeInterval(-60)).isLive(now: now))
-    }
-
-    @Test func anInsertRequestIsFreshOnlyBriefly() {
-        #expect(!hostState(phase: .idle).insertIsFresh(now: now)) // no request at all
-        #expect(hostState(phase: .idle, insertAt: now).insertIsFresh(now: now))
-        #expect(hostState(phase: .idle, insertAt: now.addingTimeInterval(-LinkChannel.insertMaxAge + 0.1)).insertIsFresh(now: now))
-        #expect(!hostState(phase: .idle, insertAt: now.addingTimeInterval(-LinkChannel.insertMaxAge - 0.1)).insertIsFresh(now: now))
     }
 
     @Test func theBoundaryMatchesTheMicKeysFreshness() {
