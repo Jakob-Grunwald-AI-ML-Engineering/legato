@@ -42,7 +42,9 @@ struct TakeSession {
     let seed: UInt64
     private var rng: SeededGenerator
     private(set) var outcome = ""
-    init(seed: UInt64) { self.seed = seed; rng = SeededGenerator(seed: seed ^ 0x7A4E5) }
+    /// Revisions of a word already published (and likely typed) draw from their own generator.
+    private var heard: SeededGenerator
+    init(seed: UInt64) { self.seed = seed; rng = SeededGenerator(seed: seed ^ 0x7A4E5); heard = SeededGenerator(seed: seed ^ 0x4EA7D) }
 
     private mutating func chance(_ p: Double) -> Bool { Double.random(in: 0..<1, using: &rng) < p }
     private mutating func pick<T>(_ items: [T]) -> T { items[Int.random(in: 0..<items.count, using: &rng)] }
@@ -92,6 +94,12 @@ struct TakeSession {
         let actsDuring = mode == "during" || mode == "both", actsAfter = mode == "after" || mode == "both"
         var keys: [String] = []
         var acted = false
+        // The words spoken since the user's last action (new speech, not a revision of a published word): every one the
+        // take still has at the end reaches the field once.
+        var newWords: [String] = []
+        func spokenWord(_ word: String) -> String? {
+            word.split { !($0.isLetter || $0.isNumber) }.map(String.init).first { $0.hasSuffix("q") && $0.dropLast().last?.isNumber == true }
+        }
 
         // The take: words in segments, joints at punctuation, fillers, Soniox flips of the head. Most sessions speak every
         // word once (a word standing twice in the field is then a duplicate); the others repeat words freely.
@@ -107,7 +115,10 @@ struct TakeSession {
         var finals: [String] = []
         var head: [String] = []
         var version = 0
-        func publish(_ snapshot: LiveDictationSnapshot, _ rig: inout QueueRig) { rig.queue.enqueue(snapshot) }
+        func publish(_ snapshot: LiveDictationSnapshot, _ rig: inout QueueRig) {
+            if rig.trace { print("        PUBLISH", snapshot.version, FieldQueue.target(of: snapshot).debugDescription) }
+            rig.queue.enqueue(snapshot)
+        }
         func speaking(_ finals: [String], _ head: [String], stopped: Bool = false) -> LiveDictationSnapshot {
             version += 1
             var segments = finals.enumerated().map { LiveSegment(id: $0.offset, text: $0.element, final: true) }
@@ -123,7 +134,12 @@ struct TakeSession {
             head.append(word); spoken += 1
             // Soniox flips the head's last word, sometimes one further back.
             if head.count > 1, chance(0.12) { head[head.count - 1] = next(&rng) }
-            if head.count > 4, chance(0.04) { head[int(0...(head.count - 3))] = next(&rng) }
+            if let w = spokenWord(head[head.count - 1]) { newWords.append(w) }
+            if head.count > 4, chance(0.04) {
+                let i = int(0...(head.count - 3))
+                newWords.removeAll { $0 == spokenWord(head[i]) }
+                head[i] = next(&rng)
+            }
             publish(speaking(finals, head), &rig)
             // The head becomes final: whole, or re-split (a short final, the rest a new head).
             if head.count >= 3, chance(0.3) {
@@ -138,8 +154,15 @@ struct TakeSession {
             let pause = Double(int(120...450))
             var waited = 0.0
             while waited < pause {
-                if actsDuring, chance(0.01) { act(&rig, &keys); acted = true }
+                if actsDuring, chance(0.01) { act(&rig, &keys); acted = true; newWords = [] }
                 rig.tick(); waited += rig.tickMs
+            }
+            // The head's last word, published (and likely typed), is heard again as another ("whether" → "weather").
+            if unique, !head.isEmpty, Double.random(in: 0..<1, using: &heard) < 0.1 {
+                newWords.removeAll { $0 == spokenWord(head[head.count - 1]) }
+                head[head.count - 1] = next(&heard)
+                publish(speaking(finals, head), &rig)
+                rig.run(ms: Double(Int.random(in: 60...300, using: &heard)))
             }
         }
         if !head.isEmpty { finals.append(head.joined(separator: " ")); head = [] }
@@ -151,7 +174,7 @@ struct TakeSession {
             LiveSegment(id: $0.offset, text: $0.element, final: true) }, complete: true), &rig)
         if actsAfter {
             rig.run(ms: Double(int(0...800)))
-            act(&rig, &keys); acted = true
+            act(&rig, &keys); acted = true; newWords = []
         }
         rig.run(ms: Double(int(0...1_500)))
         let raw = FieldQueue.joined(finals.map { LiveSegment(id: 0, text: $0, final: true) })
@@ -164,11 +187,12 @@ struct TakeSession {
         if rig.field.selection > 0 { rig.field.tap(at: rig.field.caret); rig.outsidePending = true; acted = true }
         let drained = rig.drain(limitMs: 60_000 + 200 * Double(rig.field.text.count + clean.count))
         return check(rig, drained: drained, acted: acted, initial: initial, caret: caret, raw: raw, clean: clean,
-                     keys: keys, unique: unique)
+                     keys: keys, unique: unique, newWords: newWords)
     }
 
     private mutating func act(_ rig: inout QueueRig, _ keys: inout [String]) {
         let roll = Double.random(in: 0..<1, using: &rng)
+        if rig.trace { print("        ACT", roll, "field", rig.field.string.debugDescription, "caret", rig.field.caret) }
         if roll < 0.45 { let key = pick(["a", "x", " ", ",", "\n"]); keys.append(key); rig.queue.enqueue(.insert(key)) }
         else if roll < 0.6 { rig.queue.enqueue(.deleteBackward) }
         else if roll < 0.8 { rig.queue.enqueue(.move(int(-12...4))) }
@@ -176,7 +200,7 @@ struct TakeSession {
     }
 
     private mutating func check(_ rig: QueueRig, drained: Bool, acted: Bool, initial: String, caret: Int, raw: String, clean: String,
-                                keys: [String], unique: Bool) -> String? {
+                                keys: [String], unique: Bool, newWords: [String]) -> String? {
         guard drained else { return "no stall: the queue did not drain (text \(rig.field.string.debugDescription))" }
         if rig.field.reorders > 0 { return "\(rig.field.reorders) ops landed out of order" }
         if rig.field.staleTriggers > 0 { return "\(rig.field.staleTriggers) edits went right behind a move" }
@@ -228,6 +252,22 @@ struct TakeSession {
             }
             if let twice = counts.first(where: { $0.value > 1 }) {
                 return "\(twice.key.debugDescription) stands \(twice.value) times (text \(rig.field.string.debugDescription), raw \(raw.debugDescription))"
+            }
+            // Every word spoken after the user's last action that the take still has reaches the field, once (the take is
+            // typed on at the caret, whatever was revised before).
+            if acted {
+                let fieldWords = rig.field.string.lowercased().split { !($0.isLetter || $0.isNumber) }.map(String.init)
+                let rawWords = Set(raw.lowercased().split { !($0.isLetter || $0.isNumber) }.map(String.init))
+                for word in newWords where rawWords.contains(word.lowercased()) {
+                    var n = fieldWords.filter { $0 == word.lowercased() }.count
+                    // An insert racing with a tap lands where the user tapped, maybe inside a word: there it stands
+                    // glued to the user's text (no keyboard can tell).
+                    if n == 0, let at = rig.field.string.lowercased().range(of: word.lowercased()) {
+                        let i = rig.field.string.lowercased().distance(from: rig.field.string.lowercased().startIndex, to: at.lowerBound)
+                        if rig.field.raced[i..<(i + word.count)].contains(true) { n = 1 }
+                    }
+                    if n != 1 { return "\(word.debugDescription), spoken after the user acted, stands \(n) times (text \(rig.field.string.debugDescription))" }
+                }
             }
         }
         let reported = rig.drops.contains { $0.runID == "t" && $0.reason != .reset }

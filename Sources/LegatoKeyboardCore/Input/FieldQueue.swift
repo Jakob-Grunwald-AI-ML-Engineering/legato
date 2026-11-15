@@ -27,10 +27,11 @@ import Foundation
 ///   within `nearChars` of the caret and the report shows them as typed; anything else waits for the stop. At the stop
 ///   the take is swapped to its final text in one delete and one insert when the report's text before the caret shows
 ///   the take's end as the model has it (`Swap`); otherwise it stays as typed and is reported (`Event.dropped`; the app
-///   keeps it in History). A word is never split: a take never starts or goes on inside one (`liveStart`).
+///   keeps it in History). A take never starts inside a word (`liveStart`).
 /// - Once the user types, deletes, moves the caret or makes an edit during or after a take (`LiveRun.userActed`), the
 ///   keyboard never deletes or moves in it again: no revision, no swap. Its later words start a new piece at the user's
-///   caret, typed as spoken; where pieces start is told to the app (`pieceStarts`), which cleans them apart.
+///   caret, typed as spoken (a delivered word heard again as another stays as typed, the words after it still go in);
+///   where pieces start is told to the app (`pieceStarts`), which cleans them apart.
 /// - Field switches look like taps (Safari gives a page's fields one identity): a jump counts only when a report pins
 ///   it, and one that went nowhere or stopped short drops its work once and reseeds the model (`Resync.jumpFailed`).
 /// - Instruction edits carry the read they came from (`markRead`): their scope is found through every change since,
@@ -1422,6 +1423,9 @@ public struct FieldQueue: Sendable {
     struct SpeechDelivery: Sendable, Equatable {
         private(set) var delivered: [Character] = []
         private(set) var authoritative: [Character] = []
+        /// Delivered words (by their index among the delivered words) heard again as others, and what they stand for now:
+        /// they align as that word (`end(of:in:aliases:)`).
+        private(set) var aliases: [Int: String] = [:]
         var hasDeferredRevision: Bool { authoritative != delivered }
 
         /// `complete`: the take ended, its text may be a cleanup: only new words extend the delivered text, never a
@@ -1432,7 +1436,7 @@ public struct FieldQueue: Sendable {
             authoritative = text
             var end: Int
             if delivered.isEmpty || text.starts(with: delivered) { end = delivered.count }
-            else if let found = Self.end(of: delivered, in: text) { end = found }
+            else if let found = Self.end(of: delivered, in: text, aliases: &aliases) { end = found }
             else { return nil }
             if complete, !delivered.isEmpty {
                 guard let word = text[end...].firstIndex(where: { $0.isLetter || $0.isNumber }) else { return nil }
@@ -1447,9 +1451,11 @@ public struct FieldQueue: Sendable {
         }
 
         /// The field shows `text` for the take (a verified revision near the caret, or words appended at once).
-        mutating func settle(_ text: [Character]) { delivered = text; authoritative = text }
+        mutating func settle(_ text: [Character]) { delivered = text; authoritative = text; aliases = [:] }
 
         static let alignedWords = 160
+        /// At most this many last delivered words may have been heard again as others (`end(of:in:)`).
+        static let revisedWords = 3
 
         private static func words(_ text: [Character]) -> [(end: Int, word: String)] {
             var result: [(Int, String)] = [], i = 0
@@ -1463,12 +1469,13 @@ public struct FieldQueue: Sendable {
         }
 
         /// Where the delivered text's last word ends in `text`, or nil when that word is not there (or the words before it
-        /// do not corroborate it).
-        static func end(of delivered: [Character], in text: [Character]) -> Int? {
-            let old = Array(words(delivered).suffix(alignedWords)), all = words(text)
+        /// do not corroborate it). Last words heard again as others become `aliases`.
+        static func end(of delivered: [Character], in text: [Character], aliases: inout [Int: String]) -> Int? {
+            let every = words(delivered), all = words(text)
+            let old = Array(every.suffix(alignedWords)), first = every.count - old.count
             guard let last = old.last, delivered[last.end...].allSatisfy({ !($0.isLetter || $0.isNumber) }) else { return nil }
             let new = Array(all.suffix(old.count + alignedWords))
-            let a = old.map(\.word), b = new.map(\.word)
+            let a = old.enumerated().map { aliases[first + $0.offset] ?? $0.element.word }, b = new.map(\.word)
             guard !b.isEmpty else { return nil }
             var table = [[Int]](repeating: [Int](repeating: 0, count: b.count + 1), count: a.count + 1)
             for i in stride(from: a.count - 1, through: 0, by: -1) {
@@ -1482,10 +1489,28 @@ public struct FieldQueue: Sendable {
                 if a[i] == b[j], table[i][j] == table[i + 1][j + 1] + 1 { matches[i] = j; i += 1; j += 1 }
                 else if table[i][j + 1] >= table[i + 1][j] { j += 1 } else { i += 1 }
             }
-            // The last word, and most of the few before it, stand in the revision.
-            guard let at = matches[a.count - 1] else { return nil }
-            let recent = max(0, a.count - 4)..<(a.count - 1)
-            guard recent.filter({ matches[$0] != nil }).count >= min(2, recent.count) else { return nil }
+            // The last word, and most of the few before it, stand in the revision. Or the last few words were heard again
+            // as others, one for one ("whether" → "weather"): the words after them in the revision are new, and the
+            // delivered ones stay as typed (a take the user acted in is never revised; delivery must not stall on it).
+            // (Every delivered word heard again: one for one from the take's start.)
+            let anchor = matches[a.count - 1] != nil ? a.count - 1 : (matches.keys.max() ?? -1)
+            let revised = a.count - 1 - anchor
+            let fromStart = anchor < 0 && first == 0 && new.count == all.count
+            guard anchor >= 0 || fromStart, revised <= Self.revisedWords else { return nil }
+            let matched = anchor >= 0 ? matches[anchor]! : -1
+            guard matched + revised < new.count else { return nil }
+            let at = matched + revised
+            let recent = max(0, anchor - 3)..<max(0, anchor)
+            guard recent.isEmpty || recent.contains(where: { matches[$0] != nil }) else { return nil }
+            // Delivered words heard again one for one (between two matched words, or at the end) align as the new word
+            // from now on: a take that is never revised still finds its end in later versions.
+            var previous = (i: -1, j: -1)
+            for (i, j) in matches.sorted(by: { $0.key < $1.key }) + [(anchor + revised + 1, at + 1)] {
+                if i - previous.i == j - previous.j, i - previous.i > 1 {
+                    for k in (previous.i + 1)..<i { aliases[first + k] = b[previous.j + k - previous.i] }
+                }
+                previous = (i, j)
+            }
             // What stands after the last word in the delivered text is delivered too, where the revision has it as well
             // ("some." delivered, "some." again): it is not typed a second time.
             var end = new[at].end
@@ -1544,10 +1569,7 @@ public struct FieldQueue: Sendable {
                 guard reportStableMs >= Self.stableMs || !config.animated else { return .wait }
                 // The piece starts at the user's cursor (a reseed can leave the caret away from it).
                 if cursor != userCursor { return send(.move(units(to: userCursor)), lane: .live, moveTo: userCursor) }
-                if let action = liveStart(ri) {
-                    if action == .wait { continue }
-                    return action
-                }
+                if let action = liveStart(ri) { return action }
                 let anchor = String(text[max(0, userCursor - 200)..<userCursor])
                 unit = Unit(ops: [.startRegion(run: runs[ri].runID, tStart: from, anchor: anchor)], owner: .space, paced: false)
                 return nextInUnit()
@@ -1568,25 +1590,18 @@ public struct FieldQueue: Sendable {
 
     private static func isWordCharacter(_ c: Character) -> Bool { c.isLetter || c.isNumber }
 
-    /// A word is never split by a take (Jakob's rule): nil when its next piece may start at the user's caret. With the
-    /// caret inside a word, a take that has typed nothing yet and that the user has not acted in goes to the word's end
-    /// first; words that would go on there after the user acted wait (`.wait`: nothing is moved for them), and once
-    /// the take is complete they stay untyped and the take is reported (the cleaned take is in History).
+    /// A take that starts with the caret inside a word goes to the word's end first (nobody acted in it yet): nil when
+    /// its next piece starts at the user's caret. Words that go on after the user put the caret inside a word are typed
+    /// there with a space on each side (no move after the user acted; the space after goes in when the take is done).
     private mutating func liveStart(_ ri: Int) -> Action? {
         let at = userCursor
-        guard at > 0, at < text.count, Self.isWordCharacter(text[at - 1]), Self.isWordCharacter(text[at]), selection == 0 else { return nil }
-        if runs[ri].pieces.isEmpty, !runs[ri].userActed {
-            var end = at
-            while end < text.count, Self.isWordCharacter(text[end]) { end += 1 }
-            let action = send(.move(units(to: end)), lane: .live, moveTo: end)
-            userCursor = cursor
-            return action
-        }
-        if runs[ri].complete {
-            runs[ri].settledThrough = runs[ri].delivered.count
-            reportFallback(ri, .userEdited, force: true)
-        }
-        return .wait
+        guard runs[ri].pieces.isEmpty, !runs[ri].userActed, selection == 0,
+              at > 0, at < text.count, Self.isWordCharacter(text[at - 1]), Self.isWordCharacter(text[at]) else { return nil }
+        var end = at
+        while end < text.count, Self.isWordCharacter(text[end]) { end += 1 }
+        let action = send(.move(units(to: end)), lane: .live, moveTo: end)
+        userCursor = cursor
+        return action
     }
 
     /// The open piece of run `ri` at the user's caret: its delivered words go in one grapheme at a time; a revision of
@@ -1987,6 +2002,8 @@ public struct FieldQueue: Sendable {
     private mutating func reportFallback(_ ri: Int, _ reason: DropReason?, force: Bool = false) {
         let run = runs[ri]
         guard !run.fallbackReported, run.complete else { return }
+        // An untouched take's raw version kept as typed says nothing yet: its cleanup comes next and is tried on its own.
+        guard force || run.cleaned || run.userActed else { return }
         let whole = Self.joined(run.segments)
         var shown = !force
         for pi in run.pieces.indices where shown {
@@ -2497,11 +2514,10 @@ public struct FieldQueue: Sendable {
             cursor = p; userCursor = p; selection = 0
             insertAtCursor(Array(key), owner: -1)
             if last.lane == .user { userCursor = cursor } else if last.lane == .live {
-                // Dictation never deletes after the user's tap: its text stays where it landed, the caret after it, and
-                // the take is reported (its text is in History).
+                // Dictation never deletes after the user's tap: its text stays where it landed, the caret after it (the
+                // take's later words follow there), and the take is reported (its text is in History).
                 userCursor = cursor
                 if let run = runs.last {
-                    runs[runs.count - 1].settledThrough = run.delivered.count
                     events.append(.dropped(Drop(id: "stray:" + run.runID, runID: run.runID, kind: nil, reason: .unplaceable,
                                                 text: run.complete ? Self.joined(run.segments) : String(run.delivered), partial: key)))
                 }

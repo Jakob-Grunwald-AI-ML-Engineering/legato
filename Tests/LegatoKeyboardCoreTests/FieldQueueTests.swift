@@ -245,9 +245,9 @@ import Testing
         #expect(rig.drops.isEmpty)
     }
 
-    /// Words that go on after the user put the caret inside a word are not typed into it, and nothing moves for them:
-    /// the take ends as it was typed and is reported (the cleaned take is in History).
-    @Test func wordsAfterTheUserPutTheCaretInsideAWordWait() {
+    /// Words that go on after the user put the caret inside a word go in at the caret with a space on each side (no
+    /// move after the user acted): nothing of the take is lost from the field.
+    @Test func wordsAfterTheUserPutTheCaretInsideAWordGoInWithSpaces() {
         var rig = QueueRig(FakeField(""))
         rig.queue.enqueue(snap(1, "alpha beta"))
         rig.drain()
@@ -256,15 +256,35 @@ import Testing
         let moved = rig.sent.count
         rig.queue.enqueue(snap(2, "alpha beta gamma", complete: true))
         rig.drain()
-        #expect(rig.field.string == "alpha beta")
-        #expect(rig.sent.count == moved)
+        #expect(rig.field.string == "alpha b gamma eta")
+        #expect(!rig.sent[moved...].contains { if case .move = $0.op { true } else if case .deleteBackward = $0.op { true } else { false } })
         #expect(rig.drops.map(\.reason) == [.userEdited])
-        // The caret goes between words: later words start there.
-        rig.queue.enqueue(.move(3))
+    }
+
+    /// UAT: after the user acted, the recogniser heard a delivered word again as another ("whether" → "weather"). The
+    /// word stays as typed and the words after it still go in, once.
+    @Test(arguments: [false, true])
+    func aRevisedWordAfterTheUserActedDoesNotStopTheTake(safari: Bool) {
+        var field = FakeField("")
+        field.hostDelays = safari
+        var rig = QueueRig(field, config: .init(animated: true))
+        rig.queue.enqueue(snap(1, "check the forecast"))
         rig.drain()
-        rig.queue.enqueue(snap(3, "alpha beta gamma delta", complete: true))
+        rig.queue.enqueue(.insert("x"))
         rig.drain()
-        #expect(rig.field.string == "alpha beta delta")
+        rig.queue.enqueue(snap(2, "check the forecast whether"))
+        rig.drain()
+        rig.queue.enqueue(snap(3, "check the forecast weather"))
+        rig.drain()
+        rig.queue.enqueue(snap(4, "check the forecast weather is fine today"))
+        rig.drain()
+        rig.queue.enqueue(snap(5, "check the forecast weather is fine today and their boat"))
+        rig.drain()
+        rig.queue.enqueue(snap(6, "check the forecast weather is fine today and there boat sails", complete: true))
+        rig.drain()
+        #expect(rig.field.string == "check the forecastx whether is fine today and their boat sails")
+        #expect(!rig.sent.contains { if case .deleteBackward = $0.op { true } else { false } })
+        #expect(rig.drops.map(\.reason) == [.userEdited])
     }
 
     /// The stop's swap lands and the queue says so before it goes idle (the keyboard stops stepping then, and its
