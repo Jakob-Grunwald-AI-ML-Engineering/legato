@@ -46,7 +46,10 @@ final class KeyboardController {
     /// A line above the keys: the Full Access explainer, or the "tap again to open" fallback.
     private(set) var hint: String?
     /// Recovery guidance survives Safari's accessory-field keyboard disappearance/appearance and transient hints.
-    private(set) var liveRecoveryNotice: String?
+    private(set) var liveRecoveryNotice: String? {
+        didSet { liveRecoveryNoticeAt = Date() }
+    }
+    @ObservationIgnored private var liveRecoveryNoticeAt = Date.distantPast
     /// Up to three suggestions, best first; the word row shows them as "2 | 1 | 3" (``SuggestionSlots``).
     /// `SuggestionController` fills them.
     var suggestions: [String] = []
@@ -303,6 +306,7 @@ final class KeyboardController {
     /// The host is sending audio somewhere (`dictation` or `agent`): the mic key stops it.
     var routeOpen: Bool { dictationPresentation.audioRoute != .idle }
     @ObservationIgnored private var statusPoll: Task<Void, Never>?
+    @ObservationIgnored private var seenFieldCleanupOutcome: CleanupFieldOutcome?
     private let statusLink = UserDefaultsLinkStore().map { DictationStatusLink(store: LinkStore($0)) }
     func sendDictationControl(_ action: DictationControl.Action) {
         guard fullAccess else { show("Allow Full Access to connect to Legato."); return }
@@ -314,6 +318,17 @@ final class KeyboardController {
         seenDictationNoticeID = value.dictationNoticeID ?? seenDictationNoticeID
         let wasOpen = routeOpen
         dictationPresentation = value
+        if let outcome = value.fieldCleanupOutcome, outcome != seenFieldCleanupOutcome {
+            seenFieldCleanupOutcome = outcome
+            if outcome.runID == liveSnapshot?.runID, document.documentID == liveDocumentID,
+               outcome.at >= liveRecoveryNoticeAt {
+                // A scoped field result supersedes the earlier transcript region's refusal.
+                // Never clear a different take's or a different field's recovery notice.
+                liveRecoveryNotice = outcome.status.notice
+                liveRecoveryDismissed = outcome.status.notice == nil
+                updateCleanup { $0.clear() }
+            }
+        }
         if wasOpen, !routeOpen { noteStop() }
         syncRowTakeover()
     }
@@ -869,9 +884,7 @@ final class KeyboardController {
 
     private func writeLiveAck(version: Int?, complete: Bool) {
         guard let runID = liveSnapshot?.runID else { return }
-        // Where the user split the run (a line typed between its words): the app cleans the pieces apart.
-        let pieces = queue.pieceStarts(of: runID)
-        link.writeLiveDictationAck(.init(runID: runID, version: version, complete: complete, stats: liveStats, pieces: pieces.isEmpty ? nil : pieces))
+        link.writeLiveDictationAck(.init(runID: runID, version: version, complete: complete, stats: liveStats))
     }
 
     private static func milliseconds(_ duration: Duration) -> Double {
@@ -1265,11 +1278,24 @@ final class KeyboardController {
         // home, and the read has the cursor to itself until it ends. That can take longer than the app waits for a first
         // answer: it hears that the read is under way.
         if !queue.isHome || queue.hasOwnWork { link.writeReadReply(FieldReadReply(id: request.id, state: .reading)) }
-        if request.kind == .context || request.kind == .contextInPlace { await landOwnWork() }
+        if request.kind == .context || request.kind == .contextInPlace || request.kind == .cleanup { await landOwnWork() }
         guard let readLease = await pauseQueue() else {
             return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "The field is busy. Try again in a moment."))
         }
         defer { resumeQueue(readLease) }
+        if request.kind == .cleanup {
+            // The queue owns the known document and all pending words. Never walk or nudge a
+            // host during automatic cleanup; a busy/unconfirmed field stays as typed.
+            guard !queue.hasOwnWork, queue.seeded, queue.isHome,
+                  FieldMatch.confirms(expectedBefore: queue.expectedBefore, expectedAfter: queue.expectedAfter,
+                                      reportedBefore: shown(document.contextBefore), reportedAfter: shown(document.contextAfter)),
+                  document.selectedText?.isEmpty != false else {
+                return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "The field is not ready for cleanup."))
+            }
+            markRead(request.instructionID)
+            return link.writeReadReply(FieldReadReply(id: request.id, state: .done,
+                above: queue.expectedBefore, below: queue.expectedAfter, documentID: documentID))
+        }
         guard await refreshContext() else {
             return link.writeReadReply(FieldReadReply(id: request.id, state: .failed,
                 error: "This app did not confirm the cursor position. Nothing was edited."))
@@ -1292,6 +1318,7 @@ final class KeyboardController {
         var reply = FieldReadReply(id: request.id, state: .done, below: below, selection: selection,
                                    stopBelow: after.isEmpty ? .start : .unread, moreBelow: !after.isEmpty, documentID: documentID)
         switch request.kind {
+        case .cleanup: return // handled from the confirmed queue snapshot above
         case .context, .contextInPlace:
             if selection != nil {
                 // A walk would collapse the selection: only the windows around it, and only the selection is edited.

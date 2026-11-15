@@ -1,5 +1,36 @@
 import Foundation
 
+/// Field confirmation, independent of whether the cleanup provider returned an answer.
+public enum CleanupFieldStatus: String, Sendable, Equatable, Codable {
+    case cleaned, keptAsTyped, undelivered
+    public var label: String {
+        switch self {
+        case .cleaned: "Cleaned"
+        case .keptAsTyped: "Kept as typed"
+        case .undelivered: "Cleanup unconfirmed · check the field"
+        }
+    }
+
+    public var notice: String? {
+        switch self {
+        case .cleaned: nil
+        case .keptAsTyped: "Kept as typed."
+        case .undelivered: "Cleanup couldn't be confirmed. Check the field and Legato's History."
+        }
+    }
+}
+
+/// One confirmed field-cleanup outcome, shared by History and the keyboard's presentation.
+public struct CleanupFieldOutcome: Sendable, Equatable, Codable {
+    public var runID: String
+    public var revision: Int
+    public var status: CleanupFieldStatus
+    public var at: Date
+    public init(runID: String, revision: Int, status: CleanupFieldStatus, at: Date = Date()) {
+        self.runID = runID; self.revision = revision; self.status = status; self.at = at
+    }
+}
+
 /// A rewrite is saved before its first host mutation, so an uncertain field never loses either version.
 public enum InstructionHistoryStatus: String, Sendable, Equatable, Codable {
     case saved, applied, notApplied, uncertain
@@ -26,12 +57,18 @@ public struct DictationEntry: Sendable, Equatable, Codable, Identifiable {
     /// Cleanup failed or was rejected, so `text` is the raw text as heard. Nil on older entries and when cleanup
     /// never ran (no key).
     public var cleanupFallback: Bool?
+    public var cleanupFieldStatus: CleanupFieldStatus?
+    /// Field cleanup compares these snapshots, never the surrounding typed text against raw speech.
+    public var cleanupSourceText: String?
+    public var cleanupResultText: String?
+    public var displayText: String { cleanupResultText ?? text }
     /// For Magic entries, `rawText` is the original and `text` is the generated result, even if application failed.
     public var instructionStatus: InstructionHistoryStatus?
 
     public init(
         id: UUID = UUID(), date: Date, text: String, rawText: String? = nil, localeIdentifier: String, engineID: String,
-        duration: TimeInterval, cleanupFallback: Bool? = nil, instructionStatus: InstructionHistoryStatus? = nil
+        duration: TimeInterval, cleanupFallback: Bool? = nil, instructionStatus: InstructionHistoryStatus? = nil,
+        cleanupFieldStatus: CleanupFieldStatus? = nil
     ) {
         self.id = id
         self.date = date
@@ -41,6 +78,7 @@ public struct DictationEntry: Sendable, Equatable, Codable, Identifiable {
         self.engineID = engineID
         self.duration = duration
         self.cleanupFallback = cleanupFallback
+        self.cleanupFieldStatus = cleanupFieldStatus
         self.instructionStatus = instructionStatus
     }
 }

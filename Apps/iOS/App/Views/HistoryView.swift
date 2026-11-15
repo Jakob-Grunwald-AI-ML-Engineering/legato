@@ -13,17 +13,18 @@ struct HistoryView: View {
             if entries.isEmpty { Text("No dictations yet").foregroundStyle(.secondary) }
             ForEach(entries) { entry in
                 Button {
-                    controller.copy(entry.text)
+                    controller.copy(entry.displayText)
                     copiedID = entry.id
                 } label: {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(entry.text).lineLimit(4).foregroundStyle(.primary)
+                        Text(entry.displayText).lineLimit(4).foregroundStyle(.primary)
                         if let raw = entry.rawText {
                             Text("\(entry.engineID == "instruction" ? "Original" : "Raw"): \(raw)").lineLimit(4).font(.footnote).foregroundStyle(.secondary)
                         }
                         HStack {
                             Text(entry.date, format: .dateTime.day().month().hour().minute())
                             if let status = entry.instructionStatus { Text(status.label) }
+                            if let status = entry.cleanupFieldStatus { Text(status.label) }
                             if entry.cleanupFallback == true { Text("Not cleaned up") }
                             if copiedID == entry.id { Text("Copied").foregroundStyle(.green) }
                         }
@@ -32,7 +33,10 @@ struct HistoryView: View {
                     }
                 }
                 .contextMenu {
-                    Button("Copy") { controller.copy(entry.text) }
+                    Button("Copy") { controller.copy(entry.displayText) }
+                    if let source = entry.cleanupSourceText {
+                        Button("Copy field before cleanup") { controller.copy(source) }
+                    }
                     if let raw = entry.rawText {
                         Button(entry.engineID == "instruction" ? "Copy original" : "Copy raw text") { controller.copy(raw) }
                     }

@@ -50,10 +50,11 @@ private struct HistoryRow: View {
                 }
             } label: {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(entry.text)
+                    Text(entry.displayText)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                     if let status = entry.instructionStatus { Text(status.label).font(.caption).foregroundStyle(.secondary) }
+                    if let status = entry.cleanupFieldStatus { Text(status.label).font(.caption).foregroundStyle(.secondary) }
                     Text(copied ? "Copied" : entry.date.formatted(date: .abbreviated, time: .shortened) + (entry.cleanupFallback == true ? " · Not cleaned up" : ""))
                         .font(.caption)
                         .foregroundStyle(copied ? Color.accentColor : .secondary)
@@ -64,6 +65,9 @@ private struct HistoryRow: View {
             .buttonStyle(.plain)
             .contextMenu {
                 Button("Copy result") { onCopy(entry) }
+                if let source = entry.cleanupSourceText {
+                    Button("Copy field before cleanup") { onCopyOriginal(source) }
+                }
                 if let raw = entry.rawText {
                     Button(entry.engineID == "instruction" ? "Copy original" : "Copy raw text") { onCopyOriginal(raw) }
                 }

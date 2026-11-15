@@ -319,7 +319,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
     /// A line's call is forced, so the model cannot decline in words: this field must say what it always has to hold.
     private static let cleanedTextDescription = "The complete cleaned text, every meaningful word of the input in order, however long or unusual. Never a placeholder, stub, summary or note."
     private static func takeRequest(_ input: DictationTakeInput, model: ModelChoice) throws -> Data {
-        let source: JSONValue = .object(["text": .string(input.text),
+        let source: JSONValue = .object(["text": .string(input.text), "fieldDocument": .bool(input.fieldDocument),
             "recentTakes": .array(input.recentTakes.map { .object(["raw": .string($0.raw), "cleaned": .string($0.cleaned)]) }), "textBeforeCursor": .string(String(input.textBeforeCursor.suffix(600))),
             "vocabulary": .array(input.vocabulary.map(JSONValue.string))])
         let request: JSONValue = .object([

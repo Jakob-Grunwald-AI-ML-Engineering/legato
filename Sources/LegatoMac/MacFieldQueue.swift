@@ -383,10 +383,16 @@ public final class MacFieldQueue {
 
     /// Mic-off releases the latest coalesced correction even before the final cleanup snapshot arrives.
     public func takeStopped(_ runID: String) {
+        setSpeaking(false, runID: runID)
+    }
+
+    /// Activity is independent of take lifetime. The same target owns deferred recognition
+    /// revisions; a pause releases them and new speech takes priority again.
+    public func setSpeaking(_ speaking: Bool, runID: String) {
         guard let index = runs.firstIndex(where: { $0.id == runID }), !runs[index].abandoned, !runs[index].retracted else { return }
-        runs[index].speaking = false
+        runs[index].speaking = speaking && !runs[index].complete
         let final = runs[index].speechTarget.authoritative
-        let delivery = runs[index].speechTarget.update(final, speaking: false)
+        let delivery = runs[index].speechTarget.update(final, speaking: runs[index].speaking)
         retarget(&runs[index], to: delivery)
         schedule()
     }

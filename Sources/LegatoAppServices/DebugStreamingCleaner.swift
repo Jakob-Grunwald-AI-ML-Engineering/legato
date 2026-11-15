@@ -19,9 +19,13 @@ public final class DebugStreamingCleaner: SentenceCleaning, @unchecked Sendable 
 
     /// A sentence (line by line, live), capitalized like a take, so a cleanup that lands shows word by word.
     public func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence {
-        .init(sentenceID: input.sentenceID, sequence: input.sequence, text: input.text.capitalized)
+        try await Task.sleep(for: chunkDelay)
+        return .init(sentenceID: input.sentenceID, sequence: input.sequence, text: reply ?? input.text.capitalized)
     }
-    public func cleanTake(_ input: DictationTakeInput) async throws -> String { input.text.capitalized }
+    public func cleanTake(_ input: DictationTakeInput) async throws -> String {
+        try await Task.sleep(for: chunkDelay)
+        return reply ?? input.text.capitalized
+    }
 
     public func cleanTakeStream(_ input: DictationTakeInput) -> AsyncThrowingStream<String, any Error> {
         let fail = lock.withLock { () -> Int? in let n = failAfter; failAfter = nil; return n }

@@ -1,10 +1,12 @@
 import Foundation
+import LegatoCore
 
 public enum AudioRoute: String, Sendable, Codable, CaseIterable { case idle, dictation }
 public enum DictationTakePhase: String, Sendable, Codable, Equatable { case buffering, cleaning, failed }
 
 /// Lightweight dictation controls and presentation. Text delivery stays on LiveDictationLink.
 public struct DictationStatus: Codable, Equatable, Sendable {
+    public var fieldCleanupOutcome: CleanupFieldOutcome?
     public var audioRoute = AudioRoute.idle
     public var error: String?
     public var voiceIsolationStatus: String?

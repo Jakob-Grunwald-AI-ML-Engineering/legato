@@ -13,6 +13,15 @@ import LegatoKeyboardCore
     private let readTimeout: TimeInterval
     private let editTimeout: TimeInterval
     private let landTimeout: TimeInterval
+    private var exchanging = false
+
+    /// Magic and automatic cleanup share a single-slot link. Only the wire exchange is
+    /// serialized; model work holds no lock and never blocks speech delivery.
+    private func acquireExchange() async throws {
+        while exchanging { try await Task.sleep(for: poll) }
+        try Task.checkCancellation()
+        exchanging = true
+    }
 
     public init(store: LinkStore, post: @escaping @Sendable (String) -> Void = { DarwinObserver.post($0) }, poll: Duration = .milliseconds(30),
                 ackTimeout: TimeInterval = LinkChannel.readAckTimeout, readTimeout: TimeInterval = LinkChannel.readTimeout,
@@ -41,6 +50,8 @@ import LegatoKeyboardCore
     public func clear() { link.clearAll(); post(LinkChannel.Note.instruction) }
 
     public func read(_ kind: FieldReadRequest.Kind, instructionID: String, reading: @escaping @MainActor () -> Void) async throws -> FieldReadReply {
+        try await acquireExchange()
+        defer { exchanging = false }
         let request = FieldReadRequest(instructionID: instructionID, kind: kind)
         link.request(request)
         post(LinkChannel.Note.read)
@@ -77,6 +88,8 @@ import LegatoKeyboardCore
     }
 
     public func apply(_ edit: ScopedEdit) async -> ScopedEditAck? {
+        do { try await acquireExchange() } catch { return nil }
+        defer { exchanging = false }
         guard !Task.isCancelled, !link.cancelledInstruction(id: edit.instructionID) else {
             return ScopedEditAck(id: edit.id, applied: false, reason: "The instruction was cancelled.")
         }

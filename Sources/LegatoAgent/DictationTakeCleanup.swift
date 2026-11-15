@@ -10,9 +10,11 @@ public struct DictationTakeInput: Sendable, Equatable {
     /// Earlier cleaned takes, oldest first (see `RecentTakesStore.correctionPairs`).
     public var recentTakes: [RecentTake]
     public var textBeforeCursor: String
-    public init(takeID: String, text: String, vocabulary: [String] = [], recentTakes: [RecentTake] = [], textBeforeCursor: String = "") {
+    public var fieldDocument: Bool
+    public init(takeID: String, text: String, vocabulary: [String] = [], recentTakes: [RecentTake] = [], textBeforeCursor: String = "", fieldDocument: Bool = false) {
         self.takeID = takeID; self.text = text; self.vocabulary = vocabulary
         self.recentTakes = recentTakes; self.textBeforeCursor = textBeforeCursor
+        self.fieldDocument = fieldDocument
     }
 }
 
