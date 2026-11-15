@@ -111,4 +111,3 @@ public struct SpeechDelivery: Sendable, Equatable {
         return end
     }
 }
-
