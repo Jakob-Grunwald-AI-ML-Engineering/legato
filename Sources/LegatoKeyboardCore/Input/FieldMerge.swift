@@ -7,8 +7,8 @@ import Foundation
 /// - Touching: overlapping a changed word; an insertion inside one, at the place `kept` inserted text too, glued onto
 ///   its word (a letter right at it), or next to words `kept` deleted whole. Punctuation after a word the user only
 ///   shortened still lands ("afterno" + "." → "afterno.").
-/// - The queue uses it for a dictation region the user edited (kept: the field, incoming: the run's new text) and for
-///   Magic over text Legato changed since the read (kept: Magic's result, incoming: the scope as Legato left it).
+/// - The queue uses it for Magic over text Legato changed since the read (kept: Magic's result, incoming: the scope as
+///   Legato left it).
 enum FieldMerge {
     struct Result: Equatable {
         var text: [Character]
@@ -16,13 +16,10 @@ enum FieldMerge {
         var dropped: Int
     }
 
-    /// `keptHunks`: kept's changes when known exactly (who wrote each character); else the diff, which can take a
-    /// repeated letter for the other writer's.
-    static func rebase(base: [Character], kept: [Character], incoming: [Character],
-                       keptHunks known: [ShadowEditPlanner.Hunk]? = nil) -> Result {
+    static func rebase(base: [Character], kept: [Character], incoming: [Character]) -> Result {
         guard incoming != base else { return Result(text: kept, dropped: 0) }
         guard kept != base else { return Result(text: incoming, dropped: 0) }
-        let keptHunks = known ?? ShadowEditPlanner.diff(base, kept)
+        let keptHunks = ShadowEditPlanner.diff(base, kept)
         let zones = keptHunks.map { zone(of: $0, in: base) }
         var text = kept
         var dropped = 0

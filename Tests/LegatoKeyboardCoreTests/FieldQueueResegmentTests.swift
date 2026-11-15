@@ -12,7 +12,16 @@ import Testing
         .init(runID: "r", version: version, segments: segments, complete: complete)
     }
     private func count(_ word: String, in text: String) -> Int {
-        FieldQueue.words(Array(text)).filter { String(Array(text)[$0]).lowercased() == word }.count
+        text.lowercased().split { !($0.isLetter || $0.isNumber) }.filter { $0 == word }.count
+    }
+
+    /// A revision that still waits (an earlier word changed) is published again, its end the same: the punctuation after
+    /// the last delivered word is delivered once (UAT stress: "some..", "larder.....").
+    @Test func aRepeatedRevisionDeliversItsEndOnce() {
+        var speech = FieldQueue.SpeechDelivery()
+        speech.update(Array("hollow basket teapot more three"))
+        for _ in 0..<3 { speech.update(Array("hollow basket biscuit more three some.")) }
+        #expect(String(speech.delivered) == "hollow basket teapot more three some.")
     }
 
     private var provisional: [[LiveSegment]] {
@@ -72,9 +81,9 @@ import Testing
     }
 }
 
-/// At stop, a region whose field text is the keyboard's own stale typing (not what the queue believes it typed) is
-/// repaired to the take's final text instead of dropped; a change with someone else's words is left alone.
-@Suite struct StoppedTakeRepairTests {
+/// At stop, a take whose field text is not what the queue typed (the field changed it, or the user typed into it
+/// while it was out of sight) is never repaired: the field keeps it, and the final text is reported for History.
+@Suite struct StoppedTakeKeptTests {
     private struct Host {
         var queue = FieldQueue(config: .init(animated: false, canReadAround: true, prioritizeSpeech: true))
         var text = "" { didSet { caret = min(caret, text.utf16.count) } }
@@ -83,14 +92,11 @@ import Testing
         var events: [FieldQueue.Event] = []
         var drops: [FieldQueue.Drop] { events.compactMap { if case .dropped(let d) = $0 { d } else { nil } } }
 
-        /// Answers a look-around with the whole field, as the keyboard's reader does on a short field.
         mutating func run(steps: Int = 400) {
             for _ in 0..<steps {
                 if let request = queue.recoveryRequest {
                     requests += 1
-                    let before = String(decoding: Array(text.utf16.prefix(caret)), as: UTF16.self)
-                    let after = String(decoding: Array(text.utf16.dropFirst(caret)), as: UTF16.self)
-                    queue.completeRecovery(request, report: .init(before: before, after: after), restored: true, completeDocument: true)
+                    queue.completeRecovery(request, report: nil, restored: false)
                 }
                 let before = String(decoding: Array(text.utf16.prefix(caret)), as: UTF16.self)
                 let after = String(decoding: Array(text.utf16.dropFirst(caret)), as: UTF16.self)
@@ -110,53 +116,45 @@ import Testing
         return host
     }
 
+    private static let final = LiveDictationSnapshot(runID: "r", version: 2, segments: [
+        .init(id: 0, text: "The boat left the harbour early.", cleaned: true, final: true),
+    ], complete: true)
+
     @Test(arguments: [true, false])
-    func ownStaleTypingIsRepairedToTheFinalText(noticedAfterStop: Bool) {
+    func staleTypingTheQueueDidNotMakeIsKept(noticedAfterStop: Bool) {
         var host = typed("the boat left the harbour early")
         #expect(host.text == "the boat left the harbour early")
-        // The field kept words the keyboard typed and the queue no longer believes are there.
+        // The field holds words the queue no longer believes are there.
         host.text = "the boat left left the harbour ear early"
         host.caret = host.text.utf16.count
         if !noticedAfterStop { host.run(steps: 40) }
         host.queue.takeStopped("r")
-        host.queue.enqueue(.init(runID: "r", version: 2, segments: [.init(id: 0, text: "The boat left the harbour early.", cleaned: true, final: true)],
-                                 complete: true))
+        host.queue.enqueue(Self.final)
         host.run()
-        #expect(host.requests > 0)
-        #expect(host.text == "The boat left the harbour early.")
-        #expect(host.drops.isEmpty)
+        #expect(host.requests == 0, "dictation never looks around")
+        #expect(host.text == "the boat left left the harbour ear early")
+        #expect(host.drops.contains { $0.runID == "r" && $0.text == "The boat left the harbour early." })
     }
 
-    @Test func aRegionTheUserTypedIntoWhileLostKeepsTheirText() {
+    @Test func aTakeTheUserTypedAfterIsKept() {
         var host = typed("the boat left the harbour early")
-        host.text = "the boat left left the harbour ear early"
-        host.caret = host.text.utf16.count
-        host.run(steps: 40)
         host.queue.enqueue(.insert("!"))
         host.run(steps: 40)
         host.queue.takeStopped("r")
-        host.queue.enqueue(.init(runID: "r", version: 2, segments: [.init(id: 0, text: "The boat left the harbour early.", cleaned: true, final: true)],
-                                 complete: true))
+        host.queue.enqueue(Self.final)
         host.run()
-        // Not repaired: the region stays lost (it reports as dropped when the field goes away), the user's text stays.
-        #expect(host.text == "the boat left left the harbour ear early!")
+        #expect(host.text == "the boat left the harbour early!")
+        #expect(host.drops.contains { $0.runID == "r" && $0.reason == .userEdited })
     }
 
-    @Test func someoneElsesWordsInTheRegionAreNotRepairedAway() {
-        let target = FieldRecovery.Target(id: "t", expected: "the boat left the harbour early", repair: "The boat left the harbour early.")
-        var recovery = FieldRecovery()
-        let request = recovery.begin(generation: "f", revision: 0, targets: [target])!
-        func decide(_ field: String) -> [FieldRecovery.Decision] {
-            recovery.resolve(request, text: field, generation: "f", revision: 0, restored: true, completeDocument: true)
-        }
-        #expect(decide("the boat left left the harbour ear early") ==
-                [.replan(.init(id: "t", range: 0..<40, text: "the boat left left the harbour ear early"))])
-        #expect(decide("the boat left the harbour quite early") == [.stop(id: "t", .changed)])
-        #expect(decide("the boat") == [.stop(id: "t", .changed)])
-        // Without a final text to repair to (the user typed since), a changed target stays a refusal.
-        var plain = FieldRecovery()
-        let strict = plain.begin(generation: "f", revision: 0, targets: [.init(id: "t", expected: "the boat left the harbour early")])!
-        #expect(plain.resolve(strict, text: "the boat left left the harbour ear early", generation: "f", revision: 0,
-                              restored: true, completeDocument: true) == [.stop(id: "t", .changed)])
+    @Test func anUntouchedTakeIsSwappedInOneDeleteAndOneInsert() {
+        var host = typed("the boat left the harbour early")
+        let from = host.events.count
+        host.queue.enqueue(Self.final)
+        host.run()
+        #expect(host.text == "The boat left the harbour early.")
+        let ops = host.events[from...].compactMap { if case .sent(let op, _) = $0 { op } else { nil } }
+        #expect(ops == [.deleteBackward(31), .insert("The boat left the harbour early.")])
+        #expect(host.drops.isEmpty)
     }
 }

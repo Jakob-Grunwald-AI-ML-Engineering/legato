@@ -240,7 +240,7 @@ if [ "$mode" = release-check ]; then
   # Identifiers that exist only in the e2e hooks. Positive control (no Debug build): each must still occur in
   # the iOS sources, or the needle is stale (renamed/removed) and the scan would pass vacuously.
   needles=(KeyboardHarness LegatoKeyboardHarness harness-mic harness-mic-hop harness-type harness-numbers
-    harness-state harness-visible harness-hidden harness-retry harness-insert-raw harness-clear
+    harness-state harness-visible harness-hidden harness-retry harness-insert-raw harness-clear harness-key
     harness.edit LegatoHarnessAppearance LegatoHarnessKeyboardType LegatoHarnessReturn LegatoHarnessGlobe LegatoHarnessLandscape
     LegatoHarnessAutocap LegatoHarnessSuggestions LegatoHarnessSystemField kbd.geometry kbd.view systemfield.document
     harness-mic-hop-retry dictation-debug-stream dictation-debug-mode dictation-debug-model dictation-debug-replay dictation-debug-replay-cancel dictation-debug-fail-take composer-debug-seed

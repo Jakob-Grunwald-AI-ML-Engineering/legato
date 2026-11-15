@@ -47,9 +47,10 @@ import Testing
     }
 
     /// The same list with each cleanup arriving late: after the user typed the next line's Enter and "- ", or while
-    /// the next take is already typing. The cleanup lands in its own take's line; the next take starts at the caret.
+    /// the next take is already typing. The user's keys froze the take: its cleanup is not made (it is in History);
+    /// the next take starts at the caret, and the last one, untouched, is cleaned.
     @Test(arguments: [false, true])
-    func aLateCleanupLandsInItsOwnLineWhileTheNextTakeStartsAtTheCaret(safari: Bool) {
+    func aLateCleanupIsNotMadeWhileTheNextTakeStartsAtTheCaret(safari: Bool) {
         var field = FakeField("")
         field.hostDelays = safari
         var rig = QueueRig(field, config: .init(animated: true))
@@ -71,8 +72,8 @@ import Testing
         let last = Self.items.last!
         rig.queue.enqueue(cleaned(last.prefix(1).uppercased() + last.dropFirst() + ".", run: "take\(Self.items.count - 1)", version: 21))
         rig.drain()
-        #expect(rig.field.string == Self.list)
-        #expect(rig.drops.isEmpty)
+        #expect(rig.field.string == "- buy milk\n- call anna about the boat\n- book the berth\n- Check the forecast.")
+        #expect(rig.drops.allSatisfy { $0.reason == .userEdited })
     }
 
     /// The user fixes the end of the take while it is still going: dictation goes on at their caret.
@@ -90,10 +91,11 @@ import Testing
         rig.queue.enqueue(snap(2, "buy milk and eggs bread"))
         rig.drain()
         #expect(rig.field.string == "Note: buy milk and bread")
-        // The cleanup keeps the user's deletion and lands the rest.
+        // The user's edit froze the take: the cleanup is not made.
         rig.queue.enqueue(cleaned("Buy milk and eggs bread.", run: "r", version: 3))
         rig.drain()
-        #expect(rig.field.string == "Note: Buy milk and bread.")
+        #expect(rig.field.string == "Note: buy milk and bread")
+        #expect(rig.drops.map(\.reason) == [.userEdited])
     }
 
     /// Segments of one run as the app publishes them: `cleanedAs` puts the run's cleanup in the first segment (one
@@ -106,8 +108,8 @@ import Testing
     }
 
     /// UAT F1: the take was stopped (complete) and its run goes on with new speech (the bridge reuses the run). The user
-    /// pressed Enter and typed "- " meanwhile: the new words start at their caret, and the cleanup that joins both into
-    /// one sentence lands in each piece's own words, the joiner nowhere.
+    /// pressed Enter and typed "- " meanwhile: the new words start at their caret. A cleanup that joins both into one
+    /// sentence fits neither piece alone: the field keeps them, the cleanup is in History.
     @Test(arguments: [false, true])
     func newSpeechAfterAStopStartsAtTheCaretNotAtTheTakesEnd(safari: Bool) {
         var field = FakeField("")
@@ -130,8 +132,8 @@ import Testing
         rig.queue.enqueue(LiveDictationSnapshot(runID: "m", version: 23, segments: Self.segments(
             ["the meeting is at three", "bring the laptop"], cleanedAs: "The meeting is at three, bring the laptop."), complete: true))
         rig.drain()
-        #expect(rig.field.string == "- The meeting is at three\n- bring the laptop.")
-        #expect(rig.drops.isEmpty)
+        #expect(rig.field.string == "- the meeting is at three\n- bring the laptop")
+        #expect(rig.drops.map(\.reason) == [.userEdited])
     }
 
     /// F1, with the raw version of the new speech coalesced away: the cleanup is the first the keyboard sees of it. The
@@ -150,14 +152,14 @@ import Testing
     }
 
     /// UAT F3: three items dictated in one run, the user typing "\n- " between them; the cleanup joins them into one
-    /// sentence. Each line takes its own words; no joiner lands at a line's start.
+    /// sentence. Each line keeps its own words as typed; no joiner lands anywhere.
     @Test(arguments: [(", ", false), (", ", true), ("; ", true), (". ", false), (". ", true)])
     func aCleanupThatJoinsTheRunsPiecesLeavesTheJoinersOut(joiner: String, safari: Bool) {
         let items = ["buy some milk", "call the plumber tomorrow", "water the plants"]
         var field = FakeField("")
         field.hostDelays = safari
         var rig = QueueRig(field, config: .init(animated: true))
-        for (i, item) in items.enumerated() {
+        for i in items.indices {
             type(i == 0 ? "- " : "\n- ", &rig)
             rig.queue.enqueue(LiveDictationSnapshot(runID: "list", version: i + 1, segments: Self.segments(Array(items[...i]))))
             rig.drain()
@@ -170,19 +172,20 @@ import Testing
         rig.queue.enqueue(LiveDictationSnapshot(runID: "list", version: 9, segments: Self.segments(
             items, cleanedAs: pieces.joined(separator: joiner) + "."), complete: true))
         rig.drain()
-        #expect(rig.field.string == "- " + pieces.joined(separator: "\n- ") + ".")
-        #expect(rig.drops.isEmpty)
+        #expect(rig.field.string == "- buy some milk\n- call the plumber tomorrow\n- water the plants")
+        #expect(rig.drops.map(\.reason) == [.userEdited])
     }
 
-    /// UAT F3 on the real path: the app cleans each piece on its own (the keyboard reported where they start), so each
-    /// comes back a sentence of its own. A piece's own sentence end is no joiner: every line keeps it, not only the last.
+    /// UAT F3 on the real path: the app cleans each piece on its own (the keyboard reported where they start). The user
+    /// typed during the run (the lines' starts), so nothing of it is edited any more: every piece stays as typed and the
+    /// cleaned take is in History.
     @Test(arguments: [false, true])
-    func piecesCleanedApartKeepTheirOwnSentenceEnds(safari: Bool) {
+    func piecesCleanedApartStayAsTypedOnceTheUserTyped(safari: Bool) {
         let items = ["buy some milk", "call the plumber tomorrow", "water the plants"]
         var field = FakeField("")
         field.hostDelays = safari
         var rig = QueueRig(field, config: .init(animated: true))
-        for (i, item) in items.enumerated() {
+        for i in items.indices {
             type(i == 0 ? "- " : "\n- ", &rig)
             rig.queue.enqueue(LiveDictationSnapshot(runID: "list", version: i + 1, segments: Self.segments(Array(items[...i]))))
             rig.drain()
@@ -193,8 +196,9 @@ import Testing
             LiveSegment(id: $0.offset, text: $0.element, cleaned: true, final: true)
         }, complete: true))
         rig.drain()
-        #expect(rig.field.string == "- " + pieces.joined(separator: "\n- "))
-        #expect(rig.drops.isEmpty)
+        #expect(rig.field.string == "- buy some milk\n- call the plumber tomorrow\n- water the plants")
+        #expect(rig.drops.map(\.reason) == [.userEdited])
+        #expect(!rig.sent.contains { if case .deleteBackward = $0.op { true } else { false } })
     }
 
     /// The user taps into the middle of a take's text and types a word there; the take's next words go where the

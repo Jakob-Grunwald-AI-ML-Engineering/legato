@@ -32,19 +32,33 @@ import Testing
         #expect(String(target.authoritative) == revised)
     }
 
-    @Test func keyboardDeliversNewSpeechWithoutJumpingToDeferredCorrections() {
+    @Test func keyboardTakesARevisionNearTheCaretWithoutJumping() {
         var rig = QueueRig(FakeField(""), config: .init(animated: false, prioritizeSpeech: true))
         rig.queue.enqueue(snap(1, "we saw a boat"))
         do { let drained = rig.drain(); #expect(drained) }
         let start = rig.sent.count
         rig.queue.enqueue(snap(2, "We saw a boat today"))
         do { let drained = rig.drain(); #expect(drained) }
-        #expect(rig.field.string == "we saw a boat today")
-        #expect(!rig.sent[start...].contains { if case .move = $0.op { true } else { false } })
+        #expect(rig.field.string == "We saw a boat today")
+        #expect(rig.sent[start...].map(\.op) == [.deleteBackward(13), .insert("We saw a boat today")])
+        #expect(rig.events.contains { $0.event == .liveApplied(runID: "r", version: 2, complete: false) })
+    }
+
+    @Test func keyboardDefersARevisionFarFromTheCaretUntilTheStop() {
+        var rig = QueueRig(FakeField(""), config: .init(animated: false, prioritizeSpeech: true))
+        let rest = " and the wind came up from the west so we reefed the main and ran"
+        rig.queue.enqueue(snap(1, "we saw a boat" + rest))
+        do { let drained = rig.drain(); #expect(drained) }
+        let start = rig.sent.count
+        rig.queue.enqueue(snap(2, "We saw a boat" + rest + " home"))
+        do { let drained = rig.drain(); #expect(drained) }
+        #expect(rig.field.string == "we saw a boat" + rest + " home")
+        #expect(rig.sent[start...].map(\.op) == [.insert(" home")])
         #expect(!rig.events.contains { $0.event == .liveApplied(runID: "r", version: 2, complete: false) })
         rig.queue.takeStopped("r")
+        rig.queue.enqueue(snap(3, "We saw a boat" + rest + " home.", complete: true))
         do { let drained = rig.drain(); #expect(drained) }
-        #expect(rig.field.string == "We saw a boat today")
+        #expect(rig.field.string == "We saw a boat" + rest + " home.")
     }
 
     @Test func backgroundMagicWaitsWithoutDroppingWhileSpeechHasAPause() {

@@ -247,6 +247,13 @@ final class KeyboardHarnessModel {
         return state
     }
 
+    /// A key press on the keyboard's own keys (the typing path a finger takes).
+    func pressKey(_ key: String) -> [String: Any] {
+        let typing = controller.typing!
+        if ["space", "delete", "return"].contains(key) { typing.press(keyID: key) } else { for ch in key { typing.press(keyID: "char:\(ch)") } }
+        return state
+    }
+
     func moveCursor(to offset: Int) -> [String: Any] {
         document.textView.selectedRange = NSRange(location: min(offset, (document.text as NSString).length), length: 0)
         controller.documentDidChange()

@@ -67,7 +67,7 @@ import Testing
         #expect(drained3)
         #expect(rig.field.string == "- the meeting is at three")
         #expect(rig.field.caret == rig.field.text.count)
-        #expect(rig.drops.contains { $0.runID == "long" && $0.reason == .unplaceable })
+        #expect(rig.drops.contains { $0.runID == "long" })
         let moves = keyboardOps(rig, from: from).filter { if case .move(let n) = $0 { n != 0 } else { false } }
         #expect(moves.count <= 1)
         #expect(!keyboardOps(rig, from: from).contains { if case .move = $0 { false } else { true } })
