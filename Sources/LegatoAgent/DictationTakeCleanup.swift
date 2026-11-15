@@ -111,41 +111,47 @@ public struct DictationTakeCleaner: Sendable {
         func raise() { lock.withLock { set = true } }
     }
     private func attempt(_ input: DictationTakeInput, seen: Flag, onDelta: @escaping @Sendable (String) async -> Void) async -> Outcome {
-        let limit = timeout(input.text.count), cleaner = self.cleaner
-        return await withTaskGroup(of: Outcome.self) { group in
-            group.addTask {
-                var text = ""
-                do {
-                    for try await delta in cleaner.cleanTakeStream(input) where !delta.isEmpty {
-                        seen.raise(); text += delta
-                        await onDelta(delta)
-                    }
-                    return .cleaned(text)
-                }
-                catch MessagesStreamError.missingKey { return .unavailable }
-                catch { return .failed("failed") }
+        let cleaner = self.cleaner
+        return await Self.timed(timeout: timeout(input.text.count)) {
+            var text = ""
+            for try await delta in cleaner.cleanTakeStream(input) where !delta.isEmpty {
+                seen.raise(); text += delta
+                await onDelta(delta)
             }
-            group.addTask {
-                try? await Task.sleep(for: limit)
-                return .failed("timeout")
-            }
-            let first = await group.next() ?? .failed("failed")
-            group.cancelAll()
-            return first
+            return text
         }
     }
 
-    private enum Outcome { case cleaned(String), failed(String), unavailable }
+    private enum Outcome: Sendable { case cleaned(String), failed(String), unavailable }
     private func attempt(_ input: DictationTakeInput) async -> Outcome {
-        let limit = timeout(input.text.count), cleaner = self.cleaner
-        return await withTaskGroup(of: Outcome.self) { group in
+        let cleaner = self.cleaner
+        return await Self.timed(timeout: timeout(input.text.count)) { try await cleaner.cleanTake(input) }
+    }
+
+    /// A final pass over live text uses its sentence context and one attempt: earlier unit results remain
+    /// available on failure. Buffered takes retain their streaming/retry policy above.
+    public func cleanRevision(_ input: SentenceCleanupInput) async -> DictationTakeCleanupResult {
+        let cleaner = self.cleaner
+        switch await Self.timed(timeout: timeout(input.text.count), operation: { try await cleaner.clean(input).text }) {
+        case .cleaned(let text):
+            let empty = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !text.contains(where: \.isNewline)
+            let accepted = empty ? DictationCleanupGuard.acceptsDrop(raw: input.text)
+                : DictationTakeGuard.accepts(raw: input.text, cleaned: text)
+            return accepted ? .cleaned(empty ? "" : text) : .failed(reason: "rejected")
+        case .failed(let reason): return .failed(reason: reason)
+        case .unavailable: return .unavailable
+        }
+    }
+
+    private static func timed(timeout: Duration, operation: @escaping @Sendable () async throws -> String) async -> Outcome {
+        await withTaskGroup(of: Outcome.self) { group in
             group.addTask {
-                do { return .cleaned(try await cleaner.cleanTake(input)) }
+                do { return .cleaned(try await operation()) }
                 catch MessagesStreamError.missingKey { return .unavailable }
                 catch { return .failed("failed") }
             }
             group.addTask {
-                try? await Task.sleep(for: limit)
+                try? await Task.sleep(for: timeout)
                 return .failed("timeout")
             }
             let first = await group.next() ?? .failed("failed")

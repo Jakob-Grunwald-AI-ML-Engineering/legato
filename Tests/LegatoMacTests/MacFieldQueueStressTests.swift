@@ -420,6 +420,24 @@ private struct SeededRandom {
 }
 
 @MainActor @Suite struct MacFieldQueueStressTests {
+    @Test(arguments: [false, true], [0, 5])
+    func dictationBeforeExistingTextPreservesBothBoundaries(keys: Bool, caret: Int) async {
+        let original = "Keep intro."
+        let field = FakeAXField(original, rng: SeededRandom(279))
+        field.keys = keys
+        field.selection = .init(location: caret, length: 0)
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.live(runID: "spacing", version: 1, text: "Fresh")
+        await queue.whenIdle()
+        queue.live(runID: "spacing", version: 2, text: "Fresh Water", complete: true)
+        await queue.whenIdle()
+        let expected = caret == 0 ? "Fresh Water Keep intro." : "Keep Fresh Water intro."
+        #expect(field.string == expected)
+        #expect(await queue.undo())
+        #expect(field.string == original)
+    }
+
     private static let words = ["sail", "north", "wind", "harbor", "tide", "deck", "rope", "calm", "squall", "anchor"]
 
     /// One seeded session: a run grows word by word with revisions, then its cleanup lands; Magic rewrites a word; the
@@ -1182,7 +1200,7 @@ private struct SeededRandom {
         again.live(runID: "s", version: 2, text: "Ahoj")
         await again.whenIdle()
         field.settle(all: true)
-        #expect(field.string == "Ahojthe cat is here and the sea is calm today")
+        #expect(field.string == "Ahoj the cat is here and the sea is calm today")
         #expect(field.keysSent - keys == 2, "\(field.trail.suffix(12).joined(separator: "\n"))") // Backspace, "y"
         #expect(field.caretSets - sets == 2) // there and back
     }

@@ -506,3 +506,28 @@ extension DictationPipelineTests {
         #expect(pipeline.liveRun == nil && pipeline.takeLines == ["held"])
     }
 }
+
+@MainActor @Test func bufferedSnapshotsVersionGrowthFailureAndRetractionUnderOneRun() {
+    let pipeline = DictationPipeline(cleaner: StubCleaner(), sendMode: { .onStop })
+    var delivery = DictationDelivery(lineID: "take", sequence: 0, raw: "raw words", text: "Clean", cleaned: true, final: false, isTake: true)
+    let initial = pipeline.snapshot(for: delivery)
+    #expect(initial.text == "Clean")
+    #expect(initial.stopped == true)
+    #expect(!initial.complete)
+    #expect(pipeline.snapshot(for: delivery) == initial)
+    delivery.text = "Clean words."
+    let growth = pipeline.snapshot(for: delivery)
+    #expect(growth.runID == initial.runID)
+    #expect(growth.version == initial.version + 1)
+    delivery.failed = true
+    #expect(!pipeline.snapshot(for: delivery).complete)
+    delivery.retracted = true; delivery.final = true
+    let retraction = pipeline.snapshot(for: delivery)
+    #expect(retraction.text.isEmpty)
+    #expect(retraction.rawText == "raw words")
+    #expect(retraction.complete)
+    #expect(retraction.version > growth.version)
+    let replacement = pipeline.snapshot(for: .init(lineID: "retry", sequence: 1, raw: "raw words", text: "raw words", cleaned: false, isTake: true))
+    #expect(replacement.runID != retraction.runID)
+    #expect(replacement.text == "raw words")
+}

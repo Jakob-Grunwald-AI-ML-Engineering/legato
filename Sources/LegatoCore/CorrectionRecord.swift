@@ -115,9 +115,35 @@ public struct CorrectionTracker: Sendable {
 @MainActor public final class CorrectionCapture {
     public let store: CorrectionStore
     private var trackers: [CorrectionTracker] = []
+    private var pending: [String: (raw: String, text: String)] = [:]
+    private var ownWriteAt = Date.distantPast
+    private var keyAt = Date.distantPast
+    public enum UnmatchedSourcePolicy { case retain, discard }
+    public func watch(dictationID: String, raw: String, inserted: String) {
+        pending[dictationID] = (raw, inserted)
+    }
+    public func ownWrite(now: Date = Date()) { trackers = []; ownWriteAt = now }
+    public func userWrite(now: Date = Date()) { keyAt = now }
+    public func canObserve(now: Date = Date()) -> Bool { now.timeIntervalSince(ownWriteAt) >= 0.15 }
+    @discardableResult public func armPending(snapshot: String, platform: String, locale: String, isIdle: Bool,
+                                             unmatched: UnmatchedSourcePolicy) -> Int {
+        guard isIdle else { return 0 }
+        var armed = 0
+        for (id, source) in pending {
+            if arm(dictationID: id, raw: source.raw, inserted: source.text, snapshot: snapshot,
+                   platform: platform, locale: locale, isIdle: true) {
+                pending.removeValue(forKey: id); armed += 1
+            } else if unmatched == .discard { pending.removeValue(forKey: id) }
+        }
+        return armed
+    }
+    public func observeSettled(_ snapshot: String, now: Date = Date()) {
+        guard canObserve(now: now) else { return }
+        observe(snapshot, origin: now.timeIntervalSince(keyAt) < 2 ? .keyboard : .observedHost, now: now)
+    }
     public private(set) var lastError: String?
     public init(store: CorrectionStore) { self.store = store }
-    public func reset() { trackers = [] }
+    public func reset() { trackers = []; pending = [:]; ownWriteAt = .distantPast; keyAt = .distantPast }
     @discardableResult public func arm(dictationID: String, raw: String, inserted: String, snapshot: String, platform: String, locale: String, isIdle: Bool) -> Bool {
         guard isIdle else { return false }
         trackers.removeAll { $0.dictationID == dictationID || !$0.active }

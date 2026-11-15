@@ -66,15 +66,6 @@ final class LinkClient {
     }
 
     /// The cleaned dictation lines the app has not yet had acknowledged (`link.dictation`).
-    func readDictation() -> DictationPublication? { store.map { DictationLink(store: $0).read() } ?? nil }
-    func readDictationAck() -> DictationAck? { store.map { DictationLink(store: $0).acknowledged() } ?? nil }
-    /// Every line up to `ack.upTo` is typed or dropped; the app stops sending it.
-    func writeDictationAck(_ ack: DictationAck) {
-        guard let store else { return }
-        DictationLink(store: store).acknowledge(ack)
-    }
-
-    /// The live run the app wants in the field (`link.dictation.live`); nil when there is none.
     func readLiveDictation() -> LiveDictationSnapshot? { store.map { LiveDictationLink(store: $0).read() } ?? nil }
     /// What the keyboard applied of the live run. The app only logs it, so no note follows.
     func writeLiveDictationAck(_ ack: LiveDictationAck) {

@@ -169,6 +169,8 @@ public final class MacFieldQueue {
         /// Runs: the run text this region stands for, and the space put ahead of it.
         var source: [Character] = []
         var separator: [Character] = []
+        var following: Character?
+        var suffix: [Character] = []
         /// A region after the run's first starts at the user's caret: whitespace leading its words is the separator's job.
         var trimsLead = false
         var open: Bool
@@ -1144,11 +1146,15 @@ public final class MacFieldQueue {
         let previous = doc.context(before: start, 1).last
         let words = first ? runs[index].remainder : Array(runs[index].remainder.drop { $0.isWhitespace && !$0.isNewline })
         guard !words.isEmpty else { return false }
-        let separator = Array(PanelTake.separator(before: String(words), after: previous))
+        let separator = Array(FieldInsertion.separator(before: String(words), after: previous))
+        let following = doc.context(after: start + replaced.utf16.count, 1).first
+        let suffix = Array(FieldInsertion.trailingSeparator(after: String(words), before: following))
         let region = Region(id: UUID().uuidString, runID: runs[index].id, start: start, current: Array(replaced),
-                            desired: separator + words, open: true)
+                            desired: separator + words + suffix, open: true)
         region.source = runs[index].remainder
         region.separator = separator
+        region.following = following
+        region.suffix = suffix
         region.trimsLead = !first
         region.original = replaced
         refreshContext(region, doc)
@@ -1902,7 +1908,9 @@ public final class MacFieldQueue {
             let slice = Array(text[lower..<upper])
             region.source = slice
             if !region.lost {
-                region.desired = region.separator + (region.trimsLead ? Array(slice.drop { $0.isWhitespace && !$0.isNewline }) : slice)
+                let body = region.trimsLead ? Array(slice.drop { $0.isWhitespace && !$0.isNewline }) : slice
+                region.suffix = Array(FieldInsertion.trailingSeparator(after: String(body), before: region.following))
+                region.desired = region.separator + body + region.suffix
             }
             lower = upper
         }

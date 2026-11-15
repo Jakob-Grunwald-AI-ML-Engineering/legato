@@ -29,10 +29,8 @@ import LegatoKeyboardCore
     public var isActive: Bool { phase != .idle }
     @ObservationIgnored public let pipeline: DictationPipeline
     public let instruction: InstructionSession
-    public var speechMode: SpeechMode { modeSink.target }
-    @ObservationIgnored private let modeSink: SpeechModeSink
-    @ObservationIgnored private var finishingDictation: Task<Void, Never>?
-    @ObservationIgnored private var cutTimeout: Task<Void, Never>?
+    public var speechMode: SpeechMode { speechRoute.speechMode }
+    @ObservationIgnored private let speechRoute: DictationRouteSession
     @ObservationIgnored private var magicOwnsTake = false
     @ObservationIgnored public var onMagicBegin: @MainActor () -> Void = {}
     public static var offlineFixture: Bool {
@@ -42,7 +40,7 @@ import LegatoKeyboardCore
         false
         #endif
     }
-    @ObservationIgnored let engine: DictationEngine
+    var engine: DictationEngine { speechRoute.engine }
     @ObservationIgnored private let mic: any AudioSource
     @ObservationIgnored private let sonioxKey: @MainActor () -> String
     @ObservationIgnored private let claudeKey: @MainActor () -> Bool
@@ -63,7 +61,7 @@ import LegatoKeyboardCore
     @ObservationIgnored public var onDeliverySource: @MainActor (_ id: String, _ raw: String, _ text: String) -> Void = { _, _, _ in }
     /// Types one take that is still being cleaned (whole-take modes): `poll` returns its state as it grows; returns
     /// true when the take was left open because its cleanup failed (nothing more will come until the user chooses).
-    @ObservationIgnored public var deliverStream: (@MainActor (_ poll: @MainActor () -> DictationStreamState?) async -> Bool)?
+    @ObservationIgnored public var deliverStream: (@MainActor (_ poll: @MainActor () -> DictationSnapshotState?) async -> Bool)?
     /// Takes the stalled take's partial text back out of the field (Retry / Insert as-is).
     @ObservationIgnored public var retractStream: (@MainActor () async -> Void)?
     /// Before a session begins: let the field in front become readable (an app building its Accessibility tree).
@@ -84,26 +82,10 @@ import LegatoKeyboardCore
         self.pipeline = pipeline; mic = microphone; self.sonioxKey = sonioxKey; self.claudeKey = claudeKey
         self.warmConnection = warmConnection; self.settleTimeout = settleTimeout
         self.instruction = instruction ?? InstructionSession(vocabularyURL: vocabularyURL)
-        let modeSink = SpeechModeSink(dictation: pipeline)
-        self.modeSink = modeSink
-        engine = DictationEngine(sink: modeSink, sonioxKey: sonioxKey, makeSocket: makeSocket, vocabularyURL: vocabularyURL)
+        speechRoute = DictationRouteSession(sink: pipeline, instruction: self.instruction, sonioxKey: sonioxKey,
+                                           makeSocket: makeSocket, vocabularyURL: vocabularyURL)
         pipeline.onChange = { [weak self] in self?.drain() }
-        let instruction = self.instruction
-        modeSink.onInstructionLine = { instruction.hear($0) }
-        modeSink.onInstructionTail = { instruction.hearTail($0) }
-        modeSink.onTransition = { [weak self] transition in
-            if transition.to == .instruction {
-                instruction.begin()
-                self?.finishingDictation = Task { await pipeline.finishLiveRun() }
-            } else { instruction.end() }
-        }
-        instruction.beforeRun = { [weak self] in
-            if let task = self?.finishingDictation { await task.value }
-            else { await pipeline.finishLiveRun() }
-            self?.finishingDictation = nil
-            _ = await pipeline.settle(timeout: .seconds(3))
-            await self?.drainNow()
-        }
+        speechRoute.afterDictationSettled = { [weak self] in await self?.drainNow() }
     }
 
     /// Holds the Soniox connection and the Claude connection while the app runs and keys exist. Cheap to call
@@ -190,9 +172,7 @@ import LegatoKeyboardCore
             await engine.finalizeTake()
             await engine.waitForFinish(timeout: .seconds(3))
         }
-        cutTimeout?.cancel(); cutTimeout = nil
-        modeSink.flushCuts()
-        if modeSink.target == .instruction { modeSink.toggle(to: .dictation, cut: false) }
+        speechRoute.finishModes()
         _ = await pipeline.settle(timeout: settleTimeout)
         // The whole take (on stop, or what the pause timer has not sent yet) is cleaned and written once, here.
         // The cleanup bounds itself (a timeout per attempt, one retry); a failure leaves the raw text held for the user.
@@ -219,8 +199,7 @@ import LegatoKeyboardCore
         await mic.stop()
         audioTask?.cancel(); audioTask = nil
         await engine.abandonTake()
-        await modeSink.reset()
-        instruction.reset()
+        await speechRoute.reset()
         delivered = -1; stalled = nil
         phase = .idle
         ensureWarm()
@@ -263,20 +242,7 @@ import LegatoKeyboardCore
         else { setMagic(false) }
     }
     private func setMagic(_ enabled: Bool) {
-        let mode: SpeechMode = enabled ? .instruction : .dictation
-        let cut = !debugSession && engine.hasActiveTake
-        modeSink.toggle(to: mode, cut: cut)
-        guard cut else { return }
-        Task { [weak self] in
-            guard let self else { return }
-            if !(await engine.finalizeChunk()) { modeSink.flushCuts() }
-        }
-        cutTimeout?.cancel()
-        cutTimeout = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(2))
-            guard !Task.isCancelled else { return }
-            self?.modeSink.flushCuts()
-        }
+        speechRoute.setMagic(enabled, cut: !debugSession && engine.hasActiveTake)
     }
 
     // MARK: Delivery
@@ -298,7 +264,7 @@ import LegatoKeyboardCore
                 let sequence = next.sequence, pipeline = self.pipeline
                 let stalledHere = await deliverStream {
                     guard pipeline.sessionID == session, let entry = pipeline.outbox.first(where: { $0.sequence == sequence }) else { return nil }
-                    return .init(text: entry.text, isFinal: entry.final, stalled: entry.failed && !entry.final && !entry.retracted,
+                    return .init(snapshot: pipeline.snapshot(for: entry), stalled: entry.failed && !entry.final && !entry.retracted,
                                  retracted: entry.retracted)
                 }
                 if stalledHere { stalled = (session, sequence); continue }

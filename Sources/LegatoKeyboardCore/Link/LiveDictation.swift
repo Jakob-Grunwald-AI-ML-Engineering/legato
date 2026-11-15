@@ -47,6 +47,8 @@ public struct LiveSegment: Codable, Equatable, Sendable {
 public struct LiveDictationSnapshot: Codable, Equatable, Sendable {
     public var runID: String
     public var version: Int
+    /// Assembled once by the producer; adapters never reconstruct punctuation or spacing.
+    public var text: String
     public var segments: [LiveSegment]
     /// The take ended: every word is final. Cleanup may still land later (a higher `version`).
     public var complete: Bool
@@ -57,7 +59,18 @@ public struct LiveDictationSnapshot: Codable, Equatable, Sendable {
     public var rawText: String?
     public init(runID: String, version: Int, segments: [LiveSegment], complete: Bool = false, stopped: Bool? = nil, rawText: String? = nil) {
         self.runID = runID; self.version = version; self.segments = segments; self.complete = complete; self.stopped = stopped
-        self.rawText = rawText
+        self.rawText = rawText ?? LiveSegment.joined(segments.map { $0.raw ?? $0.text }); self.text = LiveSegment.joined(segments.map(\.text))
+    }
+    private enum CodingKeys: String, CodingKey { case runID, version, text, segments, complete, stopped, rawText }
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        runID = try values.decode(String.self, forKey: .runID)
+        version = try values.decode(Int.self, forKey: .version)
+        segments = try values.decode([LiveSegment].self, forKey: .segments)
+        text = try values.decodeIfPresent(String.self, forKey: .text) ?? LiveSegment.joined(segments.map(\.text))
+        complete = try values.decode(Bool.self, forKey: .complete)
+        stopped = try values.decodeIfPresent(Bool.self, forKey: .stopped)
+        rawText = try values.decodeIfPresent(String.self, forKey: .rawText)
     }
 }
 

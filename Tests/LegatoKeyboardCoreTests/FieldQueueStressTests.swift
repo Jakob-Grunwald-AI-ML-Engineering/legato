@@ -484,7 +484,7 @@ struct StressSession {
         // Nothing conflicted: the field holds exactly the text around the run.
         let chars = Array(initial)
         let before = String(chars[..<caret]), after = String(chars[caret...])
-        var typed = DictationTypist.prepare(target, contextBefore: before, capitalization: .none)
+        var typed = FieldInsertion.prepare(target, contextBefore: before, capitalization: .none)
         let closing: Set<Character> = [",", ".", ";", ":", "!", "?", ")", "]", "}", "%", "…", "\u{2019}", "\u{201D}"]
         if let next = after.first, !next.isWhitespace, !closing.contains(next), !typed.isEmpty { typed += " " }
         let expected = before + typed + after

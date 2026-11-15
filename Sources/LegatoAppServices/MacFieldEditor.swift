@@ -54,8 +54,6 @@ import LegatoMac
     public var journal: (@MainActor (MacEditJournal.Entry) -> Void)?
     public var correctionCapture: CorrectionCapture?
     private var correctionPoll: Task<Void, Never>?
-    private var correctionSources: [String: (raw: String, text: String)] = [:]
-    private var correctionOwnWriteAt = Date.distantPast
     private var correctionExpires = Date.distantPast
     public let panel = DictationPanel()
     public let history = FieldHistory()
@@ -96,7 +94,7 @@ import LegatoMac
     public init(capture: @escaping @MainActor () -> FocusedField) { self.capture = capture }
 
     public func begin() {
-        correctionCapture?.reset(); correctionSources = [:]
+        correctionCapture?.reset()
         sessionGeneration += 1
         retain(panel.take.text)
         panel.active = false; panel.take = PanelTake(); sessionEnded = false; panelOwned = true
@@ -155,8 +153,7 @@ import LegatoMac
         queue.journal = { [weak self] entry in
             guard let self else { return }
             if entry.kind == .sent, entry.text != nil {
-                correctionCapture?.reset()
-                correctionOwnWriteAt = Date()
+                correctionCapture?.ownWrite()
             }
             journal?(entry)
         }
@@ -168,12 +165,12 @@ import LegatoMac
                 try? await Task.sleep(for: .milliseconds(200))
                 guard !Task.isCancelled, let self else { return }
                 guard Date() <= correctionExpires, let target, target.isFocused(), !passwordField else {
-                    correctionCapture?.reset(); correctionSources = [:]; return
+                    correctionCapture?.reset(); return
                 }
-                guard !queue.hasWork, Date().timeIntervalSince(correctionOwnWriteAt) >= 0.15 else { continue }
+                guard !queue.hasWork, correctionCapture?.canObserve() == true else { continue }
                 armCorrections()
-                if let snapshot = correctionSnapshot() { correctionCapture?.observe(snapshot, origin: .observedHost) }
-                else { correctionCapture?.reset(); correctionSources = [:]; return }
+                if let snapshot = correctionSnapshot() { correctionCapture?.observeSettled(snapshot) }
+                else { correctionCapture?.reset(); return }
             }
         }
         queue.onDrop = { [weak self] drop in self?.dropped(drop) }
@@ -240,7 +237,7 @@ import LegatoMac
     public func focusChanged() { if target?.isFocused() == false { panelOwned = false } }
 
     public func beginInstruction() {
-        correctionCapture?.reset(); correctionSources = [:]
+        correctionCapture?.reset()
         // A Magic start binds the field in front now when it is not the bound one. A panel session keeps its words.
         // The same editor shown as a fresh element (a web page re-rendered it) stays bound, with its queue.
         if !queue.ensureFocused() {
@@ -256,7 +253,7 @@ import LegatoMac
     /// The source identity comes from the pipeline, even when its text was streamed through several queue ops.
     public func watchDelivery(id: String, raw: String, text: String) {
         guard !passwordField, !panel.active else { return }
-        correctionSources[id] = (raw, text)
+        correctionCapture?.watch(dictationID: id, raw: raw, inserted: text)
         if !queue.hasWork { armCorrections() }
     }
 
@@ -268,12 +265,9 @@ import LegatoMac
 
     private func armCorrections() {
         guard let snapshot = correctionSnapshot() else { return }
-        for (id, source) in correctionSources {
-            if correctionCapture?.arm(dictationID: id, raw: source.raw, inserted: source.text,
-                                       snapshot: snapshot, platform: "macOS", locale: Locale.current.identifier, isIdle: !queue.hasWork) == true {
-                correctionSources.removeValue(forKey: id)
-                correctionExpires = Date().addingTimeInterval(600)
-            }
+        if (correctionCapture?.armPending(snapshot: snapshot, platform: "macOS", locale: Locale.current.identifier,
+                                          isIdle: !queue.hasWork, unmatched: .retain) ?? 0) > 0 {
+            correctionExpires = Date().addingTimeInterval(600)
         }
     }
 
@@ -283,8 +277,7 @@ import LegatoMac
     public func enqueueLive(_ snapshot: LiveDictationSnapshot?) {
         guard let snapshot else { return }
         if snapshot.complete {
-            correctionSources[snapshot.runID] = (
-                snapshot.rawText ?? snapshot.segments.map { $0.raw ?? $0.text }.filter { !$0.isEmpty }.joined(separator: " "), Self.body(of: snapshot))
+            correctionCapture?.watch(dictationID: snapshot.runID, raw: snapshot.rawText ?? snapshot.text, inserted: Self.body(of: snapshot))
         }
         guard !retiredRunIDs.contains(snapshot.runID) else { return }
         seenRunIDs.insert(snapshot.runID)
@@ -307,7 +300,7 @@ import LegatoMac
     }
 
     private static func body(of snapshot: LiveDictationSnapshot) -> String {
-        snapshot.segments.map(\.text).filter { !$0.isEmpty }.joined(separator: " ")
+        snapshot.text
     }
 
     public func deliver(_ text: String) {
@@ -315,14 +308,17 @@ import LegatoMac
     }
 
     /// A take whose cleanup streams: each state of it goes to the queue as the run's newest text.
-    public func stream(_ poll: @MainActor () -> DictationStreamState?) async -> Bool {
+    public func stream(_ poll: @MainActor () -> DictationSnapshotState?) async -> Bool {
         if panel.active { return await streamInPanel(poll) }
-        let id = UUID().uuidString
+        guard let first = poll() else { return false }
+        let id = first.snapshot.runID
+        var initial: DictationSnapshotState? = first
         streamedRunID = id
         seenRunIDs.insert(id)
-        var version = 0
-        while let state = poll() {
-            version += 1
+        var version = first.snapshot.version
+        while let state = initial ?? poll() {
+            initial = nil
+            version = state.snapshot.version
             latestRunTexts[id] = state.text
             if state.retracted { _ = retractStreamed(); return false }
             if updateRecovery(id, text: state.text) {
@@ -406,9 +402,12 @@ import LegatoMac
     }
 
     /// Follows a take whose cleanup streams: the cleaned words replace the raw ones in the panel as they come.
-    private func streamInPanel(_ poll: @MainActor () -> DictationStreamState?) async -> Bool {
-        let id = UUID().uuidString
-        while let state = poll() {
+    private func streamInPanel(_ poll: @MainActor () -> DictationSnapshotState?) async -> Bool {
+        guard let first = poll() else { return false }
+        let id = first.snapshot.runID
+        var initial: DictationSnapshotState? = first
+        while let state = initial ?? poll() {
+            initial = nil
             panel.take.stream(id: id, text: state.text, final: state.isFinal || state.retracted, retracted: state.retracted)
             if state.isFinal || state.retracted { break }
             if state.stalled { return true }

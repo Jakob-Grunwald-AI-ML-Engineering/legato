@@ -1,0 +1,88 @@
+import Foundation
+import LegatoSoniox
+
+/// Shared speech-route ownership. Hosts supply capture and field settling; the route alone owns
+/// the engine, mode transitions and the cut that separates dictation from a spoken instruction.
+@MainActor final class DictationRouteSession {
+    let engine: DictationEngine
+    let instruction: InstructionSession
+    private let modeSink: SpeechModeSink
+    private let pipeline: DictationPipeline?
+    private var finishingDictation: Task<Void, Never>?
+    private var cutTimeout: Task<Void, Never>?
+    private var cutGeneration = 0
+    var afterDictationSettled: @MainActor () async -> Void = {}
+    var speechMode: SpeechMode { modeSink.target }
+
+    init(sink: any DictationRouteSink, instruction: InstructionSession,
+         sonioxKey: @escaping @MainActor () -> String,
+         makeSocket: @escaping @Sendable () -> any SonioxSocket, vocabularyURL: URL,
+         now: @escaping @MainActor () -> Double = { ProcessInfo.processInfo.systemUptime }) {
+        self.instruction = instruction
+        pipeline = sink as? DictationPipeline
+        modeSink = SpeechModeSink(dictation: sink)
+        engine = DictationEngine(sink: modeSink, sonioxKey: sonioxKey, makeSocket: makeSocket,
+                                 vocabularyURL: vocabularyURL, now: now)
+        modeSink.onInstructionLine = { instruction.hear($0) }
+        modeSink.onInstructionTail = { instruction.hearTail($0) }
+        modeSink.onTransition = { [weak self] transition in
+            guard let self else { return }
+            if transition.to == .instruction {
+                instruction.begin()
+                if let pipeline { finishingDictation = Task { await pipeline.finishLiveRun() } }
+            } else { instruction.end() }
+        }
+        if instruction.beforeRun == nil, pipeline != nil {
+            instruction.beforeRun = { [weak self] in await self?.settleBeforeInstruction() }
+        }
+    }
+
+    private func settleBeforeInstruction() async {
+        guard let pipeline else { return }
+        if let finishingDictation { await finishingDictation.value }
+        else { await pipeline.finishLiveRun() }
+        finishingDictation = nil
+        _ = await pipeline.settle(timeout: .seconds(3))
+        await afterDictationSettled()
+    }
+
+    func beginTake() { modeSink.beginTake() }
+
+    /// Whether audio is still arriving is a host fact (including replay); cut ordering is shared.
+    func setMagic(_ enabled: Bool, cut: Bool) {
+        let mode: SpeechMode = enabled ? .instruction : .dictation
+        guard mode != modeSink.target else { return }
+        modeSink.toggle(to: mode, cut: cut)
+        guard cut else { return }
+        cutGeneration += 1
+        let generation = cutGeneration
+        Task { [weak self] in
+            guard let self else { return }
+            if !(await engine.finalizeChunk()), generation == cutGeneration { modeSink.flushCuts() }
+        }
+        cutTimeout?.cancel()
+        cutTimeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled, let self, generation == cutGeneration else { return }
+            modeSink.flushCuts()
+        }
+    }
+
+    func finishModes() {
+        cancelCut()
+        modeSink.flushCuts()
+        if modeSink.target == .instruction { modeSink.toggle(to: .dictation, cut: false) }
+    }
+
+    func reset() async {
+        cancelCut()
+        finishingDictation?.cancel(); finishingDictation = nil
+        await modeSink.reset()
+        instruction.reset()
+    }
+
+    private func cancelCut() {
+        cutGeneration += 1
+        cutTimeout?.cancel(); cutTimeout = nil
+    }
+}
