@@ -50,6 +50,12 @@ final class KeyboardController {
         didSet { liveRecoveryNoticeAt = Date() }
     }
     @ObservationIgnored private var liveRecoveryNoticeAt = Date.distantPast
+    /// Dictated text the keyboard could not place, kept for Insert or Copy (one item, in the App Group).
+    private(set) var keptText: KeptText?
+    /// The word row shows the kept text with its buttons (right after keeping, or when the chip was tapped); after the
+    /// user's next keystroke the row returns to suggestions and a chip stands for it.
+    private(set) var keptRowOpen = false
+    @ObservationIgnored private let keptStore = UserDefaultsLinkStore().map { KeptTextStore(LinkStore($0)) }
     /// Up to three suggestions, best first; the word row shows them as "2 | 1 | 3" (``SuggestionSlots``).
     /// `SuggestionController` fills them.
     var suggestions: [String] = []
@@ -140,6 +146,7 @@ final class KeyboardController {
         } else if let root = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: LinkChannel.appGroupID) {
             correctionCapture = CorrectionCapture(store: CorrectionStore(root: root))
         }
+        keptText = keptStore?.read()
         typing = TypingModel(controller: self)
         wordRow = SuggestionController(controller: self)
     }
@@ -216,7 +223,11 @@ final class KeyboardController {
                     self.queue.cancelRun(runID)
                     self.handle(self.queue.drainEvents())
                     self.liveRecoveryDismissed = false
-                    self.liveRecoveryNotice = "Edits couldn't finish. Check Legato's History for the take."
+                    if let text = self.liveSnapshot?.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        self.keep(text)
+                    } else {
+                        self.liveRecoveryNotice = "Edits couldn't finish. Check Legato's History for the take."
+                    }
                     self.syncRowTakeover()
                 }
             }
@@ -234,6 +245,33 @@ final class KeyboardController {
         // Keys pressed from now on wait for the take's text already heard (#268).
         queue.takeStopped(snapshot.runID)
     }
+    /// Holds `text` the keyboard could not place and opens the row on it; it replaces the plain notice and any older item.
+    private func keep(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        keptText = keptStore?.keep(trimmed) ?? KeptText(text: trimmed)
+        keptRowOpen = true
+        liveRecoveryNotice = nil
+        syncRowTakeover()
+    }
+    func openKeptText() { if keptText != nil { keptRowOpen = true } }
+    func dismissKeptText() {
+        keptStore?.clear()
+        keptText = nil
+        keptRowOpen = false
+    }
+    /// Types the kept text at the caret, as one chunk through the queue's user lane.
+    func insertKeptText() {
+        guard let text = keptText?.text else { return }
+        dismissKeptText()
+        type(text)
+    }
+    func copyKeptText() {
+        guard fullAccess, let text = keptText?.text else { return }
+        UIPasteboard.general.string = text
+        dismissKeptText()
+    }
+
     func dismissLiveRecovery() {
         liveRecoveryDismissed = true
         liveRecoveryNotice = nil
@@ -840,12 +878,19 @@ final class KeyboardController {
                     }
 
                     // The take's final text could not stand whole in the field (the user typed or moved since, or the
-                    // field did not show it as typed): the field keeps what it has, the cleaned take is in History.
+                    // field did not show it as typed): the field keeps what it has, the take is kept in the row.
                     liveRecoveryDismissed = false
-                    liveRecoveryNotice = drop.runID == nil
-                        ? "Couldn't safely finish the interrupted edit."
-                        : "Kept as typed. The cleaned take is in Legato's History."
+                    if drop.runID != nil, !drop.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        keep(drop.text)
+                    } else {
+                        liveRecoveryNotice = drop.runID == nil
+                            ? "Couldn't safely finish the interrupted edit."
+                            : "Kept as typed. The cleaned take is in Legato's History."
+                    }
                     syncRowTakeover()
+                } else if drop.reason == .reset, drop.runID != nil, !drop.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // The field went away, the keyboard closed or the run was cancelled before its text stood in the field.
+                    keep(drop.text)
                 }
             case .liveApplied(let runID, let version, let complete):
                 if complete, let snapshot = liveSnapshot, snapshot.runID == runID {
@@ -954,7 +999,9 @@ final class KeyboardController {
             if snapshot.complete, !blockedLiveCompleted {
                 blockedLiveCompleted = true
                 link.writeLiveDictationAck(.init(runID: snapshot.runID, version: snapshot.version, complete: true, stats: liveStats, delivered: false))
-                if !liveRecoveryDismissed {
+                if !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    keep(snapshot.text)
+                } else if !liveRecoveryDismissed {
                     liveRecoveryNotice = "The full take is in Legato's History."
                     syncRowTakeover()
                 }
@@ -1005,6 +1052,10 @@ final class KeyboardController {
         liveSnapshot = nil
         setLiveRunning(false)
         guard pending else { return }
+        if snapshot.complete, !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            keep(snapshot.text)
+            return
+        }
         liveRecoveryDismissed = false
         liveRecoveryNotice = snapshot.complete ? "The full take is in Legato's History." : "Finish dictating; the take will be in Legato's History."
         syncRowTakeover()
@@ -2003,6 +2054,7 @@ final class KeyboardController {
     }
 
     private func beforeUserEdit() {
+        keptRowOpen = false
         dismissLiveRecovery()
         settleInstructionRow()
     }
