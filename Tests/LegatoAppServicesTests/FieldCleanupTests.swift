@@ -219,6 +219,28 @@ private final class FieldCleaner: SentenceCleaning {
         #expect(pipeline.fieldCleanupOutcome?.status == .cleaned)
     }
 
+    /// iPhone (#299): a sentence is cleaned when it ends, not only at the stop, and lands in the next gap between words.
+    @Test(arguments: [false, true])
+    func aSentenceIsCleanedWhenItEndsAndLandsInTheNextGap(perSentence: Bool) async {
+        let sentence = "teh boat waits near the harbour today."
+        let field = CleanupField(sentence)
+        let pipeline = DictationPipeline(cleaner: FieldCleaner(), supportsLive: true)
+        pipeline.attachCleanupField(field, duringPauses: true, waitsForLiveDelivery: true, perSentence: perSentence)
+        pipeline.beginTake()
+        await pipeline.receive(.init(sequence: 0, text: sentence, words: [], reason: "endpoint"))
+        if perSentence {
+            // Cleaned while the take runs: the result waits while speech goes on.
+            await awaitCleanupTest { field.reads == 1 }
+            #expect(field.edits.isEmpty)
+            pipeline.boundary("endpoint")
+            await awaitCleanupTest { field.text == "the boat waits near the harbour today." }
+            #expect(field.edits.count == 1)
+        } else {
+            try? await Task.sleep(for: .milliseconds(50))
+            #expect(field.reads == 0, "a short sentence waits for a full passage or the stop")
+        }
+    }
+
     @Test func missingFinalDeliveryTimesOutWithoutReadingOrEditingTheOldScope() async {
         let clock = VirtualClock()
         let field = CleanupField("teh old boat.")

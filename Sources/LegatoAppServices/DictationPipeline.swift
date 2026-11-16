@@ -161,6 +161,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     public var speechIsActive: Bool { voiceActive }
 
     @ObservationIgnored private var cleanupDuringPauses = false
+    /// Each sentence is cleaned when it ends (iPhone, #299), besides the pause passes and the stop's final pass.
+    @ObservationIgnored private var cleanupSentences = false
     @ObservationIgnored private var waitsForLiveDelivery = false
     @ObservationIgnored private var liveDeliveryAck: LiveDictationAck?
     @ObservationIgnored public var cleanupFieldAvailable: @MainActor () -> Bool = { true }
@@ -169,10 +171,14 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
 
     /// Production field hosts use the same field cleanup owner. Hosts without a readable field
     /// retain transcript cleanup (buffered delivery and panel-only integrations).
-    public func attachCleanupField(_ field: any InstructionField, duringPauses: Bool, waitsForLiveDelivery: Bool = false) {
+    /// `perSentence`: a sentence is cleaned as soon as it ends, with the sentence before it as context, and its result
+    /// lands in the next gap between words (`canApply`); the stop's final pass stays.
+    public func attachCleanupField(_ field: any InstructionField, duringPauses: Bool, waitsForLiveDelivery: Bool = false,
+                                   perSentence: Bool = false) {
         let cleanup = FieldCleanupSession()
         cleanup.field = field
         cleanupDuringPauses = duringPauses
+        cleanupSentences = perSentence
         self.waitsForLiveDelivery = waitsForLiveDelivery
         cleanup.awaitDelivery = { [weak self] in
             guard let self else { return false }
@@ -550,6 +556,9 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         publishLive(run)
         if let cleanup = fieldCleanup, cleanupFieldAvailable() {
             if run.complete { cleanup.request(final: true) }
+            // A sentence ended: it is cleaned now, not only at the stop. The field holds it (the queue types speech
+            // whole); its result waits for the next gap between words and goes in as targeted chunks.
+            else if cleanupSentences, unit != nil { cleanup.request(sentence: true) }
             return
         }
         for piece in pieces { await submitLive(piece.text, key: piece.key, run: run) }
