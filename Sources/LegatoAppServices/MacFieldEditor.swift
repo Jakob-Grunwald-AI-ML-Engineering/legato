@@ -564,11 +564,18 @@ import LegatoMac
         let after = context(range.end, MacFieldQueue.contextChars)
         readSelection = nil; readText = nil; readRange = nil
         let result = await queue.edit(.init(id: edit.id, range: range, scope: edit.scopeText, before: before, after: after,
-                                            target: edit.target, caretAfter: true))
+                                            target: edit.target, caretAfter: edit.cursorAtEnd))
         switch result {
         case .applied(let landed):
-            instructionCursor = UTF16Range(location: landed.end, length: 0)
-            return .init(id: edit.id, applied: true, cursor: edit.target.utf16.count)
+            // The queue rebases the user's caret through the exact confirmed changes.
+            // Report that actual position, rather than inventing the scope's end for Undo.
+            guard let actual = try? target.selectedRange(), actual.length == 0,
+                  actual.location >= landed.location, actual.location <= landed.end else {
+                instructionCursor = nil // a moved/selected/unreadable caret cannot anchor this Undo
+                return .init(id: edit.id, applied: true)
+            }
+            instructionCursor = actual
+            return .init(id: edit.id, applied: true, cursor: actual.location - landed.location)
         case .stopped:
             return .init(id: edit.id, applied: false,
                          reason: "Editing stopped. Some changes may remain in the field; check it before retrying.",

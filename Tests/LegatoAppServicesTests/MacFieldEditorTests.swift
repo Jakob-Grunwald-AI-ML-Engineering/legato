@@ -237,6 +237,76 @@ import LegatoMac
         #expect(target.value == "Hello. user")
         #expect(target.selection == .init(location: 11, length: 0))
     }
+    @Test(arguments: ["BLUE BOAT.", "blue sailing boat.", "boat."])
+    func unselectedInstructionPreservesCaretBeforePunctuationAndUndo(targetText: String) async throws {
+        let target = EditorTarget("blue boat.", .init(location: 9, length: 0))
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.begin(); editor.beginInstruction()
+        let read = try await editor.read(.context, instructionID: "caret", reading: {})
+        let edit = ScopedEdit(instructionID: "caret", documentID: read.documentID,
+                              before: read.above, after: read.below, target: targetText)
+        let ack = await editor.apply(edit)
+        #expect(ack?.applied == true)
+        #expect(target.value == targetText)
+        #expect(target.selection == .init(location: targetText.utf16.count - 1, length: 0))
+        #expect(ack?.cursor == targetText.utf16.count - 1)
+        let undo = ScopedEditPlanner.undo(of: edit, cursor: try #require(ack?.cursor))
+        #expect(await editor.apply(undo)?.applied == true)
+        #expect(target.value == "blue boat.")
+        #expect(target.selection == .init(location: 9, length: 0))
+    }
+
+    @Test func lengthChangingScopedInstructionPreservesTheRebasedUserCaretAndUndo() async throws {
+        let target = EditorTarget("Header: blue boat.", .init(location: 17, length: 0))
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.begin(); editor.beginInstruction()
+        let read = try await editor.read(.context, instructionID: "rebase-caret", reading: {})
+        target.value = "Note: Header: blue boat."; target.selection = .init(location: 23, length: 0)
+        editor.relinquish()
+        let edit = ScopedEdit(instructionID: "rebase-caret", documentID: read.documentID,
+                              before: "blue boat", after: ".", target: "blue sailing boat.")
+        let ack = await editor.apply(edit)
+        #expect(ack?.applied == true)
+        #expect(target.value == "Note: Header: blue sailing boat.")
+        #expect(target.selection == .init(location: 31, length: 0))
+        #expect(ack?.cursor == 17)
+        let undo = ScopedEditPlanner.undo(of: edit, cursor: try #require(ack?.cursor))
+        #expect(await editor.apply(undo)?.applied == true)
+        #expect(target.value == "Note: Header: blue boat.")
+        #expect(target.selection == .init(location: 23, length: 0))
+    }
+
+    @Test func cursorOutsideTheAppliedScopeCannotAnchorAFabricatedUndo() async throws {
+        let target = EditorTarget("Header: blue boat.", .init(location: 17, length: 0))
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.begin(); editor.beginInstruction()
+        let read = try await editor.read(.context, instructionID: "outside-caret", reading: {})
+        target.selection = .init(location: 0, length: 0); editor.relinquish()
+        let edit = ScopedEdit(instructionID: "outside-caret", documentID: read.documentID,
+                              before: "blue boat", after: ".", target: "BLUE BOAT.")
+        let ack = await editor.apply(edit)
+        #expect(ack?.applied == true)
+        #expect(ack?.cursor == nil)
+        #expect(target.selection == .init(location: 0, length: 0))
+        let fabricated = ScopedEditPlanner.undo(of: edit, cursor: edit.target.utf16.count)
+        #expect(await editor.apply(fabricated)?.applied == false)
+        #expect(target.value == "Header: BLUE BOAT.")
+        #expect(target.selection == .init(location: 0, length: 0))
+    }
+
+    @Test func unselectedInstructionAcknowledgesRebasedCaretWithUnicodePrefix() async throws {
+        let target = EditorTarget("🐈 blue boat.", .init(location: 12, length: 0))
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.begin(); editor.beginInstruction()
+        let read = try await editor.read(.context, instructionID: "unicode-caret", reading: {})
+        let edit = ScopedEdit(instructionID: "unicode-caret", documentID: read.documentID,
+                              before: read.above, after: read.below, target: "🐈 BLUE BOAT.")
+        let ack = await editor.apply(edit)
+        #expect(ack?.applied == true)
+        #expect(target.selection == .init(location: 12, length: 0))
+        #expect(ack?.cursor == 12)
+    }
+
     @Test func selectedInstructionAndUndoTouchExactlyTheirVerifiedScope() async throws {
         let target = EditorTarget("Before 🐈 after", .init(location: 7, length: 2))
         let editor = MacFieldEditor(capture: { .target(target) })
@@ -247,6 +317,8 @@ import LegatoMac
         let ack = await editor.apply(edit)
         #expect(ack?.applied == true)
         #expect(target.value == "Before cat after")
+        #expect(target.selection == .init(location: 10, length: 0))
+        #expect(ack?.cursor == 3)
         let undo = ScopedEditPlanner.undo(of: edit, cursor: try #require(ack?.cursor))
         #expect(await editor.apply(undo)?.applied == true)
         #expect(target.value == "Before 🐈 after")

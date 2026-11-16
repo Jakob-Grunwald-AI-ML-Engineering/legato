@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "sourceBase": "e305ca171514b4e84b1bddab1b15b8db4c71534e",
+  "sourceSHA256": {
+    "Sources/LegatoAppServices/MacFieldEditor.swift": "9cea960347ff3b4d3cb93db1f9081bc88919058be2ba5668b2f7fa5bdad40bda",
+    "Sources/LegatoKeyboardCore/Link/InstructionLink.swift": "d1cd37800bb60075185ccc0fc65b391ca569cd2bfdaecda475add31efa819892",
+    "Tests/LegatoAppServicesTests/MacFieldEditorTests.swift": "b2da0c6cb6a36452e757f535339c9812beeb7e88e393e33f275ea277273b08c2"
+  },
+  "runtimeDylibSHA256": "29794208e3c718fddc928f8d6fe1605f72dabefd88749b84dd4ba787c4ee5025",
+  "mode": "isolatedsignedofflinefixture,existinginputtapon,noprovider/microphonecalls",
+  "observations": [
+    {
+      "step": "before-period",
+      "cursorUTF16": 9,
+      "text": "blue boat.",
+      "range": [
+        10,
+        9
+      ]
+    },
+    {
+      "step": "uppercase-before-period",
+      "cursorUTF16": 9,
+      "text": "BLUE BOAT.",
+      "range": [
+        10,
+        9
+      ]
+    },
+    {
+      "step": "length-change",
+      "cursorUTF16": 16,
+      "text": "BRIGHT BLUE BOAT.",
+      "range": [
+        17,
+        16
+      ]
+    },
+    {
+      "step": "length-undo",
+      "cursorUTF16": 9,
+      "text": "BLUE BOAT.",
+      "range": [
+        10,
+        9
+      ]
+    },
+    {
+      "step": "typed-marker",
+      "cursorUTF16": 10,
+      "text": "BLUE BOATx.",
+      "range": [
+        11,
+        10
+      ]
+    }
+  ],
+  "checks": {
+    "MacFieldEditorTests": "49passed",
+    "macBuild": "passed",
+    "strictSignature": "passed"
+  },
+  "cleanup": "ownfixturecancelledtoidleandexited;onlynamedownTextEditdocumentclosed;preexistingwindowsandinstalledappuntouched",
+  "friction": "InitialdirectAXrangeassignmentwasignored;excludedthatattemptandusednativeEnd/Leftthenverifiedbefore-periodbaseline."
+}
