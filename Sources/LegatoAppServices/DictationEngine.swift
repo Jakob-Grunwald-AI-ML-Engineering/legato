@@ -36,7 +36,17 @@ import LegatoVocabulary
     /// The scripted stream of `debugReplay` while it runs.
     @ObservationIgnored private var replaying: SonioxClient?
     @ObservationIgnored private var replayTask: Task<Void, Error>?
+    /// A token-only replay runs (no PCM): its recorded endpoints stand for the pauses, the only evidence there is, and
+    /// the microphone's audio (if any) is not the replayed speaker's.
+    @ObservationIgnored private var replayWithoutAudio = false
     #endif
+    /// An endpoint is a pause when the activity gate admits it, or in a token-only replay.
+    private func admitsPause(_ reason: String) -> Bool {
+        #if DEBUG || LEGATO_INTERNAL
+        if replayWithoutAudio { return reason == "endpoint" }
+        #endif
+        return activity.boundary(reason)
+    }
     /// Every live tail (the owner's latency probe or HUD).
     @ObservationIgnored public var onTail: (@MainActor (String) -> Void)?
 
@@ -99,7 +109,12 @@ import LegatoVocabulary
 
     /// Audio goes out in order; a take whose stream dropped continues on the next held connection.
     public func send(_ pcm: Data) async {
-        if activity.receive(pcm) { sink.speechActivity() }
+        #if DEBUG || LEGATO_INTERNAL
+        let gated = !replayWithoutAudio
+        #else
+        let gated = true
+        #endif
+        if gated, activity.receive(pcm) { sink.speechActivity() }
         backlog.append(pcm)
         if backlog.count > 100 { backlog.removeFirst(backlog.count - 100) }
         await flush()
@@ -190,7 +205,7 @@ import LegatoVocabulary
             await deliver(words: words, reason: reason, remainingTail: remainingTail)
         case .asrBoundary:
             if case .string(let reason) = event.payload["reason"],
-               reason == "finalize" || reason == "finished" || activity.boundary(reason) { sink.boundary(reason) }
+               reason == "finalize" || reason == "finished" || admitsPause(reason) { sink.boundary(reason) }
         case .asrRawTail:
             let text = (try? event.payload["text"]?.decode(String.self)) ?? ""
             tail = text
@@ -218,6 +233,7 @@ import LegatoVocabulary
         try Task.checkCancellation()
         let client = SonioxClient(room: room, config: SonioxConfig(mode: "Dictation"), quietFailure: .always)
         replaying = client
+        replayWithoutAudio = pcm == nil
         let task = Task { @MainActor in
             do {
                 try await client.startDebug()
@@ -255,7 +271,7 @@ import LegatoVocabulary
         }
         replayTask = task
         defer {
-            if replayTask == task { replayTask = nil; replaying = nil }
+            if replayTask == task { replayTask = nil; replaying = nil; replayWithoutAudio = false }
         }
         try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
@@ -265,7 +281,7 @@ import LegatoVocabulary
         guard let task = replayTask else { return }
         task.cancel()
         _ = await task.result
-        if replayTask == task { replayTask = nil; replaying = nil }
+        if replayTask == task { replayTask = nil; replaying = nil; replayWithoutAudio = false }
     }
 
     /// Debug bridge: a finalized line enters exactly where a Soniox segment does (the sink).

@@ -198,12 +198,31 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             #endif
             let cleaner = DictationTakeCleaner(cleaner: client, timeout: self.takeTimeout ?? { DictationTakeLimits.timeout(characters: $0) })
             let terms = Array(await self.loadTerms().prefix(200))
-            let clean: @MainActor (String) async -> String? = { part in
-                let result = await cleaner.clean(.init(takeID: UUID().uuidString, text: part,
-                    vocabulary: terms, fieldDocument: true))
-                if case .cleaned(let text) = result { return text }
-                if case .unavailable = result { return part }
-                return nil
+            var calls = 0
+            let attempt: @MainActor (String) async -> FieldCleanupChunks.Attempt = { part in
+                // The whole text gets the retry; its halves after a rejection one call each.
+                let result = await cleaner.clean(.init(takeID: UUID().uuidString, text: part, vocabulary: terms, fieldDocument: true),
+                                                 attempts: calls == 0 ? 2 : 1)
+                calls += 1
+                switch result {
+                case .cleaned(let text): return .cleaned(text)
+                case .unavailable: return .cleaned(part)
+                case .failed(let reason): return reason == "rejected" ? .rejected : .failed(reason)
+                }
+            }
+            // A guard rejection concerns part of the text: that part stays as typed, the rest is cleaned.
+            let clean: @MainActor (String) async -> String? = { [weak cleanup] part in
+                calls = 0
+                let split = await FieldCleanupChunks.cleanSplitting(part, using: attempt)
+                if split.calls > 1 || split.keptRaw > 0 {
+                    self.diagnostics?("field.cleanup.split", ["calls": split.calls, "keptRaw": split.keptRaw,
+                                                              "landed": { if case .cleaned = split.result { true } else { false } }()])
+                }
+                switch split.result {
+                case .cleaned(let text): return text
+                case .rejected: cleanup?.cleanFailure = "rejected"; return nil
+                case .failed(let reason): cleanup?.cleanFailure = reason; return nil
+                }
             }
             return final ? await clean(text) : await FieldCleanupChunks.clean(text, using: clean)
         }

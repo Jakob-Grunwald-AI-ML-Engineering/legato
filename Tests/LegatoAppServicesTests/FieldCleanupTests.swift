@@ -241,6 +241,63 @@ private final class FieldCleaner: SentenceCleaning {
         }
     }
 
+    /// iPhone (#299 device run): the read is the keyboard's shadow (bounded), and speech goes on while the model works.
+    /// The sentence's result still lands in the gap, the words typed meanwhile stay, and the pass is logged.
+    @Test func aSentenceLandsAroundSpeechTypedDuringItsCleanupInABoundedField() async {
+        let field = CleanupField("Earlier text. teh boat waits near the harbour today.")
+        field.complete = false
+        let pipeline = DictationPipeline(cleaner: FieldCleaner(), supportsLive: true)
+        pipeline.attachCleanupField(field, duringPauses: true, waitsForLiveDelivery: true, perSentence: true)
+        var events: [[String: Any]] = []
+        pipeline.diagnostics = { event, fields in if event == "field.cleanup" { events.append(fields) } }
+        pipeline.beginTake()
+        await pipeline.receive(.init(sequence: 0, text: "teh boat waits near the harbour today.", words: [], reason: "endpoint"))
+        await awaitCleanupTest { field.reads == 1 }
+        // The next sentence's words go in while the model works and before the gap.
+        field.text += " And then"; field.cursor = field.text.count
+        pipeline.boundary("endpoint")
+        await awaitCleanupTest { field.text == "Earlier text. the boat waits near the harbour today. And then" }
+        let landed = events.first { $0["status"] as? String == "cleaned" }
+        #expect(landed?["sentence"] as? Bool == true)
+        #expect(landed?["moved"] as? Bool == true)
+        #expect(landed?["modelMs"] is Int)
+    }
+
+    @Test func aCleanupTheModelRefusedIsKeptAsTypedAndSaysWhy() async {
+        let field = CleanupField("teh boat waits near the harbour today.")
+        field.complete = false
+        let session = FieldCleanupSession()
+        session.field = field
+        var events: [[String: Any]] = []
+        var status: CleanupFieldStatus?
+        session.diagnostics = { _, fields in events.append(fields) }
+        session.onResult = { _, _, result in status = result }
+        session.clean = { _, _ in session.cleanFailure = "rejected"; return nil }
+        session.request(final: true)
+        await session.settle()
+        #expect(status == .keptAsTyped)
+        #expect(events.last?["status"] as? String == "modelFailed")
+        #expect(events.last?["reason"] as? String == "rejected")
+        #expect(field.edits.isEmpty)
+    }
+
+    @Test func aRejectedTakeKeepsOnlyTheRefusedSentenceRaw() async {
+        let source = "Um, the review moved to Tuesday. We meet so um sechs Uhr there. Uh, bring the slides."
+        var calls: [String] = []
+        let split = await FieldCleanupChunks.cleanSplitting(source) { text in
+            calls.append(text)
+            if text.contains("um sechs") { return .rejected }
+            return .cleaned(text.replacingOccurrences(of: "Um, t", with: "T").replacingOccurrences(of: "Uh, b", with: "B"))
+        }
+        #expect(split.result == .cleaned("The review moved to Tuesday. We meet so um sechs Uhr there. Bring the slides."))
+        #expect(split.keptRaw == 1)
+        #expect(split.calls == calls.count)
+        let failed = await FieldCleanupChunks.cleanSplitting(source) { _ in .failed("timeout") }
+        #expect(failed.result == .failed("timeout") && failed.calls == 1, "a timeout is not split")
+        let single = await FieldCleanupChunks.cleanSplitting("We meet so um sechs Uhr.") { _ in .rejected }
+        #expect(single.result == .rejected)
+    }
+
     @Test func missingFinalDeliveryTimesOutWithoutReadingOrEditingTheOldScope() async {
         let clock = VirtualClock()
         let field = CleanupField("teh old boat.")

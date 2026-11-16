@@ -69,14 +69,71 @@ public enum FieldCleanupChunks {
             let overlapStart = oldStarts.isEmpty ? output.endIndex : oldStarts[max(0, oldStarts.count - overlap)]
             let input = String(output[overlapStart...]) + source[lower..<upper]
             guard !Task.isCancelled, let result = await clean(input) else { return nil }
-            // Providers trim boundary spaces. Keep existing separators so chunk joins cannot
-            // swallow a list break or glue words together. Interior formatting belongs to cleanup.
-            let lead = String(input.prefix(while: \.isWhitespace))
-            let trail = String(input.reversed().prefix(while: \.isWhitespace).reversed())
-            let joined = lead.isEmpty && trail.isEmpty ? result : lead + result.trimmingCharacters(in: .whitespacesAndNewlines) + trail
-            output = String(output[..<overlapStart]) + joined
+            output = String(output[..<overlapStart]) + keepingSeparators(of: input, around: result)
             consumed = end
         }
         return output
+    }
+
+    /// Providers trim boundary spaces. Keep existing separators so joins cannot swallow a list break or glue words
+    /// together. Interior formatting belongs to cleanup.
+    static func keepingSeparators(of input: String, around result: String) -> String {
+        let lead = String(input.prefix(while: \.isWhitespace))
+        let trail = String(input.reversed().prefix(while: \.isWhitespace).reversed())
+        return lead.isEmpty && trail.isEmpty ? result : lead + result.trimmingCharacters(in: .whitespacesAndNewlines) + trail
+    }
+
+    /// One cleanup call's answer.
+    public enum Attempt: Sendable, Equatable {
+        case cleaned(String)
+        /// The result failed the guard (`DictationTakeGuard`): it concerns some part of the text.
+        case rejected
+        /// No result (timeout, provider error): splitting would not help.
+        case failed(String)
+    }
+
+    /// A text whose cleanup the guard rejected is cleaned again in two halves split at a sentence end, each on its own,
+    /// down to single sentences; a sentence the guard still rejects stays as it was. So one refused sentence (a German
+    /// "um" before a time, say) keeps only itself raw, not the whole take. `.cleaned` when at least one part was
+    /// cleaned; otherwise the first answer's failure. `calls` counts the cleanup calls made.
+    @MainActor public static func cleanSplitting(_ source: String, using clean: (String) async -> Attempt)
+        async -> (result: Attempt, calls: Int, keptRaw: Int) {
+        var calls = 0, keptRaw = 0
+        func part(_ text: String) async -> (text: String, cleaned: Bool)? {
+            calls += 1
+            switch await clean(text) {
+            case .cleaned(let result): return (result, true)
+            case .failed: return nil
+            case .rejected:
+                guard !Task.isCancelled, let cut = sentenceCut(in: text) else { keptRaw += 1; return (text, false) }
+                let left = String(text[..<cut]), right = String(text[cut...])
+                guard let a = await part(left), let b = await part(right) else { return nil }
+                return (keepingSeparators(of: left, around: a.text) + keepingSeparators(of: right, around: b.text), a.cleaned || b.cleaned)
+            }
+        }
+        calls += 1
+        let first = await clean(source)
+        guard case .rejected = first, let cut = sentenceCut(in: source) else { return (first, calls, 0) }
+        let left = String(source[..<cut]), right = String(source[cut...])
+        guard let a = await part(left), let b = await part(right) else { return (.rejected, calls, keptRaw) }
+        guard a.cleaned || b.cleaned else { return (.rejected, calls, keptRaw) }
+        return (.cleaned(keepingSeparators(of: left, around: a.text) + keepingSeparators(of: right, around: b.text)), calls, keptRaw)
+    }
+
+    /// The sentence end nearest the middle of `text` (after its punctuation and the space that follows), nil for one
+    /// sentence. The cut lies at the start of the space, so each half keeps its own separators.
+    static func sentenceCut(in text: String) -> String.Index? {
+        var cuts: [String.Index] = []
+        var i = text.startIndex
+        while i < text.endIndex {
+            let next = text.index(after: i)
+            if ".!?".contains(text[i]), next < text.endIndex, text[next].isWhitespace,
+               text[next...].contains(where: { !$0.isWhitespace }), text[..<next].contains(where: \.isLetter) {
+                cuts.append(next)
+            }
+            i = next
+        }
+        let middle = text.count / 2
+        return cuts.min { abs(text.distance(from: text.startIndex, to: $0) - middle) < abs(text.distance(from: text.startIndex, to: $1) - middle) }
     }
 }

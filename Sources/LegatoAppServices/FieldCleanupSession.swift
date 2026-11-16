@@ -11,6 +11,8 @@ import LegatoKeyboardCore
     /// Cross-process speech delivery must settle before either scope read. This wait owns no field lease.
     public var awaitDelivery: @MainActor () async -> Bool = { true }
     public var clean: @MainActor (String, Bool) async -> String? = { _, _ in nil }
+    /// Why the last `clean` call gave nil (`timeout`, `failed`, `rejected`): set by the `clean` closure, for diagnostics.
+    public var cleanFailure: String?
     public var onResult: @MainActor (String, String, CleanupFieldStatus) async -> Void = { _, _, _ in }
     public var diagnostics: (@MainActor (String, [String: Any]) -> Void)?
     private var task: Task<Void, Never>?
@@ -74,65 +76,98 @@ import LegatoKeyboardCore
         return true
     }
 
+    /// One `field.cleanup` diagnostic per pass, whatever its end: counts and timings, never text.
+    private func report(_ status: String, final: Bool, sentence: Bool, repass: Bool = false, started: ContinuousClock.Instant,
+                        _ extra: [String: Any] = [:]) {
+        var fields: [String: Any] = ["final": final, "sentence": sentence, "repass": repass, "status": status,
+                                     "ms": Self.ms(since: started)]
+        fields.merge(extra) { _, new in new }
+        diagnostics?("field.cleanup", fields)
+    }
+
+    private static func ms(since start: ContinuousClock.Instant) -> Int {
+        let parts = start.duration(to: .now).components
+        return Int(parts.seconds * 1000 + parts.attoseconds / 1_000_000_000_000_000)
+    }
+
     private func pass(final: Bool, sentence: Bool = false, pending: String, repass: Bool, generation token: Int) async {
         guard let field else { return }
         lastApplied = false
         let id = UUID().uuidString
         requestID = id
+        let started = ContinuousClock.now
+        func log(_ status: String, _ extra: [String: Any] = [:]) {
+            report(status, final: final, sentence: sentence, repass: repass, started: started, extra)
+        }
         defer { field.cancel(instructionID: id); if requestID == id { requestID = nil } }
         do {
             guard await deliveryReady(final: final, source: "", generation: token) else { return }
             let reply = try await field.read(.cleanup, instructionID: id, reading: {})
             guard token == generation, !Task.isCancelled else { return }
             guard reply.state == .done, reply.selection?.isEmpty != false else {
-                await onResult("", "", .undelivered); return
+                log("readRefused"); await onResult("", "", .undelivered); return
             }
             let baseline = reply.above + reply.below
             let insertion = FieldInsertion.prepare(pending, contextBefore: reply.above, capitalization: .none)
             let following = insertion.isEmpty ? "" : FieldInsertion.trailingSeparator(after: insertion, before: reply.below.first)
             let source = reply.above + insertion + following + reply.below
             guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  final || source != lastRead else { return }
+                  final || source != lastRead else { log("unchanged"); return }
             let complete = reply.stop == .start && reply.stopBelow == .start
             let start = final ? source.startIndex : coverage.start(in: source, documentID: reply.documentID, complete: complete)
             let passage = String(source[start...])
-            guard final || sentence || FieldCleanupChunks.wordStarts(in: passage).count >= FieldCleanupChunks.words else { return }
+            let words = FieldCleanupChunks.wordStarts(in: passage).count
+            guard final || sentence || words >= FieldCleanupChunks.words else { log("short", ["words": words]); return }
             lastRead = source
+            cleanFailure = nil
+            let modelStarted = ContinuousClock.now
             let cleaned = await clean(passage, final)
+            let modelMs = Self.ms(since: modelStarted)
             guard token == generation, !Task.isCancelled else { return }
             guard let cleaned else {
+                log("modelFailed", ["reason": cleanFailure ?? "failed", "modelMs": modelMs, "words": words, "sourceChars": source.count])
                 await onResult(source, baseline, pending.isEmpty ? .keptAsTyped : .undelivered)
                 return
             }
             let target = String(source[..<start]) + cleaned
             // A provider may finish after speech resumes. Keep its result until a pause, but never
             // hold up the incoming words or apply against a different read after a reset.
+            let waitStarted = ContinuousClock.now
             while !canApply(), token == generation, !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(20))
             }
+            let gapMs = Self.ms(since: waitStarted)
             guard token == generation, !Task.isCancelled else { return }
-            // Re-read just before applying: existing shared three-way merge keeps user changes
-            // and accepts only cleanup changes in untouched words. Bounded windows cannot prove
-            // common document extent, so they require an exact match instead.
+            // Re-read just before applying: the shared three-way merge keeps every change made since the read (the
+            // user's, and speech typed meanwhile) and accepts cleanup changes only in untouched words.
             guard await deliveryReady(final: final, source: source, generation: token) else { return }
             let fresh = try await field.read(.cleanup, instructionID: id, reading: {})
             guard token == generation, !Task.isCancelled else { return }
             guard fresh.state == .done, fresh.documentID == reply.documentID, fresh.draftID == reply.draftID, fresh.selection?.isEmpty != false else {
-                await onResult(source, "", .undelivered); return
+                log("rereadRefused", ["modelMs": modelMs, "gapMs": gapMs]); await onResult(source, "", .undelivered); return
             }
             let current = fresh.above + fresh.below
             // Sending can clear a host field without changing its document ID. An empty
             // successor is no longer this cleanup's draft, including buffered speech not
             // yet inserted. Adapters also supply draftID to catch clear-then-type races.
             guard !current.isEmpty || baseline.isEmpty else {
-                await onResult(source, "", .undelivered); return
+                log("draftCleared", ["modelMs": modelMs, "gapMs": gapMs]); await onResult(source, "", .undelivered); return
             }
             let whole = reply.stop == .start && reply.stopBelow == .start && fresh.stop == .start && fresh.stopBelow == .start
-            guard current == baseline || whole else { await onResult(source, current, pending.isEmpty ? .keptAsTyped : .undelivered); return }
-            let merged = String(FieldMerge.rebase(base: Array(baseline), kept: Array(current), incoming: Array(target)).text)
+            // A bounded read (the iPhone's shadow) is merged too when the text before the cleaned passage still opens the
+            // field as read: both reads then start at the same place, and what changed since (speech typed during the model
+            // call, a key) is the field's. Buffered words still to be inserted need the read exactly.
+            let sameStart = pending.isEmpty && current.hasPrefix(source[..<start])
+            guard current == baseline || whole || sameStart else {
+                log("fieldChanged", ["modelMs": modelMs, "gapMs": gapMs, "sourceChars": source.count, "currentChars": current.count])
+                await onResult(source, current, pending.isEmpty ? .keptAsTyped : .undelivered); return
+            }
+            let merge = FieldMerge.rebase(base: Array(baseline), kept: Array(current), incoming: Array(target))
+            let merged = String(merge.text)
             if current == merged {
                 lastApplied = pending.isEmpty
                 if pending.isEmpty { coverage.confirm(proposed: target, actual: current, documentID: fresh.documentID, complete: whole) }
+                log("noChange", ["modelMs": modelMs, "gapMs": gapMs, "mergeDropped": merge.dropped])
                 await onResult(source, current, pending.isEmpty ? .keptAsTyped : .undelivered)
                 return
             }
@@ -149,12 +184,13 @@ import LegatoKeyboardCore
             }
             let status: CleanupFieldStatus = ack?.applied == true ? (target == source ? .keptAsTyped : .cleaned) : ack?.stopped == true || ack == nil ? .undelivered : .keptAsTyped
             await onResult(source, ack?.applied == true ? merged : ack?.partial ?? current, status)
-            diagnostics?("field.cleanup", ["final": final, "sourceChars": source.count, "targetChars": target.count, "status": status.rawValue,
-                                           "repass": repass, "unplaceable": ack?.unplaceable == true])
+            log(status.rawValue, ["sourceChars": source.count, "targetChars": target.count, "unplaceable": ack?.unplaceable == true,
+                                  "applied": ack?.applied == true, "modelMs": modelMs, "gapMs": gapMs, "mergeDropped": merge.dropped,
+                                  "moved": current != baseline])
         } catch {
             guard token == generation, !Task.isCancelled else { return }
+            log("readFailed")
             await onResult("", "", .undelivered)
-            diagnostics?("field.cleanup", ["final": final, "status": "readFailed"])
         }
     }
 }

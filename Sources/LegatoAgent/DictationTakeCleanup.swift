@@ -71,9 +71,10 @@ public struct DictationTakeCleaner: Sendable {
         self.cleaner = cleaner; self.timeout = timeout
     }
 
-    public func clean(_ input: DictationTakeInput) async -> DictationTakeCleanupResult {
+    /// `attempts`: calls before giving up (a failed, timed-out or rejected attempt is retried).
+    public func clean(_ input: DictationTakeInput, attempts: Int = 2) async -> DictationTakeCleanupResult {
         var reason = "failed"
-        for _ in 0..<2 {
+        for _ in 0..<max(1, attempts) {
             if Task.isCancelled { break }
             switch await attempt(input) {
             case .cleaned(let text) where DictationTakeGuard.accepts(raw: input.text, cleaned: text): return .cleaned(text)
