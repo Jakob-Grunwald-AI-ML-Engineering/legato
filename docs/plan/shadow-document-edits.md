@@ -89,7 +89,7 @@ Dictation with cleanup should now feel immediate: a cleaned sentence replaces th
 
 ## State handed over
 
-- Branch `feat/iphone-field-edits`, draft PR #298. Build `55fdcbd` is on the phone (speech types while the selection is unverified; trace of queue holds in the edit journal). Jakob finds it generally good but cleanup slow and some edits wrong, which this plan addresses.
+- PR #298 (`feat/iphone-field-edits`) carries everything up to this plan. Build `55fdcbd` is on the phone (speech types while the selection is unverified; trace of queue holds in the edit journal). Jakob finds it generally good but cleanup slow and some edits wrong, which this plan addresses.
 - Not verified on the device: the aborted-delete recovery path (`c915d7f`), which is covered by tests built from a device journal.
 - Open in #298, lower priority: Safari autocorrect on a dictated word sends that Mac run to the pill; a stale Mac pill stays until dismissed; the Mac gets no automatic re-pass after an unplaceable cleanup; after a real Select All the dictated text starts with a space and a lowercase letter.
-- **Open question for Jakob:** land #298 first and build this on a new branch on top (recommended), or fold it into #298.
+- Jakob chose to land #298 first (2026-11-16). Build this on a new branch from `main`.
