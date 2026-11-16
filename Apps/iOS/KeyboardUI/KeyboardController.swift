@@ -720,7 +720,8 @@ final class KeyboardController {
                 journal.write(entry)
                 lastJournaledReport = report
             }
-            if case .send = action { noteHold(nil) } else if !queue.isIdle {
+            // Waiting for a confirmation between ops is the queue's normal pace: only a held queue is worth a line.
+            if case .send = action { noteHold(nil) } else if !queue.isIdle, queue.hasUnverifiedInput {
                 noteHold("queue", detail: "unverifiedInput=\(queue.hasUnverifiedInput) paused=\(queue.paused) \(queue.debugState)")
             }
             handle(events)
