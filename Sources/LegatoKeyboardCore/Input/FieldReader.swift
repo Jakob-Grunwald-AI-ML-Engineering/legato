@@ -37,6 +37,9 @@ public extension FieldWindowProxy {
 /// The read stops at the nearest structural stop above the cursor (the field's start, a quote header, quoted lines,
 /// a signature delimiter), at `cap` characters, or after one block for `read_more`.
 @MainActor public struct FieldReader {
+    /// How long a walk waits after each of its own moves before it reads (kept, see `docs/field-editing.md`): a walk
+    /// verifies every window by two identical reads, so it reads the host after a move, never the proxy's echo.
+    public nonisolated static let walkSettleMs = 45
     public enum Limit: Sendable, Equatable {
         /// One block (`read_more`): a paragraph group of at most `blockLimit` new characters.
         case block

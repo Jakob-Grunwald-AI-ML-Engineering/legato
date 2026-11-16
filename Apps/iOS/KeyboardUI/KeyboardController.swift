@@ -459,9 +459,10 @@ final class KeyboardController {
         #endif
         if !isFieldBusy {
             let idleMs = lastStepAt.map { Self.milliseconds(ContinuousClock.now - $0) } ?? 0
-            queue.externalContextChanged(report: currentReport, hasText: document.hasText, elapsedSinceLastStepMs: idleMs)
+            observeIdentity()
+            queue.observe(currentReport, callback: .text, hasText: document.hasText, elapsedSinceLastStepMs: idleMs)
         }
-        documentDidChange()
+        documentDidChange(callback: true)
     }
 
     func selectionDidChange() {
@@ -471,12 +472,31 @@ final class KeyboardController {
         #endif
         if !isFieldBusy {
             let idleMs = lastStepAt.map { Self.milliseconds(ContinuousClock.now - $0) } ?? 0
-            queue.externalSelectionChanged(report: currentReport, hasText: document.hasText, elapsedSinceLastStepMs: idleMs)
+            observeIdentity()
+            queue.observe(currentReport, callback: .selection, hasText: document.hasText, elapsedSinceLastStepMs: idleMs)
         }
-        documentDidChange()
+        documentDidChange(callback: true)
     }
 
-    func documentDidChange() {
+    /// The bound field reports a new document identity: the same field when its report shows the shadow (Notes and
+    /// Safari issue a new identity when a field becomes empty, WhatsApp once with no visible cause; `FieldQueue.observe`).
+    /// Then the queue, its history and the take stay; otherwise `syncQueueField` starts over as for a new field.
+    private func observeIdentity() {
+        let id = document.documentID
+        guard let bound = queueDocumentID, id != nil, id != bound, queue.seeded else { return }
+        let observation = queue.observe(currentReport, callback: .identity, hasText: document.hasText)
+        handle(queue.drainEvents())
+        guard observation != .seam else { return }
+        queueDocumentID = id
+        if lastDocumentID == bound { lastDocumentID = id }
+        if liveDocumentID == bound { liveDocumentID = id }
+        var entry = EditJournal.Entry(t: Self.uptimeMs, kind: .field, field: id)
+        entry.reason = "identity-kept"
+        entry.detail = "\(observation)"
+        journal.write(entry)
+    }
+
+    func documentDidChange(callback: Bool = false) {
         #if DEBUG || LEGATO_INTERNAL
         if probeLease != nil, document.documentID != probeFieldID || document.isSecureTextEntry { endFieldProbe() }
         #endif
@@ -491,7 +511,7 @@ final class KeyboardController {
         refreshTraits()
         typing.documentChanged()
         trackContext()
-        pump()
+        pump(callback: callback)
     }
 
     /// A new field starts over (no history, no row); a cursor move or text change the keyboard didn't make
@@ -559,6 +579,8 @@ final class KeyboardController {
 
     // MARK: Field queue
 
+    @ObservationIgnored private var draftRecheck: Task<Void, Never>?
+
     /// Animation-only and bounded cursor-read polling retain their existing cadence.
     /// Active field work checks every 5 ms; confirmations and host settlement remain the queue's responsibility.
     private static let tickInterval = Duration.milliseconds(33)
@@ -583,6 +605,19 @@ final class KeyboardController {
             return
         }
         guard draftHadText else { return }
+        // An empty field in the same instant as the keyboard's own op is that op's (a move to the text's start): the
+        // observer looks again once the check's deadline passed (#299, task 9).
+        let idleMs = lastStepAt.map { Self.milliseconds(ContinuousClock.now - $0) } ?? 0
+        guard let cleared = queue.observesClearedDraft(currentReport, hasText: false, elapsedSinceLastStepMs: idleMs) else {
+            draftRecheck?.cancel()
+            draftRecheck = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(Int(FieldQueue.checkDeadlineMs)))
+                guard !Task.isCancelled, let self, !self.isTornDown else { return }
+                self.observeDraftBoundary()
+            }
+            return
+        }
+        guard cleared else { return }
         draftHadText = false
         draftID = UUID().uuidString
         fieldOperationCancelled = true
@@ -603,6 +638,7 @@ final class KeyboardController {
     /// The queue belongs to the field the keyboard edits now: a new field starts it over (what was pending for the old
     /// one is dropped and reported), and its settings follow the field.
     private func syncQueueField() {
+        observeIdentity()
         let id = document.documentID
         if id != queueDocumentID {
             // A take still going that typed nothing yet goes to the field the user is in now, at its caret (as on the Mac).
@@ -622,11 +658,9 @@ final class KeyboardController {
                 enqueue(rebound)
             }
         }
-        queue.config.animated = !UIAccessibility.isReduceMotionEnabled
         queue.config.movesByCharacters = charactersField != nil && charactersField == id
         queue.config.capitalization = autocapitalization
         queue.config.canReadAround = true
-        queue.config.deleteConfirmationMs = FieldQueue.transitMs
         queue.config.prioritizeSpeech = true
     }
 
@@ -695,7 +729,9 @@ final class KeyboardController {
 
     /// Steps the queue against the field's report and carries out the op it hands over. Not reentrant (the field's
     /// change notes during an op come back here); paused while a walk reads the field.
-    private func pump() {
+    /// `callback`: called for a host callback (`textDidChange`, `selectionDidChange`); the first step's report comes with
+    /// it. The ticker's and the queue's own reads are not callbacks (a chunk's check waits for its move's callback).
+    private func pump(callback: Bool = false) {
         guard !pumping else { return }
         guard !isTornDown, isVisible, !isFieldBusy, !queue.ownsRead, document.documentID != nil, !document.isSecureTextEntry else {
             noteHold(isTornDown ? "tornDown" : !isVisible ? "hidden" : isReadingField ? "reading" : isNudging ? "nudging"
@@ -710,9 +746,10 @@ final class KeyboardController {
         let now = ContinuousClock.now
         var elapsed = lastStepAt.map { Self.milliseconds(now - $0) } ?? 0
         lastStepAt = now
-        for _ in 0..<8 {
+        // A chunk's ops go out back to back within one pump: hops, a delete run, an insert, the hop back.
+        for iteration in 0..<16 {
             let report = currentReport
-            let action = queue.step(report: report, elapsedMs: elapsed)
+            let action = queue.step(report: report, elapsedMs: elapsed, callback: callback && iteration == 0)
             elapsed = 0
             let events = queue.drainEvents()
             if report != lastJournaledReport || !events.isEmpty {
@@ -790,8 +827,6 @@ final class KeyboardController {
                 if kind == .reseeded { liveStats.drifts += 1; liveStats.lastDrift = kind.rawValue }
                 trace?("queue resync=\(kind.rawValue)")
                 if kind == .recoveryRequested { beginQueueRecovery() }
-            case .nudged:
-                break
             case .applied(let id, _):
                 if let completion = editCompletions.removeValue(forKey: id) { completion(event) }
             case .dropped(let drop):
@@ -1236,7 +1271,7 @@ final class KeyboardController {
 
     /// A reader that knows what earlier reads found out about this field.
     private func reader(for field: String?) -> FieldReader {
-        FieldReader(settleMilliseconds: Int(FieldQueue.moveSettleMs), collapsesBreaks: field != nil && collapsingField == field ? true : nil,
+        FieldReader(settleMilliseconds: FieldReader.walkSettleMs, collapsesBreaks: field != nil && collapsingField == field ? true : nil,
                     movesByCharacters: field != nil && charactersField == field ? true : nil)
     }
 
@@ -1270,7 +1305,7 @@ final class KeyboardController {
         let step = backward ? -units : units
         let moved = (before: backward ? String(origin.before.dropLast()) : origin.before + String(character),
                      after: backward ? String(character) + origin.after : String(origin.after.dropFirst()))
-        func settle() async { await Task.detached { try? await Task.sleep(for: .milliseconds(Int(FieldQueue.moveSettleMs))) }.value }
+        func settle() async { await Task.detached { try? await Task.sleep(for: .milliseconds(FieldReader.walkSettleMs)) }.value }
         func shows(_ window: (before: String, after: String)) -> Bool {
             FieldMatch.confirms(expectedBefore: window.before, expectedAfter: window.after,
                                 reportedBefore: shown(document.contextBefore), reportedAfter: shown(document.contextAfter))
@@ -1460,7 +1495,7 @@ final class KeyboardController {
         fieldOperationCancelled = true
         forgetLiveRun()
         resetQueue(reason: "probe-ended")
-        queue.externalSelectionChanged(report: currentReport)
+        queue.observe(currentReport, callback: .selection)
         sessionSpan.broken(); fieldRead = nil
         if isVisible { documentDidChange() }
     }
@@ -1721,7 +1756,7 @@ final class KeyboardController {
             return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The instruction was cancelled before editing."))
         }
         let queued = FieldQueue.Edit(id: edit.id, kind: .magic, before: edit.before, after: edit.after, selected: edit.selected,
-                                     target: edit.target, cursorAtEnd: edit.cursorAtEnd, paced: true, readID: edit.instructionID)
+                                     target: edit.target, cursorAtEnd: edit.cursorAtEnd, readID: edit.instructionID)
         let started = Date()
         let outcome: FieldQueue.Event? = await withCheckedContinuation { continuation in
             magicEditIDs[edit.id] = edit.instructionID
@@ -1746,7 +1781,7 @@ final class KeyboardController {
             }
             let inverse = FieldQueue.Edit(kind: .undo, before: newBefore,
                 after: String(decoding: Array(edit.target.utf16.dropFirst(cursor)), as: UTF16.self),
-                target: edit.scopeText, cursorAtEnd: false, paced: true)
+                target: edit.scopeText, cursorAtEnd: false)
             queue.history.recordScoped(forward: forward, inverse: inverse)
             syncHistory()
 
@@ -2185,7 +2220,7 @@ final class KeyboardController {
     }
     func pause(milliseconds: Int) async {
         // Restoration still needs real host turns when the requesting task was cancelled.
-        await Task.detached { try? await Task.sleep(for: .milliseconds(max(milliseconds, Int(FieldQueue.moveSettleMs)))) }.value
+        await Task.detached { try? await Task.sleep(for: .milliseconds(max(milliseconds, FieldReader.walkSettleMs))) }.value
     }
 }
 
@@ -2208,6 +2243,6 @@ final class KeyboardController {
     }
     func pause(milliseconds: Int) async {
         // Restoration still needs real host turns when the requesting task was cancelled.
-        await Task.detached { try? await Task.sleep(for: .milliseconds(max(milliseconds, Int(FieldQueue.moveSettleMs)))) }.value
+        await Task.detached { try? await Task.sleep(for: .milliseconds(max(milliseconds, FieldReader.walkSettleMs))) }.value
     }
 }
