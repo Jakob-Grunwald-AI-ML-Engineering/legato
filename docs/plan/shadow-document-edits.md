@@ -1,6 +1,6 @@
 # Shadow-document edits: fast chunked field writing
 
-Status: **go given 2026-11-16; measurements done (except Safari contenteditable), see `docs/field-editing.md`.** Written 2026-11-16 at the end of the PR #298 session so a fresh session can execute it. Nothing here is implemented.
+Status: **iPhone tasks implemented on `feat/shadow-document-edits` (2026-11-16): 2, 3, 4, 5, 6, 9, 10; package tests green, signed device build compiles; device acceptance pending.** Task 7 (Mac) runs separately; task 8 (word row) is open. Measurements done (except Safari contenteditable). The rule set and the kept list are in `docs/field-editing.md` ("The edit model", "Kept, with reasons"). Task 9: no clear in the same instant as a move shows in the `fresh-phone-uat` or `recheck-phone-uat` journals; the observer's deadline guards it. Open: a tap inside the landing window of two chunks on a host with stale reports after a tap (known limit in `docs/field-editing.md`).
 
 ## Goal and scope
 
