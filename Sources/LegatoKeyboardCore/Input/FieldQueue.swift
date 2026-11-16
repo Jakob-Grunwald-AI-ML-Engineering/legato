@@ -502,7 +502,7 @@ public struct FieldQueue: Sendable {
     private mutating func requestRecoveryIfNeeded() {
         guard !hasUnverifiedInput else { return }
         // Dictation never looks around: its pieces are edited only at the caret.
-        guard config.canReadAround, recoveryRequest == nil, !(config.prioritizeSpeech && isSpeaking) else { return }
+        guard config.canReadAround, recoveryRequest == nil, !prioritizesSpeech else { return }
         let pieces = Set(runs.flatMap { $0.pieces.map(\.spanID) })
         let targets = spans.sorted { $0.key < $1.key }.compactMap { id, span -> FieldRecovery.Target? in
             guard span.parked, !span.anchor, !span.userChanged, !span.edited, !span.lastText.isEmpty, !pieces.contains(id) else { return nil }
@@ -663,17 +663,21 @@ public struct FieldQueue: Sendable {
     // MARK: Inspection
 
     public var isSpeaking: Bool { runs.contains { !$0.stopped && !$0.complete && $0.speaking } }
+    /// Quiet audio permits revisions only after every heard append has reached the field.
+    private var prioritizesSpeech: Bool {
+        config.prioritizeSpeech && (isSpeaking || runs.contains(where: rawAppendPending))
+    }
 
     public var isIdle: Bool {
         recoveryRequest == nil && strayInsertion == nil && tapRace == nil && inFlight == nil && unit == nil && swap == nil
-            && userLane.isEmpty && (editLane.isEmpty || config.prioritizeSpeech && isSpeaking)
+            && userLane.isEmpty && (editLane.isEmpty || prioritizesSpeech)
             && !runs.contains(where: { runNeedsWork($0) || ackDue($0) })
     }
     public var hasUserInput: Bool { !userLane.isEmpty }
     /// The keyboard's own writes still to land (a unit, queued edits, dictation): a read for an instruction waits for
     /// them, so its scope already shows them.
     public var hasOwnWork: Bool {
-        unit != nil || swap != nil || (!editLane.isEmpty && !(config.prioritizeSpeech && isSpeaking)) || runs.contains(where: { runNeedsWork($0) })
+        unit != nil || swap != nil || (!editLane.isEmpty && !prioritizesSpeech) || runs.contains(where: { runNeedsWork($0) })
     }
     public var hasOpInFlight: Bool { inFlight != nil }
     /// Nothing in flight and the caret at the user's cursor: the field is as the user left it, as far as the queue goes.
@@ -824,6 +828,12 @@ public struct FieldQueue: Sendable {
     /// One step against the field's report: at most one op to carry out.
     public mutating func step(report: Report, elapsedMs: Double) -> Action {
         guard !ownsRead else { return .wait }
+        if config.prioritizeSpeech {
+            // Delivery metadata is independent of the OS operation in flight. See the newest heard tail before
+            // admitting more background work, even when the route already reports quiet audio.
+            for ri in runs.indices { applyPending(ri) }
+            if prioritizesSpeech, let request = recoveryRequest { deferRecovery(request) }
+        }
         coordinator.advance(elapsedMs)
         stepElapsedMs = elapsedMs
         if let request = recoveryRequest {
@@ -1097,7 +1107,7 @@ public struct FieldQueue: Sendable {
         // Nothing of the keyboard's own starts, and no jump goes out, on a model the field's report does not show at the
         // caret (another field's report can fit it elsewhere): it waits, and a report that holds still so reseeds.
         let shown = lastReport.map(consistent) ?? true
-        if config.prioritizeSpeech, isSpeaking, case .edit(_, .edit)? = unit?.owner {
+        if prioritizesSpeech, case .edit(_, .edit)? = unit?.owner {
             // Finish the issued op first (the barrier above), then return to the speaking head. The edit is
             // replanned from confirmed text when dictation stops, never replayed from its old cursor offsets.
             abortUnit()
@@ -1116,8 +1126,9 @@ public struct FieldQueue: Sendable {
         guard shown else { return .wait }
         // The caret away from the user's cursor with nothing under way (an edit's unit or a walk that stopped): it goes back.
         if cursor != userCursor, userLost == nil { return send(.move(units(to: userCursor)), lane: .edit, moveTo: userCursor) }
-        if config.prioritizeSpeech, isSpeaking {
-            if let action = nextLive() { return action }
+        if prioritizesSpeech {
+            if let action = nextLiveAppend() { return action }
+            for ri in runs.indices { ack(ri) }
             return .idle
         }
         if let action = nextEdit() { return action }
@@ -1273,6 +1284,7 @@ public struct FieldQueue: Sendable {
     }
 
     private mutating func nextEdit() -> Action? {
+        guard !prioritizesSpeech else { return nil }
         var index = 0
         while index < editLane.count {
             var state = editLane[index]
@@ -1621,21 +1633,54 @@ public struct FieldQueue: Sendable {
         return from
     }
 
+    private func liveRevision(for piece: Piece) -> LiveRevision? {
+        if let queued = editLane.first(where: { $0.spanID == piece.spanID && $0.revision != nil })?.revision { return queued }
+        if case .edit(let state, _)? = unit?.owner, state.spanID == piece.spanID { return state.revision }
+        return nil
+    }
+
+    private func rawAppendPending(_ run: LiveRun) -> Bool {
+        if untypedRest(of: run) != nil { return true }
+        guard let piece = run.pieces.last(where: { $0.tEnd == nil }), let span = spans[piece.spanID],
+              !span.parked, !span.userChanged, !span.edited, span.end == userCursor else { return false }
+        if let revision = liveRevision(for: piece) {
+            // A confirmed deletion in a partial correction is not newly missing speech. Only words beyond
+            // that revision's original delivered frontier can interrupt it as a raw append.
+            return run.delivered.count > revision.through
+        }
+        return !heldAppend(piece, in: run, span: span).isEmpty
+    }
+
+    /// Raw appends share the ordinary verified writer, but never wait behind a paused cleanup's remaining hunks.
+    private mutating func nextLiveAppend() -> Action? {
+        for ri in runs.indices where rawAppendPending(runs[ri]) {
+            if let piece = runs[ri].pieces.last(where: { $0.tEnd == nil }), liveRevision(for: piece) != nil {
+                closeOpenPieces(.edit, ri: ri, freeze: false)
+            }
+            if let action = typeOpenPiece(ri) { return action }
+            if let action = startUntypedRest(ri) { return action }
+        }
+        return nil
+    }
+
+    private mutating func startUntypedRest(_ ri: Int) -> Action? {
+        guard let from = untypedRest(of: runs[ri]) else { return nil }
+        guard reportStableMs >= Self.stableMs || !config.animated else { return .wait }
+        // The piece starts at the user's cursor (a reseed can leave the caret away from it).
+        if cursor != userCursor { return send(.move(units(to: userCursor)), lane: .live, moveTo: userCursor) }
+        if let action = liveStart(ri) { return action }
+        let anchor = String(text[max(0, userCursor - 200)..<userCursor])
+        unit = Unit(ops: [.startRegion(run: runs[ri].runID, tStart: from, anchor: anchor)], owner: .space, paced: false)
+        return nextInUnit()
+    }
+
     private mutating func nextLive() -> Action? {
         for ri in runs.indices { applyPending(ri) }
         for ri in runs.indices {
             if let action = settleFinal(ri) { return action }
             if runs[ri].complete, runs[ri].settledVersion == runs[ri].version, let action = separateFollowingText(ri) { return action }
             if let action = typeOpenPiece(ri) { return action }
-            if let from = untypedRest(of: runs[ri]) {
-                guard reportStableMs >= Self.stableMs || !config.animated else { return .wait }
-                // The piece starts at the user's cursor (a reseed can leave the caret away from it).
-                if cursor != userCursor { return send(.move(units(to: userCursor)), lane: .live, moveTo: userCursor) }
-                if let action = liveStart(ri) { return action }
-                let anchor = String(text[max(0, userCursor - 200)..<userCursor])
-                unit = Unit(ops: [.startRegion(run: runs[ri].runID, tStart: from, anchor: anchor)], owner: .space, paced: false)
-                return nextInUnit()
-            }
+            if let action = startUntypedRest(ri) { return action }
             if !runs[ri].speaking, let action = revisePieces(ri) { return action }
             ack(ri)
         }
@@ -1895,11 +1940,7 @@ public struct FieldQueue: Sendable {
             if freezes { runs[ri].userActed = true }
             guard let pi = runs[ri].pieces.lastIndex(where: { $0.tEnd == nil }) else { continue }
             let piece = runs[ri].pieces[pi]
-            let queuedRevision = editLane.first(where: { $0.spanID == piece.spanID && $0.revision != nil })?.revision
-            let activeRevision: LiveRevision?
-            if case .edit(let state, _)? = unit?.owner, state.spanID == piece.spanID { activeRevision = state.revision }
-            else { activeRevision = nil }
-            if let revision = queuedRevision ?? activeRevision {
+            if let revision = liveRevision(for: piece) {
                 // A partial revision is not missing speech. Preserve the delivered frontier it began with;
                 // later appended words still start after the user's input, exactly once.
                 runs[ri].pieces[pi].tEnd = revision.through

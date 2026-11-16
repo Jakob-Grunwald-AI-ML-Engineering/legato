@@ -57,6 +57,95 @@ import Testing
         #expect(rig.field.string.contains("the unchanged words keep going"))
     }
 
+    @Test(arguments: [false, true], [false, true])
+    func quietRawSpeechTailPreemptsPacedCleanupWithoutLosingTheUsersSpace(cleanupAlreadyEditing: Bool, completeTail: Bool) throws {
+        let prefix = "Protected note. "
+        let spoken = Array(repeating: "the old boat waits near the harbour", count: 3).joined(separator: " ")
+        var field = FakeField(prefix); field.hostDelays = true
+        field.rng = SeededGenerator(seed: 7)
+        var rig = QueueRig(field, config: .init(animated: true, prioritizeSpeech: true))
+        rig.tickMs = 8
+        rig.queue.enqueue(snap(1, spoken))
+        let initial = rig.drain(); #expect(initial)
+        rig.queue.enqueue(.insert(" "))
+        let keyed = rig.drain(); #expect(keyed)
+        let cleanup = FieldQueue.Edit(id: "pause-cleanup", kind: .magic, before: spoken,
+                                      target: spoken.capitalized, cursorAtEnd: false, paced: true)
+        if cleanupAlreadyEditing {
+            rig.queue.setSpeaking(false, runID: "r")
+            rig.queue.enqueue(cleanup)
+            let start = rig.sent.count
+            while !rig.sent.dropFirst(start).contains(where: { $0.op == .deleteBackward(1) }), rig.clockMs < 20_000 { rig.tick() }
+            try #require(rig.sent.dropFirst(start).contains { $0.op == .deleteBackward(1) })
+            rig.queue.enqueue(snap(2, spoken + " corrected.", complete: completeTail))
+        } else {
+            rig.queue.enqueue(snap(2, spoken + " corrected.", complete: completeTail))
+            let start = rig.sent.count
+            while !rig.sent.dropFirst(start).contains(where: { $0.op == .insert("t") }), rig.clockMs < 20_000 { rig.tick() }
+            try #require(rig.sent.dropFirst(start).contains { $0.op == .insert("t") })
+            rig.queue.setSpeaking(false, runID: "r")
+            rig.queue.enqueue(cleanup)
+        }
+        let requested = rig.clockMs
+        var firstVisibleAt: Double?, completeVisibleAt: Double?
+        let initiallyVisible = String(rig.field.string.split(separator: " ", omittingEmptySubsequences: false).last ?? "")
+        var observedCount = "corrected.".hasPrefix(initiallyVisible) ? initiallyVisible.count : 0
+        var lastProgress = requested, longestGap = 0.0
+        while rig.clockMs - requested < FieldQueue.responsivenessTargetMs + FieldQueue.confirmLimitMs {
+            rig.tick()
+            let visible = String(rig.field.string.split(separator: " ", omittingEmptySubsequences: false).last ?? "")
+            if "corrected.".hasPrefix(visible), visible.count > observedCount {
+                if firstVisibleAt == nil { firstVisibleAt = rig.clockMs }
+                longestGap = max(longestGap, rig.clockMs - lastProgress)
+                lastProgress = rig.clockMs; observedCount = visible.count
+                if visible == "corrected." { completeVisibleAt = rig.clockMs; break }
+            }
+        }
+        let tail = rig.sent.first { $0.ms >= requested && $0.op == .insert(".") }
+        #expect(tail != nil)
+        #expect((tail?.ms ?? .infinity) - requested < FieldQueue.responsivenessTargetMs)
+        #expect((firstVisibleAt ?? .infinity) - requested < FieldQueue.responsivenessTargetMs)
+        #expect(longestGap < FieldQueue.responsivenessTargetMs)
+        #expect(completeVisibleAt != nil)
+        if !cleanupAlreadyEditing {
+            #expect((completeVisibleAt ?? .infinity) - requested < FieldQueue.responsivenessTargetMs,
+                    "The recorded mid-word ed. suffix must reach actual host truth within the target")
+        }
+        print("quiet-tail active=\(cleanupAlreadyEditing) complete=\(completeTail) first-visible-ms=\((firstVisibleAt ?? .infinity) - requested) longest-gap-ms=\(longestGap) full-tail-ms=\((completeVisibleAt ?? .infinity) - requested)")
+        let finished = rig.drain(); #expect(finished)
+        #expect(rig.field.string == prefix + spoken.capitalized + " corrected.")
+        #expect(String(zip(rig.field.text, rig.field.origin).filter { $0.1 == .user }.map(\.0)) == " ")
+        #expect(!rig.field.deletions.contains { $0.origin == .initial && $0.by != .outside })
+        #expect(rig.field.caret == rig.field.userCaret)
+        // The complete take can retain the existing notice that the user's Space changed its field context.
+        #expect(rig.drops.allSatisfy { $0.runID == "r" && $0.reason == .userEdited })
+    }
+
+    @Test func newRawWordsPreemptAPartialRevisionWithoutReplayingItsDeletedLetters() throws {
+        var field = FakeField(""); field.hostDelays = true
+        field.rng = SeededGenerator(seed: 7)
+        var rig = QueueRig(field, config: .init(animated: true, prioritizeSpeech: true))
+        rig.tickMs = 8
+        let old = "the red boat waits at the harbour"
+        let revised = "the blue boat waits at the harbour"
+        rig.queue.enqueue(snap(1, old)); let initial = rig.drain(); #expect(initial)
+        rig.queue.enqueue(snap(2, revised)); rig.queue.setSpeaking(false, runID: "r")
+        let edits = rig.sent.count
+        while !rig.sent.dropFirst(edits).contains(where: { $0.op == .deleteBackward(1) }), rig.clockMs < 10_000 { rig.tick() }
+        try #require(rig.sent.dropFirst(edits).contains { $0.op == .deleteBackward(1) })
+        let requested = rig.clockMs
+        rig.queue.enqueue(snap(3, revised + " now"))
+        rig.run(ms: FieldQueue.responsivenessTargetMs)
+        let word = rig.sent.first { $0.ms >= requested && $0.op == .insert("w") }
+        #expect(word != nil)
+        #expect((word?.ms ?? .infinity) - requested < FieldQueue.responsivenessTargetMs)
+        #expect(rig.field.string.hasSuffix(" now"))
+        let finished = rig.drain(); #expect(finished)
+        #expect(rig.field.string == revised + " now")
+        #expect(rig.field.caret == rig.field.userCaret)
+        #expect(rig.drops.isEmpty)
+    }
+
     @Test func identicalOpaqueSelectionWindowsNeverTriggerAnAutomaticMove() {
         var queue = FieldQueue(config: .init(animated: true))
         let old = FieldQueue.Report(before: "a complete selected draft")
