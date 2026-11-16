@@ -4,6 +4,8 @@ The internal iPhone build exposes a live, single-operation interface to the real
 
 Open a synthetic test field in the host app, select the installed Legato keyboard and keep the internal host app available. Background host liveness may require microphone arming; release the microphone when finished. Use the existing [device control](README.md) setup and identity variables. The default target is the physical phone; `--target sim` uses the real simulator extension when it is installed and visible, not the in-app harness.
 
+Stop the current take and let pending field edits finish first; `begin` refuses an active take or unfinished field work rather than dropping spoken text. The app-scoped probe client identity survives a host relaunch, so the same operator can still end their existing lease.
+
 Call `bash scripts/device/keyboard-probe.sh begin` to bind the current field and acquire exclusive queue ownership. Then choose one command at a time from its returned observations:
 
 | Command after `keyboard-probe.sh` | Effect |

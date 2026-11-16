@@ -1413,6 +1413,10 @@ final class KeyboardController {
         }
         if request.action == .begin {
             guard probeLease == nil else { return reply("A probe session already owns the field. End it first.") }
+            guard !routeOpen, !liveRunning, queue.isIdle, !queue.hasUserInput,
+                  !isFieldBusy, cursorReadID == nil else {
+                return reply("Stop dictation and let pending field work finish before beginning a raw probe.")
+            }
             syncQueueField()
             guard let lease = await pauseQueue() else { return reply("The queue could not grant an exclusive probe lease.") }
             probeLease = lease; probeSessionID = request.sessionID; probeFieldID = document.documentID
