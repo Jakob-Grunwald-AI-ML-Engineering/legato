@@ -458,7 +458,7 @@ final class KeyboardController {
         #endif
         if !isFieldBusy {
             let idleMs = lastStepAt.map { Self.milliseconds(ContinuousClock.now - $0) } ?? 0
-            queue.externalContextChanged(report: currentReport, elapsedSinceLastStepMs: idleMs)
+            queue.externalContextChanged(report: currentReport, hasText: document.hasText, elapsedSinceLastStepMs: idleMs)
         }
         documentDidChange()
     }
@@ -469,7 +469,7 @@ final class KeyboardController {
         #endif
         if !isFieldBusy {
             let idleMs = lastStepAt.map { Self.milliseconds(ContinuousClock.now - $0) } ?? 0
-            queue.externalSelectionChanged(report: currentReport, elapsedSinceLastStepMs: idleMs)
+            queue.externalSelectionChanged(report: currentReport, hasText: document.hasText, elapsedSinceLastStepMs: idleMs)
         }
         documentDidChange()
     }

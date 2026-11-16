@@ -121,6 +121,52 @@ import Testing
         #expect(!rig.queue.ownsEmptyReport)
     }
 
+    @Test(arguments: [false, true])
+    func aConfirmedEmptyNativeFieldAdmitsSpeechWithoutAPrimingKey(selection: Bool) {
+        var rig = QueueRig(FakeField(""), config: .init(animated: true, prioritizeSpeech: true))
+        let empty = FieldQueue.Report(before: "")
+        _ = rig.queue.step(report: empty, elapsedMs: 200)
+        if selection { rig.queue.externalSelectionChanged(report: empty, hasText: false) }
+        else { rig.queue.externalContextChanged(report: empty, hasText: false) }
+        #expect(!rig.queue.hasUnverifiedInput)
+        rig.queue.enqueue(snap(1, "first words", complete: true))
+        let drained = rig.drain()
+        #expect(drained)
+        #expect(rig.field.string == "first words")
+    }
+
+    @Test(arguments: [false, true])
+    func emptyWindowsWithoutNativeEmptyEvidenceStayUnknown(selection: Bool) {
+        let observations: [Bool?] = [nil, true]
+        for hasText in observations {
+            var queue = FieldQueue()
+            let empty = FieldQueue.Report(before: "")
+            _ = queue.step(report: empty, elapsedMs: 200)
+            if selection { queue.externalSelectionChanged(report: empty, hasText: hasText) }
+            else { queue.externalContextChanged(report: empty, hasText: hasText) }
+            #expect(queue.hasUnverifiedInput)
+        }
+        var queue = FieldQueue()
+        let nonempty = FieldQueue.Report(before: "a complete selected draft")
+        _ = queue.step(report: nonempty, elapsedMs: 200)
+        if selection { queue.externalSelectionChanged(report: nonempty, hasText: false) }
+        else { queue.externalContextChanged(report: nonempty, hasText: false) }
+        #expect(queue.hasUnverifiedInput)
+    }
+
+    @Test(arguments: [false, true])
+    func aLaterEmptyCallbackDoesNotReleaseAnOlderHeldTake(selection: Bool) {
+        var queue = FieldQueue()
+        let empty = FieldQueue.Report(before: "")
+        _ = queue.step(report: empty, elapsedMs: 200)
+        queue.externalContextChanged(report: empty)
+        queue.enqueue(snap(1, "an older held take", complete: true))
+        if selection { queue.externalSelectionChanged(report: empty, hasText: false) }
+        else { queue.externalContextChanged(report: empty, hasText: false) }
+        #expect(queue.hasUnverifiedInput)
+        for _ in 0..<20 { #expect(queue.step(report: empty, elapsedMs: 100) == .idle) }
+    }
+
     private func justConfirmedMove() -> (FieldQueue, FieldQueue.Report) {
         var queue = FieldQueue()
         let start = FieldQueue.Report(before: "alpha beta")

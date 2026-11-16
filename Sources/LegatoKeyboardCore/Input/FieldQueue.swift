@@ -554,8 +554,8 @@ public struct FieldQueue: Sendable {
         inFlight != nil || ownsRead || sinceSendMs + max(0, elapsedMs) < Self.transitMs
     }
 
-    public mutating func externalSelectionChanged(report: Report, elapsedSinceLastStepMs: Double = 0) {
-        guard !hasRecentOwnOperation(elapsedMs: elapsedSinceLastStepMs) else { return }
+    public mutating func externalSelectionChanged(report: Report, hasText: Bool? = nil, elapsedSinceLastStepMs: Double = 0) {
+        guard !hasRecentOwnOperation(elapsedMs: elapsedSinceLastStepMs), !confirmEmptyField(report, hasText: hasText) else { return }
         opaqueSelectionBaseline = report.selected == nil ? (lastReport ?? report) : nil
         unverifiedInputReason = opaqueSelectionBaseline == nil ? nil : .selection
         if opaqueSelectionBaseline != nil {
@@ -567,13 +567,23 @@ public struct FieldQueue: Sendable {
 
     /// A native text callback whose proxy windows stayed old is not a readable insertion yet.
     /// Use the same admission barrier as an opaque selection, without blind refresh movements.
-    public mutating func externalContextChanged(report: Report, elapsedSinceLastStepMs: Double = 0) {
-        guard !hasRecentOwnOperation(elapsedMs: elapsedSinceLastStepMs) else { return }
+    public mutating func externalContextChanged(report: Report, hasText: Bool? = nil, elapsedSinceLastStepMs: Double = 0) {
+        guard !hasRecentOwnOperation(elapsedMs: elapsedSinceLastStepMs), !confirmEmptyField(report, hasText: hasText) else { return }
         opaqueSelectionBaseline = lastReport ?? report
         unverifiedInputReason = .externalContext
         abortUnit()
         recoveryRequest = nil
         recoveryRevision &+= 1
+    }
+
+    /// Empty proxy windows can be stale; the native field's independent hasText=false
+    /// distinguishes a genuinely empty editor, where there is no hidden text selection.
+    private mutating func confirmEmptyField(_ report: Report, hasText: Bool?) -> Bool {
+        guard hasText == false, report.before.isEmpty, report.after.isEmpty, report.selected == nil,
+              text.isEmpty, runs.isEmpty, !hasOwnWork else { return false }
+        opaqueSelectionBaseline = nil
+        unverifiedInputReason = nil
+        return true
     }
 
     /// The route owns activity admission; this queue only schedules against that evidence.
