@@ -30,7 +30,7 @@ Compressed size, sparse allocation and logical size are different. The chunk bou
 
 ## Recreate after storage is available
 
-These commands describe the recovered workflow; they were not executed during the 2026-11-16 readiness check. Use an Apple Silicon host with macOS 26 or newer for `--net-host`. Confirm the chosen root is new or already owned by this workflow before writing into it.
+These commands describe the recreated workflow. The observed blocked readiness and stopped state above remain separate from acceptance. Use an Apple Silicon host with macOS 26 or newer for `--net-host`. Confirm the chosen root is new or already owned by this workflow before writing into it.
 
 ```bash
 set -euo pipefail
