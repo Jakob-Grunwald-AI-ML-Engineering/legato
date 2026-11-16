@@ -231,9 +231,14 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// Its exact acknowledgement orders cleanup reads after those writes without holding the user's cursor.
     private func waitForLiveDelivery(runID: String, generation: Int) async -> Bool {
         let started = streamTime()
+        var budget = liveTimeout
         while generation == takeGeneration, let run = liveRun, run.runID == runID, !Task.isCancelled {
             if let ack = liveDeliveryAck, ack.runID == runID, ack.complete, ack.version == run.snapshot.version { return ack.delivered == true }
-            guard streamTime() - started < liveTimeout else { return false }
+            // The pending snapshot may correct every previously spoken character. Reuse the scoped-edit playback
+            // bound for that conservative case; provider timeout alone is too short for verified character edits.
+            let characters = max(run.snapshot.text.count, run.wholeRaw.text.count)
+            budget = max(budget, .milliseconds(FieldQueue.budgetMs(sourceCharacters: characters, targetCharacters: characters)))
+            guard streamTime() - started < budget else { return false }
             do { try await clock.sleep(for: .milliseconds(20)) } catch { return false }
         }
         return false

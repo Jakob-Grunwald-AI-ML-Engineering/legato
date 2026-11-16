@@ -202,6 +202,11 @@ private final class FieldCleaner: SentenceCleaning {
             await awaitCleanupTest { clock.armCount > arms && clock.sleeperCount == 1 }
             #expect(field.reads == 0)
         }
+        // A valid slow delivery outlives the provider's six-second timeout without admitting an early read.
+        let arms = clock.armCount
+        clock.advance(by: .seconds(6))
+        await awaitCleanupTest { clock.armCount > arms && clock.sleeperCount == 1 }
+        #expect(field.reads == 0)
         field.text = "teh green boat."; field.cursor = field.text.count
         pipeline.acknowledgeDelivery(.init(runID: snapshot.runID, version: snapshot.version, complete: true, stats: .init(), delivered: true))
         // Statistics-only updates, including older adapters, cannot erase positive delivery evidence.
@@ -223,7 +228,8 @@ private final class FieldCleaner: SentenceCleaning {
         await pipeline.receive(.init(sequence: 0, text: "teh green boat.", words: [], reason: "endpoint"))
         let finishing = Task { await pipeline.finishTake() }
         await awaitCleanupTest { clock.sleeperCount == 1 }
-        clock.advance(by: .seconds(6)) // Existing liveTimeout policy; this is no field or keyboard lock.
+        let characters = "teh green boat.".count
+        clock.advance(by: .milliseconds(FieldQueue.budgetMs(sourceCharacters: characters, targetCharacters: characters)))
         await finishing.value
         #expect(field.reads == 0)
         #expect(field.edits.isEmpty)

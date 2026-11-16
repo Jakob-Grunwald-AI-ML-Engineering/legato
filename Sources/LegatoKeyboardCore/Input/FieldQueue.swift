@@ -225,6 +225,11 @@ public struct FieldQueue: Sendable {
     static let keyHoldGraphemeMs = 45.0
     /// A budget for the app's wait on an edit of `operationCount` ops.
     public static func budgetMs(operationCount: Int) -> Double { max(20_000, Double(max(0, operationCount)) * 150) }
+    /// Conservative background playback budget: each changed character can need a mutation and two moves.
+    /// This does not hold user input or determine its responsiveness deadline.
+    public static func budgetMs(sourceCharacters: Int, targetCharacters: Int) -> Double {
+        budgetMs(operationCount: 3 * (max(0, sourceCharacters) + max(0, targetCharacters)) + 2)
+    }
 
     // MARK: State
 
