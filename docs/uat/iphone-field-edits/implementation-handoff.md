@@ -1,53 +1,47 @@
-# Implementation handoff
+# Validation handoff
 
-Branch: `feat/iphone-field-edits` in `/Users/work/Documents/legato-wt/iphone-field-edits`. Main base: `1007a83`. Current installed candidate: `7838631`; directed physical tail/key/cursor checks and native list continuation pass. Full stress and fresh UAT remain with the parent. Parent owns the stress-validator port, final integrated checks, fresh UAT, PR and landing. No PR, merge or live promotion was performed by this implementer.
+Draft [PR #298](https://github.com/Jakob-Grunwald-AI-ML-Engineering/legato/pull/298), branch `feat/iphone-field-edits`, worktree `/Users/work/Documents/legato-wt/iphone-field-edits`, base `1007a83`. Product source is frozen at `7838631`; subsequent changes are operator documentation, evidence and the stress checker. [Current validation status](validation-status.json) owns the result summary. Do not merge while fresh acceptance is blocked.
 
-## Source and owners
+The user chose to finish current validation and stop further repair cycles: any new failure or access blocker is a recorded handoff for a fresh session. A new product fix requires fresh diagnosis and alignment rather than another automatic patch iteration.
 
-- `FieldQueue` / `FieldEditCoordinator` own conditional minimal revisions, live-speech priority, user-input preservation and the shared 500 ms response target. Existing `SpanPlanner`, `FieldMerge`, `EditHistory` and Operations barriers remain the editing owners.
-- `FieldReader` owns verified boundary reads and cancellation; the iPhone controller owns native callback provenance, draft epochs, read-lease acquisition and field adaptation. Unknown selection/context refuses before a production nudge.
-- `FieldCleanupSession` and `InstructionLink` carry the optional draft epoch, reject cleared/replaced successors, rebase genuine intervening changes, and preserve original speech in History.
-- `DictationActivity` remains the pause owner. `DictationStatusLink`, `KeyboardLinkHost` and the controller carry its run-scoped activity to the existing queue.
-- Internal `FieldProbeLink` / `KeyboardProbe` provide primitive interactive reads and native deltas under an explicit lease. The maintained operator guide is `scripts/device/keyboard-probe.md`.
-- Debug replay optionally accepts matching PCM through the actual activity owner on one original monotonic timeline. Token-only behavior is retained. No new provider endpoint or classifier was added.
+## Verified work
 
-## Built and installed state
+The full local `scripts/ci/test.sh` passed on `7838631` with Xcode 27.2 (27B52), including package tests and both unsigned apps. Ordinary iOS/Mac Release builds passed internal-tool exclusion. Current tracked Apps, Sources and Swift Tests trees are identical to that tested revision; the later Python checker has nine passing pure contracts. Full logs and hashes are retained outside temporary/cache storage under `~/Library/Application Support/LegatoTestVM/artifacts/final-validation`.
 
-Physical iPhone: iPhone 17, iOS 26.6.1 (23G83). Installed app/extension: signed `7838631`, identity `de.gruenwald.legato`, App Group `group.de.gruenwald.legato`, existing data preserved. App version is 0.1 (1).
+The [physical report](README.md) records five host baselines, native Select All/Paste safety, the pending-cleanup self-send/new-draft race and persisted speech recovery, Unicode raw movement, native list continuation and the fixed quiet-tail response. The longest of six observed cursor confirmations was 455.377 ms; the speech suffix confirmed in 158.123 ms. These are directed samples, not independent acceptance, microphone quality or a universal latency guarantee.
 
-The installed signed build includes `7838631` (confirmed-empty admission, exact successful delivery receipts and shared background delivery budget) and the earlier controller/readiness and Mac caret fixes. Xcode 27.2 was used because pinned 26.6 is unavailable. The signed physical-device build passed. The parent owns final candidate hashes and gate/UAT state.
+Both original speed-1 stress seeds passed: 40/40 takes, zero invariant/tool/contended failures, and all 20 untouched cases exactly clean. All 40 results were independently checked against their retained journals and archived durably. Per-seed results, checker/binary fingerprints and artifact directories are recorded in `validation-status.json`. This is the in-app simulator harness, not real-extension UAT.
 
-Earlier full-gate evidence on `d94be68` and ordinary iOS Release evidence on `b6e77c0` are historical checkpoints. The parent maintains the final candidate’s current gate, Release, full-stress and UAT results. Source/scanner-fixture checks alone are not a Release binary claim.
+## Acceptance blockers
 
-The original untouched simulator take 05 now passes on `486d492`, with its original validator and fixture, replay speed 1, exact expected title casing and zero loss/resync. Raw final acknowledgement precedes confirmed cleanup. See `cleanup-readiness-regression.json`. This is one focused regression, separate from two required full seeds or fresh UAT.
+- Physical iPhone: the fresh tester's existing WDA LAN endpoint timed out after 40 seconds, although device discovery reported a paired phone. The tester performed zero mutations. Do not equate paired discovery with a reachable native-control session. Exact access and prior runner details remain in the private operator handoff; rediscover them before another authorized test.
+- Mac guest: the separate test copy launches, AX is trusted and offline mode is active, but the actual observer reports `hotkeysEnabled=false`. Native input acceptance did not begin. The user stop condition ended permission repair at this point.
 
-## Physical results and remaining work
+The [VM guide](../../../scripts/device/mac-vm.md) describes durable controls, pinned image/tool and guest-only setup. The VM is stopped and retained at `~/Library/Application Support/LegatoTestVM`. Read `artifacts/mac-uat-access.md`, `guest-readiness.json`, `guest-signature-changes.json` and `vm-final-state.json` there before resuming. The original development profile rejected the VM's device identity; this was a confirmed provisioning limitation. A separate ad-hoc guest copy removes restricted identifiers/profile and permits its debug library. It is behavioral test infrastructure, not proof that the original development-signed app launches in a new guest. SIP/AMFI and host privacy settings were preserved.
 
-The five host baselines, corrected native Select All preservation, native Paste and the actual pending-cleanup self-send/new-draft/History recovery are recorded in `README.md` with synthetic-only traces and limits. Raw physical observations do not establish universal host reliability or hardware-keyboard behavior.
+## Counterexamples and refuted leads
 
-Physical matching-PCM replay, pause correction and the quiet-tail fix are confirmed. The final period confirmed in 158.123 ms, Space in 95.613 ms, q in 178.716 ms, and the longest of six cursor responses in 455.377 ms. Unicode raw movement and native list continuation are measured. Still required: both full original stress seeds, fresh integrated UAT, and final cleanup of unchanged owned fixtures; the parent owns current gate/acceptance state. Target less than 500 ms; any observed interruption over 1 second fails. Do not substitute cleanup duration, provider latency, debug transfer time or deliberate probe delay for input interruption.
+- The original untouched cleanup failures were real ordering problems. Exact successful raw-delivery receipts order both cleanup reads; a statistics-only acknowledgement is not delivery. The shared playback budget is a background wait, never a user-input hold.
+- The speech-tail stall of 19.6 seconds was real: quiet audio admitted old cleanup before the last heard letters. `7838631` prioritizes actual pending raw appends while keeping revisions in the pause lane. Preserve confirmed-operation and return-to-user-caret barriers.
+- Stress take08's `jA`→`Ja` report was a checker false positive. Both changed letters temporarily disappear inside one legitimate hunk, then return at their original slots. Checker `8a28a0e` tracks that transient mapping; wrong-slot, lost and unchanged-marker corruption still fail. Do not change the product to satisfy the retired blanket no-edits-after-input policy.
+- Cleanup duration, bridge/VNC transport and total word throughput are distinct from added input interruption. The 500 ms target and 1 second failure boundary remain unchanged.
 
-The user has authorized physical testing, microphone arming, short serial provider calls and sending only to verified self. The official WhatsApp Message yourself system label and (You) badge must still be checked before another send. The user subsequently paused phone testing after the verified handback. Do not resume phone foreground, bridge, install, retry or input actions without explicit resumption. Mac foreground work remains paused.
+## Source owners
 
-## Ready matching replay
+`FieldQueue` and `FieldEditCoordinator` own conditional revisions, raw priority, user-input preservation and operation barriers. `FieldReader` owns verified reads/cancellation; the iPhone controller owns native callback provenance, draft epochs and adaptation. `FieldCleanupSession`/`InstructionLink` own draft lifetime and History outcomes. `DictationActivity` owns pause admission. Mac field/caret and native-input adapters build on the shared policy; no second writer or blind recovery probe should be introduced.
 
-The additional real Soniox request finished and closed: 28.0389375 seconds of synthetic PCM, 148 responses. No physical microphone or user speech was used. Physical replay also confirmed natural empty-field insertion and pause cleanup, and the later quiet-tail fix is physically rechecked; its earlier failure remains preserved in the report.
+The internal primitive explorer is maintained in [keyboard-probe.md](../../../scripts/device/keyboard-probe.md). It deliberately exposes unknown raw proxy state and permits one chosen action/read at a time. A scripted walk is not agent UAT.
 
-- Committed timeline: `docs/uat/iphone-field-edits/live-soniox-human-rate.json`.
-- Matching PCM is kept in the private operator cache; its exact location is in the private access handoff.
-- Source text, exact timing and PCM hash: `live-soniox-human-rate-summary.json`.
-- First speech is 22.0319375 seconds; chosen silence is 2 seconds; resumption begins at 24.0319375 seconds and lasts 3.007 seconds, followed by 1 second of silence. TTS requested 180 words/minute; replay speed must be 1.
-- Existing command after both files are put into the bridge directory: `dictation-debug-replay timeline.json 1 take.pcm`. Configure a bounded deterministic default capitalization cleaner for the functional edit/input measurement; real Claude instruction calls and real Soniox transport have separate evidence.
-- Empty synthetic Safari surface prepared at the local server’s `/replay.html`, label `Replay human rate`. Server root is `/Users/work/Library/Caches/legato/iphone-field-edits/web`, port 8769. Recheck the Mac’s local address when reconnecting.
+## Device state and remaining fixture cleanup
 
-## Phone and tool handback
+Phone source `7838631` remains installed. Last owned handback verified idle/unarmed/no probe or replay and Home at 11:06:45.012 UTC. No known fake/harness/fixture launch or provider override remains. The user later resumed phone testing; the fresh tester's read-only access attempt made no device changes. Host Mac foreground work remains paused and its installed app/windows were preserved.
 
-Connectivity is restored. The latest release completed at 11:06:45.012 UTC: armed/warmInput/reserved false, route idle; Home was then independently confirmed. The phone is visibly free during verification and documentation. Current connection/session/discovery details are in the private operator handoff, not this tracked document. Shared Appium and other projects’ processes were preserved.
+Private phone access is `/Users/work/Library/Caches/legato/iphone-field-edits/physical-uat-access.md`, with exact owned draft cleanup notes beside it. Preserve the older replay tab's later native `l` of unknown origin. Own WhatsApp/Messages/Notes/Mail fixtures remain; remove only exact unchanged owned content after access is restored. The original clipboard could not be preserved and was replaced with the explicitly approved synthetic fixture; it was not restored. Never overwrite a newer user copy. These cleanup gaps do not authorize another connection-repair loop now.
 
-Own test data remains: WhatsApp unsent draft `New epoch safe 2785`, Messages unsent `Legato probe: Alpha beta gamma delta epsilon zeta.` in the My Card mobile conversation, own Notes note `Legato probe`, and one new Mail draft with synthetic body and no recipient. Verify each still contains only the fixture before removing it. Preserve pre-existing drafts and any user additions. Close only owned Safari test surfaces.
+Every future block ends with take/probe cancellation, microphone/provider release, verified idle/unarmed state and visible Home; reopen visibly before resuming. On Mac, close only test-owned surfaces. The reusable VM and private evidence are retained; no live promotion occurred.
 
-The user explicitly allowed replacing the unreadable clipboard with `Legato paste test: blue notebook.`; original contents were not restored. At final cleanup, remove the fixture only after a private exact comparison proves it is still ours. Never print clipboard contents or overwrite a newer user copy.
+## Host audio incident and final cleanup
 
-Every future pause/build/analysis handback must end any probe, stop/join replay or take, release and verify the microphone, then show Home. Visibly reopen the test surface before taking control again. Keep user preferences and the expanded keyboard state intact.
+The user reported choppy normal Mac dictation during testing. The VM had audio disabled and was already stopped; the current stress simulator was also shut down. Read-only checks found the built-in microphone still selected at 48 kHz and no recent Core Audio overload messages, but the older `legato-e2e` simulator remained booted. With explicit approval, only that older simulator was shut down, preserving its data and the running normal Legato process. The user immediately confirmed improvement. Simulator interference is likely; its exact audio/resource mechanism was not measured.
 
-The settled replay fixture now also contains a later native l addition whose actor is unknown. Preserve it; do not treat that addition as disposable owned input. Production reader/recovery interruption and Unicode Magic acceptance are not established by the cleanup timing/raw traversal samples alone.
+All iOS simulators and the VM are now stopped. No usual-app restart, microphone route change or host audio-setting change occurred. No host process held the owned seventh WDA runner log and no test server listened on the owned fixture port at closeout; future access must bootstrap and verify actual current services rather than reuse stale endpoints. Another approximately 3.4 GiB of stale capture data was identified by dry-run housekeeping and left untouched.
