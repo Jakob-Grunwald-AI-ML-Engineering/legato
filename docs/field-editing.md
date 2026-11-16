@@ -99,19 +99,19 @@ History copies the generated result by default. Its context menu offers Copy ori
 
 Measured with the raw keyboard probe (`scripts/device/keyboard-probe.md`, write actions) on iPhone 17, iOS 26.6.1, in synthetic fields. Raw runs stay private in `~/Library/Caches/legato/probe-299/`.
 
-| | WhatsApp composer | Notes | Safari textarea |
-|---|---|---|---|
-| Callback for the keyboard's own insert or delete | none | none | none |
-| Callback for a move | one `textDidChange`, 12–28 ms | one, 12–23 ms | two: ~10 ms showing the **old** position, then 20–30 ms with the new one |
-| Burst at full speed (move, delete run, insert, move back; no waits) | 27/27 landed | 15/15 | 15/15 |
-| Burst result visible in a callback | 33–51 ms | 26–41 ms | 130–260 ms, one callback per stage, in order |
-| Window around the caret | 300 before, 300 after, cut at line breaks | 300 / 300, cut at line breaks | 100 / 100 |
-| Unit of `adjustTextPosition` | UTF-16 code units | UTF-16 code units | graphemes |
-| Move past the end of the text | dropped entirely (caret stays) | caret at the end | not measured |
-| Back-to-back `deleteBackward` | 35 and 500 all landed | all landed; 500 take ~300 ms to apply | all landed |
-| Document identity | changed once with no visible cause | new identity when the note became empty | new identity when the field became empty; one identity shared with a contenteditable on the same page |
+| | WhatsApp composer | Notes | Safari textarea | Safari contenteditable |
+|---|---|---|---|---|
+| Callback for the keyboard's own insert or delete | none | none | none | none |
+| Callback for a move | one `textDidChange`, 12–28 ms | one, 12–23 ms | two: ~10 ms showing the **old** position, then 20–30 ms with the new one | two: ~40 ms showing the old position, then ~60 ms |
+| Burst at full speed (move, delete run, insert, move back; no waits) | 27/27 landed | 15/15 | 15/15 | 15/15 |
+| Burst result visible in a callback | 33–51 ms | 26–41 ms | 130–260 ms, one callback per stage, in order | 143–348 ms, one callback per stage |
+| Window around the caret | 300 before, 300 after, cut at line breaks | 300 / 300, cut at line breaks | 100 / 100 | 100 / 100 |
+| Unit of `adjustTextPosition` | UTF-16 code units | UTF-16 code units | graphemes | graphemes |
+| Move past the end of the text | dropped entirely (caret stays) | caret at the end | not measured | caret at the end |
+| Back-to-back `deleteBackward` | 35 and 500 all landed | all landed; 500 take ~300 ms to apply | all landed | all landed |
+| Document identity | changed once with no visible cause | new identity when the note became empty | new identity when the field became empty; one identity shared with a contenteditable on the same page | changed once during a 30-character delete run; stable on the second day |
 
-Consequences for the edit model: no host needs a wait between a hop and the edit; the check after a chunk is a read prompted by the return move, because the keyboard's own writes produce no callback; a hop stays strictly within the visible window and is corrected by looking, since the unit differs per host and an overshoot can be silently dropped; a new document identity is not proof of a new field. The 65–120 character windows of 2026-11-08 no longer hold in these hosts. A Safari contenteditable is not yet measured (its identity changed during a 30-character delete run).
+Consequences for the edit model: no host needs a wait between a hop and the edit; the check after a chunk is a read prompted by the return move, because the keyboard's own writes produce no callback; a hop stays strictly within the visible window and is corrected by looking, since the unit differs per host and an overshoot can be silently dropped; a new document identity is not proof of a new field. The 65–120 character windows of 2026-11-08 no longer hold in these hosts. The contenteditable's slowest burst settled at 348 ms, inside the 400 ms deadline with little room.
 
 ## Limits and verification
 
