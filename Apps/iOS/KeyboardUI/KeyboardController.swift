@@ -220,12 +220,12 @@ final class KeyboardController {
                 guard let self, let runID = self.cleanup.runID else { return }
                 self.updateCleanup { $0.expire(now: Date()) }
                 if !self.cleanup.isActive {
+                    let before = self.keptText
+                    // The run's drop keeps what of it is not in the field (`Drop.kept`); text standing there is not lost.
                     self.queue.cancelRun(runID)
                     self.handle(self.queue.drainEvents())
                     self.liveRecoveryDismissed = false
-                    if let text = self.liveSnapshot?.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        self.keep(text)
-                    } else {
+                    if self.keptText == before {
                         self.liveRecoveryNotice = "Edits couldn't finish. Check Legato's History for the take."
                     }
                     self.syncRowTakeover()
@@ -878,19 +878,22 @@ final class KeyboardController {
                     }
 
                     // The take's final text could not stand whole in the field (the user typed or moved since, or the
-                    // field did not show it as typed): the field keeps what it has, the take is kept in the row.
+                    // field did not show it as typed): the field keeps what it has; only what is not in the field is
+                    // kept in the row (`Drop.kept`).
                     liveRecoveryDismissed = false
-                    if drop.runID != nil, !drop.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        keep(drop.text)
+                    if drop.runID != nil, let kept = drop.kept, !kept.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        keep(kept)
                     } else {
                         liveRecoveryNotice = drop.runID == nil
                             ? "Couldn't safely finish the interrupted edit."
                             : "Kept as typed. The cleaned take is in Legato's History."
                     }
                     syncRowTakeover()
-                } else if drop.reason == .reset, drop.runID != nil, !drop.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    // The field went away, the keyboard closed or the run was cancelled before its text stood in the field.
-                    keep(drop.text)
+                } else if drop.reason == .reset, drop.runID != nil, let kept = drop.kept,
+                          !kept.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // The field went away, the keyboard closed or the run was cancelled before all its text stood in the
+                    // field: the part that is not there is kept (a take whose words stand there, raw or cleaned, keeps nothing).
+                    keep(kept)
                 }
             case .liveApplied(let runID, let version, let complete):
                 if complete, let snapshot = liveSnapshot, snapshot.runID == runID {
@@ -999,7 +1002,8 @@ final class KeyboardController {
             if snapshot.complete, !blockedLiveCompleted {
                 blockedLiveCompleted = true
                 link.writeLiveDictationAck(.init(runID: snapshot.runID, version: snapshot.version, complete: true, stats: liveStats, delivered: false))
-                if !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // A run that typed into the field it left is in that field (`Drop.kept` held anything missing then).
+                if !liveTypedRunIDs.contains(snapshot.runID), !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     keep(snapshot.text)
                 } else if !liveRecoveryDismissed {
                     liveRecoveryNotice = "The full take is in Legato's History."
@@ -1047,12 +1051,15 @@ final class KeyboardController {
         blockedLiveRunID = snapshot.runID
         blockedLiveCompleted = snapshot.complete
         updateCleanup { $0.clear() }
+        let keptBefore = keptText
         queue.cancelRun(snapshot.runID)
         handle(queue.drainEvents())
         liveSnapshot = nil
         setLiveRunning(false)
         guard pending else { return }
-        if snapshot.complete, !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        // A run that typed here is in this field: its drop (`cancelRun`) kept only what is missing from it.
+        if liveTypedRunIDs.contains(snapshot.runID), keptText != keptBefore { return }
+        if snapshot.complete, !liveTypedRunIDs.contains(snapshot.runID), !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             keep(snapshot.text)
             return
         }

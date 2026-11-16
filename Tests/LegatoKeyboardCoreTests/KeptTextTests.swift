@@ -21,4 +21,57 @@ import Testing
         let cut = item.preview(maxCharacters: 12)
         #expect(cut.hasPrefix("…") && cut.hasSuffix("Tuesday.") && cut.count == 12)
     }
+
+    // MARK: What a dropped run keeps (#299 device run: a take whose cleaned text stood in the field was kept raw)
+
+    private func reset(_ rig: inout QueueRig) -> FieldQueue.Drop? {
+        rig.queue.reset()
+        return rig.queue.drainEvents().compactMap { if case .dropped(let d) = $0 { d } else { nil } }.first
+    }
+
+    @Test func aTakeWhoseCleanedTextStandsInTheFieldKeepsNothing() {
+        var rig = QueueRig(FakeField(""))
+        rig.queue.enqueue(snap(1, "Um. so, uh, the plan is to paint the fence.", complete: true))
+        rig.drain()
+        // The field cleanup's edit cleans the take in place (the run's own text stays raw).
+        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: "Um. so, uh, the plan is to paint the fence.", target: "The plan is to paint the fence.", cursorAtEnd: false))
+        rig.drain()
+        #expect(rig.field.string == "The plan is to paint the fence.")
+        let drop = reset(&rig)
+        #expect(drop?.reason == .reset, "the run's region no longer shows its raw words: it is dropped")
+        #expect(drop?.kept == "")
+    }
+
+    @Test func aTakeWhoseRawTextStandsInTheFieldKeepsNothingWhenItsCleanupIsDropped() {
+        var rig = QueueRig(FakeField(""))
+        rig.queue.enqueue(snap(1, "um the boat left early"))
+        rig.drain()
+        rig.queue.enqueue(.move(-2))
+        rig.queue.enqueue(.insert("Z"))
+        rig.drain()
+        // Its cleaned version comes after the user typed into it: it cannot stand whole, the raw words stand.
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 2,
+            segments: [.init(id: 0, text: "The boat left earlier.", cleaned: true, final: true)], complete: true))
+        rig.drain()
+        #expect(rig.field.string.contains("earZly"), "the user's word stays; the change touching it drops")
+        let drops = rig.drops.filter { $0.runID == "r" }
+        #expect(!drops.isEmpty)
+        #expect(drops.allSatisfy { $0.kept == "" })
+        let later = reset(&rig)
+        #expect(later == nil || later?.kept == "")
+    }
+
+    @Test func onlyTheWordsNotYetInTheFieldAreKept() {
+        var rig = QueueRig(FakeField(""))
+        rig.queue.enqueue(snap(1, "alpha beta"))
+        rig.drain()
+        #expect(rig.field.string == "alpha beta")
+        // More words arrive and the field goes away before they are typed.
+        rig.queue.enqueue(snap(2, "alpha beta gamma delta"))
+        let drop = reset(&rig)
+        #expect(drop?.kept == "gamma delta")
+        var untyped = QueueRig(FakeField(""))
+        untyped.queue.enqueue(snap(1, "nothing typed yet"))
+        #expect(reset(&untyped)?.kept == "nothing typed yet")
+    }
 }
