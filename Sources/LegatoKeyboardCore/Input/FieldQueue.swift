@@ -238,35 +238,17 @@ public struct FieldQueue: Sendable {
     /// Something else needs the cursor for a moment (a walk that reads the field): the op in flight is confirmed and
     /// the caret goes back to the user's cursor, nothing else goes out.
     public var paused = false
-    public private(set) var text: [Character] = []
-    public private(set) var cursor = 0
-    public private(set) var userCursor = 0
+    /// The field as the keyboard knows it (`ShadowDocument`): text, caret, the user's cursor, selection and spans.
+    public private(set) var doc = ShadowDocument()
+    public private(set) var text: [Character] { get { doc.text } set { doc.text = newValue } }
+    public private(set) var cursor: Int { get { doc.cursor } set { doc.cursor = newValue } }
+    public private(set) var userCursor: Int { get { doc.userCursor } set { doc.userCursor = newValue } }
     /// Characters selected after `cursor`.
-    public private(set) var selection = 0
-    public private(set) var seeded = false
+    public private(set) var selection: Int { get { doc.selection } set { doc.selection = newValue } }
+    public var seeded: Bool { doc.seeded }
 
-    struct Span: Sendable, Equatable {
-        var start: Int
-        var end: Int
-        var userChanged = false
-        /// Another edit (Magic) rewrote part of it: a dictation region there is left as it is.
-        var edited = false
-        var parked = false
-        /// An edit's anchor: text inserted right at it goes after it.
-        var anchor = false
-        /// The text the span was last known to hold, to find it again after a reseed.
-        var lastText: [Character] = []
-        /// The text around it then (up to `contextChars` each side): it must stand there too.
-        var lastBefore: [Character] = []
-        var lastAfter: [Character] = []
-        /// The user typed or edited while the span was lost: a change found there may be theirs.
-        var userActedParked = false
-        /// Parked by `revert`: the text it holds if the edit's inserts and deletes the report no longer showed did
-        /// reach the host after all (`lastText`: if they did not). Only a fresh read tells which (`FieldRecovery`).
-        var landedText: [Character]?
-    }
-    private var spans: [Int: Span] = [:]
-    private var nextSpanID = 0
+    typealias Span = ShadowDocument.Span
+    private var spans: [Int: Span] { get { doc.spans } set { doc.spans = newValue } }
 
     private struct LiveRevision: Sendable, Equatable {
         var runID: String
@@ -405,9 +387,7 @@ public struct FieldQueue: Sendable {
     }
     private var unit: Unit?
 
-    private struct ModelState: Sendable, Equatable {
-        var text: [Character]; var cursor: Int; var userCursor: Int; var selection: Int; var spans: [Int: Span]
-    }
+    private typealias ModelState = ShadowDocument
     private struct InFlight: Sendable, Equatable {
         var op: ShadowOp
         var lane: Lane
@@ -492,7 +472,7 @@ public struct FieldQueue: Sendable {
                 }
                 spans[id] = span
             }
-            text = updated; cursor = newCursor; userCursor = newCursor; selection = 0; seeded = true
+            text = updated; cursor = newCursor; userCursor = newCursor; selection = 0
             readMarks = []; userLost = nil; lagging = []; confirmedHistory = []; recentSends = []
         }
         for decision in decisions {
@@ -2339,7 +2319,7 @@ public struct FieldQueue: Sendable {
         guard coordinator.begin(isCursorMove ? .move : .edit,
                                 settleMs: anywhere ? Self.transitMs : isCursorMove ? Self.moveSettleMs : editSettle,
                                 transitMs: Self.transitMs) else { return .wait }
-        let pre = ModelState(text: text, cursor: cursor, userCursor: userCursor, selection: selection, spans: spans)
+        let pre = doc
         let rollback: RevisionRollback?
         if case .edit(let state, _)? = unit?.owner, let revision = state.revision {
             rollback = RevisionRollback(editID: state.edit.id, baseline: revision.baseline)
@@ -2360,44 +2340,21 @@ public struct FieldQueue: Sendable {
     }
 
     /// The field's units from the cursor to `index` (UTF-16, or characters in a field that moves by characters).
-    private func units(to index: Int) -> Int {
-        let range = index > cursor ? cursor..<index : index..<cursor
-        let count = config.movesByCharacters ? range.count : String(text[range]).utf16.count
-        return index > cursor ? count : -count
-    }
+    private func units(to index: Int) -> Int { doc.units(to: index, byCharacters: config.movesByCharacters) }
 
     // MARK: Model
 
     private mutating func insertAtCursor(_ chars: [Character], owner: Int?) {
         guard !chars.isEmpty else { return }
-        let i = cursor, n = chars.count
-        record(.insert(at: i, count: n, owner: owner))
-        text.insert(contentsOf: chars, at: i)
-        for (id, var span) in spans {
-            if id != owner, span.start < i, i < span.end { if owner == nil { span.userChanged = true } else { span.edited = true } }
-            if span.start > i || (span.start == i && id != owner && !span.anchor) { span.start += n }
-            if span.end > i || (span.end == i && id == owner) { span.end += n }
-            span.end = max(span.end, span.start)
-            spans[id] = span
-        }
-        if userCursor >= i { userCursor += n }
-        cursor = i + n
+        record(.insert(at: cursor, count: chars.count, owner: owner))
+        doc.insertAtCursor(chars, owner: owner)
         updateRevisionBaseline(owner: owner)
     }
 
     private mutating func removeRange(_ a: Int, _ b: Int, owner: Int?) {
         guard a < b, a >= 0, b <= text.count else { return }
-        let n = b - a
         record(.remove(a, b, owner: owner))
-        text.removeSubrange(a..<b)
-        func shift(_ p: Int) -> Int { p >= b ? p - n : (p > a ? a : p) }
-        for (id, var span) in spans {
-            if id != owner, span.start < b, a < span.end { if owner == nil { span.userChanged = true } else { span.edited = true } }
-            span.start = shift(span.start); span.end = shift(span.end)
-            spans[id] = span
-        }
-        userCursor = shift(userCursor)
-        cursor = a
+        doc.removeRange(a, b, owner: owner)
         updateRevisionBaseline(owner: owner)
     }
 
@@ -2412,34 +2369,17 @@ public struct FieldQueue: Sendable {
 
     private mutating func prepend(_ chars: [Character]) {
         guard !chars.isEmpty else { return }
-        let n = chars.count
-        record(.grow(n))
-        text.insert(contentsOf: chars, at: 0)
-        cursor += n; userCursor += n
-        if let from = userLost?.from { userLost?.from = from + n }
-        for (id, var span) in spans { span.start += n; span.end += n; spans[id] = span }
+        record(.grow(chars.count))
+        if let from = userLost?.from { userLost?.from = from + chars.count }
+        doc.prepend(chars)
     }
 
-    /// A span's text in the model (empty for a parked span, whose bounds mean nothing until it is found again).
-    private func chars(of span: Span) -> [Character] {
-        guard !span.parked, span.start >= 0, span.start <= span.end, span.end <= text.count else { return [] }
-        return Array(text[span.start..<span.end])
-    }
+    private func chars(of span: Span) -> [Character] { doc.chars(of: span) }
 
-    private mutating func addSpan(_ span: Span) -> Int {
-        nextSpanID += 1
-        spans[nextSpanID] = span
-        return nextSpanID
-    }
+    private mutating func addSpan(_ span: Span) -> Int { doc.addSpan(span) }
 
     private mutating func seed(_ report: Report) {
-        var before = Array(FieldReader.trusted(before: report.before))
-        // A window that starts at a block shows "\n " there: a line break is known to precede the block.
-        if before.count < report.before.count, report.before.first?.isNewline == true { before.insert("\n", at: 0) }
-        let selected = Array(report.selected ?? "")
-        text = before + selected + Array(report.after)
-        cursor = before.count; userCursor = cursor; selection = selected.count
-        seeded = true
+        doc.seed(report)
         readMarks = []
     }
 
@@ -2473,29 +2413,15 @@ public struct FieldQueue: Sendable {
         return FieldMatch.positions(in: grown, reportedBefore: report.before, reportedAfter: (report.selected ?? "") + report.after) == [cursor + extra]
     }
 
-    private func fitsSelection(_ p: Int, _ selected: String) -> Bool {
-        let chars = Array(selected)
-        return p + chars.count <= text.count && text[p..<(p + chars.count)].elementsEqual(chars)
-    }
+    private func fitsSelection(_ p: Int, _ selected: String) -> Bool { doc.fitsSelection(p, selected) }
 
     /// The report fits the state at its cursor, wholly inside its text (no reaching past either end).
-    private func fitsInside(_ report: Report, in state: ModelState) -> Bool {
-        fits(report, in: state) && (report.selected ?? "").count + report.after.count <= state.text.count - state.cursor
-            && FieldReader.trusted(before: report.before).count <= state.cursor
-    }
+    private func fitsInside(_ report: Report, in state: ModelState) -> Bool { state.fitsInside(report) }
 
     /// The report fits the state at its cursor, perhaps elsewhere too.
-    private func fits(_ report: Report, in state: ModelState) -> Bool {
-        let selected = report.selected ?? ""
-        return selected.count == state.selection
-            && FieldMatch.positions(in: state.text, reportedBefore: report.before, reportedAfter: selected + report.after).contains(state.cursor)
-    }
+    private func fits(_ report: Report, in state: ModelState) -> Bool { state.fits(report) }
 
-    private func pins(_ report: Report, in state: ModelState) -> Bool {
-        let selected = report.selected ?? ""
-        return FieldMatch.positions(in: state.text, reportedBefore: report.before, reportedAfter: selected + report.after) == [state.cursor]
-            && selected.count == state.selection
-    }
+    private func pins(_ report: Report, in state: ModelState) -> Bool { state.pins(report) }
 
     /// The report pins a unique place in the model: the cursor (and selection) is there.
     private mutating func relocate(_ report: Report) {
@@ -2507,15 +2433,10 @@ public struct FieldQueue: Sendable {
 
     /// A confirmed report that shows more than the model knows extends it.
     private mutating func merge(_ report: Report) {
-        let before = Array(FieldReader.trusted(before: report.before))
-        if before.count > cursor, before.suffix(cursor).elementsEqual(text[..<cursor]) {
-            prepend(Array(before.prefix(before.count - cursor)))
-        }
-        let after = Array(report.after)
-        let tail = cursor + selection
-        let known = text.count - tail
-        if after.count > known, after.prefix(known).elementsEqual(text[tail...]) {
-            text += after[known...]
+        let grown = doc.extend(with: report)
+        if grown.front > 0 {
+            record(.grow(grown.front))
+            if let from = userLost?.from { userLost?.from = from + grown.front }
         }
         unparkSpans()
     }
@@ -2523,7 +2444,7 @@ public struct FieldQueue: Sendable {
     private mutating func restore(_ state: ModelState) {
         // The changes since a read no longer lead to this text.
         readMarks = []
-        text = state.text; cursor = state.cursor; userCursor = state.userCursor; selection = state.selection; spans = state.spans
+        doc.restore(state)
     }
 
     /// The report does not show what the model expects: find out what happened and go on from there.
@@ -2580,7 +2501,7 @@ public struct FieldQueue: Sendable {
         if found.count == 1, inside == found, fitsSelection(found[0], selected), hasEvidence(report) {
             abortUnit()
             // Reports of the state before the user moved, still on their way, are lag from now on.
-            lagging.append((ModelState(text: text, cursor: cursor, userCursor: userCursor, selection: selection, spans: spans), 0))
+            lagging.append((doc, 0))
             if let flight { lagging.append((flight.pre, 0)) }
             cursor = found[0]; userCursor = cursor; selection = selected.count
             closeOpenPieces(selected.isEmpty ? .cursor : .selection)
@@ -2760,7 +2681,7 @@ public struct FieldQueue: Sendable {
     /// neither where the op in flight left the caret nor where it was before: no op went there, so the user tapped.
     /// Returns that place in the current text.
     private func tappedElsewhere(_ report: Report, flight: InFlight?) -> (at: Int, seen: ModelState?)? {
-        let current = ModelState(text: text, cursor: cursor, userCursor: userCursor, selection: selection, spans: spans)
+        let current = doc
         let pre = flight?.pre ?? current
         guard report.selected == nil, selection == 0, !fits(report, in: pre), !fits(report, in: current),
               // A recent state at its own caret, late: lag, not a tap.
@@ -2801,7 +2722,7 @@ public struct FieldQueue: Sendable {
     private mutating func userTapped(at: Int, flight: InFlight?) {
         recoveryRevision &+= 1; recoveryRequest = nil
         abortUnit()
-        lagging.append((ModelState(text: text, cursor: cursor, userCursor: userCursor, selection: selection, spans: spans), 0))
+        lagging.append((doc, 0))
         if let flight { lagging.append((flight.pre, 0)) }
         cursor = at; userCursor = at; selection = 0
         closeOpenPieces(.cursor)
@@ -2936,7 +2857,7 @@ public struct FieldQueue: Sendable {
         if older.index == nil, let input = flight?.input, flight?.retried == false { lostInputs.append(input) }
         unconfirmedInHistory = false
         abortUnit()
-        let newer = ModelState(text: text, cursor: cursor, userCursor: userCursor, selection: selection, spans: spans)
+        let newer = doc
         restore(older.state)
         parkUnverifiedEdits(newer: newer)
         if older.at != older.state.cursor {
@@ -2945,7 +2866,8 @@ public struct FieldQueue: Sendable {
         }
         // Regions begun and edits placed since that state have no span in it: they are planned afresh.
         if swap != nil { failSwap() }
-        for ri in runs.indices { runs[ri].pieces.removeAll { spans[$0.spanID] == nil } }
+        let known = spans
+        for ri in runs.indices { runs[ri].pieces.removeAll { known[$0.spanID] == nil } }
         for i in editLane.indices where editLane[i].spanID.map({ spans[$0] == nil }) ?? false { editLane[i].spanID = nil }
         for i in userLane.indices { if case .edit(var e) = userLane[i], e.spanID.map({ spans[$0] == nil }) ?? false { e.spanID = nil; userLane[i] = .edit(e) } }
         for input in lostInputs.reversed() {
