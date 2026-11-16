@@ -321,10 +321,12 @@ final class AXTextTarget: TextTarget {
 
     /// Scoped AX replacements require their own setter (or WebKit's marker operation). A whole-value setter alone
     /// is insufficient: WhatsApp exposes one while refusing AXSelectedText. Chromium ignores its advertised setter.
-    var editsInPlace: Bool { writeCapabilities.editsInPlace }
+    var editsInPlace: Bool { !nativeInputUnavailable && writeCapabilities.editsInPlace }
     /// Editable fields without scoped AX writes use synthetic keys, each independently read back by the queue.
     /// Readable pages do not take keys: a letter typed there could invoke a site shortcut.
-    var typesKeys: Bool { writeCapabilities.typesKeys }
+    var typesKeys: Bool { !nativeInputUnavailable && writeCapabilities.typesKeys }
+    /// WebKit content (it alone advertises AXTextOperation); Chromium is keyed and folds already.
+    var showsNoBreakSpaces: Bool { supportsTextOperation() }
     private var writeCapabilities: FieldWriteCapabilities {
         if let writeCapabilitiesCache { return writeCapabilitiesCache }
         var selectedTextSettable: DarwinBoolean = false
@@ -363,6 +365,36 @@ final class AXTextTarget: TextTarget {
         return FieldTypingDestination.accepts(role: role, textSettable: value || selected, editableAncestorRole: ancestorRole)
     }
     var inputMark: Int { RealInput.shared.count }
+    private var nativeInputUnavailable = false
+    private var nativeClickMark = 0
+    func beginNativeInputUnit() -> Bool {
+        guard !nativeInputUnavailable, isFocused(), NativeInputHandoff.shared.begin(pid: pid, fieldID: AnyHashable(ElementKey(element: element))) else { return false }
+        nativeClickMark = RealInput.shared.clickCount
+        return true
+    }
+    var nativeInputProtected: Bool { NativeInputHandoff.shared.protected && RealInput.shared.clickCount == nativeClickMark }
+    var nativeInputNotice: String? { NativeInputHandoff.shared.failureNotice }
+    func recoverNativeInputAfterClick() -> Bool {
+        guard let click = RealInput.shared.lastClick, click.count > nativeClickMark,
+              isFocused(), Self.security(of: element) == .notPassword,
+              let frame = Self.frame(of: element), frame.contains(click.point),
+              let first = try? selectedRange(), let second = try? selectedRange(), first == second,
+              isFocused() else { return false }
+        // The gate also checks the original field token; rebinding to a password,
+        // another editor or another field in the same process cannot release old keys.
+        let recovered = NativeInputHandoff.shared.recover(pid: pid,
+            fieldID: AnyHashable(ElementKey(element: element)), verifiedClick: true)
+        if recovered { nativeClickMark = RealInput.shared.clickCount }
+        return recovered
+    }
+
+    func prepareNativeInputHome() { NativeInputHandoff.shared.prepareHome() }
+    func endNativeInputUnit(homeVerified: Bool) -> Bool {
+        let ok = NativeInputHandoff.shared.finish(homeVerified: homeVerified)
+        if !ok { nativeInputUnavailable = true }
+        return ok
+    }
+
 
     /// An absent attribute is the normal case for most elements; any other error (a timeout, a dead
     /// element) leaves the question open.
@@ -504,11 +536,9 @@ final class AXTextTarget: TextTarget {
             subrole = string(kAXSubroleAttribute)
             domID = string("AXDOMIdentifier").flatMap { $0.isEmpty ? nil : $0 }
             domClasses = ((try? AXTextTarget.copyAttribute(element, "AXDOMClassList")) as? [String]).flatMap { $0.isEmpty ? nil : $0 }
-            var point = CGPoint.zero, size = CGSize.zero
-            if let value = (try? AXTextTarget.copyAttribute(element, kAXPositionAttribute)) ?? nil, CFGetTypeID(value) == AXValueGetTypeID(),
-               AXValueGetValue(unsafeDowncast(value, to: AXValue.self), .cgPoint, &point) { x = Int(point.x.rounded()) } else { x = nil }
-            if let value = (try? AXTextTarget.copyAttribute(element, kAXSizeAttribute)) ?? nil, CFGetTypeID(value) == AXValueGetTypeID(),
-               AXValueGetValue(unsafeDowncast(value, to: AXValue.self), .cgSize, &size) { width = Int(size.width.rounded()) } else { width = nil }
+            let frame = AXTextTarget.frame(of: element)
+            x = frame.map { Int($0.minX.rounded()) }
+            width = frame.map { Int($0.width.rounded()) }
         }
 
         /// A fresh element in the same place: same window, role and subrole, DOM id and classes, x and width. Something
@@ -547,6 +577,7 @@ final class AXTextTarget: TextTarget {
     }
 
     func setSelectedRange(_ range: UTF16Range) throws {
+        try NativeInputHandoff.shared.prepare(element)
         guard isFocused() else { throw AXTargetError.unexpectedValue }
         let (element, range) = try selectionTarget(range)
         let error = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, try Self.axValue(for: range))
@@ -685,8 +716,9 @@ final class AXTextTarget: TextTarget {
             "AXTextOperationSmartReplace": false
         ]
         let result = try parameter("AXTextOperation", operation) as? [String]
+        // WebKit keeps a space at the end of a line as a no-break space (measured in Safari: `plain` + U+00A0).
         guard result == [text], isFocused(),
-              try self.text(in: .init(location: range.location, length: text.utf16.count)) == text else {
+              try self.text(in: .init(location: range.location, length: text.utf16.count)).foldingNoBreakSpaces == text.foldingNoBreakSpaces else {
             throw AXTargetError.unexpectedValue
         }
         // WebKit selects a nonempty replacement. Every TextTarget replacement promises a
@@ -697,10 +729,22 @@ final class AXTextTarget: TextTarget {
     }
 
     private func parameter(_ key: String, _ value: CFTypeRef) throws -> CFTypeRef? {
+        try NativeInputHandoff.shared.prepare(element)
         var result: CFTypeRef?
         let error = AXUIElementCopyParameterizedAttributeValue(element, key as CFString, value, &result)
         guard error == .success else { throw AXTargetError.attribute(error) }
         return result
+    }
+
+    private static func frame(of element: AXUIElement) -> CGRect? {
+        var point = CGPoint.zero, size = CGSize.zero
+        guard let position = (try? copyAttribute(element, kAXPositionAttribute)) ?? nil,
+              CFGetTypeID(position) == AXValueGetTypeID(),
+              AXValueGetValue(unsafeDowncast(position, to: AXValue.self), .cgPoint, &point),
+              let extent = (try? copyAttribute(element, kAXSizeAttribute)) ?? nil,
+              CFGetTypeID(extent) == AXValueGetTypeID(),
+              AXValueGetValue(unsafeDowncast(extent, to: AXValue.self), .cgSize, &size) else { return nil }
+        return CGRect(origin: point, size: size)
     }
 
     private static func rect(from value: CFTypeRef) throws -> CGRect {
@@ -713,6 +757,7 @@ final class AXTextTarget: TextTarget {
     // MARK: Helpers
 
     private static func copyAttribute(_ element: AXUIElement, _ attribute: String) throws -> CFTypeRef? {
+        try NativeInputHandoff.shared.prepare(element)
         var value: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         guard error == .success else { throw AXTargetError.attribute(error) }

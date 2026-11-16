@@ -1,0 +1,60 @@
+{"field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "field", "t": 484290826.943}
+{"action": "idle", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": "Alpha beta gamma delta epsilon zeta.", "before": ""}, "t": 484290827.9680834}
+{"field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "id": "2730B738-C1BA-4B61-B940-2F3AA74D5FC0", "kind": "read", "t": 484331855.5499167}
+{"edit": {"after": "Alpha beta gamma delta epsilon zeta.", "atCursor": false, "before": "", "cursorAtEnd": false, "id": "200F5B06-B3F8-4CE3-AFD8-AE732D614EA2", "kind": "magic", "paced": true, "readID": "2730B738-C1BA-4B61-B940-2F3AA74D5FC0", "target": "Alpha beta GAMMA delta epsilon zeta."}, "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "edit", "t": 484334907.3833334, "user": false}
+{"action": "send", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": "Alpha beta gamma delta epsilon zeta.", "before": ""}, "t": 484334908.3617917}
+{"field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "sent", "lane": "edit", "op": {"move": 16}, "t": 484334908.43275005}
+{"action": "wait", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta gamma"}, "t": 484334908.76625}
+{"action": "wait", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": "Alpha beta gamma delta epsilon zeta.", "before": ""}, "t": 484334915.9222917}
+{"action": "wait", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta gamma"}, "t": 484334921.14641666}
+{"action": "send", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta gamma"}, "t": 484334956.25575006}
+{"detail": "40", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "confirmed", "t": 484334956.47570837}
+{"field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "sent", "lane": "edit", "op": {"delete": 1}, "t": 484334956.47570837}
+{"action": "wait", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta gamm"}, "t": 484334956.92775005}
+{"action": "send", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta gamm"}, "t": 484335077.04962504}
+{"detail": "113", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "confirmed", "t": 484335077.26933336}
+{"field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "sent", "lane": "edit", "op": {"delete": 1}, "t": 484335077.26933336}
+{"action": "wait", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta gam"}, "t": 484335077.6037084}
+{"action": "send", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta gam"}, "t": 484335193.0158334}
+{"detail": "109", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "confirmed", "t": 484335193.17079175}
+{"field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "sent", "lane": "edit", "op": {"delete": 1}, "t": 484335193.17079175}
+{"action": "wait", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta ga"}, "t": 484335193.45933336}
+{"action": "send", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta ga"}, "t": 484335308.7272084}
+{"detail": "109", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "confirmed", "t": 484335308.94133335}
+{"field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "sent", "lane": "edit", "op": {"delete": 1}, "t": 484335308.94133335}
+{"action": "wait", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta g"}, "t": 484335309.26120836}
+{"action": "send", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta g"}, "t": 484335428.018375}
+{"detail": "112", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "confirmed", "t": 484335428.239}
+{"field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "sent", "lane": "edit", "op": {"delete": 1}, "t": 484335428.239}
+{"action": "wait", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta "}, "t": 484335428.780125}
+{"action": "send", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta "}, "t": 484335547.46900004}
+{"detail": "112", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "confirmed", "t": 484335547.66083336}
+{"field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "sent", "lane": "edit", "op": {"insert": "G"}, "t": 484335547.66083336}
+{"action": "wait", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta G"}, "t": 484335547.96333337}
+{"action": "send", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta G"}, "t": 484335554.33275}
+{"detail": "0", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "confirmed", "t": 484335554.4371667}
+{"field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "sent", "lane": "edit", "op": {"insert": "A"}, "t": 484335554.4371667}
+{"action": "wait", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta GA"}, "t": 484335554.67183334}
+{"action": "send", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta GA"}, "t": 484335561.1419167}
+{"detail": "0", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "confirmed", "t": 484335561.3112917}
+{"field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "sent", "lane": "edit", "op": {"insert": "M"}, "t": 484335561.3112917}
+{"action": "wait", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta GAM"}, "t": 484335561.61220837}
+{"action": "send", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta GAM"}, "t": 484335568.240875}
+{"detail": "0", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "confirmed", "t": 484335568.44979167}
+{"field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "sent", "lane": "edit", "op": {"insert": "M"}, "t": 484335568.44979167}
+{"action": "wait", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta GAMM"}, "t": 484335568.7887917}
+{"action": "send", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta GAMM"}, "t": 484335574.97691673}
+{"detail": "0", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "confirmed", "t": 484335575.1749584}
+{"field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "sent", "lane": "edit", "op": {"insert": "A"}, "t": 484335575.1749584}
+{"action": "wait", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta GAMMA"}, "t": 484335575.5097917}
+{"action": "wait", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta GAMMA"}, "t": 484335582.0202917}
+{"detail": "0", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "confirmed", "t": 484335582.1741667}
+{"action": "send", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta GAMMA"}, "t": 484335667.8694167}
+{"field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "sent", "lane": "edit", "op": {"move": -16}, "t": 484335668.0659584}
+{"action": "wait", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": "Alpha beta GAMMA delta epsilon zeta.", "before": ""}, "t": 484335668.378875}
+{"action": "wait", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": " delta epsilon zeta.", "before": "Alpha beta GAMMA"}, "t": 484335675.7737084}
+{"action": "wait", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": "Alpha beta GAMMA delta epsilon zeta.", "before": ""}, "t": 484335684.4244584}
+{"action": "idle", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "step", "report": {"after": "Alpha beta GAMMA delta epsilon zeta.", "before": ""}, "t": 484335717.83758336}
+{"detail": "43", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "confirmed", "t": 484335718.0452917}
+{"detail": "0", "field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "id": "200F5B06-B3F8-4CE3-AFD8-AE732D614EA2", "kind": "applied", "t": 484335718.0452917}
+{"field": "64CD66C7-48E3-49AC-88C2-028C5394EC74", "kind": "reset", "reason": "hidden", "t": 484379033.5077917}

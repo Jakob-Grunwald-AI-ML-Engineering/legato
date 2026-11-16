@@ -1,0 +1,101 @@
+{
+  "operationSamples": [
+    {
+      "op": {
+        "move": 16
+      },
+      "issuedMs": 484334908.43275005,
+      "confirmedMs": 484334956.47570837,
+      "elapsedMs": 48.043
+    },
+    {
+      "op": {
+        "delete": 1
+      },
+      "issuedMs": 484334956.47570837,
+      "confirmedMs": 484335077.26933336,
+      "elapsedMs": 120.794
+    },
+    {
+      "op": {
+        "delete": 1
+      },
+      "issuedMs": 484335077.26933336,
+      "confirmedMs": 484335193.17079175,
+      "elapsedMs": 115.901
+    },
+    {
+      "op": {
+        "delete": 1
+      },
+      "issuedMs": 484335193.17079175,
+      "confirmedMs": 484335308.94133335,
+      "elapsedMs": 115.771
+    },
+    {
+      "op": {
+        "delete": 1
+      },
+      "issuedMs": 484335308.94133335,
+      "confirmedMs": 484335428.239,
+      "elapsedMs": 119.298
+    },
+    {
+      "op": {
+        "delete": 1
+      },
+      "issuedMs": 484335428.239,
+      "confirmedMs": 484335547.66083336,
+      "elapsedMs": 119.422
+    },
+    {
+      "op": {
+        "insert": "G"
+      },
+      "issuedMs": 484335547.66083336,
+      "confirmedMs": 484335554.4371667,
+      "elapsedMs": 6.776
+    },
+    {
+      "op": {
+        "insert": "A"
+      },
+      "issuedMs": 484335554.4371667,
+      "confirmedMs": 484335561.3112917,
+      "elapsedMs": 6.874
+    },
+    {
+      "op": {
+        "insert": "M"
+      },
+      "issuedMs": 484335561.3112917,
+      "confirmedMs": 484335568.44979167,
+      "elapsedMs": 7.138
+    },
+    {
+      "op": {
+        "insert": "M"
+      },
+      "issuedMs": 484335568.44979167,
+      "confirmedMs": 484335575.1749584,
+      "elapsedMs": 6.725
+    },
+    {
+      "op": {
+        "insert": "A"
+      },
+      "issuedMs": 484335575.1749584,
+      "confirmedMs": 484335582.1741667,
+      "elapsedMs": 6.999
+    },
+    {
+      "op": {
+        "move": -16
+      },
+      "issuedMs": 484335668.0659584,
+      "confirmedMs": 484335718.0452917,
+      "elapsedMs": 49.979
+    }
+  ],
+  "wholeMs": 809.613
+}

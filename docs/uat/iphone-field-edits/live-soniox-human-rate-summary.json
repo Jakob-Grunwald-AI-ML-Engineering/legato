@@ -1,0 +1,20 @@
+{
+  "audioSeconds": 28.0389375,
+  "format": "16000 Hz mono signed little-endian PCM16",
+  "pcmSHA256": "3b834b075036270097a31fa8d03e2206d96fd8e6a4ff2e122bb8d6afe70ef793",
+  "firstSpeechSeconds": 22.0319375,
+  "chosenSilentGapSeconds": 2.0,
+  "secondSpeechSeconds": 3.007,
+  "trailingSilenceSeconds": 1.0,
+  "ttsRateWordsPerMinute": 180,
+  "firstText": "Today we are preparing the boat for a short trip along the coast. The weather report says the wind will stay gentle until the evening. Please put the blue notebook beside the chart table and check that the cabin lights are working. We will bring fresh water, bread, fruit, warm jackets, a small repair kit, and enough rope for the next harbour. Before we leave, walk around the deck and close every open hatch.",
+  "secondText": "Now I am speaking again while the earlier passage is being corrected.",
+  "providerResponses": 148,
+  "providerFinished": true,
+  "endpointResponseSeconds": [
+    22.241433374991175,
+    27.338021042000037
+  ],
+  "physicalReplayMeasured": true,
+  "physicalReplayOutcome": "7838631 physical replay confirmed natural empty-field insertion, pause correction and admitted suffix/native input responses below 500 ms in the measured sample; full stress and fresh UAT remain separate."
+}

@@ -46,6 +46,9 @@ public struct FieldRecovery: Sendable {
         public let generation: String
         public let revision: UInt64
         public let targets: [Target]
+        /// A target's last operation may or may not have landed, and the proxy's report is what left that open: the
+        /// transport walks the field instead of settling the request from the window it already has.
+        public var needsRead: Bool { targets.contains { $0.landed != nil } }
     }
     public enum Refusal: String, Sendable, Equatable { case cancelled, unrestored, unreadable, changed, ambiguous, uncorroborated }
     public struct Placement: Sendable, Equatable {

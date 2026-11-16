@@ -1,0 +1,11 @@
+{
+  "unicodeRevision": "c355a35",
+  "listRevision": "7838631",
+  "unicodeSource": "A👩🏽‍🚀 B🇩🇪 C é Z",
+  "unicodeObservation": "From before A, native+1 reached A; another+1 traversed the full astronaut grapheme; subsequent+7 traversed flag and combining accent intact, ending before final space+Z. No text mutation.",
+  "unicodeLimit": "Chosen 120 ms reads are observation delays, not host-confirmation latency or a universal unit claim. This is raw proxy exploration, not production Unicode Magic acceptance.",
+  "listBefore": "first item\nsecond item",
+  "listAfterNativeReturnAXValue": "• first item\n• second item\n• \n",
+  "listObservation": "Actual Legato Return at verified list end produced a visible third native bullet and retained both original items.",
+  "evidence": "Native before/after screenshots inspected privately; they contain local network UI and are not committed."
+}

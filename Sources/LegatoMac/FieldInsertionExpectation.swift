@@ -19,7 +19,7 @@ public struct FieldInsertionExpectation: Sendable, Equatable {
     public func matches(selection: UTF16Range?, length: Int?, insertedText: String?, normalizeSpaces: Bool) -> Bool {
         guard selection == caret, self.length == nil || length == self.length, let insertedText else { return false }
         func normalized(_ value: String) -> String {
-            normalizeSpaces ? value.replacingOccurrences(of: "\u{00A0}", with: " ") : value
+            normalizeSpaces ? value.foldingNoBreakSpaces : value
         }
         return normalized(insertedText) == normalized(text)
     }

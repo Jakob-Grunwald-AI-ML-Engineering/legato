@@ -65,6 +65,16 @@ import LegatoKeyboardCore
     private var reported: (range: UTF16Range, until: ContinuousClock.Instant?)?
     var editsInPlace: Bool { !keys }
     var typesKeys: Bool { keys }
+    var onNativeReplace: (() -> Void)?
+    var nativeCanAdmit = true
+    var nativeInputProtected = false
+    var onNativeEnd: (() -> Void)?
+    func beginNativeInputUnit() -> Bool { nativeCanAdmit }
+    func endNativeInputUnit(homeVerified: Bool) -> Bool {
+        if homeVerified { onNativeEnd?() }
+        return homeVerified
+    }
+
     var inputMark: Int { mark }
     var fieldKey: AnyHashable? { key }
 
@@ -274,6 +284,7 @@ import LegatoKeyboardCore
         selection = .init(location: range.location + text.utf16.count, length: 0)
         writes += 1
         if rng.chance(lagChance) { lagging = before }
+        onNativeReplace?()
     }
 
     /// The user types `character` at their caret (replacing a selection).
@@ -420,6 +431,63 @@ private struct SeededRandom {
 }
 
 @MainActor @Suite struct MacFieldQueueStressTests {
+    @Test func deferredNativeKeyLandsAfterTheConfirmedUserCaret() async {
+        let field = FakeAXField("the cat", rng: SeededRandom(294))
+        var clock = ContinuousClock.now
+        field.clock = { clock }
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.now = { clock }
+        queue.sleep = { clock += $0 }
+        field.nativeInputProtected = true
+        field.onNativeReplace = {
+            field.onNativeReplace = nil
+            field.mark += 1 // observed key is held; it has not changed the field yet
+        }
+        field.onNativeEnd = {
+            field.onNativeEnd = nil
+            field.type("z")
+        }
+        _ = await queue.edit(.init(range: .init(location: 0, length: 7), scope: "the cat", target: "The Cat"))
+        #expect(field.string == "The Catz")
+        #expect(field.selection == .init(location: 8, length: 0))
+    }
+
+    @Test func unavailableNativeInputOwnershipDoesNotMoveOrEditTheField() async {
+        let field = FakeAXField("the cat", rng: SeededRandom(295))
+        var clock = ContinuousClock.now
+        field.clock = { clock }
+        field.nativeCanAdmit = false
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.now = { clock }
+        queue.sleep = { clock += $0 }
+        let result = await queue.edit(.init(range: .init(location: 0, length: 7), scope: "the cat", target: "The Cat"))
+        #expect(result == .dropped(.focusLost))
+        #expect(field.writes == 0)
+        #expect(field.string == "the cat")
+        #expect(field.selection == .init(location: 7, length: 0))
+    }
+
+    @Test func nativeReadbackDoesNotRestoreTheCaretOverInterveningInput() async {
+        let field = FakeAXField("the cat", rng: SeededRandom(293))
+        var clock = ContinuousClock.now
+        field.clock = { clock }
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.now = { clock }
+        queue.sleep = { clock += $0 }
+        field.onNativeReplace = {
+            field.onNativeReplace = nil
+            field.mark += 1
+            field.selection = .init(location: 0, length: 0)
+        }
+        let result = await queue.edit(.init(range: .init(location: 0, length: 7), scope: "the cat", target: "The Cat"))
+        #expect(result == .applied(.init(location: 0, length: 7)))
+        #expect(field.string == "The Cat")
+        #expect(field.selection == .init(location: 0, length: 0))
+    }
+
     @Test(arguments: [false, true], [0, 5])
     func dictationBeforeExistingTextPreservesBothBoundaries(keys: Bool, caret: Int) async {
         let original = "Keep intro."

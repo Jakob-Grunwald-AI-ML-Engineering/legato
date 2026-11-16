@@ -141,6 +141,7 @@ import Observation
             fallbackOwner.pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
             fallbackOwner.keys = keyPresses.count; fallbackOwner.allowed = true
             fallbackOwner.witness = AXTextTarget.capturePasteWitness()
+            NativeInputHandoff.shared.beginRun()
             fieldEditor.begin()
         }
         dictation.onPrepare = { await AXTextTarget.prepareFocused() }

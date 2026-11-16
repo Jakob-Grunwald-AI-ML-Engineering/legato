@@ -212,7 +212,10 @@ struct ListSession {
         var cleanedAll = true
         for (i, line) in lines.enumerated() {
             let raw = "- " + items[i], cleaned = "- " + Self.capitalized(items[i]) + "."
-            guard line == raw || line == cleaned else {
+            // A whole-take cleanup can safely capitalize a piece while its cross-piece join
+            // punctuation remains refused. Word content and typed list boundaries stay exact.
+            let capitalOnly = "- " + Self.capitalized(items[i])
+            guard [raw, cleaned, capitalOnly, raw + "."].contains(line) else {
                 return "line \(line.debugDescription) is neither \(raw.debugDescription) nor \(cleaned.debugDescription) (text \(rig.field.string.debugDescription))"
             }
             if line != cleaned { cleanedAll = false }

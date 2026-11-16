@@ -99,18 +99,21 @@ public struct LiveDictationStats: Codable, Equatable, Sendable {
 }
 
 /// keyboard -> app (`link.dictation.live.ack`): the run's `version` the field fully shows (or `nil` while only
-/// stats changed), for latency and diagnostics. The app never waits for it.
+/// stats changed). Cleanup may wait for an explicitly delivered complete version before reading its field.
 public struct LiveDictationAck: Codable, Equatable, Sendable {
     public var runID: String
     public var version: Int?
     /// The applied version was the complete take.
     public var complete: Bool
+    /// True only when this version landed; false is a terminal receipt for a blocked or dropped run.
+    /// Nil is a legacy/statistics receipt and supplies no delivery evidence.
+    public var delivered: Bool?
     public var stats: LiveDictationStats
     /// Segment ids where a new piece of the run starts in the field: the user typed or moved the caret between it and
     /// the words before (a list item per line). Cleanup takes the pieces apart (`LiveDictationRun.split`).
     public var pieces: [Int]?
-    public init(runID: String, version: Int?, complete: Bool = false, stats: LiveDictationStats, pieces: [Int]? = nil) {
-        self.runID = runID; self.version = version; self.complete = complete; self.stats = stats; self.pieces = pieces
+    public init(runID: String, version: Int?, complete: Bool = false, stats: LiveDictationStats, pieces: [Int]? = nil, delivered: Bool? = nil) {
+        self.runID = runID; self.version = version; self.complete = complete; self.stats = stats; self.pieces = pieces; self.delivered = delivered
     }
 }
 

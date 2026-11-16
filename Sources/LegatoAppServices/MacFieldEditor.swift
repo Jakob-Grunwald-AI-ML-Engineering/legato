@@ -217,6 +217,7 @@ import LegatoMac
     /// Work the queue could not place remains visible, without replaying the part already represented in the field.
     private func dropped(_ drop: MacFieldQueue.Drop) {
         guard !drop.text.isEmpty, drop.reason != .cancelled else { return }
+        if let notice = target?.nativeInputNotice { report(notice) }
         guard let runID = drop.runID else { retain(drop.text, id: drop.id); return }
         guard !dismissedRecoveryRuns.contains(runID) else { return }
         if drop.typed == 0 {
@@ -230,7 +231,17 @@ import LegatoMac
     }
 
     /// The user typed or clicked: the queue takes their caret and text from the next read and replans around them.
-    public func relinquish() { panelOwned = false; queue.userActed() }
+    public func relinquish() {
+        panelOwned = false; queue.userActed()
+        guard let target, target.nativeInputNotice != nil else { return }
+        Task { @MainActor [weak self, weak target] in
+            guard let self, let target else { return }
+            await sleep(MacFieldQueue.keySettle)
+            if target.recoverNativeInputAfterClick() {
+                report("Cursor recovered. Cleanup is paused for this take.")
+            }
+        }
+    }
     public func cancel(instructionID: String) {
         guard activeInstructionID == instructionID else { return }
         activeInstructionID = nil
@@ -553,11 +564,18 @@ import LegatoMac
         let after = context(range.end, MacFieldQueue.contextChars)
         readSelection = nil; readText = nil; readRange = nil
         let result = await queue.edit(.init(id: edit.id, range: range, scope: edit.scopeText, before: before, after: after,
-                                            target: edit.target, caretAfter: true))
+                                            target: edit.target, caretAfter: edit.cursorAtEnd))
         switch result {
         case .applied(let landed):
-            instructionCursor = UTF16Range(location: landed.end, length: 0)
-            return .init(id: edit.id, applied: true, cursor: edit.target.utf16.count)
+            // The queue rebases the user's caret through the exact confirmed changes.
+            // Report that actual position, rather than inventing the scope's end for Undo.
+            guard let actual = try? target.selectedRange(), actual.length == 0,
+                  actual.location >= landed.location, actual.location <= landed.end else {
+                instructionCursor = nil // a moved/selected/unreadable caret cannot anchor this Undo
+                return .init(id: edit.id, applied: true)
+            }
+            instructionCursor = actual
+            return .init(id: edit.id, applied: true, cursor: actual.location - landed.location)
         case .stopped:
             return .init(id: edit.id, applied: false,
                          reason: "Editing stopped. Some changes may remain in the field; check it before retrying.",

@@ -40,6 +40,10 @@ import LegatoKeyboardCore
     var loseFocusAfter: Int?
     var readsFailAfterWrite = false
     var ignoreWrites = false
+    var trailingSpaceBecomesNoBreak = false
+    var homeFailures = 0
+    var showsNoBreakSpaces: Bool { trailingSpaceBecomesNoBreak }
+    func endNativeInputUnit(homeVerified: Bool) -> Bool { if !homeVerified { homeFailures += 1 }; return homeVerified }
     init(_ text: String) { value = text; selection = .init(location: text.utf16.count, length: 0) }
     func isFocused() -> Bool { focused }
     func selectedRange() throws -> UTF16Range { selection }
@@ -53,6 +57,10 @@ import LegatoKeyboardCore
     func replace(_ range: UTF16Range, with text: String) throws {
         if ignoreWrites { writes += 1; return }
         value = (value as NSString).replacingCharacters(in: NSRange(location: range.location, length: range.length), with: text)
+        if trailingSpaceBecomesNoBreak {
+            value = value.replacingOccurrences(of: "\u{00A0}", with: " ")
+            if value.hasSuffix(" ") { value = String(value.dropLast()) + "\u{00A0}" }
+        }
         selection = .init(location: range.location + text.utf16.count, length: 0)
         writes += 1; snapshots.append(value)
         if let limit = loseFocusAfter, writes >= limit { focused = false }
@@ -149,6 +157,20 @@ import LegatoKeyboardCore
         guard case .applied = await result else { Issue.record("deferred Magic was dropped"); return }
         await queue.whenIdle()
         #expect(field.value == "Header new. fresh words today")
+    }
+
+    /// Safari's rich editor keeps a space at the end of a line as a no-break space (measured: `plain` + U+00A0).
+    @Test func aWebEditorsTrailingNoBreakSpaceReadsBackAsTheSpaceThatWasWritten() async {
+        let field = NativePlanField("")
+        field.trailingSpaceBecomesNoBreak = true
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.live(runID: "speech", version: 1, text: "plain ", speaking: true)
+        await queue.whenIdle()
+        queue.live(runID: "speech", version: 2, text: "plain ascii words.", speaking: true)
+        await queue.whenIdle()
+        #expect(field.value == "plain ascii words.")
+        #expect(field.homeFailures == 0)
     }
 
     @Test func aLongVerifiedRewriteBuildsOneDiffInsteadOfDiffingEveryGrapheme() async {

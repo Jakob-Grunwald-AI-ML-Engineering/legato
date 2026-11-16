@@ -1,0 +1,75 @@
+{
+  "sourceBase": "d58e2f670581d3b0a2c7ccfedc9674325bd23684",
+  "runtimeDylibSHA256": "04a05e84c40e4931f85b3e0b8a9cd35af0b062b6adcce877399706804e13f971",
+  "finalRuntimeDylibSHA256": "9f9cc047df5c2f733362d17a388da3f77bb263f16be7d9774dcb7303327f5f88",
+  "stats": [
+    {
+      "at": "2026-11-16T08:04:46.491Z",
+      "captured": 2,
+      "failures": 0,
+      "held": 0,
+      "lastUnitMs": 30.642791651189327,
+      "replayed": 2,
+      "state": "idle"
+    },
+    {
+      "at": "2026-11-16T08:08:28.088Z",
+      "captured": 4,
+      "failures": 0,
+      "held": 0,
+      "lastUnitMs": 11.257458332693204,
+      "replayed": 4,
+      "state": "idle"
+    },
+    {
+      "at": "2026-11-16T08:11:53.544Z",
+      "captured": 2,
+      "failures": 0,
+      "held": 0,
+      "lastUnitMs": 37.3447916645091,
+      "replayed": 2,
+      "state": "idle"
+    }
+  ],
+  "environment": {
+    "macOS": "26.6.2 (25G83)",
+    "Xcode": "27.2 (27B52)",
+    "mode": "signed isolated offline fixture, original identity, existing input tap enabled"
+  },
+  "checks": {
+    "focusedContracts": "3 passed",
+    "macAppBuild": "passed",
+    "signature": "codesign --verify --deep --strict passed",
+    "fullFinalGate": "parent pending",
+    "failurePolicyContracts": "4 tests with5cases passed",
+    "failurePolicyMacBuild": "passed",
+    "failurePolicyForeground": "not run; Mac kept visibly free"
+  },
+  "schemaVersion": 2,
+  "normalPathSourceSHA256": {
+    "Apps/macOS/App/Debug/DebugBridge.swift": "110c86d6374d748aa7063c51906b689773ee3574ddd07202e3ae5ea801e5b21f",
+    "Apps/macOS/App/System/AXTextTarget.swift": "7b03206a930cdc7a46c3307ce4e4fa1a4915212c9ab3b8139b8edd42bc3e01fb",
+    "Apps/macOS/App/System/HotkeyTap.swift": "362531ad1de5a51ee59bb04bad5e43487d90dca311cb772e5b74cca9e89bd6bd",
+    "Apps/macOS/App/System/SyntheticKeys.swift": "71c3e44bbcbb7dc7ba2b91239b741ec98aabb7edafee5e21661f514734e6c828",
+    "Apps/macOS/App/System/NativeInputHandoff.swift": "11fb21f19c66406bb00d2b4aadeba741f1dd59f36d2e3c9c44902e9fdd9e0396",
+    "Sources/LegatoMac/MacFieldQueue.swift": "3614c75714033635f79f74b471e519f44bca18ceb5d6f812b759434b6eb03a87",
+    "Sources/LegatoMac/TextTarget.swift": "b09e77049e585c73f019a2922a9a548e4b6ea7cb6b0991977f06f7abc230807b",
+    "Sources/LegatoAppServices/MacFieldEditor.swift": "66c0d2fc7dd9ebd47749b91f581aec46976cffd377d68b52869c7388e7663c51",
+    "Tests/LegatoMacTests/MacFieldQueueStressTests.swift": "4e78639fab62e707cbffd9662d44f787db74637eec97713d54dadd533ddc778b"
+  },
+  "failurePolicySourceSHA256": {
+    "Apps/macOS/App/Debug/DebugBridge.swift": "110c86d6374d748aa7063c51906b689773ee3574ddd07202e3ae5ea801e5b21f",
+    "Apps/macOS/App/System/AXTextTarget.swift": "f22f048aec70a0fcaf607aa430523fd66e45879e7327dfaa7fcd2e17a6683c16",
+    "Apps/macOS/App/System/HotkeyTap.swift": "362531ad1de5a51ee59bb04bad5e43487d90dca311cb772e5b74cca9e89bd6bd",
+    "Apps/macOS/App/System/SyntheticKeys.swift": "32addedc3916bec47b125733b5540bc772ed1a6a9ea6bbf71148383eeb82303a",
+    "Apps/macOS/App/System/NativeInputHandoff.swift": "1be37fe73a32347a5738b97a4e68ed2f0c7c9b62f7c6149ea0a7f6c11070a2aa",
+    "Sources/LegatoMac/MacFieldQueue.swift": "3614c75714033635f79f74b471e519f44bca18ceb5d6f812b759434b6eb03a87",
+    "Sources/LegatoMac/TextTarget.swift": "d000aceb054f8c933d3cbef6cd0ee820d83362963bb2c506447735aabb14edd7",
+    "Sources/LegatoAppServices/MacFieldEditor.swift": "bb05db9860867798f11b8d304c9ea5b337eaeaab7ff3c2a920f81919538735ca",
+    "Tests/LegatoMacTests/MacFieldQueueStressTests.swift": "4e78639fab62e707cbffd9662d44f787db74637eec97713d54dadd533ddc778b",
+    "Sources/LegatoMac/NativeInputLease.swift": "3efb758ee6439ae19cb66f7ff2264f93520da7e77545e7240e685cd92bb430dc",
+    "Tests/LegatoMacTests/NativeInputLeaseTests.swift": "7acb6cddca5d540d8839d8ab3d8e4f3b74f95a516c7a7de93da5a3b9076fda7e",
+    "Sources/LegatoKeyboardCore/Input/FieldEditCoordinator.swift": "64f75829872cdad6462c0e31a100128809cf3897923f850638dc27b9f135b9d5"
+  },
+  "failurePolicyBuiltDylibSHA256": "9b970abf5db92cf5ae16f4ba07152acf4cafa614afb030ee97066e919604aa80"
+}

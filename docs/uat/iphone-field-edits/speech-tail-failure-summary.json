@@ -1,0 +1,34 @@
+{
+  "revision": "c355a35",
+  "method": "Physical real-extension matching-PCM replay at speed 1; native Space during active cleanup/resumption; phone monotonic edit journal. Guarded directed integration measurement, not fresh UAT.",
+  "runID": "FD7A0F0A-8AC0-4D93-9AB5-F3DE225637DB",
+  "manualSpace": {
+    "inputUptimeMs": 495727488.0060417,
+    "issuedDelayMs": 4.1921666264534,
+    "queueConfirmedDelayMs": 22.725208342075348
+  },
+  "speechTail": {
+    "firstSnapshotWithCorrectedUptimeMs": 495728882.05675,
+    "snapshotVersion": 144,
+    "issuedInitialCorrectByMs": 63.211791694164276,
+    "remainingEDDotIssuedDelayMs": [
+      19568.50766670704,
+      19577.921041727066,
+      19586.57625001669
+    ],
+    "oldCleanupAppliedUptimeMs": 495748450.5644167,
+    "acceptance": "FAIL: admitted raw suffix waited for old cleanup after acoustic activity became quiet."
+  },
+  "nativeReadback": "All original words and the intentional user Space inside aga in remained; cursor stimulus was not sent because complete-tail guard failed.",
+  "liveMicrophoneIsolation": {
+    "sampleUTC": "2026-11-16T10:26:05.546Z",
+    "armed": true,
+    "route": "idle",
+    "warmInput": true,
+    "method": "Existing state command during replay. KeyboardSession sends live PCM to DictationEngine only for dictation route; debug replay does not open that gate and uses the offline decoder."
+  },
+  "limits": [
+    "Queue confirmation uses proxy readback, which may be optimistic; independent native full-field readback corroborates retained content, not per-letter display timing.",
+    "The 19.6 second gap is on-device admitted-snapshot to issued-operation time; it excludes bridge/network and is not total cleanup duration."
+  ]
+}

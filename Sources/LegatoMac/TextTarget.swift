@@ -104,10 +104,21 @@ public protocol TextTarget: AnyObject {
     /// transport and offer guarded keys instead. This sends no input, returns true only on an actual downgrade,
     /// and is never called for an uncertain or partially landed write.
     func recoverWriteFailure() -> Bool
+    /// A rich web editor: it stores a space at the end of a line as a no-break space (WebKit and Chromium both), so
+    /// text read from it is compared with spaces folded.
+    var showsNoBreakSpaces: Bool { get }
     /// Whether the field is edited with synthetic keys instead (`press`), each one verified by reading it back.
     var typesKeys: Bool { get }
     /// A counter of the user's real key presses and clicks: a key planned at one mark is refused at another.
     var inputMark: Int { get }
+    /// Reserves keyboard delivery while one native edit temporarily borrows its selection.
+    func beginNativeInputUnit() -> Bool
+    var nativeInputProtected: Bool { get }
+    var nativeInputNotice: String? { get }
+    func recoverNativeInputAfterClick() -> Bool
+    func prepareNativeInputHome()
+    func endNativeInputUnit(homeVerified: Bool) -> Bool
+
     /// Sends one key, only if every guard holds now: the bound element has focus in the frontmost app, no real input
     /// since `mark`, no modifier held, and the selection is `selection`. Throws `FieldKeyRefusal` and sends nothing
     /// otherwise. Returning does not mean the key landed: the caller reads the field back.
@@ -120,12 +131,25 @@ public protocol TextTarget: AnyObject {
     var fieldKey: AnyHashable? { get }
 }
 
+public extension String {
+    /// A rich editor's no-break spaces read as the spaces that were written (see `TextTarget.showsNoBreakSpaces`).
+    var foldingNoBreakSpaces: String { contains("\u{00A0}") ? replacingOccurrences(of: "\u{00A0}", with: " ") : self }
+}
+
 public enum TextTargetReadError: Error { case unsupported }
 public extension TextTarget {
     var editsInPlace: Bool { true }
     func recoverWriteFailure() -> Bool { false }
     var typesKeys: Bool { false }
+    var showsNoBreakSpaces: Bool { false }
     var inputMark: Int { 0 }
+    func beginNativeInputUnit() -> Bool { true }
+    var nativeInputProtected: Bool { false }
+    var nativeInputNotice: String? { nil }
+    func recoverNativeInputAfterClick() -> Bool { false }
+    func prepareNativeInputHome() {}
+    func endNativeInputUnit(homeVerified: Bool) -> Bool { homeVerified }
+
     func press(_ key: FieldKey, mark: Int, selection: UTF16Range) throws { throw FieldKeyRefusal.unavailable }
     func setCaret(_ range: UTF16Range, mark: Int, selection: UTF16Range) throws { throw FieldKeyRefusal.unavailable }
     var fieldKey: AnyHashable? { nil }

@@ -68,6 +68,23 @@ private func paragraphs(_ count: Int) -> String {
     func pause(milliseconds: Int) async {}
 }
 
+/// A native move can echo the old block for multiple reads before the real host catches up.
+/// This models the physical div-boundary trace without converting it into a latency guarantee.
+@MainActor private final class DelayedBlockField: FieldWindowProxy {
+    let field: BlockField
+    private var echo: (before: String, after: String)?
+    private var remaining = 0
+    init(_ text: String, cursor: Int) { field = BlockField(text, cursor: cursor, sizes: [200]) }
+    var windowBefore: String { remaining > 0 ? echo!.before : field.windowBefore }
+    var windowAfter: String { remaining > 0 ? echo!.after : field.windowAfter }
+    func move(by units: Int) {
+        echo = (field.windowBefore, field.windowAfter)
+        field.move(by: units)
+        remaining = 3
+    }
+    func pause(milliseconds: Int) async { remaining = max(0, remaining - 1) }
+}
+
 /// Safari's `contenteditable` with `<p>` paragraphs (measured): a paragraph break shows as "\n\n" in the windows but
 /// the cursor moves over it as one unit. `text` holds one "\n" per break, as the field counts.
 @MainActor private final class ParagraphField: FieldWindowProxy {
@@ -173,6 +190,16 @@ private func paragraphs(_ count: Int) -> String {
         // The echo of an edit and the scope check look past the artifact.
         #expect(OwnEditEcho.isSame(expected: "the gate.\n\nAfter that it is", reported: "\n After that it is"))
         #expect(!OwnEditEcho.isSame(expected: "the gate.\nBefore that it is", reported: "\n After that it is"))
+    }
+
+    @Test func twoStaleBlockEndEchoesDoNotHideTheFollowingDivParagraph() async throws {
+        let first = "First paragraph alpha."
+        let text = first + "\nSecond paragraph beta."
+        let proxy = DelayedBlockField(text, cursor: first.count)
+        let read = try await FieldReader(settleMilliseconds: 0).readDown(proxy, known: "", room: 3000).get()
+        #expect(read.text == "\nSecond paragraph beta.")
+        #expect(read.stop == .start)
+        #expect(proxy.field.cursor == first.count)
     }
 
     @Test func readsAShortFieldToItsStartAndReturnsTheCursor() async throws {

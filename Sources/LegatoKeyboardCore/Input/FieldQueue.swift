@@ -24,14 +24,13 @@ import Foundation
 /// - Live dictation types only at the caret and trusts the model (the keyboard is the field's only writer; an iOS
 ///   keyboard sees a short window of it): a run's words go in one grapheme at a time at its open piece's end, the
 ///   user's caret. A revision of the piece's last words goes in while speaking only when every changed character lies
-///   within `nearChars` of the caret and the report shows them as typed; anything else waits for the stop. At the stop
-///   the take is swapped to its final text in one delete and one insert when the report's text before the caret shows
-///   the take's end as the model has it (`Swap`); otherwise it stays as typed and is reported (`Event.dropped`; the app
-///   keeps it in History). A take never starts inside a word (`liveStart`).
-/// - Once the user types, deletes, moves the caret or makes an edit during or after a take (`LiveRun.userActed`), the
-///   keyboard never deletes or moves in it again: no revision, no swap. Its later words start a new piece at the user's
-///   caret, typed as spoken (a delivered word heard again as another stays as typed, the words after it still go in);
-///   where pieces start is told to the app (`pieceStarts`), which cleans them apart.
+///   within `nearChars` of the caret for legacy hosts without activity admission. Production hosts release revisions
+///   through the conditional edit lane in confirmed pauses or at stop. Every unchanged character remains in place;
+///   a stop-time block swap is only an end-verified fallback after a failed jump. Otherwise text stays as typed with
+///   recovery in History. A take never starts inside a word (`liveStart`).
+/// - User typing, deletion and movement close the current speech piece; later words start at the user's caret.
+///   Corrections still visit unchanged portions of earlier pieces. The shared merge protects user changes, including
+///   changes made while an edit was on its way. Pieces remain independently anchored across typed separators.
 /// - Field switches look like taps (Safari gives a page's fields one identity): a jump counts only when a report pins
 ///   it, and one that went nowhere or stopped short drops its work once and reseeds the model (`Resync.jumpFailed`).
 /// - Instruction edits carry the read they came from (`markRead`): their scope is found through every change since,
@@ -113,7 +112,8 @@ public struct FieldQueue: Sendable {
         /// A report showed an older confirmed state: lag until a fresh report (after a nudge) keeps showing it.
         case stale
         /// A fresh report kept showing an older state: the host lost what followed. The model goes back to it and the
-        /// lost edits are made again (the user's lost keys go once more).
+        /// lost edits are made again (the user's lost keys go once more). A scoped edit's own inserts and deletes are
+        /// not taken for lost on that report: its scope waits for a fresh read (`parkUnverifiedEdits`).
         case reverted
         /// A jump of the keyboard's own went nowhere (the report kept showing the caret where it was): the text it was
         /// for is not in this field. Its work drops and the model starts over from the report (`reseeded` follows).
@@ -218,12 +218,19 @@ public struct FieldQueue: Sendable {
     /// How long the user's keys wait for the take (`flushBeforeKeys`): the typing still to do at `keyHoldGraphemeMs` a
     /// grapheme, plus `keyHoldSlackMs` for its final words, never more than `keyHoldMaxMs`. Then they land and the rest
     /// of the take follows them.
-    public static let keyHoldMaxMs = 8_000.0
+    /// User requirement: reserve a host transit and return jump inside the 500 ms responsiveness target.
+    public static let responsivenessTargetMs = FieldEditCoordinator.inputResponseTargetMs
+    public static let keyHoldMaxMs = responsivenessTargetMs - transitMs - moveSettleMs
     public static let keyHoldSlackMs = 1_000.0
     /// Safari confirms an insert in about 45 ms.
     static let keyHoldGraphemeMs = 45.0
     /// A budget for the app's wait on an edit of `operationCount` ops.
     public static func budgetMs(operationCount: Int) -> Double { max(20_000, Double(max(0, operationCount)) * 150) }
+    /// Conservative background playback budget: each changed character can need a mutation and two moves.
+    /// This does not hold user input or determine its responsiveness deadline.
+    public static func budgetMs(sourceCharacters: Int, targetCharacters: Int) -> Double {
+        budgetMs(operationCount: 3 * (max(0, sourceCharacters) + max(0, targetCharacters)) + 2)
+    }
 
     // MARK: State
 
@@ -254,9 +261,21 @@ public struct FieldQueue: Sendable {
         var lastAfter: [Character] = []
         /// The user typed or edited while the span was lost: a change found there may be theirs.
         var userActedParked = false
+        /// Parked by `revert`: the text it holds if the edit's inserts and deletes the report no longer showed did
+        /// reach the host after all (`lastText`: if they did not). Only a fresh read tells which (`FieldRecovery`).
+        var landedText: [Character]?
     }
     private var spans: [Int: Span] = [:]
     private var nextSpanID = 0
+
+    private struct LiveRevision: Sendable, Equatable {
+        var runID: String
+        var version: Int
+        var proposal: [Character]
+        var through: Int
+        /// Expected text after only our own partial operations; user changes rebase against this.
+        var baseline: [Character]
+    }
 
     private struct EditState: Sendable, Equatable {
         var edit: Edit
@@ -267,6 +286,7 @@ public struct FieldQueue: Sendable {
         var attempts = 0
         /// About how many graphemes the edit types (the changed middle of its scope), for the backlog's pace.
         var typedEstimate: Int
+        var revision: LiveRevision?
 
         init(edit: Edit) {
             self.edit = edit
@@ -290,6 +310,8 @@ public struct FieldQueue: Sendable {
         var complete = false
         /// The user stopped the take (`takeStopped`, or a snapshot says so): keys wait for its words still arriving.
         var stopped = false
+        /// Acoustic/semantic activity, supplied by the route; an open take need not be speaking.
+        var speaking = true
         var pending: LiveDictationSnapshot?
         /// The newest snapshot's segments: what each piece's final text is.
         var segments: [LiveSegment] = []
@@ -305,12 +327,11 @@ public struct FieldQueue: Sendable {
         var ackedVersion: Int?
         /// Every segment is cleaned: no later cleanup is coming.
         var cleaned = false
-        /// The complete version settled (swapped in, or kept with the fallback): each version once.
+        /// The complete version settled through verified edits or a reported fallback: each version once.
         var settledVersion: Int?
         var fallbackReported = false
-        /// The user typed, deleted, tapped, moved the caret or made an edit during or after the take (or the field changed
-        /// in a way nothing explains): its later words are only appended at the caret as spoken; the keyboard makes no
-        /// delete or move for it again (no revision, no swap; History has the cleaned take).
+        /// Manual activity prevents whole-block fallback and changes where later speech starts.
+        /// Conditional revisions still visit unchanged pieces and preserve protected user words.
         var userActed = false
         /// Delivered text up to here is never typed again (it went with a swap that did not finish, or landed elsewhere).
         var settledThrough = 0
@@ -396,6 +417,10 @@ public struct FieldQueue: Sendable {
         var waitedMs = 0.0
         var input: Input?
         var retried = false
+        /// A deliberate user action in an opaque selection is allowed, but never replayed against the old model.
+        var acceptsRawUserReport = false
+        /// A take's words typed while the selection or context was unverified (`heldSpeechNext`).
+        var heldSpeech: HeldSpeech?
         var isMove: Bool
         /// A report counts only this long after the last send (a move's settle gap).
         var settleMs: Double
@@ -406,6 +431,11 @@ public struct FieldQueue: Sendable {
         var lastReport: Report?
         /// A jump of the keyboard's own to this span (a region's or an edit's).
         var jumpSpan: Int?
+    }
+    /// The report a held insert of speech was sent on, and the piece's span it went to.
+    private struct HeldSpeech: Sendable, Equatable {
+        var report: Report
+        var spanID: Int
     }
     private var coordinator = FieldEditCoordinator.Operations()
     private var inFlight: InFlight? {
@@ -470,7 +500,7 @@ public struct FieldQueue: Sendable {
             case .replan(let placement):
                 guard restored, let id = Int(placement.id), var span = spans[id] else { continue }
                 span.start = placement.range.lowerBound; span.end = placement.range.upperBound
-                span.lastText = Array(placement.text); span.parked = false
+                span.lastText = Array(placement.text); span.parked = false; span.landedText = nil
                 spans[id] = span
                 events.append(.resync(.recoveryReplanned))
             case .stop(let key, _):
@@ -481,12 +511,14 @@ public struct FieldQueue: Sendable {
     }
 
     private mutating func requestRecoveryIfNeeded() {
+        guard !hasUnverifiedInput else { return }
         // Dictation never looks around: its pieces are edited only at the caret.
-        guard config.canReadAround, recoveryRequest == nil, !(config.prioritizeSpeech && isSpeaking) else { return }
+        guard config.canReadAround, recoveryRequest == nil, !prioritizesSpeech else { return }
         let pieces = Set(runs.flatMap { $0.pieces.map(\.spanID) })
         let targets = spans.sorted { $0.key < $1.key }.compactMap { id, span -> FieldRecovery.Target? in
             guard span.parked, !span.anchor, !span.userChanged, !span.edited, !span.lastText.isEmpty, !pieces.contains(id) else { return nil }
-            return .init(id: String(id), expected: String(span.lastText), before: String(span.lastBefore), after: String(span.lastAfter))
+            return .init(id: String(id), expected: String(span.lastText), landed: span.landedText.map { String($0) },
+                         before: String(span.lastBefore), after: String(span.lastAfter))
         }
         guard let request = recovery.begin(generation: recoveryGeneration, revision: recoveryRevision, targets: targets) else { return }
         recoveryRequest = request
@@ -506,6 +538,78 @@ public struct FieldQueue: Sendable {
         userLane.removeAll { if case .edit(let state) = $0, state.spanID == id { abandoned.append(state); return true }; return false }
         editLane.removeAll { if $0.spanID == id { abandoned.append($0); return true }; return false }
         for state in abandoned { drop(state, .unplaceable) }
+    }
+
+    /// An issued deletion may temporarily leave the host empty. The adapter must not mistake
+    /// its own confirmed operation for a host clearing the draft (for example after Send).
+    public var ownsEmptyReport: Bool {
+        guard text.isEmpty else { return false }
+        if swap != nil { return true }
+        if case .edit(_, let lane)? = unit?.owner, lane != .user { return true }
+        if let flight = inFlight, flight.lane != .user, case .deleteBackward = flight.op { return true }
+        // A synchronous proxy may confirm the final deletion before the adapter observes its
+        // empty callback. Carry that automatic origin through the existing host transit only.
+        if lastSentLane != .user, sinceSendMs < Self.transitMs,
+           case .deleteBackward? = lastSentOp { return true }
+        return false
+    }
+
+    /// A nil selection following an external selection callback can be an opaque Safari Select All.
+    /// Identical windows cannot prove a collapsed caret, so every automatic action that needs to know where the
+    /// caret is remains held (revisions, edits, recovery reads, any move or delete). A take's words still go in
+    /// at the caret as plain inserts (`heldSpeechNext`), as the user's keys do: the report they change is the
+    /// evidence that lifts the hold.
+    public enum UnverifiedInput: String, Sendable { case selection, externalContext }
+    private var opaqueSelectionBaseline: Report?
+    public private(set) var unverifiedInputReason: UnverifiedInput?
+    public var hasUnverifiedInput: Bool { opaqueSelectionBaseline != nil }
+    public var hasUnverifiedSelection: Bool { hasUnverifiedInput && unverifiedInputReason == .selection }
+    public var hasUnverifiedContext: Bool { hasUnverifiedInput && unverifiedInputReason == .externalContext }
+    public var hasRecentOwnOperation: Bool { hasRecentOwnOperation(elapsedMs: 0) }
+
+    /// The ticker can sleep after confirming a move, before its transit window has elapsed.
+    /// Native callbacks supply the idle wall time before pumping; observe it without advancing
+    /// the queue clock, because the next step will account for that same interval exactly once.
+    public func hasRecentOwnOperation(elapsedMs: Double) -> Bool {
+        inFlight != nil || ownsRead || sinceSendMs + max(0, elapsedMs) < Self.transitMs
+    }
+
+    public mutating func externalSelectionChanged(report: Report, hasText: Bool? = nil, elapsedSinceLastStepMs: Double = 0) {
+        guard !hasRecentOwnOperation(elapsedMs: elapsedSinceLastStepMs), !confirmEmptyField(report, hasText: hasText) else { return }
+        opaqueSelectionBaseline = report.selected == nil ? (lastReport ?? report) : nil
+        unverifiedInputReason = opaqueSelectionBaseline == nil ? nil : .selection
+        if opaqueSelectionBaseline != nil {
+            abortUnit()
+            recoveryRequest = nil
+            recoveryRevision &+= 1
+        }
+    }
+
+    /// A native text callback whose proxy windows stayed old is not a readable insertion yet.
+    /// Use the same admission barrier as an opaque selection, without blind refresh movements.
+    public mutating func externalContextChanged(report: Report, hasText: Bool? = nil, elapsedSinceLastStepMs: Double = 0) {
+        guard !hasRecentOwnOperation(elapsedMs: elapsedSinceLastStepMs), !confirmEmptyField(report, hasText: hasText) else { return }
+        opaqueSelectionBaseline = lastReport ?? report
+        unverifiedInputReason = .externalContext
+        abortUnit()
+        recoveryRequest = nil
+        recoveryRevision &+= 1
+    }
+
+    /// Empty proxy windows can be stale; the native field's independent hasText=false
+    /// distinguishes a genuinely empty editor, where there is no hidden text selection.
+    private mutating func confirmEmptyField(_ report: Report, hasText: Bool?) -> Bool {
+        guard hasText == false, report.before.isEmpty, report.after.isEmpty, report.selected == nil,
+              text.isEmpty, runs.isEmpty, !hasOwnWork else { return false }
+        opaqueSelectionBaseline = nil
+        unverifiedInputReason = nil
+        return true
+    }
+
+    /// The route owns activity admission; this queue only schedules against that evidence.
+    public mutating func setSpeaking(_ active: Bool, runID: String) {
+        guard let index = runs.firstIndex(where: { $0.runID == runID }) else { return }
+        runs[index].speaking = active
     }
 
     public var ownsRead: Bool { coordinator.current?.kind == .read }
@@ -533,7 +637,15 @@ public struct FieldQueue: Sendable {
     /// The user moved the caret (a tap): only the user's own input goes until the report held still this long and fits.
     private var quietAfterMove = false
     /// The op that was on its way when the user tapped: it may land where they tapped.
-    private struct Sent: Sendable, Equatable { var op: ShadowOp; var lane: Lane; var pre: ModelState; var ageMs = 0.0 }
+    private struct RevisionRollback: Sendable, Equatable {
+        var editID: String
+        var baseline: [Character]
+    }
+    private struct Sent: Sendable, Equatable {
+        var op: ShadowOp; var lane: Lane; var pre: ModelState
+        var revisionRollback: RevisionRollback?
+        var ageMs = 0.0
+    }
     /// The ops sent lately (within the confirm window): any of them may have landed where the user tapped meanwhile.
     private var recentSends: [Sent] = []
     private var tapRace: (sends: [Sent], ageMs: Double)?
@@ -565,18 +677,22 @@ public struct FieldQueue: Sendable {
 
     // MARK: Inspection
 
-    public var isSpeaking: Bool { runs.contains { !$0.stopped && !$0.complete } }
+    public var isSpeaking: Bool { runs.contains { !$0.stopped && !$0.complete && $0.speaking } }
+    /// Quiet audio permits revisions only after every heard append has reached the field.
+    private var prioritizesSpeech: Bool {
+        config.prioritizeSpeech && (isSpeaking || runs.contains(where: rawAppendPending))
+    }
 
     public var isIdle: Bool {
         recoveryRequest == nil && strayInsertion == nil && tapRace == nil && inFlight == nil && unit == nil && swap == nil
-            && userLane.isEmpty && (editLane.isEmpty || config.prioritizeSpeech && isSpeaking)
+            && userLane.isEmpty && (editLane.isEmpty || prioritizesSpeech)
             && !runs.contains(where: { runNeedsWork($0) || ackDue($0) })
     }
     public var hasUserInput: Bool { !userLane.isEmpty }
     /// The keyboard's own writes still to land (a unit, queued edits, dictation): a read for an instruction waits for
     /// them, so its scope already shows them.
     public var hasOwnWork: Bool {
-        unit != nil || swap != nil || (!editLane.isEmpty && !(config.prioritizeSpeech && isSpeaking)) || runs.contains(where: { runNeedsWork($0) })
+        unit != nil || swap != nil || (!editLane.isEmpty && !prioritizesSpeech) || runs.contains(where: { runNeedsWork($0) })
     }
     public var hasOpInFlight: Bool { inFlight != nil }
     /// Nothing in flight and the caret at the user's cursor: the field is as the user left it, as far as the queue goes.
@@ -727,6 +843,12 @@ public struct FieldQueue: Sendable {
     /// One step against the field's report: at most one op to carry out.
     public mutating func step(report: Report, elapsedMs: Double) -> Action {
         guard !ownsRead else { return .wait }
+        if config.prioritizeSpeech {
+            // Delivery metadata is independent of the OS operation in flight. See the newest heard tail before
+            // admitting more background work, even when the route already reports quiet audio.
+            for ri in runs.indices { applyPending(ri) }
+            if prioritizesSpeech, let request = recoveryRequest { deferRecovery(request) }
+        }
         coordinator.advance(elapsedMs)
         stepElapsedMs = elapsedMs
         if let request = recoveryRequest {
@@ -758,6 +880,12 @@ public struct FieldQueue: Sendable {
         recentSends = recentSends.compactMap { var sent = $0; sent.ageMs += elapsedMs; return sent.ageMs < Self.confirmLimitMs ? sent : nil }
         confirmedHistory = confirmedHistory.filter { $0.ageMs + elapsedMs < Self.historyMs }.map { ($0.state, $0.input, $0.ageMs + elapsedMs) }
         if report == lastReport { reportStableMs += elapsedMs } else { lastReport = report; reportStableMs = 0 }
+        if let baseline = opaqueSelectionBaseline,
+           (unverifiedInputReason == .selection && report.selected != nil)
+                || (report != baseline && reportStableMs >= Self.moveSettleMs) {
+            opaqueSelectionBaseline = nil
+            unverifiedInputReason = nil
+        }
         if !seeded {
             seed(report)
             // Edits that came before the first report are anchored where the cursor turns out to be.
@@ -766,6 +894,69 @@ public struct FieldQueue: Sendable {
             for i in editLane.indices where editLane[i].anchorID == nil && !editLane[i].edit.atCursor && editLane[i].edit.selected == nil {
                 editLane[i].anchorID = addSpan(Span(start: userCursor, end: userCursor, anchor: true))
             }
+        }
+
+        if let flight = inFlight, flight.acceptsRawUserReport {
+            // No cursor probe and no retry: a key may have intentionally replaced an unreported selection.
+            guard sinceSendMs >= Self.transitMs, reportStableMs >= Self.moveSettleMs else { return .wait }
+            let inputs = userLane.compactMap { item -> UserItem? in
+                if case .input = item { return item }; return nil
+            }
+            let retired = runs.map(\.runID) + retiredRunIDs
+            let waited = sinceSendMs
+            reset()
+            retiredRunIDs = Array(retired.suffix(32))
+            userLane = inputs
+            seed(report)
+            lastReport = report
+            events.append(.confirmed(waitedMs: waited))
+            return next()
+        }
+        if let flight = inFlight, let held = flight.heldSpeech {
+            // No cursor probe and no retry: only a report that held still after the host's transit says what the
+            // insert did (an optimistic echo cannot show a selection it replaced).
+            guard coordinator.settled, sinceSendMs >= Self.transitMs, reportStableMs >= Self.moveSettleMs else {
+                inFlight?.waitedMs += elapsedMs
+                return .wait
+            }
+            if report == held.report {
+                // The proxy shows nothing of it yet. A plain insert at the caret counts as landed after the confirm
+                // window, so the take is never stuck behind a report that does not move; the hold stays.
+                guard flight.waitedMs + elapsedMs >= Self.confirmLimitMs else {
+                    inFlight?.waitedMs += elapsedMs
+                    return .wait
+                }
+                inFlight = nil
+                events.append(.resync(.assumed))
+            } else if case .insert(let typed) = flight.op, Self.shows(report, insert: typed, after: held.report),
+                      matches(report, anywhere: false) {
+                guard confirm(flight, report: report) else { return .wait }
+            } else {
+                // Not the old text with the insert (it replaced a selection no report showed, or the field had
+                // changed unseen): the report is the model. The piece goes on where its text stands before the caret.
+                inFlight = nil
+                reseed(report, flight: flight)
+                if var span = spans[held.spanID], span.parked, !span.lastText.isEmpty, cursor == userCursor, selection == 0,
+                   cursor >= span.lastText.count, text[(cursor - span.lastText.count)..<cursor].elementsEqual(span.lastText) {
+                    span.start = cursor - span.lastText.count; span.end = cursor; span.parked = false
+                    spans[held.spanID] = span
+                }
+            }
+        }
+        if hasUnverifiedInput, inFlight == nil {
+            // The take's words still go in at the caret; everything else of the keyboard's own stays held.
+            guard let item = userLane.first else { return next() }
+            guard case .input(let input, _) = item else { return .idle }
+            userLane.removeFirst()
+            let op: ShadowOp
+            switch input {
+            case .insert(let value): op = .insert(value)
+            case .deleteBackward: op = .deleteBackward(1)
+            case .move(let amount): op = .move(units(to: max(0, min(text.count, userCursor + amount))))
+            }
+            let action = send(op, lane: .user) { _ in }
+            inFlight?.acceptsRawUserReport = true
+            return action
         }
 
         if let tap = tappedElsewhere(report, flight: inFlight) {
@@ -786,18 +977,7 @@ public struct FieldQueue: Sendable {
             if settled, matches(report, anywhere: flight.anywhere),
                flight.anywhere || !pins(report, in: flight.pre) || (flight.staleCheck && flight.op == .move(0)),
                !lagging.contains(where: { pins(report, in: $0.state) }) {
-                if flight.anywhere { relocate(report) }
-                guard coordinator.confirm(matches: true) else { return .wait }
-                events.append(.confirmed(waitedMs: flight.waitedMs))
-                lastSendConfirmed = true
-                confirmedHistory.append((flight.pre, flight.input, 0))
-                unconfirmedInHistory = false
-                if confirmedHistory.count > Self.historyCount { confirmedHistory.removeFirst() }
-                staleNudgeSent = false
-                userActed = false
-                merge(report)
-                inFlight = nil
-                lagging = []
+                guard confirm(flight, report: report) else { return .wait }
             } else if !settled {
                 flight.waitedMs += elapsedMs
                 inFlight = flight
@@ -862,6 +1042,34 @@ public struct FieldQueue: Sendable {
         return next()
     }
 
+    /// The report shows the op in flight as the model has it: it is confirmed (unless the barrier still settles).
+    private mutating func confirm(_ flight: InFlight, report: Report) -> Bool {
+        if flight.anywhere { relocate(report) }
+        guard coordinator.confirm(matches: true) else { return false }
+        events.append(.confirmed(waitedMs: flight.waitedMs))
+        lastSendConfirmed = true
+        confirmedHistory.append((flight.pre, flight.input, 0))
+        unconfirmedInHistory = false
+        if confirmedHistory.count > Self.historyCount { confirmedHistory.removeFirst() }
+        staleNudgeSent = false
+        userActed = false
+        merge(report)
+        inFlight = nil
+        lagging = []
+        return true
+    }
+
+    /// The report shows what `held` showed with `insert` typed at its caret. An insert that replaced a selection no
+    /// report showed leaves only itself: text the window showed before is gone.
+    static func shows(_ report: Report, insert: String, after held: Report) -> Bool {
+        guard report.selected == nil else { return false }
+        let before = FieldReader.trusted(before: report.before), old = FieldReader.trusted(before: held.before)
+        guard before.hasSuffix(insert) else { return false }
+        let kept = before.dropLast(insert.count)
+        return kept.isEmpty == old.isEmpty && (kept.hasSuffix(old) || old.hasSuffix(kept))
+            && report.after.isEmpty == held.after.isEmpty && (report.after.hasPrefix(held.after) || held.after.hasPrefix(report.after))
+    }
+
     // MARK: Choosing the next op
 
     /// The next op, held back while it would follow the last one too soon for its kind: ops of one kind at the caret
@@ -889,6 +1097,7 @@ public struct FieldQueue: Sendable {
     }
 
     private mutating func plannedNext() -> Action {
+        if hasUnverifiedInput { return heldSpeechNext() }
         // An op that never confirmed may still be on its way: nothing follows it before the host's transit.
         if !lastSendConfirmed, sinceSendMs < Self.transitMs {
             if inFlight == nil { for ri in runs.indices { ack(ri) } }
@@ -963,7 +1172,7 @@ public struct FieldQueue: Sendable {
         // Nothing of the keyboard's own starts, and no jump goes out, on a model the field's report does not show at the
         // caret (another field's report can fit it elsewhere): it waits, and a report that holds still so reseeds.
         let shown = lastReport.map(consistent) ?? true
-        if config.prioritizeSpeech, isSpeaking, case .edit(_, .edit)? = unit?.owner {
+        if prioritizesSpeech, case .edit(_, .edit)? = unit?.owner {
             // Finish the issued op first (the barrier above), then return to the speaking head. The edit is
             // replanned from confirmed text when dictation stops, never replayed from its old cursor offsets.
             abortUnit()
@@ -982,8 +1191,9 @@ public struct FieldQueue: Sendable {
         guard shown else { return .wait }
         // The caret away from the user's cursor with nothing under way (an edit's unit or a walk that stopped): it goes back.
         if cursor != userCursor, userLost == nil { return send(.move(units(to: userCursor)), lane: .edit, moveTo: userCursor) }
-        if config.prioritizeSpeech, isSpeaking {
-            if let action = nextLive() { return action }
+        if prioritizesSpeech {
+            if let action = nextLiveAppend() { return action }
+            for ri in runs.indices { ack(ri) }
             return .idle
         }
         if let action = nextEdit() { return action }
@@ -1139,6 +1349,7 @@ public struct FieldQueue: Sendable {
     }
 
     private mutating func nextEdit() -> Action? {
+        guard !prioritizesSpeech else { return nil }
         var index = 0
         while index < editLane.count {
             var state = editLane[index]
@@ -1201,7 +1412,7 @@ public struct FieldQueue: Sendable {
             }
         }
         guard let id = state.spanID, let span = spans[id] else { drop(state, .changed); return .done }
-        if span.userChanged { drop(state, .userEdited); return .done }
+        if state.revision == nil, span.userChanged { drop(state, .userEdited); return .done }
         if span.parked {
             requestRecoveryIfNeeded()
             if recoveryRequest != nil { return .wait }
@@ -1211,6 +1422,14 @@ public struct FieldQueue: Sendable {
             drop(state, .unplaceable); return .done
         }
         let current = chars(of: span)
+        if var revision = state.revision {
+            // Replanning after a key protects changes made since our last confirmed partial text.
+            state.edit.target = String(conditionalRevisionTarget(base: revision.baseline, current: current,
+                                                               proposal: Array(state.edit.target), span: span))
+            revision.baseline = current
+            state.revision = revision
+            spans[id]?.userChanged = false
+        }
         let target = Array(state.edit.target)
         if current == target {
             if state.edit.cursorAtEnd, userCursor != span.end {
@@ -1226,7 +1445,7 @@ public struct FieldQueue: Sendable {
             return .done
         }
         state.attempts += 1
-        guard state.attempts <= 4 else { drop(state, .unplaceable); return .done }
+        guard state.revision != nil || state.attempts <= 4 else { drop(state, .unplaceable); return .done }
         let paced = state.edit.paced && config.animated
         var ops = plan(spanID: id, from: current, to: target, paced: paced)
         ops += state.edit.cursorAtEnd ? [.moveToSpanEnd(id), .setUserCursorToCursor] : [.moveToUser]
@@ -1400,11 +1619,29 @@ public struct FieldQueue: Sendable {
         guard let id = state.spanID, let span = spans[id] else { return }
         let offset = min(max(0, userCursor - span.start), span.end - span.start)
         let cursorUnits = String(text[span.start..<(span.start + offset)]).utf16.count
+        if let revision = state.revision,
+           let ri = runs.firstIndex(where: { $0.runID == revision.runID }),
+           let pi = runs[ri].pieces.firstIndex(where: { $0.spanID == id }) {
+            runs[ri].pieces[pi].swapped = chars(of: span)
+            runs[ri].pieces[pi].swappedEnd = revision.through
+            runs[ri].pieces[pi].proposal = revision.proposal
+            runs[ri].pieces[pi].revisedVersion = revision.version
+            return
+        }
         spans[id] = nil; finishSpan(state.anchorID)
         events.append(.applied(id: state.edit.id, cursor: cursorUnits))
     }
 
     private mutating func drop(_ state: EditState, _ reason: DropReason) {
+        if let revision = state.revision,
+           let ri = runs.firstIndex(where: { $0.runID == revision.runID }),
+           let pi = runs[ri].pieces.firstIndex(where: { $0.spanID == state.spanID }) {
+            runs[ri].pieces[pi].failedRevisionVersion = revision.version
+            // These words were already delivered before the failed jump. Never start them again
+            // at a new caret; only speech beyond that original frontier may append there.
+            runs[ri].pieces[pi].tEnd = max(runs[ri].pieces[pi].tEnd ?? 0, revision.through)
+            return
+        }
         var partial: String?
         if let id = state.spanID, let span = spans[id], !span.parked, inFlight == nil { partial = String(chars(of: span)) }
         finishSpan(state.spanID); finishSpan(state.anchorID)
@@ -1435,10 +1672,16 @@ public struct FieldQueue: Sendable {
         /// The text a swap put in, standing for the delivered words before `swappedEnd`.
         var swapped: [Character]?
         var swappedEnd = 0
+        /// Latest model proposal remains separate from the user's protected actual text.
+        var proposal: [Character]?
+        var revisedVersion: Int?
+        var failedRevisionVersion: Int?
     }
 
     private func runNeedsWork(_ run: LiveRun) -> Bool {
         if run.pending != nil || swap?.runID == run.runID { return true }
+        if !run.speaking, run.speech.hasDeferredRevision,
+           run.pieces.contains(where: { $0.revisedVersion != run.version && $0.failedRevisionVersion != run.version }) { return true }
         if run.complete, run.version != nil, run.settledVersion != run.version, !run.pieces.isEmpty { return true }
         if run.complete, run.settledVersion == run.version, run.pieces.last?.spaceAfter == true { return true }
         if let piece = run.pieces.last(where: { $0.tEnd == nil }), let span = spans[piece.spanID] {
@@ -1455,21 +1698,101 @@ public struct FieldQueue: Sendable {
         return from
     }
 
+    private func liveRevision(for piece: Piece) -> LiveRevision? {
+        if let queued = editLane.first(where: { $0.spanID == piece.spanID && $0.revision != nil })?.revision { return queued }
+        if case .edit(let state, _)? = unit?.owner, state.spanID == piece.spanID { return state.revision }
+        return nil
+    }
+
+    private func rawAppendPending(_ run: LiveRun) -> Bool {
+        if untypedRest(of: run) != nil { return true }
+        guard let piece = run.pieces.last(where: { $0.tEnd == nil }), let span = spans[piece.spanID],
+              !span.parked, !span.userChanged, !span.edited, span.end == userCursor else { return false }
+        if let revision = liveRevision(for: piece) {
+            // A confirmed deletion in a partial correction is not newly missing speech. Only words beyond
+            // that revision's original delivered frontier can interrupt it as a raw append.
+            return run.delivered.count > revision.through
+        }
+        return !heldAppend(piece, in: run, span: span).isEmpty
+    }
+
+    /// Raw appends share the ordinary verified writer, but never wait behind a paused cleanup's remaining hunks.
+    private mutating func nextLiveAppend() -> Action? {
+        for ri in runs.indices where rawAppendPending(runs[ri]) {
+            if let piece = runs[ri].pieces.last(where: { $0.tEnd == nil }), liveRevision(for: piece) != nil {
+                closeOpenPieces(.edit, ri: ri, freeze: false)
+            }
+            if let action = typeOpenPiece(ri) { return action }
+            if let action = startUntypedRest(ri) { return action }
+        }
+        return nil
+    }
+
+    /// While the selection or context is unverified (`hasUnverifiedInput`), a take's words still to be typed go in
+    /// at the caret, as the user's keys do: a region's start with its separator and the open piece's untyped end,
+    /// through the ordinary writer. Only ever an insert, never a move or a delete: a piece that needs more than an
+    /// append (a revision, a lost place, a caret away from the user's) waits for the hold to lift. An insert that
+    /// replaces a selection no report showed is accepted, as for a key; its report then becomes the model (`step`).
+    private mutating func heldSpeechNext() -> Action {
+        // An op that never confirmed may still be on its way: nothing follows it before the host's transit.
+        if !lastSendConfirmed, sinceSendMs < Self.transitMs { return .wait }
+        if case .space? = unit?.owner { return nextInUnit() }
+        guard !paused, unit == nil, swap == nil, strayInsertion == nil, tapRace == nil, userLost == nil, userLane.isEmpty,
+              selection == 0, cursor == userCursor, let report = lastReport else { return .idle }
+        for ri in runs.indices { applyPending(ri) }
+        for ri in runs.indices where rawAppendPending(runs[ri]) {
+            guard let piece = runs[ri].pieces.last(where: { $0.tEnd == nil }) else {
+                if let action = startUntypedRest(ri, held: true) { return action }
+                continue
+            }
+            guard liveRevision(for: piece) == nil, let span = spans[piece.spanID] else { continue }
+            let rest = heldAppend(piece, in: runs[ri], span: span)
+            guard !rest.isEmpty else { continue }
+            let action = append(rest, to: piece)
+            if case .send = action { inFlight?.heldSpeech = HeldSpeech(report: report, spanID: piece.spanID) }
+            return action
+        }
+        return .idle
+    }
+
+    /// The open piece's next words at the caret: one grapheme per op when animated, at the backlog's pace.
+    private mutating func append(_ rest: [Character], to piece: Piece) -> Action {
+        var count = rest.count, credit = 0.0
+        if config.animated {
+            let pace = paceAllows(ops: queuedBacklog())
+            guard pace.go else { return .wait }
+            count = 1; credit = pace.credit
+        }
+        let slice = Array(rest.prefix(count))
+        let spanID = piece.spanID
+        let action = send(.insert(String(slice)), lane: .live) { q in
+            q.insertAtCursor(slice, owner: spanID)
+            q.userCursor = q.cursor
+        }
+        paceCreditMs = credit
+        return action
+    }
+
+    private mutating func startUntypedRest(_ ri: Int, held: Bool = false) -> Action? {
+        guard let from = untypedRest(of: runs[ri]) else { return nil }
+        guard reportStableMs >= Self.stableMs || !config.animated else { return .wait }
+        // The piece starts at the user's cursor (a reseed can leave the caret away from it).
+        if cursor != userCursor { return held ? nil : send(.move(units(to: userCursor)), lane: .live, moveTo: userCursor) }
+        // Held: no move to the word's end, the words go in where the caret is.
+        if !held, let action = liveStart(ri) { return action }
+        let anchor = String(text[max(0, userCursor - 200)..<userCursor])
+        unit = Unit(ops: [.startRegion(run: runs[ri].runID, tStart: from, anchor: anchor)], owner: .space, paced: false)
+        return nextInUnit()
+    }
+
     private mutating func nextLive() -> Action? {
         for ri in runs.indices { applyPending(ri) }
         for ri in runs.indices {
             if let action = settleFinal(ri) { return action }
             if runs[ri].complete, runs[ri].settledVersion == runs[ri].version, let action = separateFollowingText(ri) { return action }
             if let action = typeOpenPiece(ri) { return action }
-            if let from = untypedRest(of: runs[ri]) {
-                guard reportStableMs >= Self.stableMs || !config.animated else { return .wait }
-                // The piece starts at the user's cursor (a reseed can leave the caret away from it).
-                if cursor != userCursor { return send(.move(units(to: userCursor)), lane: .live, moveTo: userCursor) }
-                if let action = liveStart(ri) { return action }
-                let anchor = String(text[max(0, userCursor - 200)..<userCursor])
-                unit = Unit(ops: [.startRegion(run: runs[ri].runID, tStart: from, anchor: anchor)], owner: .space, paced: false)
-                return nextInUnit()
-            }
+            if let action = startUntypedRest(ri) { return action }
+            if !runs[ri].speaking, let action = revisePieces(ri) { return action }
             ack(ri)
         }
         let newest = runs.last?.runID
@@ -1523,23 +1846,7 @@ public struct FieldQueue: Sendable {
         if cursor != userCursor { return send(.move(units(to: userCursor)), lane: .live, moveTo: userCursor) }
         if nearRevision(ri, pi) { desired = Array(desiredText(runs[ri].pieces[pi], in: runs[ri])) }
         guard desired != current else { return nil }
-        if desired.starts(with: current) {
-            // One grapheme per op when animated, at the backlog's pace.
-            var count = desired.count - current.count, credit = 0.0
-            if config.animated {
-                let pace = paceAllows(ops: queuedBacklog())
-                guard pace.go else { return .wait }
-                count = 1; credit = pace.credit
-            }
-            let slice = Array(desired[current.count..<(current.count + count)])
-            let spanID = piece.spanID
-            let action = send(.insert(String(slice)), lane: .live) { q in
-                q.insertAtCursor(slice, owner: spanID)
-                q.userCursor = q.cursor
-            }
-            paceCreditMs = credit
-            return action
-        }
+        if desired.starts(with: current) { return append(Array(desired[current.count...]), to: piece) }
         // A verified revision of the last words: what differs goes, then is typed again.
         let k = current.count - Self.commonPrefix(current, desired)
         guard !runs[ri].userActed, k <= Self.nearChars, verifiesBefore(k, span: span) else {
@@ -1554,7 +1861,10 @@ public struct FieldQueue: Sendable {
     /// of the caret, and the field's report showing them as typed) is taken now; anything else waits for the stop.
     private mutating func nearRevision(_ ri: Int, _ pi: Int) -> Bool {
         let run = runs[ri], piece = run.pieces[pi]
-        guard !run.complete, !run.userActed, run.speech.hasDeferredRevision, let span = spans[piece.spanID] else { return false }
+        // Hosts with activity admission use the shared conditional lane during pauses; never
+        // tail-retype unchanged characters while prioritizing incoming speech.
+        guard !config.prioritizeSpeech, !run.complete, !run.userActed, run.speech.hasDeferredRevision,
+              let span = spans[piece.spanID] else { return false }
         let delivered = run.speech.delivered, revised = run.speech.authoritative
         let from = Self.commonPrefix(delivered, revised)
         // A contraction alone (a word taken back) waits: ASR takes words back and forth, and the stop settles it.
@@ -1582,7 +1892,9 @@ public struct FieldQueue: Sendable {
     /// The field shows the run's newest version and that is still to be said (`Event.liveApplied`).
     private func ackDue(_ run: LiveRun) -> Bool {
         // A deferred revision is not in the field yet: the version is not shown.
-        guard !(run.speech.hasDeferredRevision && !run.complete), let version = run.version, run.pending == nil,
+        let unsettledRevision = run.speech.hasDeferredRevision && !run.complete
+            && run.pieces.contains { $0.revisedVersion != run.version }
+        guard !unsettledRevision, let version = run.version, run.pending == nil,
               run.ackedVersion != version, !runNeedsWork(run) else { return false }
         return true
     }
@@ -1723,6 +2035,13 @@ public struct FieldQueue: Sendable {
             if freezes { runs[ri].userActed = true }
             guard let pi = runs[ri].pieces.lastIndex(where: { $0.tEnd == nil }) else { continue }
             let piece = runs[ri].pieces[pi]
+            if let revision = liveRevision(for: piece) {
+                // A partial revision is not missing speech. Preserve the delivered frontier it began with;
+                // later appended words still start after the user's input, exactly once.
+                runs[ri].pieces[pi].tEnd = revision.through
+                events.append(.regionClosed(runID: runs[ri].runID, cause: cause))
+                continue
+            }
             let span = spans[piece.spanID]
             let current = span.map { chars(of: $0) } ?? []
             if current.isEmpty, piece.swapped == nil, span?.parked != true {
@@ -1743,10 +2062,82 @@ public struct FieldQueue: Sendable {
             let typed = span?.parked == true ? max(0, (span.map { $0.end - $0.start } ?? 0) - prefix)
                 : Self.commonPrefix(Array(current.dropFirst(prefix)), prepared)
             var end = min(delivered.count, base + lead + max(0, typed - separator))
-            while end < delivered.count, !delivered[end].isWhitespace { end += 1 }
+            // Finish a word already started, never an entirely untyped word after a delivered space.
+            // The short input budget makes this boundary common when Enter interrupts a stopped backlog.
+            if end > 0, Self.isWordCharacter(delivered[end - 1]) {
+                while end < delivered.count, !delivered[end].isWhitespace { end += 1 }
+            }
             runs[ri].pieces[pi].tEnd = max(base, end)
             events.append(.regionClosed(runID: runs[ri].runID, cause: cause))
         }
+    }
+
+    /// Map only revisions entirely inside one delivered piece. A change crossing an intervening
+    /// user boundary is left alone; no guessed distribution of a rewritten sentence across fields.
+    private func revisionProposal(_ pi: Int, in run: LiveRun) -> [Character] {
+        if run.complete, let final = finalText(pi, in: run) { return final }
+        let piece = run.pieces[pi], delivered = run.delivered
+        let a = min(piece.tStart, delivered.count), b = min(piece.tEnd ?? delivered.count, delivered.count)
+        let target = run.complete ? Array(Self.joined(run.segments)) : run.speech.authoritative
+        var raw = Array(delivered[a..<b])
+        let contentStart = a + raw.prefix { $0.isWhitespace }.count
+        for h in FieldEditCoordinator.changes(from: delivered, to: target).reversed() {
+            guard h.start >= a, h.end <= b,
+                  h.start < b || (pi == run.pieces.count - 1 && h.start == b) else { continue }
+            // A cleaner's join punctuation belongs between speech pieces. The user may have
+            // put a newline/list marker there; never move that joiner to the next line's start.
+            if pi > 0, h.start < contentStart || (h.start == contentStart && h.end == h.start) { continue }
+            raw.replaceSubrange((h.start - a)..<(h.end - a), with: h.text)
+        }
+        return Array(FieldInsertion.prepare(String(raw), contextBefore: piece.anchor, capitalization: config.capitalization))
+    }
+
+    private func conditionalRevisionTarget(base: [Character], current: [Character], proposal: [Character], span: Span) -> [Character] {
+        // Punctuation typed immediately after the dictated scope is still the user's. Include
+        // that evidence in the merge so cleanup cannot append a second terminal mark before it.
+        let adjacent = Array(text[span.end...].prefix { character in
+            character.unicodeScalars.allSatisfy { CharacterSet.punctuationCharacters.contains($0) }
+        })
+        let merged = FieldMerge.rebase(base: base, kept: current + adjacent, incoming: proposal).text
+        guard adjacent.isEmpty || merged.suffix(adjacent.count).elementsEqual(adjacent) else { return current }
+        return Array(merged.dropLast(adjacent.count))
+    }
+
+    /// Automatic corrections use the existing conditional edit lane. User input can abort and
+    /// replan between confirmed graphemes; each jump still requires the queue's ordinary proof.
+    private mutating func revisePieces(_ ri: Int) -> Action? {
+        let run = runs[ri]
+        guard run.complete || !run.speaking, let version = run.version,
+              selection == 0, !hasUnverifiedInput, untypedRest(of: run) == nil else { return nil }
+        if editLane.contains(where: { $0.revision?.runID == run.runID }) { return .wait }
+        if case .edit(let state, _)? = unit?.owner, state.revision?.runID == run.runID { return .wait }
+        for pi in run.pieces.indices {
+            let piece = run.pieces[pi]
+            guard piece.revisedVersion != version, piece.failedRevisionVersion != version else { continue }
+            guard let span = spans[piece.spanID], !span.parked, !span.edited else {
+                runs[ri].pieces[pi].failedRevisionVersion = version
+                continue
+            }
+            let current = chars(of: span), expected = Array(desiredText(piece, in: run))
+            // The speaking head must finish its heard append first; revisions never type missing speech twice.
+            if piece.tEnd == nil, current.count < expected.count, expected.starts(with: current) { return nil }
+            let proposal = revisionProposal(pi, in: run)
+            let baseline = piece.proposal ?? expected
+            let target = conditionalRevisionTarget(base: baseline, current: current, proposal: proposal, span: span)
+            if target == current {
+                runs[ri].pieces[pi].proposal = proposal
+                runs[ri].pieces[pi].revisedVersion = version
+                continue
+            }
+            var state = EditState(edit: Edit(id: "\(run.runID)#revision-\(piece.spanID)", kind: .version,
+                target: String(target), cursorAtEnd: false, paced: true))
+            state.spanID = piece.spanID
+            state.revision = LiveRevision(runID: run.runID, version: version, proposal: proposal,
+                                          through: piece.tEnd ?? run.delivered.count, baseline: current)
+            editLane.append(state)
+            return nextEdit() ?? .wait
+        }
+        return nil
     }
 
     // MARK: Swap at stop
@@ -1774,8 +2165,8 @@ public struct FieldQueue: Sendable {
     /// The swap needs the report to show this much of the take before the caret (all of a shorter take).
     static let tailChars = 16
 
-    /// Run `ri`'s complete version: the take swapped to its final text, or the field kept as it is (the final text is
-    /// in History: `Event.dropped`). Each version is settled once.
+    /// Settle a completed version through minimal conditional edits first. A failed jump may use the strict
+    /// untouched end-verified swap; otherwise keep the field and recover the proposal in History.
     private mutating func settleFinal(_ ri: Int) -> Action? {
         let run = runs[ri]
         guard run.complete, let version = run.version, run.settledVersion != version, swap == nil,
@@ -1788,6 +2179,10 @@ public struct FieldQueue: Sendable {
             reportFallback(ri, reason)
             return separateFollowingText(ri)
         }
+        if let action = revisePieces(ri) { return action }
+        let revised = runs[ri]
+        if revised.pieces.allSatisfy({ $0.revisedVersion == version }) { return keep(run.userActed ? .userEdited : nil) }
+        // A verified jump failed: only the old end-verified, untouched block swap may still recover it.
         if run.userActed { return keep(.userEdited) }
         guard let final = finalText(pi, in: run) else { return keep(.changed) }
         guard let span = spans[piece.spanID], !span.parked else { return keep(.unplaceable) }
@@ -1945,13 +2340,17 @@ public struct FieldQueue: Sendable {
                                 settleMs: anywhere ? Self.transitMs : isCursorMove ? Self.moveSettleMs : editSettle,
                                 transitMs: Self.transitMs) else { return .wait }
         let pre = ModelState(text: text, cursor: cursor, userCursor: userCursor, selection: selection, spans: spans)
+        let rollback: RevisionRollback?
+        if case .edit(let state, _)? = unit?.owner, let revision = state.revision {
+            rollback = RevisionRollback(editID: state.edit.id, baseline: revision.baseline)
+        } else { rollback = nil }
         if let moveTo { cursor = moveTo } else { apply(&self) }
         var isMove = false
         if case .move = op { isMove = true }
         inFlight = InFlight(op: op, lane: lane, anywhere: anywhere, pre: pre, isMove: isMove, settleMs: anywhere ? Self.transitMs : isMove ? Self.moveSettleMs : 0)
         coordinator.dispatched()
         lastSentOp = op; lastSentLane = lane
-        recentSends.append(Sent(op: op, lane: lane, pre: pre))
+        recentSends.append(Sent(op: op, lane: lane, pre: pre, revisionRollback: rollback))
         if recentSends.count > 16 { recentSends.removeFirst() }
         paceCreditMs = 0
         sinceSendMs = 0
@@ -1983,6 +2382,7 @@ public struct FieldQueue: Sendable {
         }
         if userCursor >= i { userCursor += n }
         cursor = i + n
+        updateRevisionBaseline(owner: owner)
     }
 
     private mutating func removeRange(_ a: Int, _ b: Int, owner: Int?) {
@@ -1998,6 +2398,16 @@ public struct FieldQueue: Sendable {
         }
         userCursor = shift(userCursor)
         cursor = a
+        updateRevisionBaseline(owner: owner)
+    }
+
+    private mutating func updateRevisionBaseline(owner: Int?) {
+        guard let owner, let span = spans[owner],
+              case .edit(var state, let lane)? = unit?.owner,
+              state.spanID == owner, var revision = state.revision else { return }
+        revision.baseline = chars(of: span)
+        state.revision = revision
+        unit?.owner = .edit(state, lane)
     }
 
     private mutating func prepend(_ chars: [Character]) {
@@ -2333,6 +2743,19 @@ public struct FieldQueue: Sendable {
         }
     }
 
+    /// A speculative revision write landed somewhere else. Its missing intended character is our
+    /// interrupted operation, not a user's deletion, so conditional merge must use the pre-send baseline.
+    private mutating func restoreRevisionBaseline(_ rollback: RevisionRollback?) {
+        guard let rollback else { return }
+        if case .edit(var state, let lane)? = unit?.owner, state.edit.id == rollback.editID {
+            state.revision?.baseline = rollback.baseline
+            unit?.owner = .edit(state, lane)
+        }
+        for index in editLane.indices where editLane[index].edit.id == rollback.editID {
+            editLane[index].revision?.baseline = rollback.baseline
+        }
+    }
+
     /// The report fits the known text (or a recently confirmed state of it, shown late) at one place inside it that is
     /// neither where the op in flight left the caret nor where it was before: no op went there, so the user tapped.
     /// Returns that place in the current text.
@@ -2395,7 +2818,7 @@ public struct FieldQueue: Sendable {
     /// take is reported); an edit's text comes out again (`strayInsertion`).
     private mutating func tapRaceLanded(_ report: Report) -> Bool {
         guard let race = tapRace, report.selected == nil, let last = race.sends.last else { return false }
-        if case .deleteBackward(let count) = last.op { return tapRaceDeleteLanded(report, count: count, pre: last.pre) }
+        if case .deleteBackward(let count) = last.op { return tapRaceDeleteLanded(report, count: count, pre: last.pre, rollback: last.revisionRollback) }
         var key = ""
         for sent in race.sends.reversed() {
             guard case .insert(let s) = sent.op, sent.lane == last.lane else { break }
@@ -2406,6 +2829,7 @@ public struct FieldQueue: Sendable {
                 .filter { !before.isEmpty || $0 == 0 }
             guard found.count == 1, let p = found.first, p != sent.pre.cursor, report.after.count <= sent.pre.text.count - p else { continue }
             restore(sent.pre)
+            restoreRevisionBaseline(sent.revisionRollback)
             cursor = p; userCursor = p; selection = 0
             insertAtCursor(Array(key), owner: -1)
             if last.lane == .user { userCursor = cursor } else if last.lane == .live {
@@ -2442,7 +2866,7 @@ public struct FieldQueue: Sendable {
     /// The delete that was on its way at the tap landed there: the report shows the text before it with the characters
     /// in front of the tapped place gone (fewer at the text's start). The model takes that; what it deleted was not the
     /// keyboard's to delete, so it goes back in, and the user's cursor is where they tapped.
-    private mutating func tapRaceDeleteLanded(_ report: Report, count: Int, pre: ModelState) -> Bool {
+    private mutating func tapRaceDeleteLanded(_ report: Report, count: Int, pre: ModelState, rollback: RevisionRollback?) -> Bool {
         let before = Array(FieldReader.trusted(before: report.before)), after = Array(report.after), old = pre.text
         guard before.count <= old.count, before.count + after.count >= Self.relocateChars || before.isEmpty else { return false }
         var hits: [(q: Int, n: Int)] = []
@@ -2455,6 +2879,7 @@ public struct FieldQueue: Sendable {
         }
         guard hits.count == 1, let hit = hits.first, hit.q + hit.n != pre.cursor else { return false }
         restore(pre)
+        restoreRevisionBaseline(rollback)
         let deleted = Array(text[hit.q..<(hit.q + hit.n)])
         removeRange(hit.q, hit.q + hit.n, owner: nil)
         cursor = hit.q; userCursor = hit.q; selection = 0
@@ -2511,7 +2936,9 @@ public struct FieldQueue: Sendable {
         if older.index == nil, let input = flight?.input, flight?.retried == false { lostInputs.append(input) }
         unconfirmedInHistory = false
         abortUnit()
+        let newer = ModelState(text: text, cursor: cursor, userCursor: userCursor, selection: selection, spans: spans)
         restore(older.state)
+        parkUnverifiedEdits(newer: newer)
         if older.at != older.state.cursor {
             cursor = older.at; userCursor = older.at
             closeOpenPieces(.cursor)
@@ -2533,6 +2960,39 @@ public struct FieldQueue: Sendable {
         staleNudgeSent = false; staleNudgeDue = false
         lagging = []
         events.append(.resync(.reverted))
+    }
+
+    /// A report that keeps showing an older state does not prove the host lost an edit's inserts and deletes since:
+    /// Safari can apply one after the stale check's fresh report and never report it (measured on an iPhone: the
+    /// delete landed, the model went back, and the edit's next jump was planned one character off). The scope of a
+    /// queued edit that differs between the two states is therefore parked with both texts. Nothing is planned in it
+    /// until a fresh read shows which one the field holds (`requestRecoveryIfNeeded`, asked when the edit is next
+    /// started: after the user's input, with the caret home), and the model starts over from that read. A scope that
+    /// shows neither drops the edit. Typed lines (no scope to find) and hosts without a reader go back as before.
+    private mutating func parkUnverifiedEdits(newer: ModelState) {
+        guard config.canReadAround else { return }
+        for state in editLane where state.revision == nil && !state.edit.atCursor {
+            guard let id = state.spanID, let was = newer.spans[id], !was.parked, !was.anchor,
+                  was.start >= 0, was.start <= was.end, was.end <= newer.text.count else { continue }
+            let landed = Array(newer.text[was.start..<was.end])
+            if var span = spans[id] {
+                let lost = chars(of: span)
+                guard !span.parked, lost != landed, !lost.isEmpty else { continue }
+                span.lastText = lost; span.landedText = landed
+                span.lastBefore = Array(text[max(0, span.start - Self.contextChars)..<span.start])
+                span.lastAfter = Array(text[span.end..<min(text.count, span.end + Self.contextChars)])
+                span.parked = true; span.userActedParked = false
+                spans[id] = span
+            } else if newer.text != text, !landed.isEmpty {
+                // Placed after the older state: only the text it was last planned against is known.
+                var span = was
+                span.lastText = landed; span.landedText = nil
+                span.lastBefore = Array(newer.text[max(0, was.start - Self.contextChars)..<was.start])
+                span.lastAfter = Array(newer.text[was.end..<min(newer.text.count, was.end + Self.contextChars)])
+                span.parked = true; span.userActedParked = false
+                spans[id] = span
+            }
+        }
     }
 
     /// The report is the model with a few characters more right at the caret (another keyboard typed there): they go
@@ -2560,7 +3020,8 @@ public struct FieldQueue: Sendable {
 
     /// Parked spans come back where their text is found again, once and uniquely.
     private mutating func unparkSpans() {
-        for (id, var span) in spans where span.parked {
+        // A span parked for an unverified edit is found by a fresh read only: the model's own text proves nothing.
+        for (id, var span) in spans where span.parked && span.landedText == nil {
             let needle = span.lastText
             // A short text may well stand elsewhere too (the user's own words): only a long one is found again.
             guard needle.count >= Self.relocateChars, needle.count <= text.count else { continue }

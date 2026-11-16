@@ -1,0 +1,68 @@
+{
+  "method": "Complete initial raw field stable for at least400ms, synth pause, observe actual title-case cleanup, immediately publish resumed speech command; AX sampled via persistent JXA and monotonic clock. First sample predates strengthened guard but full baseline and actual cleanup verified in trace.",
+  "valid": [
+    {
+      "evidence": "mac-textedit-1.json",
+      "host": "TextEdit",
+      "run": "textedit-1",
+      "changed": true,
+      "resumedAt": 0.5937319583608769,
+      "firstPartialSeconds": 0.4919873333128635,
+      "firstWordSeconds": 0.6103638333152048,
+      "pollMaxSeconds": 0.13817358334199525,
+      "pollSamples": 15,
+      "baselineChars": 436
+    },
+    {
+      "evidence": "mac-textedit-3.json",
+      "host": "TextEdit",
+      "run": "textedit-3",
+      "changed": true,
+      "resumedAt": 0.4870098333340138,
+      "firstPartialSeconds": 0.46030687500024214,
+      "firstWordSeconds": 0.6024847083317582,
+      "pollMaxSeconds": 0.16676329166512005,
+      "pollSamples": 11,
+      "baselineChars": 445
+    },
+    {
+      "evidence": "mac-safari-textarea-2.json",
+      "host": "Safari",
+      "run": "safari-textarea-2",
+      "changed": true,
+      "resumedAt": 0.29776187500101514,
+      "firstPartialSeconds": 0.5022618333459832,
+      "firstWordSeconds": 0.6803532083285972,
+      "pollMaxSeconds": 0.1332224583311472,
+      "pollSamples": 12,
+      "baselineChars": 443
+    },
+    {
+      "evidence": "mac-safari-contenteditable-2.json",
+      "host": "Safari",
+      "run": "safari-contenteditable-2",
+      "changed": true,
+      "resumedAt": 0.4406747499888297,
+      "firstPartialSeconds": 0.5669405000226106,
+      "firstWordSeconds": 0.5673256666632369,
+      "pollMaxSeconds": 0.15607241666293703,
+      "pollSamples": 12,
+      "baselineChars": 444
+    }
+  ],
+  "excluded": [
+    "textedit-2: initial speech still appending",
+    "safari-textarea-1: initial speech still appending",
+    "safari-contenteditable-1: readiness timeout due observed trailing NBSP; no pause triggered"
+  ],
+  "binarySha256": "3d42206977283da0ee3f19a9ac0c1419ba0241aeb6585d4336942447f86ab56f",
+  "limitations": [
+    "existing accepted prior fixture artifact, not a fresh final-candidate build",
+    "synthetic scheduling, no microphone or real provider",
+    "hotkeys/event tap disabled",
+    "observed sample bounds only; not worst-case",
+    "Mail not measured",
+    "Safari local HTML only; no remote web app"
+  ],
+  "host": "macOS26.6.2 25G83 Xcode27.2 27B52"
+}

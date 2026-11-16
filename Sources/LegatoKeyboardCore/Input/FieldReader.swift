@@ -261,18 +261,12 @@ public extension FieldWindowProxy {
         if moved > 0 { proxy.move(by: moved) }
         // A stable but wrong pair may be a stale report. Keep waiting for the original position, not merely any
         // repeated window; validate both sides so repeated text cannot masquerade as restoration.
-        var previous: (String, String)?
-        var restored = false
-        for _ in 0...(maxRereads + 1) {
-            await proxy.pause(milliseconds: settleMilliseconds)
-            let pair = (collapse ? Self.collapsed(proxy.windowBefore) : proxy.windowBefore,
-                        collapse ? Self.collapsed(proxy.windowAfter) : proxy.windowAfter)
-            let expectedBefore = collapse ? Self.collapsed(originBefore) : originBefore
-            let expectedAfter = collapse ? Self.collapsed(originAfter) : originAfter
-            let beforeMatches = expectedBefore.isEmpty ? pair.0.isEmpty : Self.stitches(before: pair.0, onto: expectedBefore)
-            let afterMatches = expectedAfter.isEmpty ? pair.1.isEmpty : Self.stitches(after: pair.1, onto: expectedAfter)
-            if let previous, previous == pair, beforeMatches, afterMatches { restored = true; break }
-            previous = pair
+        let expectedBefore = collapse ? Self.collapsed(originBefore) : originBefore
+        let expectedAfter = collapse ? Self.collapsed(originAfter) : originAfter
+        let restored = await confirmRestoration(proxy, normalizing: { collapse ? Self.collapsed($0) : $0 }) { pair in
+            let beforeMatches = expectedBefore.isEmpty ? pair.before.isEmpty : Self.stitches(before: pair.before, onto: expectedBefore)
+            let afterMatches = expectedAfter.isEmpty ? pair.after.isEmpty : Self.stitches(after: pair.after, onto: expectedAfter)
+            return beforeMatches && afterMatches
         }
         guard restored else { return .failure(.cursorLost) }
         if let failure { return .failure(failure) }
@@ -352,21 +346,38 @@ public extension FieldWindowProxy {
         if decided { result.collapsesBreaks = collapse }
         if moved > 0 { proxy.move(by: -moved) }
         // Back at the cursor: two reads that agree, the window after starting with what was read, the one before as it was.
-        var back: (before: String, after: String)?
-        var previous: (String, String)?
-        for _ in 0...(maxRereads + 1) {
-            await proxy.pause(milliseconds: settleMilliseconds)
-            let pair = (shown(proxy.windowBefore), shown(proxy.windowAfter))
-            let afterMatches = known.isEmpty ? Self.stitches(after: pair.1, onto: text) : Self.stitches(after: pair.1, onto: known)
-            let beforeMatches = shown(originWindow).isEmpty ? pair.0.isEmpty : Self.stitches(before: pair.0, onto: shown(originWindow))
-            if let previous, previous == pair, afterMatches, beforeMatches { back = pair; break }
-            previous = pair
+        let restored = await confirmRestoration(proxy, normalizing: shown) { pair in
+            let afterMatches = known.isEmpty ? Self.stitches(after: pair.after, onto: text) : Self.stitches(after: pair.after, onto: known)
+            let beforeMatches = shown(originWindow).isEmpty ? pair.before.isEmpty : Self.stitches(before: pair.before, onto: shown(originWindow))
+            return afterMatches && beforeMatches
         }
-        guard back != nil else { return .failure(.cursorLost) }
+        guard restored else { return .failure(.cursorLost) }
         if let failure { return .failure(failure) }
         result.text = text
         result.added = max(0, text.count - known.count)
         return .success(result)
+    }
+
+    /// Restoration still reads after cancellation, but cannot hold a user's next key for the
+    /// entire ordinary retry budget. The next native operation retains its existing transit allowance.
+    private func confirmRestoration(_ proxy: any FieldWindowProxy, normalizing: (String) -> String,
+                                    matching: ((before: String, after: String)) -> Bool) async -> Bool {
+        var previous: (String, String)?
+        var cancelledReads = 0
+        let reservedMs = FieldQueue.transitMs + 2 * Double(settleMilliseconds)
+        let restoreBudget = max(0, FieldEditCoordinator.inputResponseTargetMs - reservedMs)
+        let cancelledLimit = max(2, Int(restoreBudget / Double(max(1, settleMilliseconds))))
+        for _ in 0...(maxRereads + 1) {
+            if proxy.isCancelled || Task.isCancelled {
+                guard cancelledReads < cancelledLimit else { return false }
+                cancelledReads += 1
+            }
+            await proxy.pause(milliseconds: settleMilliseconds)
+            let pair = (normalizing(proxy.windowBefore), normalizing(proxy.windowAfter))
+            if let previous, previous == pair, matching((pair.0, pair.1)) { return true }
+            previous = pair
+        }
+        return false
     }
 
     /// At an empty window after the cursor: moves one unit on. Nil when the cursor did not move (the field's end); else
@@ -374,10 +385,17 @@ public extension FieldWindowProxy {
     private func crossBlockEnd(_ proxy: any FieldWindowProxy, before: String, offset: Int,
                                result: inout Result) async -> Swift.Result<Void, Failure>? {
         proxy.move(by: 1)
-        switch await stablePair(proxy, offset: offset + 1, result: &result, stitches: { _ in true }) {
-        case .failure(let reason): proxy.move(by: -1); return .failure(reason)
+        // Two equal old reports are not evidence that +1 went nowhere: a real Safari div
+        // boundary can keep that stale echo before revealing the next paragraph. Wait for a
+        // changed, stable report rather than accepting the optimistic state as the field's end.
+        switch await stablePair(proxy, offset: offset + 1, result: &result, stitches: { $0.before != before }) {
+        case .failure(let reason):
+            let now = proxy.windowBefore
+            if now != before { proxy.move(by: -1) }
+            if reason == .cancelled { return .failure(reason) }
+            if now == before { return nil } // no movement was observed through the bounded read budget
+            return .failure(reason)
         case .success(let pair):
-            if pair.before == before { return nil }
             guard pair.before.last?.isNewline == true else { proxy.move(by: -1); return .failure(.stitch(offset: offset)) }
             return .success(())
         }
@@ -394,7 +412,9 @@ public extension FieldWindowProxy {
         var last: (String, String)?
         var failure = Failure.unstable(offset: offset)
         for attempt in 0...(maxRereads + 1) {
+            guard !proxy.isCancelled, !Task.isCancelled else { return .failure(.cancelled) }
             await proxy.pause(milliseconds: settleMilliseconds)
+            guard !proxy.isCancelled, !Task.isCancelled else { return .failure(.cancelled) }
             let pair = (proxy.windowBefore, proxy.windowAfter)
             if attempt > 1 { result.rereads += 1 }
             if let previous = last, previous == pair {

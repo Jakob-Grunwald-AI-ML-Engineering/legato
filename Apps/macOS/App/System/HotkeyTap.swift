@@ -20,14 +20,14 @@ private final class TapContext: @unchecked Sendable {
 }
 
 /// The tap's thread: owns the context for as long as the callback can run.
-private final class TapLoop: @unchecked Sendable {
+final class TapLoop: @unchecked Sendable {
     private let source: CFRunLoopSource
-    private let context: TapContext
+    private let context: AnyObject
     private let lock = NSLock()
     private var loop: CFRunLoop?
     private var stopped = false
 
-    init(source: CFRunLoopSource, context: TapContext) {
+    init(source: CFRunLoopSource, context: AnyObject) {
         self.source = source
         self.context = context
     }

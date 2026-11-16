@@ -1,0 +1,201 @@
+{
+  "status": "DRAFT_STUCK_TAKE_OPEN",
+  "pr": "https://github.com/Jakob-Grunwald-AI-ML-Engineering/legato/pull/298",
+  "branch": "feat/iphone-field-edits",
+  "base": "1007a83235dc705679449f528d4ab188dea72761",
+  "productRevision": "b960ed3",
+  "unchangedProductAndSwiftTestTrees": {
+    "Apps": {
+      "tested": "639a136f4923e1997a481f9786364eaebaf93e19",
+      "current": "639a136f4923e1997a481f9786364eaebaf93e19"
+    },
+    "Sources": {
+      "tested": "39fac5de01280a43081dffe9941de5f52f37fa9c",
+      "current": "39fac5de01280a43081dffe9941de5f52f37fa9c"
+    },
+    "Tests": {
+      "tested": "0fb41c56f07765986f60fc50d723dbd2f561973e",
+      "current": "0fb41c56f07765986f60fc50d723dbd2f561973e"
+    }
+  },
+  "userStopCondition": "Finish current validation. Record any further failure or access blocker; no additional repair cycle.",
+  "toolchain": {
+    "xcode": "27.2",
+    "build": "27B52",
+    "pinned26_6Available": false
+  },
+  "localGate": {
+    "command": "bash scripts/ci/test.sh",
+    "revision": "783863142ea5406bd619edbadd57490cddc2051f",
+    "result": "PASS",
+    "exitCode": 0,
+    "swiftSeconds": 67,
+    "iOSBuildSeconds": 22,
+    "macBuildSeconds": 20
+  },
+  "ordinaryReleaseChecks": [
+    {
+      "command": "bash scripts/ci/release.sh check",
+      "result": "PASS",
+      "internalEndpointsExcludedMachOCount": 3
+    },
+    {
+      "command": "bash scripts/ci/release.sh mac-release",
+      "result": "PASS",
+      "internalEndpointsExcludedMachOCount": 2
+    }
+  ],
+  "gateLogArchive": "LegatoTestVM/artifacts/final-validation; SHA256 record retained there",
+  "stressChecker": {
+    "revision": "8a28a0e52cf6105820a5b93fdb2fe27eee1aed2b",
+    "pureContractsPassed": 9,
+    "originalTake08UnchangedJournalRevalidated": "PASS",
+    "successfulJournalsRetained": true
+  },
+  "stress": [
+    {
+      "seed": 2026111601,
+      "speed": 1,
+      "result": "PASS",
+      "takes": 20,
+      "failures": 0,
+      "toolErrors": 0,
+      "contended": 0,
+      "untouchedExactClean": 9,
+      "expectedDrops": 6,
+      "resyncs": 3,
+      "artifacts": "20261116-121933-seed2026111601",
+      "journalCount": 20
+    },
+    {
+      "seed": 2026111602,
+      "speed": 1,
+      "result": "PASS",
+      "takes": 20,
+      "failures": 0,
+      "toolErrors": 0,
+      "contended": 0,
+      "untouchedExactClean": 11,
+      "expectedDrops": 6,
+      "resyncs": 3,
+      "artifacts": "20261116-123455-seed2026111602",
+      "journalCount": 20
+    }
+  ],
+  "physicalDirectedChecks": {
+    "result": "PASS for recorded samples",
+    "source": "7838631",
+    "summary": "physical-input-timing-summary.json",
+    "recognitionOrUniversalWorstCaseClaim": false
+  },
+  "independentUAT": {
+    "date": "2026-11-16",
+    "report": "fresh-uat.md",
+    "phone": {
+      "result": "FAIL",
+      "findings": [
+        "Cleanup target removes letters typed during speech",
+        "Aborted cleanup edit leaves one dictated letter deleted"
+      ],
+      "hosts": [
+        "Safari textarea",
+        "Safari rich list"
+      ],
+      "untested": [
+        "WhatsApp",
+        "Notes",
+        "Messages",
+        "Mail",
+        "send/clear then new draft",
+        "History recovery"
+      ]
+    },
+    "mac": {
+      "result": "FAIL",
+      "findings": [
+        "Safari contenteditable: caret check fails after first write; speech kept in pill",
+        "Blocked native input lease is process-wide"
+      ],
+      "passed": [
+        "TextEdit",
+        "Safari textarea (healthy session)"
+      ],
+      "untested": [
+        "mid-session cleanup in flight"
+      ]
+    }
+  },
+  "vm": {
+    "engine": "Tart2.41.1 using Apple Virtualization",
+    "durableRoot": "~/Library/Application Support/LegatoTestVM",
+    "state": "stopped",
+    "independentlyVerified": true,
+    "originalSignedAppPreserved": true,
+    "guestTestSignature": "Separate ad-hoc copy; restricted app/team identifiers and embedded profile removed; disable-library-validation entitlement enabled only in this guest copy.",
+    "globalSIPandAMFIChanged": false,
+    "hostUIControlled": false
+  },
+  "phoneHandback": {
+    "lastOwnedVerifiedUTC": "2026-11-16T11:06:45.012Z",
+    "armed": false,
+    "warmInput": false,
+    "reserved": false,
+    "route": "idle",
+    "homeVerified": true,
+    "subsequentFreshTesterMutations": 0,
+    "knownOfflineProviderOrLaunchOverrideRemaining": false,
+    "installedSource": "7838631",
+    "draftsAndNewerClipboardPreserved": true
+  },
+  "remainingLimits": [
+    "Stuck cleaning take on iPhone is undiagnosed; recovery path not observed on device.",
+    "Physical external hardware keyboard behavior not established by WDA.",
+    "Recorded-PCM/provider tests do not establish microphone or recognition quality.",
+    "Own unchanged fixture cleanup remains access-blocked; preserve unknown additions and newer clipboard."
+  ],
+  "delivery": {
+    "prRemainsDraft": true,
+    "merged": false,
+    "livePromoted": false
+  },
+  "housekeeping": {
+    "approvedOldBuildDirectoriesRemoved": 11,
+    "approvedOldTestSimulatorsRemoved": 3,
+    "otherDeletionPerformed": false,
+    "additionalDryRunReclaimableApproxGiB": 3.4,
+    "durableVMExcludedFromRoutineCleanup": true
+  },
+  "stressBinarySHA256": {
+    "Legato": "c93e964acd7922fedecd50f49a08fafe72508e2edacee0d7580d2ffa629bb433",
+    "Legato.debug.dylib": "659d881b61fa7719d26865b8802f5ac809b72a7942bcdc78ccfcad64e264d1a9",
+    "PlugIns/LegatoKeyboard.appex/LegatoKeyboard": "96e8f3fb95b6cc2e5617249c95521c1faa57e98d223e45454c0f0960a8d5d118",
+    "PlugIns/LegatoKeyboard.appex/LegatoKeyboard.debug.dylib": "b57d2ee35014e12aee5c21cbde30a1f2b3bb0eb71eb16ab948b6c92d903b9051"
+  },
+  "stressArtifactArchive": "~/Library/Application Support/LegatoTestVM/artifacts/final-validation/stress",
+  "simulatorHandback": {
+    "replayCancelledAndJoined": true,
+    "idleVerified": true,
+    "ownedSimulatorState": "Shutdown",
+    "deleted": false
+  },
+  "hostAudioReport": {
+    "userReportedNormalLegatoChoppyAfterVMWork": true,
+    "vmAudioDisabled": true,
+    "vmStopped": true,
+    "defaultInput": "MacBook Pro Microphone at48000Hz",
+    "recentCoreAudioOverloadMessages": 0,
+    "remainingOlderSimulator": "legato-e2e",
+    "shutdownApproval": "APPROVED",
+    "cause": "Remaining iOS simulator likely contributed: the user reported improvement after its shutdown while the VM was already stopped. Exact mechanism not proven.",
+    "olderSimulatorStateAfterApprovedStop": "Shutdown; data preserved",
+    "allIOSSimulatorsStopped": true,
+    "normalLegatoProcessRestartedOrChanged": false,
+    "userConfirmedImprovement": true
+  },
+  "recheck": {
+    "revision": "b960ed3",
+    "mac": "PASS (guest, offline fixtures)",
+    "phone": "Letter loss not reproduced (Safari, Notes, WhatsApp self-chat). OPEN: a take stuck in cleaning blocked typing and later takes until app relaunch; cause unknown.",
+    "localGate": "PASS on c915d7f; b960ed3 passed LegatoMacTests (245) and the Mac build"
+  }
+}

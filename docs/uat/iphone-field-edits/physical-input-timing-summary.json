@@ -1,0 +1,51 @@
+{
+  "revision": "783863142ea5406bd619edbadd57490cddc2051f",
+  "environment": "Real iPhone 17 / iOS 26.6.1 (23G83), signed Debug app, real extension, synthetic Safari textarea",
+  "method": "Original provider timeline plus matching PCM at speed 1; guarded directed native Space, space-pan cursor movement and q marker while cleanup remained active. On-device monotonic intent/snapshot, sent and queue confirmation events; independent native full-field readback. Scripted integration, not independent UAT.",
+  "runID": "A4255085-B680-41BC-8674-738B94173815",
+  "manualSpace": {
+    "issuedMs": 84.09062498807907,
+    "confirmedMs": 95.61349993944168
+  },
+  "typedQ": {
+    "issuedMs": 124.95566666126251,
+    "confirmedMs": 178.71599996089935
+  },
+  "admittedFinalWord": {
+    "snapshotVersion": 144,
+    "snapshotUptimeMs": 497293527.9500834,
+    "firstCharacterIssuedMs": 12.104,
+    "finalPeriodIssuedMs": 91.73658335208893,
+    "finalPeriodConfirmedMs": 158.1230416893959
+  },
+  "cursor": {
+    "intentCallbacks": 6,
+    "totalNativeCharacterDelta": -7,
+    "confirmedDelaysMs": [
+      255.9834166765213,
+      285.38137501478195,
+      316.4078750014305,
+      348.5271666646004,
+      382.9886666536331,
+      455.3766666650772
+    ],
+    "longestObservedMs": 455.3766666650772
+  },
+  "nativeReadback": {
+    "markerIndex": 471,
+    "expectedEndMinusSevenIndex": 471,
+    "allOriginalCharactersRetainedApartFromRequestedCaseChanges": true,
+    "explicitAddedCharacters": "q then a later native l",
+    "laterInputActor": "unknown",
+    "laterInputDelayAfterQMs": 75096.8723332882,
+    "laterInputDelayAfterCleanupCompletionMs": 55817.007791638374,
+    "laterInputTrace": "later-native-input.jsonl"
+  },
+  "limits": [
+    "Queue confirmation uses bounded proxy reports which can be optimistic. Independent native settled text confirms retained content/caret, not per-character display latency.",
+    "Timing excludes bridge/network transfer and chosen gesture hold; it starts at admitted snapshot or native key/cursor intent.",
+    "The longest observed response is 455.377 ms in this sample, not a universal or worst-case guarantee.",
+    "The later native l is recorded separately without actor attribution and must be preserved.",
+    "The original c355a35 failure remains in speech-tail-failure-summary.json for comparison."
+  ]
+}

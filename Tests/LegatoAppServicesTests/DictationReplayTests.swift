@@ -23,6 +23,86 @@ import LegatoSoniox
         #expect(throws: DictationReplayTimeline.ReplayError.empty) { try DictationReplayTimeline.parse(Data(#"{"responses":[{"t":1,"tokens":[]}]}"#.utf8)) }
     }
 
+    @Test func originalPCMRunsBeforeMatchingResponseAndRetainsEndpointDelay() throws {
+        let timeline = DictationReplayTimeline(frames: [.init(at: 0.2, json: "endpoint"), .init(at: 0.5, json: "delayed")])
+        let pcm = try DictationReplayPCM(Data(count: 6_400)) // Ten original 20 ms quiet frames.
+        var cursor = DictationReplayCursor(timeline: timeline, pcm: pcm)
+        var activity = DictationActivity()
+        var audioFrames = 0
+        var responses: [Double] = []
+        while let event = cursor.next() {
+            switch event {
+            case .pcm(_, let data):
+                audioFrames += 1
+                activity.receive(data)
+            case .response(let response):
+                #expect(audioFrames == 10)
+                let admitted = activity.boundary("endpoint")
+                #expect(admitted)
+                responses.append(response.at)
+            }
+        }
+        #expect(responses == [0.2, 0.5])
+    }
+
+    @Test func PCMValidationRejectsEmptyOddAndOversizedInputsAndRetainsShortFinalFrame() throws {
+        for data in [Data(), Data(count: 1), Data(count: DictationReplayPCM.maximumBytes + 2)] {
+            #expect(throws: DictationReplayTimeline.ReplayError.invalidPCM) { try DictationReplayPCM(data) }
+        }
+        var cursor = DictationReplayCursor(timeline: .init(frames: []), pcm: try .init(Data(count: 960)))
+        #expect(cursor.next() == .pcm(at: 0.02, Data(count: 640)))
+        #expect(cursor.next() == .pcm(at: 0.03, Data(count: 320)))
+        #expect(cursor.next() == nil)
+    }
+
+    @Test func replayFilesMustBeBoundedRegularBasenames() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data([0, 0]).write(to: root.appendingPathComponent("take.pcm"))
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("link.pcm"), withDestinationURL: root.appendingPathComponent("take.pcm"))
+        #expect(try DictationReplayTimeline.readFile("take.pcm", in: root, maximumBytes: 2) == Data([0, 0]))
+        for name in ["../take.pcm", "/take.pcm", ".take.pcm", "a\\take.pcm", "link.pcm"] {
+            #expect(throws: DictationReplayTimeline.ReplayError.invalidFile) { try DictationReplayTimeline.readFile(name, in: root, maximumBytes: 2) }
+        }
+        #expect(throws: DictationReplayTimeline.ReplayError.invalidFile) { try DictationReplayTimeline.readFile("take.pcm", in: root, maximumBytes: 1) }
+    }
+
+    @MainActor @Test(arguments: [false, true]) func stoppingReplayJoinsItsAudioAndTokenClock(cancelCaller: Bool) async throws {
+        let sink = ReplayActivitySink()
+        let engine = DictationEngine(sink: sink, sonioxKey: { "test" }, makeSocket: { TestSocket() },
+                                     vocabularyURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        engine.open()
+        let timeline = DictationReplayTimeline(frames: [.init(at: 10, json: #"{"tokens":[{"text":"later","is_final":true}]}"#)])
+        let pcm = try DictationReplayPCM(Data(repeating: 32, count: 32_000))
+        let replay = Task { try await engine.debugReplay(timeline, pcm: pcm) }
+        // Let original PCM enter the real activity classifier, then close while token pacing is suspended.
+        let deadline = ContinuousClock.now + .seconds(2)
+        while sink.activityCount == 0, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(sink.activityCount > 0)
+        if cancelCaller { replay.cancel() } else { await engine.close() }
+        if case .success = await replay.result { Issue.record("Stopping the route must cancel its replay") }
+        let count = sink.activityCount
+        #expect(!engine.isReplaying)
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(sink.activityCount == count && sink.lines.isEmpty)
+        await engine.close()
+    }
+
+    @MainActor @Test(arguments: [false, true]) func onlyOriginalQuietPCMAdmitsTheRecordedEndpoint(includePCM: Bool) async throws {
+        let sink = ReplayActivitySink()
+        let engine = DictationEngine(sink: sink, sonioxKey: { "test" }, makeSocket: { TestSocket() },
+                                     vocabularyURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        engine.open()
+        let timeline = DictationReplayTimeline(frames: [.init(at: 0.2, json: #"{"tokens":[{"text":"<end>","is_final":true}]}"#)])
+        try await engine.debugReplay(timeline, pcm: includePCM ? DictationReplayPCM(Data(count: 6_400)) : nil)
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !sink.boundaries.contains("finished"), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(sink.boundaries.contains("finished"))
+        #expect(sink.boundaries.contains("endpoint") == includePCM)
+        await engine.close()
+    }
+
     @Test func theNeutralFixtureSegmentsIntoFiveSentencesThroughTheProviderSegmenter() throws {
         struct Frame: Decodable { var tokens: [SonioxToken] }
         let timeline = try DictationReplayTimeline.parse(Data(contentsOf: Self.fixture))
@@ -35,5 +115,15 @@ import LegatoSoniox
         #expect(segments.count == 5 && timeline.duration > 20)
         #expect(segments[2].words.map(\.word.text).contains("there"), "The final form wins over the provisional one")
     }
+}
+
+@MainActor private final class ReplayActivitySink: DictationRouteSink {
+    var activityCount = 0
+    var lines: [DictationRouteLine] = []
+    var boundaries: [String] = []
+    func receive(_ line: DictationRouteLine) async { lines.append(line) }
+    func speechActivity() { activityCount += 1 }
+    func boundary(_ reason: String) { boundaries.append(reason) }
+    func reset() async {}
 }
 #endif

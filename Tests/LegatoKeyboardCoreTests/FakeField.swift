@@ -25,6 +25,8 @@ struct FakeField {
     /// After a tap, this many reports show the field's text as it was a few host turns ago (before the edits the keyboard
     /// confirmed last) with the caret where the user tapped: a stale report that reverts confirmed edits (UAT, Safari).
     var staleReportsAfterTap = 0
+    /// Reports never show a selection (Safari's opaque Select All): the caret shows at its end, nothing selected.
+    var hidesSelection = false
     private var truthLog: [[Character]] = []
     private var staleShow: (text: [Character], caret: Int, left: Int)?
     var nowMs = 0.0
@@ -112,6 +114,9 @@ struct FakeField {
     /// The report as the proxy shows it now: the field, with moves not applied yet already in it.
     var current: FieldQueue.Report {
         let shown = proxy ?? (text, caret, selection)
+        if hidesSelection {
+            return Self.report(text: shown.text, caret: shown.caret + shown.selection, selection: 0, window: window, blockEcho: blockEcho)
+        }
         return Self.report(text: shown.text, caret: shown.caret, selection: shown.selection, window: window, blockEcho: blockEcho)
     }
 

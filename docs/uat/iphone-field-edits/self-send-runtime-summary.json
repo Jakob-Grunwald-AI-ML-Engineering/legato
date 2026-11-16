@@ -1,0 +1,24 @@
+{
+  "sourceRevision": "d94be68c44e9c37bce5b842988026c914c1185e8",
+  "device": "iPhone 17 / iOS 26.6.1 (23G83)",
+  "method": "Directed real-extension test, deterministic valid capitalization cleaner delayed 3000 ms, native WhatsApp Send, external WDA successor typing; no cursor probes or repairs between Send and successor verification.",
+  "recipientProof": "Official WhatsApp Message yourself system label and (You) badge, checked before testing. Private native screenshot also verifies own account.",
+  "runID": "C2A54F8E-272A-4D9F-8215-AE0AB3F54563",
+  "readUptimeMs": 491978418.017,
+  "clearUptimeMs": 491978985.8846251,
+  "successorFirstReportUptimeMs": 491979420.20933336,
+  "lateFreshAttemptUptimeMs": 491981573.3374584,
+  "actualSuccessor": "New epoch safe 2785",
+  "persistedHistory": {
+    "found": true,
+    "cleanupFieldStatus": "undelivered",
+    "rawText": "green boat",
+    "text": "green boat"
+  },
+  "limits": [
+    "The original spoken line was held after a manual caret change; History proves its recovery, not that all raw speech was sent.",
+    "The provider was a deterministic default capitalization fixture; real Soniox transport is recorded separately.",
+    "This directed race is not a human-rate interruption measurement or independent UAT.",
+    "The selected field text and all committed journal rows are synthetic; full mixed journals and screenshots remain private."
+  ]
+}

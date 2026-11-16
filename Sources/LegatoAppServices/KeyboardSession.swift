@@ -335,14 +335,18 @@ import LegatoVocabulary
     }
     /// Debug bridge: replays a recorded Soniox token timeline into the dictation route (no microphone), then ends the
     /// take as the mic key's stop does. Returns when the take is written.
-    public func debugDictationReplay(_ timeline: DictationReplayTimeline, speed: Double = 1) async throws {
+    public func debugDictationReplay(_ timeline: DictationReplayTimeline, speed: Double = 1, pcm: DictationReplayPCM? = nil) async throws {
         guard isOpen, gate.surface == .dictation else { throw DebugDictationError.notOnDictationSurface }
         speechRoute.beginTake()
         debugTakeOpen = false
-        try await dictation.debugReplay(timeline, speed: speed)
+        try await dictation.debugReplay(timeline, speed: speed, pcm: pcm)
+        try Task.checkCancellation()
         await dictation.waitForFinish(timeout: .seconds(3))
+        try Task.checkCancellation()
         await sink.finishTake()
     }
+    /// Joins only the synthetic input clock; an already-started downstream cleanup retains its own lifetime.
+    public func cancelDebugDictationReplay() async { await dictation.cancelDebugReplay() }
     /// Debug bridge: the magic toggle as if the keyboard set it (`off`, `latched`, `held`); it stays until either changes it.
     public func debugMagic(_ toggle: MagicToggle) throws {
         guard isOpen, gate.surface == .dictation else { throw DebugDictationError.notOnDictationSurface }

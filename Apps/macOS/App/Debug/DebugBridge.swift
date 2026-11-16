@@ -105,7 +105,7 @@ import ApplicationServices
             case .password: capture = "password"
             }
             let panel = app.fieldEditor.panel
-            return ["capture": capture, "captureNote": AXTextTarget.lastCaptureNote, "offline": MacDictationSession.offlineFixture,
+            return ["nativeInput": NativeInputHandoff.shared.diagnostics, "capture": capture, "captureNote": AXTextTarget.lastCaptureNote, "offline": MacDictationSession.offlineFixture,
                     "axTrusted": AXIsProcessTrusted(),
                     "frontmostPID": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1,
                     "frontmostBundle": NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "",

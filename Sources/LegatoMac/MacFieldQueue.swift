@@ -665,15 +665,20 @@ public final class MacFieldQueue {
             count = cap
         }
         guard let text = try? target.text(in: UTF16Range(location: base, length: count)) else { return nil }
-        return (Document(base: base, text: Self.folded(text, keyed: Self.keyed(target)) as NSString, length: length), selection)
+        return (Document(base: base, text: Self.folded(text, keyed: Self.foldsSpaces(target)) as NSString, length: length), selection)
     }
 
     private static func keyed(_ target: any TextTarget) -> Bool { !target.editsInPlace && target.typesKeys }
+    private static func foldsSpaces(_ target: any TextTarget) -> Bool { keyed(target) || target.showsNoBreakSpaces }
+    /// The field's text there as the queue compares it with its own (`folded`).
+    private func shown(_ target: any TextTarget, in range: UTF16Range) -> String? {
+        (try? target.text(in: range)).map { Self.folded($0, keyed: Self.foldsSpaces(target)) }
+    }
 
     /// Keystroke fields: a rich editor shows a typed space as a no-break space (Chromium does at the end of a line, and
     /// turns it back once more text follows). The queue reads both as a space, so its own spaces are recognised.
     static func folded(_ text: String, keyed: Bool) -> String {
-        keyed && text.contains("\u{00A0}") ? text.replacingOccurrences(of: "\u{00A0}", with: " ") : text
+        keyed ? text.foldingNoBreakSpaces : text
     }
 
     /// One op at most. False when the field cannot take one now (unfocused, unreadable, an edit not yet placeable).
@@ -708,8 +713,11 @@ public final class MacFieldQueue {
                 // Real input moves the real caret: a pending proof or refresh would prove nothing now.
                 probeAt = nil; staleCaret = nil
             }
-            // The user is typing or clicking: keys wait until they rest (without counting toward `parkLimit`).
-            if let input = inputAt, now() - input < Self.keyQuiet { holding = true; return false }
+        }
+        // Background native edits also borrow the caret. Let real input land before borrowing it again;
+        // incoming speech still gets priority, while key-based transports retain their existing input guard.
+        if keyed || !runs.contains(where: \.speaking), let input = inputAt, now() - input < Self.keyQuiet {
+            holding = true; return false
         }
         if keyed, let late = lateKey {
             // Never a second key while the last one may still land.
@@ -725,7 +733,7 @@ public final class MacFieldQueue {
         if let probe = probeAt, selection != UTF16Range(location: probe, length: 0) { probeAt = nil }
         if let region = nextRegion() {
             if keyed { return await performKey(region, doc: doc, selection: selection, target: target, mark: mark) }
-            return await perform(region, doc: doc, target: target)
+            return await perform(region, doc: doc, target: target, mark: mark)
         }
         if openRemainderRegion(doc) { return true }
         if keyed, caretOwed { return await restoreCaret(doc: doc, selection: selection, target: target, mark: mark) }
@@ -1187,11 +1195,28 @@ public final class MacFieldQueue {
         return plan
     }
 
-    private func perform(_ region: Region, doc: Document, target: any TextTarget) async -> Bool {
+    private func perform(_ region: Region, doc: Document, target: any TextTarget, mark: Int) async -> Bool {
+        guard target.inputMark == mark else { userActedFlag = true; return true }
         guard beginOperation(.edit) else { return false }
         defer { operations.invalidate() }
         var plan = nativePlan(for: region)
         guard let step = plan.next, let after = plan.afterNext else { return true }
+        guard target.beginNativeInputUnit() else { return false }
+        var nativeUnitOpen = true
+        var nativeHome = userCaret
+        func endNativeUnit() -> Bool {
+            target.prepareNativeInputHome()
+            let confirmed = nativeHome.map { (try? target.selectedRange()) == $0 } ?? false
+            nativeUnitOpen = false
+            return target.endNativeInputUnit(homeVerified: confirmed)
+        }
+        defer { if nativeUnitOpen { _ = endNativeUnit() } }
+        // Creating the scoped tap can itself overlap input before any selection is borrowed.
+        // Re-read on the next step rather than applying the old document after that input.
+        if target.inputMark != mark {
+            nativeHome = try? target.selectedRange()
+            userActedFlag = true; inputAt = now(); return true
+        }
         let lower = step.range.lowerBound, upper = step.range.upperBound
         let insertion = step.replacement
         let location = region.start + String(region.current[..<lower]).utf16.count
@@ -1212,7 +1237,7 @@ public final class MacFieldQueue {
             return await failed(region, after: after, reason: "write", unchanged: nativeWriteUnchanged(region, doc: doc, target: target))
         }
         // Read back the region and the caret before anything else goes out.
-        let shown = try? target.text(in: UTF16Range(location: region.start, length: String(after).utf16.count))
+        let shown = shown(target, in: UTF16Range(location: region.start, length: String(after).utf16.count))
         guard shown == String(after) else {
             // The op may still land: the caret it leaves is ours too.
             expectedSelections.append(UTF16Range(location: range.location + text.utf16.count, length: 0))
@@ -1229,7 +1254,22 @@ public final class MacFieldQueue {
         // A retracted run's first region gives back what it replaced, selected again, so the retry replaces it too.
         if done, region.retracting, !region.original.isEmpty { wanted = UTF16Range(location: region.start, length: region.end - region.start) }
         userCaret = wanted
+        target.prepareNativeInputHome()
         let selection = try? target.selectedRange()
+        // AX selection/write/readback can overlap a real key or click. The confirmed text landed,
+        // but its old return destination no longer owns the caret. Never restore it over the user.
+        if target.inputMark != mark, !target.nativeInputProtected {
+            nativeHome = selection
+            region.nativePlan = nil
+            userActedFlag = true
+            inputAt = now()
+            expectedSelections = selection.map { [$0] } ?? []
+            caretOwed = false
+            note(.verified, id: region.id, run: region.runID, location: region.start, length: region.end - region.start,
+                 text: String(region.current), selection: selection, detail: "inputDuringNativeEdit")
+            if !endNativeUnit() { region.lost = true; drop(region, .failed) }
+            return true
+        }
         if selection != wanted, beginOperation(.move) {
             try? target.setSelectedRange(wanted)
             operationDispatched()
@@ -1238,6 +1278,11 @@ public final class MacFieldQueue {
         } else {
             expectedSelections = [wanted]
         }
+        nativeHome = wanted
+        guard endNativeUnit() else {
+            region.lost = true; drop(region, .failed); return true
+        }
+        if target.inputMark != mark { userActedFlag = true; inputAt = now() }
         note(.verified, id: region.id, run: region.runID, location: region.start, length: region.end - region.start, text: String(region.current),
              selection: wanted)
         if pacedNow, !insertion.isEmpty {
@@ -1850,7 +1895,7 @@ public final class MacFieldQueue {
 
     private func nativeWriteUnchanged(_ region: Region, doc: Document, target: any TextTarget) -> Bool {
         (try? target.textLength()) == doc.length
-            && (try? target.text(in: UTF16Range(location: region.start, length: String(region.current).utf16.count))) == String(region.current)
+            && shown(target, in: UTF16Range(location: region.start, length: String(region.current).utf16.count)) == String(region.current)
     }
 
     private func failed(_ region: Region, after: [Character], reason: String, unchanged: Bool = false) async -> Bool {

@@ -1,0 +1,86 @@
+{
+  "revision": "c355a35",
+  "appSHA256": "42615cec29acf715fce7d23b249e0bd0e860ad5d173ca47f24a5122f626e2f54",
+  "keyboardSHA256": "5c316ff3bb08100913721c2a57d45f6926f8dc734871b8aa8e9a169ce8a91de7",
+  "validatorSHA256": "b1cb71d4e87b31a8419f1273e6a67fc65a3c17925ec2ddaa08d0706372c32d02",
+  "method": "Focused original untouched simulator fixtures at speed 1. Original timelines and expected cleaned fields were compared independently; invariant 3 unchanged. Separate from full seeds, physical proof or UAT.",
+  "results": [
+    {
+      "take": 11,
+      "fixtureIdenticalToOriginal": true,
+      "exactCleanedFieldConfirmed": true,
+      "characters": 265,
+      "finalVersion": 58,
+      "rawConfirmationAfterSnapshotMs": 2947.763,
+      "firstCleanupReadAfterRawConfirmationMs": 82.957,
+      "cleanupCompletedAfterFirstReadMs": 12415.258,
+      "drops": 1,
+      "resyncs": 0
+    },
+    {
+      "take": 14,
+      "fixtureIdenticalToOriginal": true,
+      "exactCleanedFieldConfirmed": true,
+      "characters": 175,
+      "finalVersion": 41,
+      "rawConfirmationAfterSnapshotMs": 468.543,
+      "firstCleanupReadAfterRawConfirmationMs": 105.262,
+      "cleanupCompletedAfterFirstReadMs": 8814.774,
+      "drops": 1,
+      "resyncs": 0
+    },
+    {
+      "take": 15,
+      "fixtureIdenticalToOriginal": true,
+      "exactCleanedFieldConfirmed": true,
+      "characters": 483,
+      "finalVersion": 102,
+      "rawConfirmationAfterSnapshotMs": 670.648,
+      "firstCleanupReadAfterRawConfirmationMs": 112.546,
+      "cleanupCompletedAfterFirstReadMs": 23443.117,
+      "drops": 0,
+      "resyncs": 0
+    },
+    {
+      "take": 16,
+      "fixtureIdenticalToOriginal": true,
+      "exactCleanedFieldConfirmed": true,
+      "characters": 268,
+      "finalVersion": 54,
+      "rawConfirmationAfterSnapshotMs": 3801.823,
+      "firstCleanupReadAfterRawConfirmationMs": 82.918,
+      "cleanupCompletedAfterFirstReadMs": 11887.026,
+      "drops": 1,
+      "resyncs": 0
+    },
+    {
+      "take": 17,
+      "fixtureIdenticalToOriginal": true,
+      "exactCleanedFieldConfirmed": true,
+      "characters": 137,
+      "finalVersion": 27,
+      "rawConfirmationAfterSnapshotMs": 4434.874,
+      "firstCleanupReadAfterRawConfirmationMs": 70.57,
+      "cleanupCompletedAfterFirstReadMs": 6460.921,
+      "drops": 1,
+      "resyncs": 0
+    },
+    {
+      "take": 18,
+      "fixtureIdenticalToOriginal": true,
+      "exactCleanedFieldConfirmed": true,
+      "characters": 155,
+      "finalVersion": 30,
+      "rawConfirmationAfterSnapshotMs": 1818.136,
+      "firstCleanupReadAfterRawConfirmationMs": 91.276,
+      "cleanupCompletedAfterFirstReadMs": 7511.169,
+      "drops": 0,
+      "resyncs": 0
+    }
+  ],
+  "priorMeasuredFailure": {
+    "rawDeliveryMs": 7325,
+    "oldPreparationTimeoutMs": 6000,
+    "fix": "Reuse the shared field-playback budget for background delivery acknowledgement; no input lease or hold-budget change."
+  }
+}

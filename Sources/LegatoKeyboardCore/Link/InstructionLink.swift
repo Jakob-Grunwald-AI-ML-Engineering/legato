@@ -155,12 +155,14 @@ public struct FieldReadReply: Codable, Sendable, Equatable {
     /// The failure lies in how this app shows its text (its windows never agreed): reading again cannot help.
     public var lasting: Bool?
     public var documentID: String?
+    /// Adapter-observed draft lifetime; a host may reuse its document ID after Send.
+    public var draftID: String?
     public init(id: String, state: State, above: String = "", below: String = "", selection: String? = nil, sessionLength: Int = 0,
                 stop: FieldStop = .unread, stopBelow: FieldStop? = nil, moreAbove: Bool = false, moreBelow: Bool = false, error: String? = nil,
-                documentID: String? = nil) {
+                documentID: String? = nil, draftID: String? = nil) {
         self.id = id; self.state = state; self.above = above; self.below = below; self.selection = selection
         self.sessionLength = sessionLength; self.stop = stop; self.stopBelow = stopBelow; self.moreAbove = moreAbove; self.moreBelow = moreBelow
-        self.error = error; self.documentID = documentID
+        self.error = error; self.documentID = documentID; self.draftID = draftID
     }
 }
 
@@ -172,18 +174,22 @@ public struct ScopedEdit: Codable, Sendable, Equatable {
     public var id: String
     public var instructionID: String
     public var documentID: String?
+    /// When supplied, the adapter must still be editing the draft that was read.
+    public var draftID: String?
     public var before: String
     public var after: String
     public var selected: String?
     public var target: String
     public var at: Date
     public init(id: String = UUID().uuidString, instructionID: String, documentID: String?, before: String, after: String,
-                selected: String? = nil, target: String, at: Date = Date()) {
-        self.id = id; self.instructionID = instructionID; self.documentID = documentID
+                selected: String? = nil, target: String, at: Date = Date(), draftID: String? = nil) {
+        self.id = id; self.instructionID = instructionID; self.documentID = documentID; self.draftID = draftID
         self.before = before; self.after = after; self.selected = selected; self.target = target; self.at = at
     }
     /// The scope as the field shows it now.
     public var scopeText: String { selected ?? (before + after) }
+    /// A selected replacement collapses after its result; an unselected edit preserves the user caret.
+    public var cursorAtEnd: Bool { selected != nil }
 }
 
 /// keyboard -> app (`link.instruction.edit.ack`).
@@ -200,8 +206,13 @@ public struct ScopedEditAck: Codable, Sendable, Equatable {
     public var partial: String?
     /// Ops went out and the edit stopped before the end; without `partial` the field's text is unknown.
     public var stopped: Bool?
-    public init(id: String, applied: Bool, cursor: Int? = nil, reason: String? = nil, partial: String? = nil, stopped: Bool? = nil) {
+    /// Not applied because the scope could not be found or verified again (`FieldQueue.DropReason.unplaceable`): the
+    /// field may hold part of the edit. A cleanup reads it afresh and runs once more (`FieldCleanupSession`).
+    public var unplaceable: Bool?
+    public init(id: String, applied: Bool, cursor: Int? = nil, reason: String? = nil, partial: String? = nil, stopped: Bool? = nil,
+                unplaceable: Bool? = nil) {
         self.id = id; self.applied = applied; self.cursor = cursor; self.reason = reason; self.partial = partial; self.stopped = stopped
+        self.unplaceable = unplaceable
     }
 }
 
