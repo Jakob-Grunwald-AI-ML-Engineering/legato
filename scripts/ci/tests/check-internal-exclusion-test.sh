@@ -17,7 +17,7 @@ done
 printf '%s\n' MacOfflineInstructionRunner > "$work/sources/Apps/macOS/App/Debug/MacOfflineInstructionRunner.swift"
 printf '%s\n' LegatoDataRoot LegatoOfflineFixture > "$work/sources/Apps/macOS/App/MacAppController.swift"
 printf '%s\n' MeetingFixtures offline-fixture meetings-real-microphone > "$work/sources/Apps/iOS/App/Debug/IOSMeetingFixture.swift"
-printf '%s\n' clipboard-preserve clipboard-fixture clipboard-restore 'enum DebugClipboard' > "$work/sources/Apps/iOS/App/Debug/DebugClipboard.swift"
+printf '%s\n' clipboard-status clipboard-preserve clipboard-fixture clipboard-restore 'enum DebugClipboard' > "$work/sources/Apps/iOS/App/Debug/DebugClipboard.swift"
 printf '%s\n' keyboard-probe "enum KeyboardProbe" FieldProbeLink > "$work/sources/Apps/iOS/App/Debug/KeyboardProbe.swift"
 printf '%s\n' IOSOfflineInstructionRunner > "$work/sources/Apps/iOS/App/Debug/IOSOfflineInstructionRunner.swift"
 printf '%s\n' LegatoOfflineFixture > "$work/sources/Apps/iOS/App/AppController.swift"
@@ -49,7 +49,7 @@ make_object "$work/clean app/PlugIns/Widget.appex/Widget" 'ordinary widget'
 make_object "$work/clean app/PlugIns/Keyboard.appex/Keyboard" 'FieldProbeLink'
 expect_failure 'embedded raw proxy probe leak' 'Release contains: FieldProbeLink' "$work/clean app"
 make_object "$work/clean app/PlugIns/Keyboard.appex/Keyboard" 'ordinary keyboard'
-for needle in DebugBridge DebugOverlayView 12SessionProbeO 'Session probe:' MeetingFixtures offline-fixture meetings-real-microphone keyboard-probe KeyboardProbe FieldProbeLink clipboard-preserve clipboard-fixture clipboard-restore DebugClipboard; do
+for needle in DebugBridge DebugOverlayView 12SessionProbeO 'Session probe:' MeetingFixtures offline-fixture meetings-real-microphone keyboard-probe KeyboardProbe FieldProbeLink clipboard-status clipboard-preserve clipboard-fixture clipboard-restore DebugClipboard; do
   make_object "$work/leaked/Legato" "$needle"
   expect_failure "internal entry point $needle" "Release contains: $needle" "$work/leaked"
 done

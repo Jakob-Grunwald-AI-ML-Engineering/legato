@@ -13,6 +13,13 @@ import LegatoDevHarness
     }
 
     static func register(_ harness: DevHarness) {
+        harness.register("clipboard-status") { command in
+            guard command.args.isEmpty else { throw Failure.invalid }
+            try foreground()
+            let board = UIPasteboard.general
+            return ["numberOfItems": board.numberOfItems, "hasStrings": board.hasStrings,
+                    "hasURLs": board.hasURLs, "hasImages": board.hasImages, "hasColors": board.hasColors]
+        }
         harness.register("clipboard-preserve") { command in
             guard command.args.isEmpty else { throw Failure.invalid }
             try foreground()
