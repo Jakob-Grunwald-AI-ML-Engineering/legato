@@ -94,10 +94,16 @@ import LegatoKeyboardCore
             // common document extent, so they require an exact match instead.
             let fresh = try await field.read(.cleanup, instructionID: id, reading: {})
             guard token == generation, !Task.isCancelled else { return }
-            guard fresh.state == .done, fresh.documentID == reply.documentID, fresh.selection?.isEmpty != false else {
+            guard fresh.state == .done, fresh.documentID == reply.documentID, fresh.draftID == reply.draftID, fresh.selection?.isEmpty != false else {
                 await onResult(source, "", .undelivered); return
             }
             let current = fresh.above + fresh.below
+            // Sending can clear a host field without changing its document ID. An empty
+            // successor is no longer this cleanup's draft, including buffered speech not
+            // yet inserted. Adapters also supply draftID to catch clear-then-type races.
+            guard !current.isEmpty || baseline.isEmpty else {
+                await onResult(source, "", .undelivered); return
+            }
             let whole = reply.stop == .start && reply.stopBelow == .start && fresh.stop == .start && fresh.stopBelow == .start
             guard current == baseline || whole else { await onResult(source, current, pending.isEmpty ? .keptAsTyped : .undelivered); return }
             let merged = String(FieldMerge.rebase(base: Array(baseline), kept: Array(current), incoming: Array(target)).text)
@@ -108,7 +114,7 @@ import LegatoKeyboardCore
                 return
             }
             let edit = ScopedEdit(instructionID: id, documentID: reply.documentID,
-                                  before: fresh.above, after: fresh.below, target: merged)
+                                  before: fresh.above, after: fresh.below, target: merged, draftID: fresh.draftID)
             let ack = await field.apply(edit)
             guard token == generation else { return }
             lastApplied = ack?.applied == true

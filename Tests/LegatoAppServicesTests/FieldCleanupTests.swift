@@ -9,15 +9,18 @@ import LegatoKeyboardCore
     var text: String
     var cursor: Int
     var edits: [ScopedEdit] = []
+    var draftID: String?
+    var beforeApply: (() -> Void)?
     init(_ text: String) { self.text = text; cursor = text.count }
     func publish(_ strip: InstructionStrip) {}
     func read(_ kind: FieldReadRequest.Kind, instructionID: String, reading: @escaping @MainActor () -> Void) async throws -> FieldReadReply {
         .init(id: instructionID, state: .done, above: String(text.prefix(cursor)), below: String(text.dropFirst(cursor)),
-              stop: .start, stopBelow: .start, documentID: "field")
+              stop: .start, stopBelow: .start, documentID: "field", draftID: draftID)
     }
     func apply(_ edit: ScopedEdit) async -> ScopedEditAck? {
+        beforeApply?()
         edits.append(edit)
-        guard edit.scopeText == text else { return .init(id: edit.id, applied: false) }
+        guard edit.draftID == draftID, edit.scopeText == text else { return .init(id: edit.id, applied: false) }
         text = edit.target; cursor = text.count
         return .init(id: edit.id, applied: true, cursor: text.utf16.count)
     }
@@ -92,6 +95,52 @@ private final class FieldCleaner: SentenceCleaning {
         await session.settle()
         #expect(field.text == "the blue boat sails.")
         #expect(session.lastApplied)
+    }
+
+    @Test func sentDraftIsNotRepopulatedByLateCleanup() async {
+        let field = CleanupField("teh boat")
+        let session = FieldCleanupSession()
+        session.field = field
+        var status: CleanupFieldStatus?
+        session.clean = { _, _ in field.text = ""; field.cursor = 0; return "the boat." }
+        session.onResult = { _, _, result in status = result }
+        session.request(final: true)
+        await session.settle()
+        #expect(field.text.isEmpty)
+        #expect(field.edits.isEmpty)
+        #expect(status == .undelivered)
+        #expect(!session.lastApplied)
+    }
+
+    @Test func newDraftWithSameDocumentAndTextRejectsOldResult() async {
+        let field = CleanupField("teh boat")
+        field.draftID = "sent-draft"
+        let session = FieldCleanupSession()
+        session.field = field
+        session.clean = { _, _ in
+            // Even identical text may be a new message after Send.
+            field.draftID = "next-draft"
+            return "the boat."
+        }
+        session.request(final: true)
+        await session.settle()
+        #expect(field.text == "teh boat")
+        #expect(field.edits.isEmpty)
+        #expect(!session.lastApplied)
+    }
+
+    @Test func draftChangesAfterReadAreStillRefusedAtApply() async {
+        let field = CleanupField("teh boat")
+        field.draftID = "first"
+        let session = FieldCleanupSession()
+        session.field = field
+        session.clean = { _, _ in "the boat." }
+        field.beforeApply = { field.draftID = "next" }
+        session.request(final: true)
+        await session.settle()
+        #expect(field.text == "teh boat")
+        #expect(field.edits.first?.draftID == "first")
+        #expect(!session.lastApplied)
     }
 
     @Test func resetDuringProviderWorkCannotWriteOrReportIntoNextTake() async {
