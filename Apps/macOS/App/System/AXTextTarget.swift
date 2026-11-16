@@ -321,10 +321,10 @@ final class AXTextTarget: TextTarget {
 
     /// Scoped AX replacements require their own setter (or WebKit's marker operation). A whole-value setter alone
     /// is insufficient: WhatsApp exposes one while refusing AXSelectedText. Chromium ignores its advertised setter.
-    var editsInPlace: Bool { writeCapabilities.editsInPlace }
+    var editsInPlace: Bool { !nativeInputUnavailable && writeCapabilities.editsInPlace }
     /// Editable fields without scoped AX writes use synthetic keys, each independently read back by the queue.
     /// Readable pages do not take keys: a letter typed there could invoke a site shortcut.
-    var typesKeys: Bool { writeCapabilities.typesKeys }
+    var typesKeys: Bool { !nativeInputUnavailable && writeCapabilities.typesKeys }
     private var writeCapabilities: FieldWriteCapabilities {
         if let writeCapabilitiesCache { return writeCapabilitiesCache }
         var selectedTextSettable: DarwinBoolean = false
@@ -363,6 +363,22 @@ final class AXTextTarget: TextTarget {
         return FieldTypingDestination.accepts(role: role, textSettable: value || selected, editableAncestorRole: ancestorRole)
     }
     var inputMark: Int { RealInput.shared.count }
+    private var nativeInputUnavailable = false
+    private var nativeClickMark = 0
+    func beginNativeInputUnit() -> Bool {
+        guard !nativeInputUnavailable, isFocused(), NativeInputHandoff.shared.begin(pid: pid) else { return false }
+        nativeClickMark = RealInput.shared.clickCount
+        return true
+    }
+    var nativeInputProtected: Bool { NativeInputHandoff.shared.protected && RealInput.shared.clickCount == nativeClickMark }
+    var nativeInputNotice: String? { NativeInputHandoff.shared.failureNotice }
+    func prepareNativeInputHome() { NativeInputHandoff.shared.prepareHome() }
+    func endNativeInputUnit(homeVerified: Bool) -> Bool {
+        let ok = NativeInputHandoff.shared.finish(homeVerified: homeVerified)
+        if !ok { nativeInputUnavailable = true }
+        return ok
+    }
+
 
     /// An absent attribute is the normal case for most elements; any other error (a timeout, a dead
     /// element) leaves the question open.
@@ -547,6 +563,7 @@ final class AXTextTarget: TextTarget {
     }
 
     func setSelectedRange(_ range: UTF16Range) throws {
+        try NativeInputHandoff.shared.prepare(element)
         guard isFocused() else { throw AXTargetError.unexpectedValue }
         let (element, range) = try selectionTarget(range)
         let error = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, try Self.axValue(for: range))
@@ -697,6 +714,7 @@ final class AXTextTarget: TextTarget {
     }
 
     private func parameter(_ key: String, _ value: CFTypeRef) throws -> CFTypeRef? {
+        try NativeInputHandoff.shared.prepare(element)
         var result: CFTypeRef?
         let error = AXUIElementCopyParameterizedAttributeValue(element, key as CFString, value, &result)
         guard error == .success else { throw AXTargetError.attribute(error) }
@@ -713,6 +731,7 @@ final class AXTextTarget: TextTarget {
     // MARK: Helpers
 
     private static func copyAttribute(_ element: AXUIElement, _ attribute: String) throws -> CFTypeRef? {
+        try NativeInputHandoff.shared.prepare(element)
         var value: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         guard error == .success else { throw AXTargetError.attribute(error) }

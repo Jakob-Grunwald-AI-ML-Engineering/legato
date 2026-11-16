@@ -1,0 +1,167 @@
+{
+  "method": "Same-process monotonic MacEditJournal times: resumed live snapshot admitted to first/new region verified grapheme and marker. This excludes DevHarness500ms file polling, ASR, and external AX sampling. No wall clock subtraction.",
+  "samples": [
+    {
+      "trace": "textedit-3",
+      "run": "FFB30F39-3B37-4CC5-A378-9B3DD7DAA597",
+      "admissionUptimeMs": 170555739.08341667,
+      "firstCharacterVerifiedMs": 16.259916692972183,
+      "fourCharactersVerifiedMs": 48.15958333015442,
+      "firstMarkerVerifiedMs": 187.13729166984558,
+      "evidenceEntries": [
+        {
+          "detail": "v2",
+          "field": "E660A743-99BF-499D-8C28-4DF45426A574",
+          "kind": "live",
+          "run": "FFB30F39-3B37-4CC5-A378-9B3DD7DAA597",
+          "t": 170555739.08341667,
+          "text": "we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night. resumptionmarker arrives with new speech."
+        },
+        {
+          "detail": "rev=440 owed=false caret=447+0 edits=0+1 regions=[\"FFB30F39-3B37-4CC5-A378-9B3DD7DAA597@31[we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.\u2192we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.]x\", \"FFB30F39-3B37-4CC5-A378-9B3DD7DAA597@445[ r\u2192 resumptionmarker arrives with new speech.]o\"]",
+          "field": "E660A743-99BF-499D-8C28-4DF45426A574",
+          "id": "028F2A11-4A5C-463C-BFE1-2B733B7954E4",
+          "kind": "verified",
+          "length": 2,
+          "location": 445,
+          "run": "FFB30F39-3B37-4CC5-A378-9B3DD7DAA597",
+          "selection": "447+0",
+          "t": 170555755.34333336,
+          "text": " r"
+        },
+        {
+          "detail": "rev=443 owed=false caret=450+0 edits=0+1 regions=[\"FFB30F39-3B37-4CC5-A378-9B3DD7DAA597@31[we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.\u2192we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.]x\", \"FFB30F39-3B37-4CC5-A378-9B3DD7DAA597@445[ resu\u2192 resumptionmarker arrives with new speech.]o\"]",
+          "field": "E660A743-99BF-499D-8C28-4DF45426A574",
+          "id": "028F2A11-4A5C-463C-BFE1-2B733B7954E4",
+          "kind": "verified",
+          "length": 5,
+          "location": 445,
+          "run": "FFB30F39-3B37-4CC5-A378-9B3DD7DAA597",
+          "selection": "450+0",
+          "t": 170555787.243,
+          "text": " resu"
+        },
+        {
+          "detail": "rev=455 owed=false caret=462+0 edits=0+1 regions=[\"FFB30F39-3B37-4CC5-A378-9B3DD7DAA597@31[we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.\u2192we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.]x\", \"FFB30F39-3B37-4CC5-A378-9B3DD7DAA597@445[ resumptionmarker\u2192 resumptionmarker arrives with new speech.]o\"]",
+          "field": "E660A743-99BF-499D-8C28-4DF45426A574",
+          "id": "028F2A11-4A5C-463C-BFE1-2B733B7954E4",
+          "kind": "verified",
+          "length": 17,
+          "location": 445,
+          "run": "FFB30F39-3B37-4CC5-A378-9B3DD7DAA597",
+          "selection": "462+0",
+          "t": 170555926.22070834,
+          "text": " resumptionmarker"
+        }
+      ]
+    },
+    {
+      "trace": "safari-textarea-2",
+      "run": "035B7DB2-2491-4F42-986A-AD48ECFD7ABA",
+      "admissionUptimeMs": 170445431.79483333,
+      "firstCharacterVerifiedMs": 28.252958357334137,
+      "fourCharactersVerifiedMs": 61.57970833778381,
+      "firstMarkerVerifiedMs": 205.5597083568573,
+      "evidenceEntries": [
+        {
+          "detail": "v2",
+          "field": "D58B16E8-D265-4B8A-816F-502BBF377B5F",
+          "kind": "live",
+          "run": "035B7DB2-2491-4F42-986A-AD48ECFD7ABA",
+          "t": 170445431.79483333,
+          "text": "we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night. resumptionmarker arrives with new speech."
+        },
+        {
+          "detail": "rev=438 owed=false caret=445+0 edits=0+1 regions=[\"035B7DB2-2491-4F42-986A-AD48ECFD7ABA@29[we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.\u2192we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.]x\", \"035B7DB2-2491-4F42-986A-AD48ECFD7ABA@443[ r\u2192 resumptionmarker arrives with new speech.]o\"]",
+          "field": "D58B16E8-D265-4B8A-816F-502BBF377B5F",
+          "id": "AD2F8A88-A257-4BD6-A3DF-2D9E5DFD9990",
+          "kind": "verified",
+          "length": 2,
+          "location": 443,
+          "run": "035B7DB2-2491-4F42-986A-AD48ECFD7ABA",
+          "selection": "445+0",
+          "t": 170445460.0477917,
+          "text": " r"
+        },
+        {
+          "detail": "rev=441 owed=false caret=448+0 edits=0+1 regions=[\"035B7DB2-2491-4F42-986A-AD48ECFD7ABA@29[we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.\u2192we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.]x\", \"035B7DB2-2491-4F42-986A-AD48ECFD7ABA@443[ resu\u2192 resumptionmarker arrives with new speech.]o\"]",
+          "field": "D58B16E8-D265-4B8A-816F-502BBF377B5F",
+          "id": "AD2F8A88-A257-4BD6-A3DF-2D9E5DFD9990",
+          "kind": "verified",
+          "length": 5,
+          "location": 443,
+          "run": "035B7DB2-2491-4F42-986A-AD48ECFD7ABA",
+          "selection": "448+0",
+          "t": 170445493.37454167,
+          "text": " resu"
+        },
+        {
+          "detail": "rev=453 owed=false caret=460+0 edits=0+1 regions=[\"035B7DB2-2491-4F42-986A-AD48ECFD7ABA@29[we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.\u2192we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.]x\", \"035B7DB2-2491-4F42-986A-AD48ECFD7ABA@443[ resumptionmarker\u2192 resumptionmarker arrives with new speech.]o\"]",
+          "field": "D58B16E8-D265-4B8A-816F-502BBF377B5F",
+          "id": "AD2F8A88-A257-4BD6-A3DF-2D9E5DFD9990",
+          "kind": "verified",
+          "length": 17,
+          "location": 443,
+          "run": "035B7DB2-2491-4F42-986A-AD48ECFD7ABA",
+          "selection": "460+0",
+          "t": 170445637.3545417,
+          "text": " resumptionmarker"
+        }
+      ]
+    },
+    {
+      "trace": "safari-contenteditable-2",
+      "run": "47FB7675-0B5E-4867-84FC-08C90403CC32",
+      "admissionUptimeMs": 170518082.53108335,
+      "firstCharacterVerifiedMs": 22.674874991178513,
+      "fourCharactersVerifiedMs": 52.04241666197777,
+      "firstMarkerVerifiedMs": 172.42595833539963,
+      "evidenceEntries": [
+        {
+          "detail": "v2",
+          "field": "3716D86E-BE26-439D-B68F-543A8DE03403",
+          "kind": "live",
+          "run": "47FB7675-0B5E-4867-84FC-08C90403CC32",
+          "t": 170518082.53108335,
+          "text": "we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night. resumptionmarker arrives with new speech."
+        },
+        {
+          "detail": "rev=438 owed=false caret=445+0 edits=0+1 regions=[\"47FB7675-0B5E-4867-84FC-08C90403CC32@28[ we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.\u2192 we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.]x\", \"47FB7675-0B5E-4867-84FC-08C90403CC32@443[ r\u2192 resumptionmarker arrives with new speech.]o\"]",
+          "field": "3716D86E-BE26-439D-B68F-543A8DE03403",
+          "id": "E1FD3100-EF20-4B11-B9C7-34ACAEF9ED64",
+          "kind": "verified",
+          "length": 2,
+          "location": 443,
+          "run": "47FB7675-0B5E-4867-84FC-08C90403CC32",
+          "selection": "445+0",
+          "t": 170518105.20595834,
+          "text": " r"
+        },
+        {
+          "detail": "rev=441 owed=false caret=448+0 edits=0+1 regions=[\"47FB7675-0B5E-4867-84FC-08C90403CC32@28[ we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.\u2192 we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.]x\", \"47FB7675-0B5E-4867-84FC-08C90403CC32@443[ resu\u2192 resumptionmarker arrives with new speech.]o\"]",
+          "field": "3716D86E-BE26-439D-B68F-543A8DE03403",
+          "id": "E1FD3100-EF20-4B11-B9C7-34ACAEF9ED64",
+          "kind": "verified",
+          "length": 5,
+          "location": 443,
+          "run": "47FB7675-0B5E-4867-84FC-08C90403CC32",
+          "selection": "448+0",
+          "t": 170518134.5735,
+          "text": " resu"
+        },
+        {
+          "detail": "rev=453 owed=false caret=460+0 edits=0+1 regions=[\"47FB7675-0B5E-4867-84FC-08C90403CC32@28[ we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.\u2192 we should prepare the boat for a longer journey tomorrow morning. the weather looks promising and the crew will bring all the supplies before breakfast. we also need to check the engine and fill the water tanks before departure. everyone should pack a warm jacket because the evening can become quite cold near the coast. after lunch we can review our route together and choose a sheltered anchorage for the night.]x\", \"47FB7675-0B5E-4867-84FC-08C90403CC32@443[ resumptionmarker\u2192 resumptionmarker arrives with new speech.]o\"]",
+          "field": "3716D86E-BE26-439D-B68F-543A8DE03403",
+          "id": "E1FD3100-EF20-4B11-B9C7-34ACAEF9ED64",
+          "kind": "verified",
+          "length": 17,
+          "location": 443,
+          "run": "47FB7675-0B5E-4867-84FC-08C90403CC32",
+          "selection": "460+0",
+          "t": 170518254.95704168,
+          "text": " resumptionmarker"
+        }
+      ]
+    }
+  ]
+}

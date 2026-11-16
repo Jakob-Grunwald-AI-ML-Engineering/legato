@@ -217,6 +217,7 @@ import LegatoMac
     /// Work the queue could not place remains visible, without replaying the part already represented in the field.
     private func dropped(_ drop: MacFieldQueue.Drop) {
         guard !drop.text.isEmpty, drop.reason != .cancelled else { return }
+        if let notice = target?.nativeInputNotice { report(notice) }
         guard let runID = drop.runID else { retain(drop.text, id: drop.id); return }
         guard !dismissedRecoveryRuns.contains(runID) else { return }
         if drop.typed == 0 {

@@ -108,6 +108,13 @@ public protocol TextTarget: AnyObject {
     var typesKeys: Bool { get }
     /// A counter of the user's real key presses and clicks: a key planned at one mark is refused at another.
     var inputMark: Int { get }
+    /// Reserves keyboard delivery while one native edit temporarily borrows its selection.
+    func beginNativeInputUnit() -> Bool
+    var nativeInputProtected: Bool { get }
+    var nativeInputNotice: String? { get }
+    func prepareNativeInputHome()
+    func endNativeInputUnit(homeVerified: Bool) -> Bool
+
     /// Sends one key, only if every guard holds now: the bound element has focus in the frontmost app, no real input
     /// since `mark`, no modifier held, and the selection is `selection`. Throws `FieldKeyRefusal` and sends nothing
     /// otherwise. Returning does not mean the key landed: the caller reads the field back.
@@ -126,6 +133,12 @@ public extension TextTarget {
     func recoverWriteFailure() -> Bool { false }
     var typesKeys: Bool { false }
     var inputMark: Int { 0 }
+    func beginNativeInputUnit() -> Bool { true }
+    var nativeInputProtected: Bool { false }
+    var nativeInputNotice: String? { nil }
+    func prepareNativeInputHome() {}
+    func endNativeInputUnit(homeVerified: Bool) -> Bool { homeVerified }
+
     func press(_ key: FieldKey, mark: Int, selection: UTF16Range) throws { throw FieldKeyRefusal.unavailable }
     func setCaret(_ range: UTF16Range, mark: Int, selection: UTF16Range) throws { throw FieldKeyRefusal.unavailable }
     var fieldKey: AnyHashable? { nil }
