@@ -188,6 +188,8 @@ public struct ScopedEdit: Codable, Sendable, Equatable {
     }
     /// The scope as the field shows it now.
     public var scopeText: String { selected ?? (before + after) }
+    /// A selected replacement collapses after its result; an unselected edit preserves the user caret.
+    public var cursorAtEnd: Bool { selected != nil }
 }
 
 /// keyboard -> app (`link.instruction.edit.ack`).
