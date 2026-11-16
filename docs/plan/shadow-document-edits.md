@@ -1,6 +1,6 @@
 # Shadow-document edits: fast chunked field writing
 
-Status: **plan, awaiting Jakob's go.** Written 2026-11-16 at the end of the PR #298 session so a fresh session can execute it. Nothing here is implemented.
+Status: **go given 2026-11-16; measurements done (except Safari contenteditable), see `docs/field-editing.md`.** Written 2026-11-16 at the end of the PR #298 session so a fresh session can execute it. Nothing here is implemented.
 
 ## Goal and scope
 

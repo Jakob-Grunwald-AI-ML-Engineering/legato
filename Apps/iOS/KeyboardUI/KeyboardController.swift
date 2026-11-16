@@ -455,6 +455,7 @@ final class KeyboardController {
     func textDidChange() {
         #if DEBUG || LEGATO_INTERNAL
         nativeTextChangeCount += 1
+        traceProbe("text")
         #endif
         if !isFieldBusy {
             let idleMs = lastStepAt.map { Self.milliseconds(ContinuousClock.now - $0) } ?? 0
@@ -466,6 +467,7 @@ final class KeyboardController {
     func selectionDidChange() {
         #if DEBUG || LEGATO_INTERNAL
         nativeSelectionChangeCount += 1
+        traceProbe("selection")
         #endif
         if !isFieldBusy {
             let idleMs = lastStepAt.map { Self.milliseconds(ContinuousClock.now - $0) } ?? 0
@@ -748,6 +750,10 @@ final class KeyboardController {
         } else {
             guard !queue.ownsRead, queue.hasOpInFlight else { return }
         }
+        apply(op)
+    }
+
+    private func apply(_ op: ShadowOp) {
         switch op {
         case .move(let units): document.adjustTextPosition(byCharacterOffset: units)
         case .deleteBackward(let count): for _ in 0..<count { document.deleteBackward() }
@@ -1413,6 +1419,26 @@ final class KeyboardController {
     @ObservationIgnored private var probeSessionID: String?
     @ObservationIgnored private var probeFieldID: String?
     @ObservationIgnored private var probeExpiry: Task<Void, Never>?
+    /// Writes allowed: the field was empty at `begin` or its window held `FieldProbeRequest.marker`.
+    @ObservationIgnored private var probeWritable = false
+    /// Host callbacks during one move or write, with the proxy as each one saw it.
+    @ObservationIgnored private var probeTrace: [FieldProbeObservation]?
+    @ObservationIgnored private var probeTraceStart = 0.0
+
+    private func probeObservation(since start: Double, event: String? = nil) -> FieldProbeObservation {
+        let secure = document.isSecureTextEntry
+        return FieldProbeObservation(elapsedMs: Self.uptimeMs - start, uptimeMs: Self.uptimeMs,
+            before: secure ? "" : document.contextBefore, after: secure ? "" : document.contextAfter,
+            selected: secure ? nil : document.selectedText, hasText: document.hasText,
+            fieldID: document.documentID, secure: secure,
+            nativeTextChangeCount: nativeTextChangeCount, nativeSelectionChangeCount: nativeSelectionChangeCount,
+            event: event)
+    }
+
+    private func traceProbe(_ event: String) {
+        guard probeTrace != nil else { return }
+        probeTrace?.append(probeObservation(since: probeTraceStart, event: event))
+    }
 
     /// Abandonment timeout is an operational safety policy, not a host latency measurement.
     private func refreshProbeExpiry() {
@@ -1429,7 +1455,7 @@ final class KeyboardController {
     private func endFieldProbe() {
         guard probeLease != nil else { return }
         probeExpiry?.cancel(); probeExpiry = nil
-        probeLease = nil; probeSessionID = nil; probeFieldID = nil
+        probeLease = nil; probeSessionID = nil; probeFieldID = nil; probeWritable = false; probeTrace = nil
         isReadingField = false
         fieldOperationCancelled = true
         forgetLiveRun()
@@ -1446,14 +1472,7 @@ final class KeyboardController {
                 ownsLease: probeLease != nil && queue.ownsRead && cursorReadID == probeLease,
                 fieldID: document.documentID, error: error, observations: observations))
         }
-        func observation() -> FieldProbeObservation {
-            let secure = document.isSecureTextEntry
-            return FieldProbeObservation(elapsedMs: Self.uptimeMs - start, uptimeMs: Self.uptimeMs,
-                before: secure ? "" : document.contextBefore, after: secure ? "" : document.contextAfter,
-                selected: secure ? nil : document.selectedText, hasText: document.hasText,
-                fieldID: document.documentID, secure: secure,
-                nativeTextChangeCount: nativeTextChangeCount, nativeSelectionChangeCount: nativeSelectionChangeCount)
-        }
+        func observation(_ event: String? = nil) -> FieldProbeObservation { probeObservation(since: start, event: event) }
         guard (0...10_000).contains(request.milliseconds), request.delta != Int.min,
               Date().timeIntervalSince(request.at) <= LinkChannel.requestMaxAge else {
             return reply("Invalid or expired probe operation.")
@@ -1471,6 +1490,8 @@ final class KeyboardController {
             syncQueueField()
             guard let lease = await pauseQueue() else { return reply("The queue could not grant an exclusive probe lease.") }
             probeLease = lease; probeSessionID = request.sessionID; probeFieldID = document.documentID
+            probeWritable = !document.hasText
+                || (document.contextBefore + document.contextAfter).contains(FieldProbeRequest.marker)
             isReadingField = true
             fieldOperationCancelled = false
             refreshProbeExpiry()
@@ -1490,17 +1511,49 @@ final class KeyboardController {
             reply(nil, [final])
         case .read, .status:
             reply(nil, [observation()])
-        case .move, .pause:
-            if request.action == .move { dispatch(.move(request.delta), reading: true) }
-            var samples = request.action == .move ? [observation()] : []
-            if request.milliseconds > 0 { try? await Task.sleep(for: .milliseconds(request.milliseconds)) }
+        case .move, .pause, .delete, .insert, .burst:
+            if request.writes, !probeWritable {
+                return reply("Writes need a synthetic field: empty at begin, or showing \(FieldProbeRequest.marker) in its window.")
+            }
+            // Every call goes out back to back, with no wait in between; callbacks and silent window changes are
+            // recorded until the settle time ends.
+            let acting = request.action != .pause
+            probeTraceStart = start
+            probeTrace = acting ? [] : nil
+            defer { probeTrace = nil }
+            switch request.action {
+            case .move: dispatch(.move(request.delta), reading: true)
+            case .delete: apply(.deleteBackward(request.count ?? 0))
+            case .insert: if let text = request.text { apply(.insert(text)) }
+            case .burst:
+                if request.delta != 0 { dispatch(.move(request.delta), reading: true) }
+                if let count = request.count, count > 0 { apply(.deleteBackward(count)) }
+                if let text = request.text { apply(.insert(text)) }
+                if let back = request.back, back != 0 { dispatch(.move(back), reading: true) }
+            default: break
+            }
+            var samples = acting ? [observation("sent")] : []
+            if request.milliseconds > 0 {
+                let deadline = start + Double(request.milliseconds)
+                var last = samples.last
+                while Self.uptimeMs < deadline, !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(acting ? 5 : request.milliseconds))
+                    guard acting else { break }
+                    let now = observation("window")
+                    if let seen = probeTrace, !seen.isEmpty { samples += seen; probeTrace = []; last = seen.last }
+                    if let previous = last, (now.before, now.after, now.selected) != (previous.before, previous.after, previous.selected) {
+                        samples.append(now); last = now
+                    }
+                }
+            }
             guard !Task.isCancelled, isVisible, document.documentID == probeFieldID,
                   probeSessionID == request.sessionID, cursorReadID == probeLease, queue.ownsRead,
                   !document.isSecureTextEntry else {
                 endFieldProbe()
                 return reply("The field changed during the probe operation.")
             }
-            if request.action == .pause || request.milliseconds > 0 { samples.append(observation()) }
+            samples += probeTrace ?? []
+            if request.action == .pause || request.milliseconds > 0 { samples.append(observation("settled")) }
             reply(nil, samples)
         }
     }
