@@ -21,7 +21,6 @@ import Foundation
 /// as it is then. Live dictation types at its open piece's end, the user's caret, and pieces close on the user's input;
 /// cleanup may change hand-typed text only when it was in the cleanup's input (`placeThroughRead`, `FieldMerge`).
 public struct FieldQueue: Sendable {
-public struct FieldQueue: Sendable {
     // MARK: Public types
 
     /// The field's report around the cursor: `selected` is the selection (nil or empty: none).
