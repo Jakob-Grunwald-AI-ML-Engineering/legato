@@ -813,14 +813,16 @@ def report_take(res: Result, outdir: Path) -> None:
         print(f"      ? {e}")
     for n in res.notes:
         print(f"      . {n}")
+    # Keep every completed take available for independent offline revalidation.
+    d = outdir / f"take-{t.index:02d}"
+    d.mkdir(exist_ok=True)
+    (d / "timeline.json").write_text(json.dumps({"responses": t.frames}))
+    (d / "result.json").write_text(json.dumps({
+        "seed": t.seed, "kind": t.kind, "user": t.user, "taps": res.taps, "transcript": t.transcript,
+        "expected_clean": t.expected_clean, "field": res.text, "failures": res.failures, "notes": res.notes,
+        "tool_errors": res.tool_errors, "contended": res.contended, "wall_seconds": res.wall}, indent=1))
+    (d / "journal.jsonl").write_text("\n".join(json.dumps(e) for e in res.entries))
     if res.failures or res.tool_errors or res.contended:
-        d = outdir / f"take-{t.index:02d}"
-        d.mkdir(exist_ok=True)
-        (d / "timeline.json").write_text(json.dumps({"responses": t.frames}))
-        (d / "result.json").write_text(json.dumps({
-            "seed": t.seed, "kind": t.kind, "user": t.user, "taps": res.taps, "transcript": t.transcript,
-            "expected_clean": t.expected_clean, "field": res.text, "failures": res.failures, "notes": res.notes}, indent=1))
-        (d / "journal.jsonl").write_text("\n".join(json.dumps(e) for e in res.entries))
         print(f"      artifacts: {d}")
 
 

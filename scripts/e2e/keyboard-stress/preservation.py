@@ -1,4 +1,30 @@
 """Independent journal checks for conditional edits around synthetic manual input."""
+from dataclasses import dataclass, field
+
+
+def unique_offset(haystack: str, needle: str) -> int | None:
+    if not needle:
+        return 0 if not haystack else None
+    offset = haystack.lower().find(needle.lower())
+    if offset < 0 or haystack.lower().find(needle.lower(), offset + 1) >= 0:
+        return None
+    return offset
+
+
+@dataclass
+class CaseEdit:
+    source: str
+    target: str
+    missing: set[int] = field(default_factory=set)
+
+    @property
+    def slots(self) -> list[int]:
+        return [index for index in range(len(self.source)) if index not in self.missing]
+
+    @property
+    def current(self) -> str:
+        return "".join(self.source[index] for index in self.slots)
+
 
 def user_text_damage(entries: list[dict[str, object]], text: str, markers: str) -> list[str]:
     """Check actual preservation, not the retired rule forbidding all edits after input.
@@ -10,19 +36,10 @@ def user_text_damage(entries: list[dict[str, object]], text: str, markers: str) 
     failures: list[str] = []
     report: tuple[str, str] | None = None
     expected: list[str] = []
-    case_edits: dict[str, tuple[str, str]] = {}
-    pending_case: list[tuple[str, str, int]] = []
+    case_edits: dict[str, CaseEdit] = {}
 
     def marks(value: str) -> list[str]:
         return [char.lower() for char in value if char.lower() in markers]
-
-    def unique_offset(haystack: str, needle: str) -> int | None:
-        if not needle:
-            return None
-        offset = haystack.lower().find(needle.lower())
-        if offset < 0 or haystack.lower().find(needle.lower(), offset + 1) >= 0:
-            return None
-        return offset
 
     for row in entries:
         kind = row.get("kind")
@@ -39,7 +56,7 @@ def user_text_damage(entries: list[dict[str, object]], text: str, markers: str) 
             selected = edit.get("selected")
             source = selected if isinstance(selected, str) else before + after if isinstance(before, str) and isinstance(after, str) else None
             if isinstance(source, str) and isinstance(target, str) and len(source) == len(target) and source.lower() == target.lower():
-                case_edits[str(edit.get("id", ""))] = source, target
+                case_edits[str(edit.get("id", ""))] = CaseEdit(source, target)
         op = row.get("op")
         if kind != "sent" or not isinstance(op, dict):
             continue
@@ -57,48 +74,50 @@ def user_text_damage(entries: list[dict[str, object]], text: str, markers: str) 
             if isinstance(insertion, str):
                 expected[at:at] = marks(insertion)
             continue
+        full = before + after
+        matching = [(state, offset) for state in reversed(tuple(case_edits.values()))
+                    if (offset := unique_offset(full, state.current)) is not None]
         if isinstance(deletion, int) and deletion > 0:
             consumed = before[-deletion:]
-            full = before + after
-            # Case-only cleanup can touch only characters explicitly changed by its target.
-            matching = [(source, target, offset) for source, target in reversed(tuple(case_edits.values()))
-                        if (offset := unique_offset(full, source)) is not None]
-            if matching:
-                source, target, offset = matching[0]
-                start = len(before) - deletion
-                if offset <= start and start + deletion <= offset + len(source):
-                    for pos in range(start, start + deletion):
-                        index = pos - offset
-                        if source[index] == target[index]:
-                            failures.append(f"case-only cleanup deleted unchanged character {full[pos]!r}")
-            for char in consumed:
-                if char.lower() not in markers:
+            authorized_marker = False
+            for state, offset in matching:
+                start = len(before) - deletion - offset
+                slots = state.slots
+                if not 0 <= start <= start + deletion <= len(slots):
                     continue
-                authorized = None
-                if deletion == 1:
-                    pos = len(before) - 1
-                    for source, target, offset in matching:
-                        index = pos - offset
-                        if 0 <= index < len(source) and source[index] == char and target[index] != char and target[index].lower() == char.lower():
-                            authorized = source, target, index
-                            break
-                if authorized is None:
+                # A case hunk can delete several adjacent changed characters before inserting
+                # their replacements. Keep the original slots even while those gaps are visible.
+                for relative, index in enumerate(slots[start:start + deletion]):
+                    char = consumed[relative]
+                    changed = state.source[index] != state.target[index]
+                    intended = changed and char == state.source[index]
+                    if not changed:
+                        failures.append(f"case-only cleanup deleted unchanged character {char!r}")
+                    elif not intended:
+                        failures.append(f"case-only cleanup retyped an already changed character {char!r}")
+                    state.missing.add(index)
+                    if deletion == 1 and intended and char.lower() in markers:
+                        authorized_marker = True
+                break
+            for char in consumed:
+                if char.lower() in markers and not authorized_marker:
                     failures.append(f"automatic deletion touched protected user character {char!r}")
-                else:
-                    pending_case.append(authorized)
-        if isinstance(insertion, str) and marks(insertion):
-            authorized = None
+        if isinstance(insertion, str):
+            authorized = False
             if len(insertion) == 1:
-                for pending in pending_case:
-                    source, target, index = pending
-                    offset = unique_offset(before + after, source[:index] + source[index + 1:])
-                    if offset is not None and len(before) == offset + index and target[index] == insertion:
-                        authorized = pending
+                for state, offset in matching:
+                    slots = state.slots
+                    for index in sorted(state.missing):
+                        position = sum(slot < index for slot in slots)
+                        if (len(before) == offset + position and state.target[index] == insertion
+                                and state.source[index] != state.target[index]):
+                            state.missing.remove(index)
+                            authorized = True
+                            break
+                    if authorized:
                         break
-            if authorized is None:
+            if marks(insertion) and not authorized:
                 failures.append(f"automatic insertion rewrote or duplicated protected user text {insertion!r}")
-            else:
-                pending_case.remove(authorized)
     if marks(text) != expected:
         failures.append(f"user character order/identity changed: expected {''.join(expected)!r}, got {''.join(marks(text))!r}")
     return failures

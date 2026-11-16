@@ -42,6 +42,33 @@ class PreservationTests(unittest.TestCase):
         ]
         self.assertTrue(user_text_damage(rows, "az", "zqxj"))
 
+    def adjacent_case_hunk(self, target: str = "bZa") -> list[dict[str, object]]:
+        return [
+            report("b"), sent("user", insert="z"), report("bz"), sent("user", insert="A"),
+            {"kind": "edit", "edit": {"id": "e", "before": "bzA", "after": "", "target": target}},
+            report("bzA"), sent("edit", delete=1), report("bz"), sent("edit", delete=1),
+        ]
+
+    def test_adjacent_case_hunk_keeps_identity_across_temporary_gaps(self) -> None:
+        rows = self.adjacent_case_hunk() + [
+            report("b"), sent("edit", insert="Z"), report("bZ"), sent("edit", insert="a"),
+        ]
+        self.assertEqual(user_text_damage(rows, "bZa", "zqxj"), [])
+
+    def test_adjacent_case_hunk_cannot_move_the_marker(self) -> None:
+        rows = self.adjacent_case_hunk() + [report("", "b"), sent("edit", insert="Z")]
+        self.assertTrue(user_text_damage(rows, "Zba", "zqxj"))
+
+    def test_adjacent_case_hunk_cannot_retype_an_unchanged_marker(self) -> None:
+        rows = self.adjacent_case_hunk("bza") + [
+            report("b"), sent("edit", insert="z"), report("bz"), sent("edit", insert="a"),
+        ]
+        self.assertTrue(user_text_damage(rows, "bza", "zqxj"))
+
+    def test_adjacent_case_hunk_cannot_lose_the_marker(self) -> None:
+        rows = self.adjacent_case_hunk() + [report("b"), sent("edit", insert="a")]
+        self.assertTrue(user_text_damage(rows, "ba", "zqxj"))
+
 
 if __name__ == "__main__":
     unittest.main()
