@@ -1,5 +1,5 @@
 {
-  "status": "DRAFT_PHONE_RECHECK_PENDING",
+  "status": "DRAFT_STUCK_TAKE_OPEN",
   "pr": "https://github.com/Jakob-Grunwald-AI-ML-Engineering/legato/pull/298",
   "branch": "feat/iphone-field-edits",
   "base": "1007a83235dc705679449f528d4ab188dea72761",
@@ -148,7 +148,7 @@
     "draftsAndNewerClipboardPreserved": true
   },
   "remainingLimits": [
-    "iPhone recheck of the cleanup recovery fix is untested.",
+    "Stuck cleaning take on iPhone is undiagnosed; recovery path not observed on device.",
     "Physical external hardware keyboard behavior not established by WDA.",
     "Recorded-PCM/provider tests do not establish microphone or recognition quality.",
     "Own unchanged fixture cleanup remains access-blocked; preserve unknown additions and newer clipboard."
@@ -195,7 +195,7 @@
   "recheck": {
     "revision": "b960ed3",
     "mac": "PASS (guest, offline fixtures)",
-    "phone": "UNTESTED: WDA needs the owner passcode for Enable UI Automation",
+    "phone": "Letter loss not reproduced (Safari, Notes, WhatsApp self-chat). OPEN: a take stuck in cleaning blocked typing and later takes until app relaunch; cause unknown.",
     "localGate": "PASS on c915d7f; b960ed3 passed LegatoMacTests (245) and the Mac build"
   }
 }
