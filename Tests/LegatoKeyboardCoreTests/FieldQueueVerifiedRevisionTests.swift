@@ -121,4 +121,59 @@ import Testing
         #expect(!rig.queue.ownsEmptyReport)
     }
 
+    private func justConfirmedMove() -> (FieldQueue, FieldQueue.Report) {
+        var queue = FieldQueue()
+        let start = FieldQueue.Report(before: "alpha beta")
+        _ = queue.step(report: start, elapsedMs: 200)
+        queue.enqueue(.move(-4))
+        #expect(queue.step(report: start, elapsedMs: 0) == .send(.move(-4)))
+        queue.operationDispatched()
+        let moved = FieldQueue.Report(before: "alpha ", after: "beta")
+        _ = queue.step(report: moved, elapsedMs: FieldQueue.moveSettleMs)
+        #expect(!queue.hasOpInFlight)
+        #expect(queue.hasRecentOwnOperation)
+        return (queue, moved)
+    }
+
+    @Test(arguments: [false, true])
+    func anIdleWallGapExpiresOwnMoveProvenanceBeforeExternalCallbacks(selection: Bool) {
+        var (queue, report) = justConfirmedMove()
+        // No step while idle: the in-queue clock is deliberately still 45 ms old.
+        #expect(!queue.hasRecentOwnOperation(elapsedMs: 2_000))
+        if selection { queue.externalSelectionChanged(report: report, elapsedSinceLastStepMs: 2_000) }
+        else { queue.externalContextChanged(report: report, elapsedSinceLastStepMs: 2_000) }
+        #expect(queue.hasUnverifiedInput)
+        #expect(queue.hasUnverifiedSelection == selection)
+        #expect(queue.hasUnverifiedContext == !selection)
+    }
+
+    @Test(arguments: [false, true])
+    func aCallbackInsideTheTransitWindowStillBelongsToTheOwnOperation(selection: Bool) {
+        var (queue, report) = justConfirmedMove()
+        let withinTransit = FieldQueue.transitMs - FieldQueue.moveSettleMs - 1
+        #expect(queue.hasRecentOwnOperation(elapsedMs: withinTransit))
+        if selection { queue.externalSelectionChanged(report: report, elapsedSinceLastStepMs: withinTransit) }
+        else { queue.externalContextChanged(report: report, elapsedSinceLastStepMs: withinTransit) }
+        #expect(!queue.hasUnverifiedInput)
+        #expect(queue.hasRecentOwnOperation(elapsedMs: -2_000))
+    }
+
+    @Test func elapsedWallTimeNeverOverridesAnOutstandingOperationOrReadLease() {
+        var queue = FieldQueue()
+        let start = FieldQueue.Report(before: "alpha beta")
+        _ = queue.step(report: start, elapsedMs: 200)
+        queue.enqueue(.move(-4))
+        #expect(queue.step(report: start, elapsedMs: 0) == .send(.move(-4)))
+        #expect(queue.hasRecentOwnOperation(elapsedMs: 2_000))
+        queue.externalSelectionChanged(report: start, elapsedSinceLastStepMs: 2_000)
+        #expect(!queue.hasUnverifiedInput)
+        let moved = FieldQueue.Report(before: "alpha ", after: "beta")
+        _ = queue.step(report: moved, elapsedMs: FieldQueue.transitMs)
+        let acquired = queue.acquireRead()
+        #expect(acquired)
+        #expect(queue.hasRecentOwnOperation(elapsedMs: 2_000))
+        queue.externalContextChanged(report: moved, elapsedSinceLastStepMs: 2_000)
+        #expect(!queue.hasUnverifiedInput)
+    }
+
 }

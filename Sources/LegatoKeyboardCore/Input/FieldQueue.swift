@@ -545,10 +545,17 @@ public struct FieldQueue: Sendable {
     public var hasUnverifiedInput: Bool { opaqueSelectionBaseline != nil }
     public var hasUnverifiedSelection: Bool { hasUnverifiedInput && unverifiedInputReason == .selection }
     public var hasUnverifiedContext: Bool { hasUnverifiedInput && unverifiedInputReason == .externalContext }
-    public var hasRecentOwnOperation: Bool { inFlight != nil || sinceSendMs < Self.transitMs || ownsRead }
+    public var hasRecentOwnOperation: Bool { hasRecentOwnOperation(elapsedMs: 0) }
 
-    public mutating func externalSelectionChanged(report: Report) {
-        guard !hasRecentOwnOperation else { return }
+    /// The ticker can sleep after confirming a move, before its transit window has elapsed.
+    /// Native callbacks supply the idle wall time before pumping; observe it without advancing
+    /// the queue clock, because the next step will account for that same interval exactly once.
+    public func hasRecentOwnOperation(elapsedMs: Double) -> Bool {
+        inFlight != nil || ownsRead || sinceSendMs + max(0, elapsedMs) < Self.transitMs
+    }
+
+    public mutating func externalSelectionChanged(report: Report, elapsedSinceLastStepMs: Double = 0) {
+        guard !hasRecentOwnOperation(elapsedMs: elapsedSinceLastStepMs) else { return }
         opaqueSelectionBaseline = report.selected == nil ? (lastReport ?? report) : nil
         unverifiedInputReason = opaqueSelectionBaseline == nil ? nil : .selection
         if opaqueSelectionBaseline != nil {
@@ -560,8 +567,8 @@ public struct FieldQueue: Sendable {
 
     /// A native text callback whose proxy windows stayed old is not a readable insertion yet.
     /// Use the same admission barrier as an opaque selection, without blind refresh movements.
-    public mutating func externalContextChanged(report: Report) {
-        guard !hasRecentOwnOperation else { return }
+    public mutating func externalContextChanged(report: Report, elapsedSinceLastStepMs: Double = 0) {
+        guard !hasRecentOwnOperation(elapsedMs: elapsedSinceLastStepMs) else { return }
         opaqueSelectionBaseline = lastReport ?? report
         unverifiedInputReason = .externalContext
         abortUnit()
