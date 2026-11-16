@@ -1,0 +1,20 @@
+{
+  "sourceRevision": "486d492",
+  "method": "Focused scripted simulator replay of the original failing untouched take, using the original fixture and unchanged validator. Not agent UAT or physical-device proof.",
+  "command": "scripts/e2e/keyboard-stress.sh --udid D173717D-1F84-4619-A9B8-1007833266C8 --seed 2026111601 --only 5 --takes 20 --speed 1 --user auto --no-install --no-launch",
+  "expectedAndActual": "Near Tassel Cedar Valley When Uh, Olive.",
+  "pass": 1,
+  "fail": 0,
+  "toolErrors": 0,
+  "drops": 0,
+  "resyncs": 0,
+  "rawFinalAcknowledgedLocalTime": "10:40:15.109",
+  "cleanupCleanedLocalTime": "10:40:17.048",
+  "diagnosticReadFailedInNewRun": false,
+  "appSHA256": "88fecfd4951a749a1d242a07a64f70105efefd7f5027c7f913edf153ef5caa81",
+  "extensionSHA256": "ee8b864b9ab67a12c7b8419e57c7bfca3a0af8d9571a4a643c5b5078b0b8c195",
+  "simulator": "iPhone 17 / iOS 26.5, dedicated headless test device",
+  "toolchain": "Xcode 27.2",
+  "privateEvidence": "/Users/work/Library/Caches/legato/iphone-field-edits-stress/fixed-readiness/20261116-103957-seed2026111601",
+  "limit": "A single focused regression does not replace the required two full stress seeds, final integrated gate or fresh UAT."
+}
