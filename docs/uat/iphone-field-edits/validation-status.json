@@ -1,5 +1,5 @@
 {
-  "status": "DRAFT_ACCEPTANCE_BLOCKED",
+  "status": "DRAFT_ACCEPTANCE_FAILED",
   "pr": "https://github.com/Jakob-Grunwald-AI-ML-Engineering/legato/pull/298",
   "branch": "feat/iphone-field-edits",
   "base": "1007a83235dc705679449f528d4ab188dea72761",
@@ -89,15 +89,40 @@
     "recognitionOrUniversalWorstCaseClaim": false
   },
   "independentUAT": {
+    "date": "2026-11-16",
+    "report": "fresh-uat.md",
     "phone": {
-      "result": "BLOCKED_UNTESTED",
-      "reason": "Existing WDA LAN endpoint timed out after40s; paired device discovery did not establish WDA reachability.",
-      "testerMutations": 0
+      "result": "FAIL",
+      "findings": [
+        "Cleanup target removes letters typed during speech",
+        "Aborted cleanup edit leaves one dictated letter deleted"
+      ],
+      "hosts": [
+        "Safari textarea",
+        "Safari rich list"
+      ],
+      "untested": [
+        "WhatsApp",
+        "Notes",
+        "Messages",
+        "Mail",
+        "send/clear then new draft",
+        "History recovery"
+      ]
     },
     "mac": {
-      "result": "BLOCKED_UNTESTED",
-      "reason": "Guest actual hotkeysEnabled=false despite AX trusted and offline mode; no native observer acceptance possible.",
-      "testerGuestOperations": 0
+      "result": "FAIL",
+      "findings": [
+        "Safari contenteditable: caret check fails after first write; speech kept in pill",
+        "Blocked native input lease is process-wide"
+      ],
+      "passed": [
+        "TextEdit",
+        "Safari textarea (healthy session)"
+      ],
+      "untested": [
+        "mid-session cleanup in flight"
+      ]
     }
   },
   "vm": {
@@ -123,7 +148,7 @@
     "draftsAndNewerClipboardPreserved": true
   },
   "remainingLimits": [
-    "Fresh physical/native acceptance not completed.",
+    "Fresh acceptance failed; four product findings open (fresh-uat.md).",
     "Physical external hardware keyboard behavior not established by WDA.",
     "Recorded-PCM/provider tests do not establish microphone or recognition quality.",
     "Own unchanged fixture cleanup remains access-blocked; preserve unknown additions and newer clipboard."

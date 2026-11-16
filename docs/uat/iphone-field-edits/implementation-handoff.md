@@ -1,6 +1,6 @@
 # Validation handoff
 
-Draft [PR #298](https://github.com/Jakob-Grunwald-AI-ML-Engineering/legato/pull/298), branch `feat/iphone-field-edits`, worktree `/Users/work/Documents/legato-wt/iphone-field-edits`, base `1007a83`. Product source is frozen at `7838631`; subsequent changes are operator documentation, evidence and the stress checker. [Current validation status](validation-status.json) owns the result summary. Do not merge while fresh acceptance is blocked.
+Draft [PR #298](https://github.com/Jakob-Grunwald-AI-ML-Engineering/legato/pull/298), branch `feat/iphone-field-edits`, worktree `/Users/work/Documents/legato-wt/iphone-field-edits`, base `1007a83`. Product source is frozen at `7838631`; subsequent changes are operator documentation, evidence and the stress checker. [Current validation status](validation-status.json) owns the result summary. Do not merge: fresh acceptance failed.
 
 The user chose to finish current validation and stop further repair cycles: any new failure or access blocker is a recorded handoff for a fresh session. A new product fix requires fresh diagnosis and alignment rather than another automatic patch iteration.
 
@@ -12,10 +12,9 @@ The [physical report](README.md) records five host baselines, native Select All/
 
 Both original speed-1 stress seeds passed: 40/40 takes, zero invariant/tool/contended failures, and all 20 untouched cases exactly clean. All 40 results were independently checked against their retained journals and archived durably. Per-seed results, checker/binary fingerprints and artifact directories are recorded in `validation-status.json`. This is the in-app simulator harness, not real-extension UAT.
 
-## Acceptance blockers
+## Acceptance result
 
-- Physical iPhone: the fresh tester's existing WDA LAN endpoint timed out after 40 seconds, although device discovery reported a paired phone. The tester performed zero mutations. Do not equate paired discovery with a reachable native-control session. Exact access and prior runner details remain in the private operator handoff; rediscover them before another authorized test.
-- Mac guest: the separate test copy launches, AX is trusted and offline mode is active, but the actual observer reports `hotkeysEnabled=false`. Native input acceptance did not begin. The user stop condition ended permission repair at this point.
+Fresh acceptance ran on 2026-11-16 and failed on both platforms; [the report](fresh-uat.md) lists the four product findings and what stayed untested. The earlier access blockers are resolved: the guest observer became active after a plain relaunch, and the phone needs a restarted WDA runner with a new session each time.
 
 The [VM guide](../../../scripts/device/mac-vm.md) describes durable controls, pinned image/tool and guest-only setup. The VM is stopped and retained at `~/Library/Application Support/LegatoTestVM`. Read `artifacts/mac-uat-access.md`, `guest-readiness.json`, `guest-signature-changes.json` and `vm-final-state.json` there before resuming. The original development profile rejected the VM's device identity; this was a confirmed provisioning limitation. A separate ad-hoc guest copy removes restricted identifiers/profile and permits its debug library. It is behavioral test infrastructure, not proof that the original development-signed app launches in a new guest. SIP/AMFI and host privacy settings were preserved.
 
