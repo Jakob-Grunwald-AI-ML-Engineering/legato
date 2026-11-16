@@ -680,10 +680,27 @@ final class KeyboardController {
 
     private static var uptimeMs: Double { ProcessInfo.processInfo.systemUptime * 1000 }
 
+    /// What keeps the queue from stepping, journaled when it changes: a take that types nothing is otherwise silent.
+    @ObservationIgnored private var lastHold: String?
+    private func noteHold(_ reason: String?, detail: String? = nil) {
+        guard reason != lastHold else { return }
+        lastHold = reason
+        var entry = EditJournal.Entry(t: Self.uptimeMs, kind: .hold, field: queueDocumentID)
+        entry.reason = reason ?? "released"
+        entry.detail = detail ?? "idle=\(queue.isIdle) cursorRead=\(cursorReadID != nil) probe=\(probeLease != nil) live=\(liveRunning)"
+        journal.write(entry)
+    }
+
     /// Steps the queue against the field's report and carries out the op it hands over. Not reentrant (the field's
     /// change notes during an op come back here); paused while a walk reads the field.
     private func pump() {
-        guard !isTornDown, isVisible, !isFieldBusy, !queue.ownsRead, !pumping, document.documentID != nil, !document.isSecureTextEntry else { return }
+        guard !pumping else { return }
+        guard !isTornDown, isVisible, !isFieldBusy, !queue.ownsRead, document.documentID != nil, !document.isSecureTextEntry else {
+            noteHold(isTornDown ? "tornDown" : !isVisible ? "hidden" : isReadingField ? "reading" : isNudging ? "nudging"
+                     : queue.ownsRead ? "ownsRead" : document.documentID == nil ? "noDocument" : "secure")
+            return
+        }
+        if queue.paused { noteHold("paused") } else if lastHold != "queue" { noteHold(nil) }
         pumping = true
         defer { pumping = false }
         syncQueueField()
@@ -702,6 +719,9 @@ final class KeyboardController {
                 entry.action = switch action { case .send: "send"; case .wait: "wait"; case .idle: "idle" }
                 journal.write(entry)
                 lastJournaledReport = report
+            }
+            if case .send = action { noteHold(nil) } else if !queue.isIdle {
+                noteHold("queue", detail: "unverifiedInput=\(queue.hasUnverifiedInput) paused=\(queue.paused) \(queue.debugState)")
             }
             handle(events)
             guard case .send(let op) = action else { break }

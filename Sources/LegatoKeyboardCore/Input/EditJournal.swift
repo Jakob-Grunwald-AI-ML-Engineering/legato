@@ -23,6 +23,8 @@ public enum EditJournal {
         case read
         /// The field's report, when it changed, and the step's outcome.
         case step
+        /// The keyboard did not step the queue (`reason`: what held it; `released` when it steps again).
+        case hold
         case sent, confirmed, resync, nudged, applied, dropped, liveApplied, regionStarted, regionClosed
         /// The queue was reset (field change, keyboard gone).
         case reset
