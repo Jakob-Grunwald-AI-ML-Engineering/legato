@@ -35,6 +35,7 @@ import LegatoVocabulary
     #if DEBUG || LEGATO_INTERNAL
     /// The scripted stream of `debugReplay` while it runs.
     @ObservationIgnored private var replaying: SonioxClient?
+    @ObservationIgnored private var replayTask: Task<Void, Error>?
     #endif
     /// Every live tail (the owner's latency probe or HUD).
     @ObservationIgnored public var onTail: (@MainActor (String) -> Void)?
@@ -160,7 +161,7 @@ import LegatoVocabulary
 
     public func close() async {
         #if DEBUG || LEGATO_INTERNAL
-        await replaying?.close(); replaying = nil
+        await cancelDebugReplay()
         #endif
         let stream = self.stream, room = self.room, take = active
         self.stream = nil; self.room = nil; backlog = []; active = nil
@@ -209,22 +210,62 @@ import LegatoVocabulary
     /// Debug bridge: a recorded token timeline stands in for the Soniox socket. Every response goes through the
     /// provider decoder and segmenter (`SonioxClient.injectDebugFrame`), so segments, the live tail and the sink
     /// see exactly what a spoken take produces; then the take is finalized like a stop. `speed` 2 replays twice as
-    /// fast. Needs the open route (the keyboard on the typing surface).
-    public func debugReplay(_ timeline: DictationReplayTimeline, speed: Double = 1) async throws {
+    /// fast. Optional original PCM feeds the live activity gate before each corresponding response, on the same
+    /// monotonic clock (including the recorded endpoint delay). Needs the open route; use speed 1 for acceptance.
+    public func debugReplay(_ timeline: DictationReplayTimeline, speed: Double = 1, pcm: DictationReplayPCM? = nil) async throws {
         guard let room else { throw DictationReplayTimeline.ReplayError.routeClosed }
-        await replaying?.close()
+        await cancelDebugReplay()
+        try Task.checkCancellation()
         let client = SonioxClient(room: room, config: SonioxConfig(mode: "Dictation"), quietFailure: .always)
         replaying = client
-        try await client.startDebug()
-        var last = 0.0
-        for frame in timeline.frames {
-            let wait = (frame.at - last) / max(0.1, speed)
-            if wait > 0.001 { try await Task.sleep(for: .seconds(wait)) }
-            last = frame.at
-            try await client.injectDebugFrame(frame.json)
+        let task = Task { @MainActor in
+            do {
+                try await client.startDebug()
+                if pcm != nil { activity = DictationActivity() }
+                if pcm == nil {
+                    // Preserve the existing token-only fixture cadence.
+                    var last = 0.0
+                    for frame in timeline.frames {
+                        let wait = (frame.at - last) / max(0.1, speed)
+                        if wait > 0.001 { try await Task.sleep(for: .seconds(wait)) }
+                        try Task.checkCancellation()
+                        last = frame.at
+                        try await client.injectDebugFrame(frame.json)
+                    }
+                } else {
+                    let clock = ContinuousClock(), started = clock.now
+                    var cursor = DictationReplayCursor(timeline: timeline, pcm: pcm)
+                    while let event = cursor.next() {
+                        try await clock.sleep(until: started.advanced(by: .seconds(event.at / max(0.1, speed))))
+                        try Task.checkCancellation()
+                        switch event {
+                        case .pcm(_, let data):
+                            if activity.receive(data) { sink.speechActivity() }
+                        case .response(let frame):
+                            try await client.injectDebugFrame(frame.json)
+                        }
+                    }
+                }
+                try Task.checkCancellation()
+                try await client.finish(micOff: false)
+            } catch {
+                await client.close()
+                throw error
+            }
         }
-        try await client.finish(micOff: false)
-        replaying = nil
+        replayTask = task
+        defer {
+            if replayTask == task { replayTask = nil; replaying = nil }
+        }
+        try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+    }
+
+    /// Closing the route joins its one pacing task, so neither PCM nor tokens can arrive after close returns.
+    public func cancelDebugReplay() async {
+        guard let task = replayTask else { return }
+        task.cancel()
+        _ = await task.result
+        if replayTask == task { replayTask = nil; replaying = nil }
     }
 
     /// Debug bridge: a finalized line enters exactly where a Soniox segment does (the sink).

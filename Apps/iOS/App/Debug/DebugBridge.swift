@@ -59,26 +59,31 @@ import UIKit
         }
         // Ends the take as the keyboard's mic key does (no microphone): the held take is cleaned and typed now.
         harness.register("dictation-debug-stop") { _ in
+            harness.cancelOperations(commands: ["dictation-debug-replay"])
+            await AppController.shared.keyboardSession.cancelDebugDictationReplay()
             try AppController.shared.keyboardSession.debugDictationStop()
             return AppController.shared.dictation.takeState
         }
         // A recorded Soniox token timeline (a file in the bridge directory, put there with `ctl.sh put`) replaces the
-        // microphone: `<file> [speed]`. Returns at once; `control.done` follows when the take is written.
+        // microphone: `<file> [speed] [pcm-file]`. Returns at once; `control.done` follows when the take is written.
         harness.register("dictation-debug-replay") { command in
-            guard (1...2).contains(command.args.count), !command.args[0].contains("/"), !command.args[0].hasPrefix("."),
-                  let speed = command.args.count == 2 ? Double(command.args[1]) : 1, speed > 0, speed.isFinite else { throw Usage.invalid }
-            let timeline = try DictationReplayTimeline.parse(try Data(contentsOf: root.appending(path: command.args[0])))
+            guard (1...3).contains(command.args.count),
+                  let speed = command.args.count >= 2 ? Double(command.args[1]) : 1, speed > 0, speed.isFinite else { throw Usage.invalid }
+            let timeline = try DictationReplayTimeline.parse(DictationReplayTimeline.readFile(command.args[0], in: root, maximumBytes: DictationReplayTimeline.maximumTimelineBytes))
+            let pcm = try command.args.count == 3 ? DictationReplayPCM(DictationReplayTimeline.readFile(command.args[2], in: root, maximumBytes: DictationReplayPCM.maximumBytes)) : nil
             return try harness.acceptOperation(command, reserve: {
                 guard harness.pendingOperationCommands.contains("dictation-debug-replay") == false else { throw Usage.busy }
             }) {
-                try await AppController.shared.keyboardSession.debugDictationReplay(timeline, speed: speed)
+                try await AppController.shared.keyboardSession.debugDictationReplay(timeline, speed: speed, pcm: pcm)
                 var state = AppController.shared.dictation.takeState
                 state["frames"] = timeline.frames.count; state["seconds"] = timeline.duration
+                if let pcm { state["pcmSeconds"] = pcm.duration }
                 return state
             }
         }
         harness.register("dictation-debug-replay-cancel") { _ in
             harness.cancelOperations(commands: ["dictation-debug-replay"])
+            await AppController.shared.keyboardSession.cancelDebugDictationReplay()
             return AppController.shared.dictation.takeState
         }
         // The "Send dictation" setting (App Group), so a run does not depend on what the phone was left on.
