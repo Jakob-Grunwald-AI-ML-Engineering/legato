@@ -252,7 +252,7 @@ import Testing
             guard case .send(let op) = queue.step(report: empty, elapsedMs: 100) else { continue }
             sent.append(op); queue.operationDispatched()
         }
-        #expect(sent.first == .insert("An older held take"))
+        #expect(sent.first == .insert("an older held take"))
         #expect(sent.allSatisfy { if case .insert = $0 { true } else { false } })
         #expect(queue.hasUnverifiedInput)
     }

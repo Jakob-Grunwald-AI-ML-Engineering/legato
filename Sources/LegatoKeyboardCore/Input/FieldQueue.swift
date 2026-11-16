@@ -171,8 +171,8 @@ public struct FieldQueue: Sendable {
     static let contextChars = 8
     /// A report reaching back past a short model must agree with at least this much of it.
     static let extendOverlapChars = 4
-    /// Hops toward one target before the chunk gives up (each one within sight, then a look and a correction).
-    static let hopLimit = 8
+    /// Hops toward one target that bring it no closer (corrections after a look) before the chunk gives up.
+    static let hopStallLimit = 2
     /// A budget for the app's wait on an edit of `operationCount` ops.
     public static func budgetMs(operationCount: Int) -> Double { max(20_000, Double(max(0, operationCount)) * 150) }
     /// Conservative background playback budget: each changed character can need a mutation and two moves.
@@ -305,8 +305,9 @@ public struct FieldQueue: Sendable {
     private struct Unit: Sendable, Equatable {
         var ops: [QOp]
         var owner: UnitOwner
-        /// Hops sent toward the current target (each within sight, looked at, corrected).
-        var hops = 0
+        /// Distance left to the current target at the last hop, and hops that did not shorten it (corrections).
+        var distance: Int?
+        var stalls = 0
     }
     private var unit: Unit?
 
@@ -327,10 +328,15 @@ public struct FieldQueue: Sendable {
         var heldSpeech: HeldSpeech?
         /// The last op was a hop of a running chunk from this caret: the next report is looked at before the chunk goes on.
         var hopFrom: Int?
+        /// Where the caret was earlier in the chunk (its start, each hop's start): a report that fits one of them may be
+        /// late, so it proves no landing.
+        var visited: [Int] = []
         /// A jump of the keyboard's own to this span (a region's or an edit's).
         var jumpSpan: Int?
-        /// The ops of the chunk so far (a tap can redirect any of them).
+        /// The ops of the chunk so far (a tap can redirect any of them), and whose text each insert or delete was
+        /// (`unknownOwner` where the sender did not say).
         var ops: [ShadowOp] = []
+        var owners: [Int?] = []
         /// The report the first op went out on.
         var sentOn: Report?
     }
@@ -539,7 +545,8 @@ public struct FieldQueue: Sendable {
         var revisionRollback: RevisionRollback?
         var ageMs = 0.0
     }
-    /// The ops sent lately (within the check's deadline): any of them may have landed where the user tapped meanwhile.
+    /// The ops sent lately (twice the check's deadline, as a tap is only seen past it): any of them may have landed where
+    /// the user tapped meanwhile.
     private var recentSends: [Sent] = []
     private var tapRace: (sends: [Sent], ageMs: Double)?
     /// A proved misplaced insertion, anchored by the unchanged text around it. A read or resync may
@@ -762,7 +769,7 @@ public struct FieldQueue: Sendable {
         // Only the user selects: a selection the model does not have says the user acted at the caret.
         if report.selected != nil, selection == 0 { userActed = true }
         if let race = tapRace { tapRace = race.ageMs + elapsedMs < 2 * Self.checkDeadlineMs ? (race.sends, race.ageMs + elapsedMs) : nil }
-        recentSends = recentSends.compactMap { var sent = $0; sent.ageMs += elapsedMs; return sent.ageMs < Self.checkDeadlineMs ? sent : nil }
+        recentSends = recentSends.compactMap { var sent = $0; sent.ageMs += elapsedMs; return sent.ageMs < 2 * Self.checkDeadlineMs ? sent : nil }
         if report == lastReport { reportStableMs += elapsedMs } else { lastReport = report; reportStableMs = 0 }
         if let baseline = opaqueSelectionBaseline,
            (unverifiedInputReason == .selection && report.selected != nil) || report != baseline {
@@ -846,14 +853,14 @@ public struct FieldQueue: Sendable {
         if let flight = inFlight {
             if let from = flight.hopFrom {
                 // A hop of a running chunk: look where it landed before the chunk goes on.
-                if case .move(let units) = flight.op, look(report, from: from, units: units) {
+                if case .move(let units) = flight.op, look(report, from: from, units: units, visited: flight.visited) {
                     inFlight?.hopFrom = nil
                     return next()
                 }
                 guard flight.waitedMs >= Self.checkDeadlineMs else { return .wait }
                 inFlight = nil
                 events.append(.resync(.checkFailed))
-                resync(report, pre: flight)
+                if !explainTap(report, flight: flight) { resync(report, pre: flight) }
                 return next()
             }
             // The chunk goes on: its ops go back to back (the check comes after its last op).
@@ -863,7 +870,9 @@ public struct FieldQueue: Sendable {
             // there (a burst lands whole, measured), and an edit inside the window would not fit.
             var endsWithMove = false
             if case .move = flight.op { endsWithMove = true }
-            if matches(report, anywhere: flight.anywhere), flight.anywhere || endsWithMove || !pins(report, in: flight.pre) {
+            // Repetitive text in a short window may fit elsewhere too: fitting at the caret is enough for a chunk.
+            let shows = flight.anywhere ? matches(report, anywhere: true) : consistent(report)
+            if shows, flight.anywhere || endsWithMove || !fits(report, in: flight.pre) {
                 guard confirm(flight, report: report) else { return .wait }
             } else if flight.waitedMs < Self.checkDeadlineMs {
                 // Not shown yet: no seam. The user's input goes behind the chunk all the same (`plannedNext`).
@@ -877,7 +886,7 @@ public struct FieldQueue: Sendable {
                     return next()
                 }
                 events.append(.resync(.checkFailed))
-                resync(report, pre: flight)
+                if !explainTap(report, flight: flight) { resync(report, pre: flight) }
             }
         } else if !consistent(report) {
             // Within the deadline of the keyboard's own last op the host may still be applying it: no seam yet.
@@ -894,9 +903,10 @@ public struct FieldQueue: Sendable {
     /// field's unit is learned, and the chunk's next hop corrects by what is left. Anything else may be a late report
     /// (Safari's first callback after a move shows the old place; a host still applying earlier ops shows its older
     /// state): the chunk waits, and at the deadline its check has failed.
-    private mutating func look(_ report: Report, from: Int, units: Int) -> Bool {
+    private mutating func look(_ report: Report, from: Int, units: Int, visited: [Int]) -> Bool {
         guard report.selected == nil, selection == 0 else { return false }
         let found = doc.positions(of: report)
+        guard !found.contains(where: { $0 == from || visited.contains($0) }) else { return false }
         if found.contains(cursor) { return true }
         let byCharacters = !movesByCharacters
         var at = from, left = abs(units)
@@ -971,7 +981,7 @@ public struct FieldQueue: Sendable {
         }
         // User input first; a unit that has not started gives the caret back first.
         if let stray = strayInsertion, selection == 0 {
-            abortUnit()
+            if case .edit? = unit?.owner { abortUnit() }
             let places = FieldMatch.positions(in: text, reportedBefore: stray.before + stray.text, reportedAfter: stray.after)
             guard places.count == 1, let end = places.first, end >= stray.text.count,
                   String(text[(end - stray.text.count)..<end]) == stray.text else {
@@ -1037,6 +1047,8 @@ public struct FieldQueue: Sendable {
     }
 
     private mutating func nextUser() -> Action? {
+        // Words heard before the key are known now: a word the key would cut short is finished with it.
+        for ri in runs.indices { applyPending(ri) }
         while let item = userLane.first {
             if !item.isMove { for (id, span) in spans where span.parked { spans[id]?.userActedParked = true } }
             switch item {
@@ -1298,13 +1310,13 @@ public struct FieldQueue: Sendable {
                 guard let span = spans[id], !span.parked else { unit = nil; requeue(current.owner); return .wait }
                 let target = min(max(0, span.start + offset), text.count)
                 if target != cursor { return hop(to: target, span: id) }
-                current.ops.removeFirst(); current.hops = 0; unit = current
+                current.ops.removeFirst(); current.distance = nil; current.stalls = 0; unit = current
             case .moveToUser:
                 if userCursor != cursor { return hop(to: userCursor, span: nil) }
-                current.ops.removeFirst(); current.hops = 0; unit = current
+                current.ops.removeFirst(); current.distance = nil; current.stalls = 0; unit = current
             case .moveToSpanEnd(let id):
                 if let end = spans[id]?.end, end != cursor { return hop(to: end, span: id) }
-                current.ops.removeFirst(); current.hops = 0; unit = current
+                current.ops.removeFirst(); current.distance = nil; current.stalls = 0; unit = current
             case .setUserCursorToCursor:
                 current.ops.removeFirst(); unit = current
                 userCursor = cursor
@@ -1323,10 +1335,10 @@ public struct FieldQueue: Sendable {
                 guard cursor >= count, count > 0 else { unit = nil; requeue(current.owner); return .wait }
                 current.ops.removeFirst(); unit = current
                 // One delete run: `count` single deletes back to back (the adapter's dispatch).
-                return send(.deleteBackward(count), lane: lane(of: current.owner)) { q in q.removeRange(q.cursor - count, q.cursor, owner: owner) }
+                return send(.deleteBackward(count), lane: lane(of: current.owner), owner: owner) { q in q.removeRange(q.cursor - count, q.cursor, owner: owner) }
             case .insert(let chars, let owner):
                 current.ops.removeFirst(); unit = current
-                return send(.insert(chars), lane: lane(of: current.owner)) { q in q.insertAtCursor(Array(chars), owner: owner) }
+                return send(.insert(chars), lane: lane(of: current.owner), owner: owner) { q in q.insertAtCursor(Array(chars), owner: owner) }
             }
         }
         return next()
@@ -1335,7 +1347,8 @@ public struct FieldQueue: Sendable {
     /// A hop toward `target`, never past what the field showed on that side: a host drops a move that overshoots its
     /// text (WhatsApp) and counts in its own units (UTF-16, or graphemes in Safari), so a far target takes several hops,
     /// each looked at and corrected (`look`). One character past an empty window is allowed where the model knows a line
-    /// break there (a window cut at the line). Too many hops, or nothing to see on that side, fail the chunk.
+    /// break there (a window cut at the line). Hops that bring the target no closer, or nothing to see on that side, fail
+    /// the chunk.
     private mutating func hop(to target: Int, span id: Int?) -> Action {
         guard var current = unit else { return .wait }
         let lane = lane(of: current.owner)
@@ -1347,8 +1360,10 @@ public struct FieldQueue: Sendable {
             let edge = target < cursor ? cursor - 1 : cursor
             if edge >= 0, edge < text.count, text[edge].isNewline { visible = 1 }
         }
-        current.hops += 1
-        guard current.hops <= Self.hopLimit, visible > 0 else {
+        let distance = abs(target - cursor)
+        if let last = current.distance, distance >= last { current.stalls += 1 }
+        current.distance = distance
+        guard current.stalls <= Self.hopStallLimit, visible > 0 else {
             // The model's text is not where the field could show it: a seam. The chunk stops; its owner is planned again.
             unit = nil
             if case .edit(var state, let lane) = current.owner { state.failures += 1; requeue(.edit(state, lane)) } else { requeue(current.owner) }
@@ -1361,6 +1376,7 @@ public struct FieldQueue: Sendable {
         let from = cursor
         let action = send(.move(units(to: to)), lane: lane, moveTo: to)
         inFlight?.hopFrom = from
+        inFlight?.visited.append(from)
         if let id { inFlight?.jumpSpan = id }
         return action
     }
@@ -1541,7 +1557,7 @@ public struct FieldQueue: Sendable {
     /// The open piece's next words at the caret, in one insert (speech is one chunk).
     private mutating func append(_ rest: [Character], to piece: Piece) -> Action {
         let spanID = piece.spanID
-        return send(.insert(String(rest)), lane: .live) { q in
+        return send(.insert(String(rest)), lane: .live, owner: spanID) { q in
             q.insertAtCursor(rest, owner: spanID)
             q.userCursor = q.cursor
         }
@@ -1627,7 +1643,7 @@ public struct FieldQueue: Sendable {
             return nil
         }
         let spanID = piece.spanID
-        return send(.deleteBackward(k), lane: .live) { q in q.removeRange(q.cursor - k, q.cursor, owner: spanID) }
+        return send(.deleteBackward(k), lane: .live, owner: spanID) { q in q.removeRange(q.cursor - k, q.cursor, owner: spanID) }
     }
 
     /// While the take runs, a revision of the open piece's last words (every changed character within `nearChars`
@@ -2102,7 +2118,7 @@ public struct FieldQueue: Sendable {
     /// Sends one op of a chunk: the model takes it at once (`apply`, or the caret at `moveTo`). The first op of a chunk
     /// opens its check (the state before it is what a report must not merely show); later ops, and the user's input
     /// behind a chunk, join that check.
-    private mutating func send(_ op: ShadowOp, lane: Lane, anywhere: Bool = false, moveTo: Int? = nil,
+    private mutating func send(_ op: ShadowOp, lane: Lane, anywhere: Bool = false, moveTo: Int? = nil, owner: Int? = FieldQueue.unknownOwner,
                                _ apply: (inout FieldQueue) -> Void = { _ in }) -> Action {
         let joining = inFlight
         if joining == nil {
@@ -2118,9 +2134,11 @@ public struct FieldQueue: Sendable {
         if let moveTo { cursor = moveTo } else { apply(&self) }
         var flight = InFlight(op: op, lane: lane, anywhere: anywhere || joining?.anywhere == true, pre: joining?.pre ?? opPre)
         flight.ops = (joining?.ops ?? []) + [op]
+        flight.owners = (joining?.owners ?? []) + [owner]
         flight.sentOn = joining?.sentOn ?? lastReport
         flight.jumpSpan = joining?.jumpSpan
         flight.input = joining?.input
+        flight.visited = joining?.visited ?? []
         inFlight = flight
         coordinator.dispatched()
         lastSentOp = op; lastSentLane = lane
@@ -2482,6 +2500,122 @@ public struct FieldQueue: Sendable {
             return (here, state.text == text ? nil : seen)
         }
         return nil
+    }
+
+    /// `send`'s owner when the sender did not name one: such a chunk is never replayed (`explainTap`).
+    static let unknownOwner = Int.min
+
+    /// A tap while the chunk was landing: its ops up to some point landed where they were sent, the rest where the user
+    /// tapped (moves from there). When exactly one split and tapped place give the report, the model takes them: what the
+    /// keyboard typed at the tap is taken out again (an edit's, `strayInsertion`) or kept and reported (dictation's),
+    /// what it deleted there is typed back, and the chunk's work is planned again from the model.
+    private mutating func explainTap(_ report: Report, flight: InFlight) -> Bool {
+        let ops = flight.ops, owners = flight.owners
+        let edits = zip(ops, owners).filter { if case .move = $0.0 { false } else { true } }
+        guard report.selected == nil, selection == 0, ops.count == owners.count, ops.count <= 16,
+              !edits.contains(where: { $0.1 == Self.unknownOwner }), !edits.isEmpty,
+              // A report the model shows somewhere is the ordinary resync's (the user moved, or the host lags).
+              doc.positions(of: report).isEmpty,
+              flight.pre.text.count <= 2_000, hasEvidence(report) else { return false }
+        let byCharacters = movesByCharacters
+        func run(_ op: ShadowOp, _ text: inout [Character], _ caret: inout Int) {
+            switch op {
+            case .move(let units):
+                var left = abs(units)
+                while left > 0, units > 0 ? caret < text.count : caret > 0 {
+                    left -= byCharacters ? 1 : String(units > 0 ? text[caret] : text[caret - 1]).utf16.count
+                    caret += units > 0 ? 1 : -1
+                }
+            case .deleteBackward(let n):
+                let k = min(n, caret); text.removeSubrange((caret - k)..<caret); caret -= k
+            case .insert(let s):
+                text.insert(contentsOf: s, at: caret); caret += s.count
+            }
+        }
+        let tail = Array(FieldReader.trusted(before: report.before).suffix(Self.contextChars))
+        // Explanations that end in the same field are one (when the tap came does not matter): the earliest split is kept.
+        var hit: (k: Int, tap: Int, text: [Character], caret: Int)?
+        for k in 0..<ops.count {
+            var base = flight.pre.text, baseCaret = flight.pre.cursor
+            for op in ops[..<k] { run(op, &base, &baseCaret) }
+            for tap in 0...base.count where tap != baseCaret {
+                var text = base, caret = tap
+                for op in ops[k...] { run(op, &text, &caret) }
+                guard caret >= tail.count, text[(caret - tail.count)..<caret].elementsEqual(tail),
+                      FieldMatch.positions(in: text, reportedBefore: report.before, reportedAfter: report.after) == [caret] else { continue }
+                if let hit { guard hit.text == text, hit.caret == caret else { return false } } else { hit = (k, tap, text, caret) }
+            }
+        }
+        guard let (k, tap, _, _) = hit else { return false }
+        // The model as the field shows it: the ops before the tap where they were sent, the rest from the tap.
+        let lane = flight.lane
+        abortUnit()
+        doc.restore(flight.pre)
+        readMarks = []
+        func apply(_ op: ShadowOp, owner: Int?) {
+            switch op {
+            case .move(let units):
+                var caret = cursor
+                var left = abs(units)
+                while left > 0, units > 0 ? caret < text.count : caret > 0 {
+                    left -= byCharacters ? 1 : String(units > 0 ? text[caret] : text[caret - 1]).utf16.count
+                    caret += units > 0 ? 1 : -1
+                }
+                cursor = caret
+            case .deleteBackward(let n): removeRange(max(0, cursor - n), cursor, owner: owner)
+            case .insert(let s): insertAtCursor(Array(s), owner: owner)
+            }
+        }
+        for i in 0..<k { apply(ops[i], owner: owners[i]) }
+        cursor = tap; userCursor = tap
+        var stray: (start: Int, text: [Character])?
+        var restore: (at: Int, text: [Character])?
+        for i in k..<ops.count {
+            switch ops[i] {
+            case .insert(let s):
+                if let current = stray, current.start + current.text.count == cursor { stray?.text += Array(s) }
+                else if stray == nil { stray = (cursor, Array(s)) } else { return reseedAfterTap(report) }
+                apply(ops[i], owner: -1)
+            case .deleteBackward(let n):
+                let removed = Array(text[max(0, cursor - n)..<cursor])
+                if !removed.isEmpty {
+                    guard restore == nil, stray == nil else { return reseedAfterTap(report) }
+                    restore = (cursor - removed.count, removed)
+                }
+                apply(ops[i], owner: -1)
+            case .move: apply(ops[i], owner: nil)
+            }
+        }
+        closeOpenPieces(.cursor)
+        quietAfterMove = true
+        tapRace = nil
+        events.append(.resync(.cursorMoved))
+        if let stray {
+            if lane == .live {
+                // Dictation never deletes after the user's tap: its text stays where it landed, and the take is reported.
+                if let run = runs.last {
+                    events.append(.dropped(Drop(id: "stray:" + run.runID, runID: run.runID, kind: nil, reason: .unplaceable,
+                                                text: run.complete ? Self.joined(run.segments) : String(run.delivered), partial: String(stray.text))))
+                }
+            } else {
+                let end = stray.start + stray.text.count
+                strayInsertion = StrayInsertion(text: String(stray.text),
+                    before: String(text[max(0, stray.start - Self.relocateChars)..<stray.start]),
+                    after: String(text[end..<min(text.count, end + Self.relocateChars)]), lane: lane)
+            }
+        }
+        if let restore {
+            // What the keyboard deleted at the tap was not its to delete: typed back where it was.
+            let id = addSpan(Span(start: restore.at, end: restore.at, anchor: true))
+            unit = Unit(ops: [.moveInSpan(id, offset: 0), .insert(String(restore.text), owner: nil), .moveToUser], owner: .space)
+            userCursor = restore.at
+        }
+        return true
+    }
+
+    private mutating func reseedAfterTap(_ report: Report) -> Bool {
+        reseed(report, flight: nil)
+        return true
     }
 
     /// The user tapped at `at` (current text) while a chunk was on its way: everything stops there.
