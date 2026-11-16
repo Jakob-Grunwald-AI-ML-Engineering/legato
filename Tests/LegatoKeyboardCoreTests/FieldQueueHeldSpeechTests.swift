@@ -10,7 +10,7 @@ import Testing
 
     private func heldRig(_ text: String = draft, reason: Reason, hostDelays: Bool, animated: Bool = true) -> QueueRig {
         var field = FakeField(text); field.hostDelays = hostDelays
-        var rig = QueueRig(field, config: .init(animated: animated, prioritizeSpeech: true))
+        var rig = QueueRig(field, config: .init(prioritizeSpeech: true))
         rig.run(ms: 300)
         hold(&rig, reason)
         return rig
@@ -65,7 +65,7 @@ import Testing
     @Test(arguments: [false, true], [false, true])
     func aHiddenSelectAllIsReplacedAndTheReportBecomesTheModel(hostDelays: Bool, animated: Bool) {
         var field = FakeField(Self.draft); field.hostDelays = hostDelays
-        var rig = QueueRig(field, config: .init(animated: animated, prioritizeSpeech: true))
+        var rig = QueueRig(field, config: .init(prioritizeSpeech: true))
         rig.run(ms: 300)
         // Safari's opaque Select All: the report stays the same and shows no selection.
         rig.field.hidesSelection = true
@@ -97,7 +97,7 @@ import Testing
     /// The proxy's windows were stale (text arrived unseen): the fresh report after the insert is the model, and the
     /// take goes on from its own words before the caret.
     @Test func staleContextIsReplacedByTheReportAfterTheInsert() {
-        var queue = FieldQueue(config: .init(animated: false))
+        var queue = FieldQueue(config: .init())
         let stale = FieldQueue.Report(before: "Le")
         _ = queue.step(report: stale, elapsedMs: 200)
         queue.externalContextChanged(report: stale)
@@ -120,7 +120,7 @@ import Testing
 
     @Test(arguments: Reason.allCases)
     func whileHeldOnlyInsertsGoAndEditsWait(reason: Reason) {
-        var queue = FieldQueue(config: .init(animated: false))
+        var queue = FieldQueue(config: .init())
         let old = FieldQueue.Report(before: Self.draft)
         _ = queue.step(report: old, elapsedMs: 200)
         switch reason {
@@ -150,7 +150,6 @@ import Testing
         #expect(sent == [.insert(" the cat waits"), .insert(" here")])
         #expect(queue.hasUnverifiedInput)
         #expect(queue.pendingEditIDs == ["magic"])
-        #expect(!queue.drainEvents().contains { if case .nudged = $0 { true } else { false } })
     }
 
     @Test(arguments: Reason.allCases, [false, true])
@@ -158,16 +157,12 @@ import Testing
         var rig = heldRig(reason: reason, hostDelays: hostDelays)
         rig.queue.enqueue(snap(1, "the cat waits near the boat"))
         while rig.sent.isEmpty, rig.clockMs < 5_000 { rig.tick() }
-        // The first of the speech is on its way, unconfirmed: the key waits for that one op, then goes before the rest.
-        try #require(rig.sent.map(\.op) == [.insert(" ")])
+        // The speech is one chunk, on its way: the key goes right behind it.
+        try #require(rig.sent.map(\.op) == [.insert(" the cat waits near the boat")])
         rig.queue.enqueue(.insert("!"))
         do { let drained = rig.drain(); #expect(drained) }
-        #expect(rig.sent.count > 2)
-        #expect(rig.sent[1].op == .insert("!"))
-        #expect(rig.sent.allSatisfy { isInsert($0.op) })
-        #expect(rig.field.string.hasPrefix(Self.draft + " !"))
-        #expect(rig.field.string.filter { $0 == "!" }.count == 1)
-        #expect(rig.field.string.hasSuffix("the cat waits near the boat"))
+        #expect(rig.sent.map(\.op) == [.insert(" the cat waits near the boat"), .insert("!")])
+        #expect(rig.field.string == Self.draft + " the cat waits near the boat!")
         #expect(rig.queue.modelText == rig.field.string)
         #expect(!rig.queue.hasUnverifiedInput)
         #expect(rig.field.deletions.isEmpty)

@@ -45,7 +45,7 @@ enum JournalReplay {
         let first = entries.first { $0.report != nil }?.report ?? .init(before: "")
         var field = FakeField(first.before + (first.selected ?? "") + first.after, caret: first.before.count)
         configure(&field)
-        var rig = QueueRig(field, config: .init(animated: true))
+        var rig = QueueRig(field, config: .init())
         let start = entries.first?.t ?? 0
         for entry in entries {
             while rig.clockMs < entry.t - start { rig.tick() }
@@ -100,7 +100,7 @@ private struct Recorder {
     }
 
     @Test func aRecordedSessionReplaysToTheSameOps() {
-        var rig = QueueRig(FakeField("Notes: "), config: .init(animated: true))
+        var rig = QueueRig(FakeField("Notes: "), config: .init())
         var recorder = Recorder()
         recorder.entries.append(.init(t: 0, kind: .field, field: "doc"))
         recorder.enqueue(&rig, snapshot: snap(1, "hello wrld"))
@@ -110,7 +110,7 @@ private struct Recorder {
         for _ in 0..<60 { recorder.step(&rig, elapsed: 33) }
         // Through the file format and back.
         let text = recorder.entries.map { String(decoding: EditJournal.line($0), as: UTF8.self) }.joined()
-        let replay = JournalReplay.run(EditJournal.entries(text), config: .init(animated: true))
+        let replay = JournalReplay.run(EditJournal.entries(text), config: .init())
         #expect(!replay.recorded.isEmpty)
         #expect(replay.sent == replay.recorded)
         // The same input against a fresh fake field keeps the user's key and ends idle.

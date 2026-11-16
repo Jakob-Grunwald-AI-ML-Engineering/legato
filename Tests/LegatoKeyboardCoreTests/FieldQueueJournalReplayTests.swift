@@ -2,104 +2,32 @@ import Foundation
 import Testing
 @testable import LegatoKeyboardCore
 
-/// An edit's insert or delete that a report stopped showing is not thereby lost. Recorded on an iPhone (Safari
-/// textarea, real cleanup provider, synthetic text, 2026-11-16): a cleanup turned "bread" into "Bread"; its delete of
-/// "b" showed, then the proxy went back to the report from before it and kept it through the stale check's nudge. The
-/// delete had landed. The queue went back to the text with "b" and planned the rest one character off, so the "B" never
-/// went in and the edit dropped: "read".
-@Suite struct FieldQueueUnverifiedEditTests {
-    /// The keyboard's configuration on the device.
-    static let config = FieldQueue.Config(animated: true, canReadAround: true, prioritizeSpeech: true,
-                                          deleteConfirmationMs: FieldQueue.transitMs)
+/// Recorded on an iPhone (Safari textarea, real cleanup provider, synthetic text, 2026-11-16, `fresh-phone-uat`): a
+/// cleanup turned "bread" into "Bread" 219 characters before the caret. The old queue sent one op at a time; Safari's
+/// report went back to the state before the delete and the queue reverted onto it, so the "B" never went in ("read").
+/// The chunk model sends hop, delete, insert and the hop back together and checks once.
+@Suite struct FieldQueueJournalReplayTests {
     static let source = "A👩🏽\u{200D}🚀 B🇩🇪 Today we're preparing the boat for a short trip along the coast. The weather report says the wind will stay gentle until the evening. Please put the blue notebook beside the chart table and check that the cabin lights are working. We will bring fresh water, bread, fruit, warm jackets, a small repair kit, and enough rope for the next harbor. Before we leave, walk around the deck and close every open hatch. Now I am speaking again while the earlier passage is being corrected. C é Z"
     static let target = source.replacingOccurrences(of: "bread", with: "Bread")
-    /// The field once the delete had landed.
-    static let landed = source.replacingOccurrences(of: "bread", with: "read")
 
-    /// The journal up to the caret's way home after the queue gave the delete up.
-    private func replayed() throws -> (queue: FieldQueue, request: FieldRecovery.Request) {
-        let replay = JournalReplay.run(EditJournal.entries(Self.journal), config: Self.config)
-        #expect(replay.events.contains(.resync(.stale)) && replay.events.contains(.resync(.reverted)))
-        // The device's ops so far, and no jump on a text nobody verified.
-        #expect(replay.sent == [.move(-219), .deleteBackward(1), .move(0), .move(219)])
-        #expect(replay.sent == replay.recorded)
-        let request = try #require(replay.queue.recoveryRequest, "\(replay.queue.debugState)")
-        #expect(replay.events.last == .resync(.recoveryRequested))
-        return (replay.queue, request)
-    }
-
-    /// The field at `text` with the caret before " C é Z", read whole.
-    private func read(_ text: String) -> FieldQueue.Report {
-        .init(before: String(text.dropLast(6)), after: String(text.suffix(6)))
-    }
-
-    /// Carries the queue's ops out on `text` until it is idle.
-    private func finish(_ queue: inout FieldQueue, in text: inout String) -> [ShadowOp] {
-        var caret = String(text.dropLast(6)).utf16.count, sent: [ShadowOp] = []
-        for _ in 0..<400 {
-            let before = String(decoding: Array(text.utf16.prefix(caret)), as: UTF16.self)
-            let after = String(decoding: Array(text.utf16.dropFirst(caret)), as: UTF16.self)
-            if case .send(let op) = queue.step(report: .init(before: before, after: after), elapsedMs: 33) {
-                let result = ShadowEditPlanner.simulate(ops: [op], shadow: text, cursor: caret)
-                text = result.text; caret = result.cursor; sent.append(op)
-            }
-            if queue.isIdle { break }
+    /// The journal's own input against fields that behave like the measured hosts.
+    @Test(arguments: [FakeField.Host.safari, .notes, .whatsApp])
+    func theBreadCleanupLandsAsOneChunk(host: FakeField.Host) throws {
+        let entries = EditJournal.entries(Self.journal)
+        let rig = JournalReplay.simulate(entries) { field in
+            let caret = field.caret
+            field = FakeField.host(host, field.string, caret: caret)
         }
-        return sent
-    }
-
-    @Test func aDeleteTheReportStoppedShowingIsVerifiedByAReadAndTheEditGoesOn() throws {
-        var (queue, request) = try replayed()
-        let scope = try #require(request.targets.first)
-        #expect(request.targets.count == 1 && request.needsRead)
-        #expect(scope.expected == Self.source && scope.landed == Self.landed)
-        _ = queue.drainEvents()
-
-        var field = Self.landed
-        queue.completeRecovery(request, report: read(field), restored: true, completeDocument: true)
-        #expect(queue.modelText == field, "The model is the field as read")
-        #expect(queue.drainEvents().contains(.resync(.recoveryReplanned)))
-        let sent = finish(&queue, in: &field)
-        #expect(sent == [.move(-219), .insert("B"), .move(219)], "Only what the field still lacks")
-        #expect(field == Self.target)
-        #expect(queue.modelText == field && queue.isIdle)
-        #expect(queue.drainEvents().contains { if case .applied = $0 { true } else { false } })
-    }
-
-    @Test func aDeleteTheHostDidLoseIsMadeAgainAfterTheRead() throws {
-        var (queue, request) = try replayed()
-        var field = Self.source
-        queue.completeRecovery(request, report: read(field), restored: true, completeDocument: true)
-        #expect(queue.modelText == field)
-        let sent = finish(&queue, in: &field)
-        #expect(sent == [.move(-219), .deleteBackward(1), .insert("B"), .move(219)])
-        #expect(field == Self.target && queue.modelText == field && queue.isIdle)
-    }
-
-    @Test func aScopeTheReadShowsNeitherWayDropsTheEditAndTouchesNothing() throws {
-        var (queue, request) = try replayed()
-        _ = queue.drainEvents()
-        // The user changed a word meanwhile: neither text is there.
-        var field = Self.landed.replacingOccurrences(of: "fruit", with: "apples")
-        queue.completeRecovery(request, report: read(field), restored: true, completeDocument: true)
-        #expect(queue.modelText == field, "The model is the field as read")
-        let events = queue.drainEvents()
-        #expect(events.contains { if case .dropped(let drop) = $0 { drop.reason == .unplaceable } else { false } })
-        let kept = field
-        #expect(finish(&queue, in: &field).isEmpty)
-        #expect(field == kept && queue.isIdle)
-    }
-
-    @Test func theUsersKeyGoesBeforeTheReadAndCancelsItsEvidence() throws {
-        var (queue, request) = try replayed()
-        queue.enqueue(.insert("!"))
-        #expect(queue.recoveryRequest == nil)
-        // The proxy's window at the caret, as the device showed it there.
-        let window = FieldQueue.Report(before: "Now I am speaking again while the earlier passage is being corrected.", after: " C é Z")
-        #expect(queue.step(report: window, elapsedMs: 33) == .send(.insert("!")))
-        let model = queue.modelText
-        queue.completeRecovery(request, report: read(Self.landed), restored: true, completeDocument: true)
-        #expect(queue.modelText == model, "A read from before the key never replaces the model")
+        #expect(rig.field.string == Self.target, "\(rig.queue.debugState)")
+        #expect(rig.queue.isIdle)
+        let ops = rig.sent.map(\.op)
+        // One delete of the one changed letter and one insert, never a zero-offset nudge.
+        #expect(ops.filter { if case .deleteBackward = $0 { true } else { false } } == [.deleteBackward(1)])
+        #expect(ops.filter { if case .insert = $0 { true } else { false } } == [.insert("B")])
+        #expect(!ops.contains(.move(0)))
+        // The caret is back where the user left it.
+        #expect(rig.field.caret == rig.field.text.count - Array(" C é Z").count)
+        #expect(rig.applied.count == 1 && rig.drops.isEmpty)
     }
 
     static let journal = #"""

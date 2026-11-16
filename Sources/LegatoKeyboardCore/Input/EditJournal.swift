@@ -25,6 +25,7 @@ public enum EditJournal {
         case step
         /// The keyboard did not step the queue (`reason`: what held it; `released` when it steps again).
         case hold
+        /// `nudged`: written by builds before the chunk model (#299); still read from their journals.
         case sent, confirmed, resync, nudged, applied, dropped, liveApplied, regionStarted, regionClosed
         /// The queue was reset (field change, keyboard gone).
         case reset
@@ -102,7 +103,6 @@ public enum EditJournal {
             case .sent(let op, let lane): entry.kind = .sent; entry.op = Op(op); entry.lane = lane
             case .confirmed(let waited): entry.kind = .confirmed; entry.detail = "\(Int(waited))"
             case .resync(let kind): entry.kind = .resync; entry.reason = kind.rawValue
-            case .nudged: entry.kind = .nudged
             case .applied(let id, let cursor): entry.kind = .applied; entry.id = id; entry.detail = "\(cursor)"
             case .dropped(let drop):
                 entry.kind = .dropped; entry.id = drop.id; entry.run = drop.runID; entry.reason = drop.reason.rawValue

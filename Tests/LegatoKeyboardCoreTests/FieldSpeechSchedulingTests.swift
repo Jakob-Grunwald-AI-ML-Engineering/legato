@@ -33,7 +33,7 @@ import Testing
     }
 
     @Test func keyboardAppendsWhileSpeakingThenAppliesOnlyTheChangedLetterDuringAPause() {
-        var rig = QueueRig(FakeField(""), config: .init(animated: false, prioritizeSpeech: true))
+        var rig = QueueRig(FakeField(""), config: .init(prioritizeSpeech: true))
         rig.queue.enqueue(snap(1, "we saw a boat"))
         do { let drained = rig.drain(); #expect(drained) }
         let start = rig.sent.count
@@ -51,7 +51,7 @@ import Testing
     }
 
     @Test func keyboardDefersARevisionFarFromTheCaretUntilTheStop() {
-        var rig = QueueRig(FakeField(""), config: .init(animated: false, prioritizeSpeech: true))
+        var rig = QueueRig(FakeField(""), config: .init(prioritizeSpeech: true))
         let rest = " and the wind came up from the west so we reefed the main and ran"
         rig.queue.enqueue(snap(1, "we saw a boat" + rest))
         do { let drained = rig.drain(); #expect(drained) }
@@ -68,7 +68,7 @@ import Testing
     }
 
     @Test func backgroundMagicWaitsWithoutDroppingWhileSpeechHasAPause() {
-        var rig = QueueRig(FakeField("Header old. "), config: .init(animated: false, prioritizeSpeech: true))
+        var rig = QueueRig(FakeField("Header old. "), config: .init(prioritizeSpeech: true))
         rig.queue.enqueue(.init(id: "magic", kind: .magic, before: "Header old. ", target: "Header new. ", cursorAtEnd: false))
         rig.queue.enqueue(snap(1, "fresh words"))
         do { let drained = rig.drain(); #expect(drained) }
@@ -82,7 +82,7 @@ import Testing
     }
 
     @Test func aJoinedCleanupKeepsRawNewSegmentsAndCoalescesToItsFinalTarget() {
-        var rig = QueueRig(FakeField(""), config: .init(animated: false, prioritizeSpeech: true))
+        var rig = QueueRig(FakeField(""), config: .init(prioritizeSpeech: true))
         rig.queue.enqueue(snap(1, "we saw a boat"))
         do { let drained = rig.drain(); #expect(drained) }
         let segments: [LiveSegment] = [

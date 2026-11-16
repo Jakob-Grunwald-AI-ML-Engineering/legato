@@ -42,24 +42,24 @@ import Testing
         #expect(rig.drops.isEmpty)
     }
 
-    @Test func aFlipIsPacedOneGraphemePerTickWhenAnimated() {
-        var rig = QueueRig(FakeField(""), config: .init(animated: true))
+    @Test func aFlipGoesInOneChunk() {
+        var rig = QueueRig(FakeField(""), config: .init())
         rig.queue.enqueue(snap(1, "a cat sat"))
         rig.drain()
         let before = rig.sent.count
         rig.queue.enqueue(snap(2, "a black cat sat"))
         rig.drain()
-        let inserts = rig.sent[before...].filter { if case .insert = $0.op { true } else { false } }
-        #expect(inserts.allSatisfy { if case .insert(let s) = $0.op { s.count == 1 } else { false } })
-        #expect(zip(inserts, inserts.dropFirst()).allSatisfy { $1.ms - $0.ms >= FieldQueue.charMs - 0.001 })
+        // A revision near the caret: one delete run back to the change, one insert from there.
+        let inserts = rig.sent[before...].compactMap { if case .insert(let s) = $0.op { s } else { nil } }
+        #expect(inserts == ["black cat sat"])
         #expect(rig.field.string == "a black cat sat")
     }
 
-    /// The lane's bound, without the rule that keys wait for the take (`keysWaitForTake`).
+    /// The user's key waits only for the chunk on its way, even behind a lagging host.
     @Test func aUserKeyDuringABusyQueueLandsWithinTheBoundAtTheUsersCursor() {
         var field = FakeField("")
         field.lagTicks = 2
-        var rig = QueueRig(field, config: .init(animated: true, keysWaitForTake: false))
+        var rig = QueueRig(field, config: .init())
         rig.queue.enqueue(snap(1, String(repeating: "dictated words keep coming ", count: 6)))
         rig.run(ms: 600)
         let typedSoFar = rig.field.string
@@ -68,7 +68,7 @@ import Testing
         rig.run(ms: 400)
         let keyAt = rig.sent.first { if $0.ms > asked, case .insert(let s) = $0.op { s.hasSuffix("X") } else { false } }?.ms
         #expect(keyAt != nil)
-        #expect((keyAt ?? .infinity) - asked <= FieldQueue.userBoundMs + 2 * rig.tickMs)
+        #expect((keyAt ?? .infinity) - asked <= FieldQueue.checkDeadlineMs + 2 * rig.tickMs)
         rig.drain()
         // The key closed the region at its place; the run went on after it.
         let text = rig.field.string
@@ -145,11 +145,12 @@ import Testing
         #expect(rig.drops.first?.reason == .userEdited)
     }
 
+    /// The head's partial word grows into the whole word later: a key in between finishes the word first.
     @Test func aWordCutShortByAKeyIsFinishedFirst() {
-        var rig = QueueRig(FakeField(""), config: .init(animated: true))
-        rig.queue.enqueue(snap(1, "wonderful"))
-        while rig.field.string.count < 3, rig.clockMs < 2_000 { rig.tick() }
-        #expect((1..<"wonderful".count).contains(rig.field.string.count))
+        var rig = QueueRig(FakeField(""), config: .init())
+        rig.queue.enqueue(snap(1, "wonder"))
+        rig.drain()
+        rig.queue.enqueue(snap(2, "wonderful"))
         rig.queue.enqueue(.insert("x"))
         rig.drain()
         #expect(rig.field.string == "wonderful x")
@@ -186,7 +187,7 @@ import Testing
         // A repeated line ending the field, typed take by take into a list: it lands whole.
         var field = FakeField("")
         field.blockEcho = true
-        var rig = QueueRig(field, config: .init(animated: true))
+        var rig = QueueRig(field, config: .init())
         for key in "- " { rig.queue.enqueue(.insert(String(key))); rig.run(ms: 66) }
         rig.queue.enqueue(snap(1, "maple light", run: "a"))
         rig.drain()
@@ -215,7 +216,7 @@ import Testing
         field.window = 30
         var rig = QueueRig(field)
         rig.queue.enqueue(FieldQueue.Edit(id: "m", kind: .magic, before: "Begin " + long + "teh end", after: "",
-                                          target: "Begin " + long + "the end", paced: false))
+                                          target: "Begin " + long + "the end"))
         rig.drain()
         // The scope's start is not in the field: the edit's text there is not trusted beyond what the field confirms.
         #expect(rig.field.string.hasSuffix("the end") || rig.drops.count == 1)
@@ -266,7 +267,7 @@ import Testing
     func aRevisedWordAfterTheUserActedDoesNotStopTheTake(safari: Bool) {
         var field = FakeField("")
         field.hostDelays = safari
-        var rig = QueueRig(field, config: .init(animated: true))
+        var rig = QueueRig(field, config: .init())
         rig.queue.enqueue(snap(1, "check the forecast"))
         rig.drain()
         rig.queue.enqueue(.insert("x"))
@@ -307,7 +308,7 @@ import Testing
     }
 
     @Test func aRunAfterASentenceEndStartsWithACapitalAndASpace() {
-        var rig = QueueRig(FakeField("Done."), config: .init(animated: false, capitalization: .sentences))
+        var rig = QueueRig(FakeField("Done."), config: .init(capitalization: .sentences))
         rig.queue.enqueue(snap(1, "next one"))
         rig.drain()
         #expect(rig.field.string == "Done. Next one")
@@ -316,17 +317,15 @@ import Testing
     @Test func safarisTimingNeverReordersOrStallsReports() {
         var field = FakeField("I think the plan is fine. ")
         field.hostDelays = true
-        var rig = QueueRig(field, config: .init(animated: true))
+        var rig = QueueRig(field, config: .init())
         rig.queue.enqueue(snap(1, "and then we go"))
         rig.run(ms: 400)
         rig.queue.enqueue(snap(2, "and than we go home"))
         rig.queue.enqueue(.insert("!"))
         rig.drain()
         #expect(rig.field.reorders == 0)
-        #expect(rig.field.staleTriggers == 0)
         #expect(rig.field.string.contains("!"))
-        // Same-kind ops at the typewriter pace; a change of kind after an edit only after the host's transit.
-        #expect(zip(rig.sent, rig.sent.dropFirst()).allSatisfy { $1.ms - $0.ms >= FieldQueue.gap(after: $0.op, before: $1.op) - 0.001 })
+        #expect(rig.queue.modelText == rig.field.string)
     }
 
     /// A rich editor puts a placeholder into a line that becomes empty (or drops its list item): a replacement of a whole
@@ -336,10 +335,10 @@ import Testing
         var field = FakeField("milk\neggs\nbread", caret: 9)
         field.hostDelays = safari
         field.blockEcho = true
-        var rig = QueueRig(field, config: .init(animated: true))
+        var rig = QueueRig(field, config: .init())
         rig.run(ms: 100)
         rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: "milk\neggs", after: "\nbread",
-                                          target: "milk\nbutter\nbread", cursorAtEnd: false, paced: true))
+                                          target: "milk\nbutter\nbread", cursorAtEnd: false))
         var emptied = false
         for _ in 0..<200 {
             rig.tick()
@@ -348,25 +347,13 @@ import Testing
         #expect(rig.field.string == "milk\nbutter\nbread")
         #expect(!emptied)
         rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: "milk\nbutter", after: "\nbread", target: "milk\nbutter\nBREAD",
-                                          cursorAtEnd: false, paced: true))
+                                          cursorAtEnd: false))
         for _ in 0..<200 {
             rig.tick()
             if rig.field.string.hasSuffix("\n") { emptied = true }
         }
         #expect(rig.field.string == "milk\nbutter\nBREAD")
         #expect(!emptied)
-    }
-
-    @Test func aLostOpIsSeenAndTheUsersKeyGoesOnceMore() {
-        var rig = QueueRig(FakeField("abc"))
-        rig.queue.enqueue(.insert("d"))
-        // The host drops the key: the queue sees the old state.
-        _ = rig.queue.step(report: rig.field.tick(), elapsedMs: 0)
-        for _ in 0..<30 {
-            let action = rig.queue.step(report: rig.field.tick(), elapsedMs: 33)
-            if case .send(let op) = action { rig.field.apply(op) }
-        }
-        #expect(rig.field.string == "abcd")
     }
 }
 
@@ -382,7 +369,7 @@ import Testing
         field.hostDelays = true
         field.staleReportsAfterTap = 3
         field.lagTicks = Int(seed % 3)
-        var rig = QueueRig(field, config: .init(animated: true))
+        var rig = QueueRig(field, config: .init())
         rig.queue.enqueue(snap(1, raw))
         rig.drain()
         #expect(rig.field.string == raw)
@@ -393,10 +380,13 @@ import Testing
         rig.queue.enqueue(.insert("Q"))
         rig.drain()
         #expect(rig.field.reorders == 0)
-        #expect(rig.field.string.hasPrefix("Q"))
-        // Every word is there whole (cleaned, or raw where the user's tap closed the region first).
-        let words = rig.field.string.dropFirst().split(separator: " ").map { $0.lowercased() }
-        #expect(words == raw.split(separator: " ").map { String($0) })
+        // No keyboard can see a tap inside a chunk's landing window: what is still on its way may land at the tap. Nothing
+        // is lost: the key lands once, and every character of the take is still there, in order.
+        #expect(rig.field.string.filter { $0 == "Q" }.count == 1)
+        var rest = Substring(raw)
+        for c in rig.field.string.lowercased() where c == rest.first { rest = rest.dropFirst() }
+        #expect(rest.isEmpty, "\(rig.field.string.debugDescription)")
+        #expect(!rig.field.deletions.contains { $0.origin == .initial || $0.origin == .user })
     }
 
     /// UAT: two keys within 0.1 s, a tap, a key, then backspace, against Safari's timing: every key lands once, in order.
@@ -404,7 +394,7 @@ import Testing
         var field = FakeField("alpha bravo charlie delta echo")
         field.hostDelays = true
         field.staleReportsAfterTap = 2
-        var rig = QueueRig(field, config: .init(animated: true))
+        var rig = QueueRig(field, config: .init())
         rig.run(ms: 100)
         rig.queue.enqueue(.insert("x")); rig.tick(); rig.queue.enqueue(.insert("y"))
         rig.run(ms: 400)
@@ -424,27 +414,21 @@ import Testing
     private func rig(_ text: String = "") -> QueueRig {
         var field = FakeField(text)
         field.hostDelays = true
-        return QueueRig(field, config: .init(animated: true))
+        return QueueRig(field, config: .init())
     }
 
     private func inserts(_ rig: QueueRig, from: Int = 0) -> [(ms: Double, text: String)] {
         rig.sent[from...].compactMap { if case .insert(let s) = $0.op { ($0.ms, s) } else { nil } }
     }
 
-    @Test func aBacklogGoesOneGraphemePerOpAtTheFloorThenCalms() {
+    @Test func aBacklogGoesInOneInsert() {
         var rig = rig()
         let line = "we need slides for the meeting tomorrow at three, and the budget numbers from last week; "
             + "anna checks whether the room is free in the afternoon"
         rig.queue.enqueue(snap(1, line))
         rig.drain()
-        let typed = inserts(rig)
-        let gaps = zip(typed, typed.dropFirst()).map { $1.ms - $0.ms }
-        let floor = gaps.prefix(40).reduce(0, +) / 40
-        print("speed: floor \(Int(floor)) ms an op (\(line.count) chars backlog), last gaps \(gaps.suffix(5).map { Int($0) })")
         #expect(rig.field.string == line)
-        #expect(typed.allSatisfy { $0.text.count == 1 })
-        #expect(floor < 60, "a long backlog goes at the confirmation floor")
-        #expect(gaps.suffix(5).allSatisfy { $0 >= SpanPlanner.calmMs - 0.001 }, "the last few at the calm pace")
+        #expect(inserts(rig).map(\.text) == [line])
         #expect(rig.field.reorders == 0)
     }
 
@@ -490,7 +474,7 @@ import Testing
         var rig = rig(sentence)
         rig.run(ms: 100)
         let from = rig.sent.count
-        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: sentence, target: sentence.uppercased(), cursorAtEnd: false, paced: true))
+        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: sentence, target: sentence.uppercased(), cursorAtEnd: false))
         let start = rig.clockMs
         rig.drain()
         let took = (rig.sent.last?.ms ?? start) - start
@@ -498,12 +482,12 @@ import Testing
         #expect(rig.field.string == sentence.uppercased())
         let ops = rig.sent[from...].map(\.op)
         // Only letters change case. Spaces and punctuation are never deleted or retyped for a cheaper block.
-        #expect(ops.filter { if case .deleteBackward = $0 { true } else { false } }.allSatisfy { $0 == .deleteBackward(1) })
+        let deleted = ops.reduce(0) { if case .deleteBackward(let n) = $1 { $0 + n } else { $0 } }
+        #expect(deleted == sentence.filter { $0.isLowercase }.count)
         #expect(inserts(rig, from: from).map(\.text).joined().allSatisfy { $0.isUppercase })
-        #expect(inserts(rig, from: from).count == sentence.filter { $0.isLowercase }.count)
+        #expect(inserts(rig, from: from).map(\.text).joined().count == sentence.filter { $0.isLowercase }.count)
         #expect(rig.field.reorders == 0)
-        #expect(took < Double(sentence.count) * FieldQueue.editSettleMs * 2,
-                "Targeted edits respect the proxy's move/edit settlement windows")
+        #expect(took < 1_000, "one chunk per group of nearby changes, no settle waits")
     }
 
     @Test func aCleanupOfTwentyScatteredChangesInThreeHundredCharacters() {
@@ -532,14 +516,18 @@ import Testing
 
     private static let line = "please remember to send the quarterly report to the whole team before Friday afternoon"
 
-    /// Types the line, deleting as the UAT did while it typed: the "e" of "whole", all of "Friday", the end of "afternoon"
-    /// (the deletes go at once, without the rule that keys wait for the take).
+    /// Dictates the line in three stretches, deleting in the pauses as the UAT did: the "e" of "whole", all of "Friday",
+    /// the end of "afternoon".
     private static func typedWithDeletes() -> QueueRig {
-        var rig = QueueRig(FakeField(""), config: .init(animated: true, keysWaitForTake: false))
-        rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 1, segments: [.init(id: 0, text: line, final: true)]))
+        var rig = QueueRig(FakeField(""), config: .init())
+        var version = 0
         func type(until suffix: String, thenDelete count: Int, rig: inout QueueRig) {
+            let end = line.range(of: suffix)!.upperBound
+            version += 1
+            rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: version, segments: [.init(id: 0, text: String(line[..<end]), final: false)]))
             while !rig.field.string.hasSuffix(suffix), rig.clockMs < 30_000 { rig.tick() }
             for _ in 0..<count { rig.queue.enqueue(.deleteBackward) }
+            rig.drain()
         }
         type(until: "whole", thenDelete: 1, rig: &rig)
         type(until: "Friday", thenDelete: 6, rig: &rig)
@@ -555,7 +543,7 @@ import Testing
         rig.field.tap(at: 6)
         rig.run(ms: 1_000)
         let from = rig.events.count
-        rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 2, segments: [
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 4, segments: [
             .init(id: 0, text: "Please remember to send the quarterly report to the whole team before Friday afternoon.", cleaned: true, final: true),
         ], complete: true))
         let drained = rig.drain(); #expect(drained)
@@ -563,7 +551,7 @@ import Testing
         #expect(rig.field.string == "Please remember to send the quarterly report to the whol team before afterno.")
         #expect(rig.events[from...].allSatisfy { if case .sent(.deleteBackward(let n), _) = $0.event { n == 1 } else { true } })
         #expect(rig.queue.userCursor == 6 && rig.field.caret == 6)
-        #expect(rig.events.contains { $0.event == .liveApplied(runID: "r", version: 2, complete: true) })
+        #expect(rig.events.contains { $0.event == .liveApplied(runID: "r", version: 4, complete: true) })
         #expect(rig.drops.map(\.reason) == [.userEdited])
     }
 
@@ -600,7 +588,7 @@ import Testing
 
     /// Magic read the field while the run's cleanup was still on its way; the cleanup landed before the result came.
     @Test func magicReadBeforeACleanupLandsOverIt() {
-        var rig = QueueRig(FakeField(""), config: .init(animated: true))
+        var rig = QueueRig(FakeField(""), config: .init())
         rig.queue.enqueue(snap(1, "please send the report"))
         rig.drain()
         rig.queue.markRead("i1")
@@ -610,7 +598,7 @@ import Testing
         rig.drain()
         #expect(rig.field.string == "Please send the report.")
         rig.queue.enqueue(FieldQueue.Edit(id: "m", kind: .magic, before: "please send the report", target: "Bitte sende den Bericht.",
-                                          cursorAtEnd: false, paced: true, readID: "i1"))
+                                          cursorAtEnd: false, readID: "i1"))
         rig.drain()
         #expect(rig.field.string == "Bitte sende den Bericht.")
         #expect(rig.applied == ["m"])

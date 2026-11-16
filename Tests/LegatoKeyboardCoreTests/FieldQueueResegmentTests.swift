@@ -48,7 +48,7 @@ import Testing
 
     @Test(arguments: [false, true])
     func aResplitNeverTypesDeliveredWordsTwice(animated: Bool) {
-        var rig = QueueRig(FakeField(""), config: .init(animated: animated, prioritizeSpeech: true))
+        var rig = QueueRig(FakeField(""), config: .init(prioritizeSpeech: true))
         for (i, segments) in provisional.enumerated() {
             rig.queue.enqueue(take(i + 1, segments))
             do { let drained = rig.drain(); #expect(drained) }
@@ -85,7 +85,7 @@ import Testing
 /// while it was out of sight) is never repaired: the field keeps it, and the final text is reported for History.
 @Suite struct StoppedTakeKeptTests {
     private struct Host {
-        var queue = FieldQueue(config: .init(animated: false, canReadAround: true, prioritizeSpeech: true))
+        var queue = FieldQueue(config: .init(canReadAround: true, prioritizeSpeech: true))
         var text = "" { didSet { caret = min(caret, text.utf16.count) } }
         var caret = 0
         var requests = 0

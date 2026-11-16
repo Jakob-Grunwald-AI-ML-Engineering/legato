@@ -87,7 +87,8 @@ struct TakeSession {
         field.truncation = chance(0.4) ? Double(int(2...20)) / 100 : 0
         field.truncationRng = SeededGenerator(seed: seed ^ 0x7C)
         field.rng = SeededGenerator(seed: seed ^ 0xD1)
-        var rig = QueueRig(field, config: .init(animated: chance(0.7), prioritizeSpeech: true))
+        _ = chance(0.7) // was the typewriter setting; drawn so seeds keep their sessions
+        var rig = QueueRig(field, config: .init(prioritizeSpeech: true))
 
         // The user: left alone, acting during the take, after its stop, or both.
         let mode = pick(["alone", "alone", "alone", "during", "during", "after", "both"])
@@ -202,16 +203,8 @@ struct TakeSession {
     private mutating func check(_ rig: QueueRig, drained: Bool, acted: Bool, initial: String, caret: Int, raw: String, clean: String,
                                 keys: [String], unique: Bool, newWords: [String]) -> String? {
         guard drained else { return "no stall: the queue did not drain (text \(rig.field.string.debugDescription))" }
+        // No-corruption checks only (#299): a chunk's ops go back to back.
         if rig.field.reorders > 0 { return "\(rig.field.reorders) ops landed out of order" }
-        if rig.field.staleTriggers > 0 { return "\(rig.field.staleTriggers) edits went right behind a move" }
-        var open = false
-        for (ms, event) in rig.events {
-            switch event {
-            case .sent: if open { return "two ops in flight at \(Int(ms)) ms" }; open = true
-            case .confirmed, .resync: open = false
-            default: break
-            }
-        }
         if let bad = rig.field.deletions.first(where: { ($0.by == .live || $0.by == .edit) && $0.origin != .live && $0.origin != .edit && !$0.racing }) {
             return "the keyboard (\(bad.by.rawValue)) deleted \(String(bad.char).debugDescription) written by \(bad.origin.rawValue)"
         }

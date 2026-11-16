@@ -32,7 +32,7 @@ import Testing
         var field = FakeField("")
         field.hostDelays = safari
         field.blockEcho = blocks
-        var rig = QueueRig(field, config: .init(animated: true))
+        var rig = QueueRig(field, config: .init())
         for (i, item) in Self.items.enumerated() {
             type(i == 0 ? "- " : "\n- ", &rig)
             rig.drain()
@@ -43,7 +43,7 @@ import Testing
         }
         #expect(rig.field.string == Self.list)
         #expect(rig.drops.isEmpty)
-        #expect(rig.field.reorders == 0 && rig.field.staleTriggers == 0)
+        #expect(rig.field.reorders == 0)
     }
 
     /// The same list with each cleanup arriving late: after the user typed the next line's Enter and "- ", or while
@@ -53,7 +53,7 @@ import Testing
     func aLateCleanupPreservesTheNextTakesCaretAndWords(safari: Bool) {
         var field = FakeField("")
         field.hostDelays = safari
-        var rig = QueueRig(field, config: .init(animated: true))
+        var rig = QueueRig(field, config: .init())
         for (i, item) in Self.items.enumerated() {
             type(i == 0 ? "- " : "\n- ", &rig)
             if i > 0 {
@@ -81,7 +81,7 @@ import Testing
     func dictationGoesOnAtTheCaretAfterTheUserEditsTheTakesText(safari: Bool) {
         var field = FakeField("Note: ")
         field.hostDelays = safari
-        var rig = QueueRig(field, config: .init(animated: true))
+        var rig = QueueRig(field, config: .init())
         rig.queue.enqueue(snap(1, "buy milk and eggs"))
         rig.drain()
         for _ in 0..<5 { rig.queue.enqueue(.deleteBackward) }
@@ -114,7 +114,7 @@ import Testing
     func newSpeechAfterAStopStartsAtTheCaretNotAtTheTakesEnd(safari: Bool) {
         var field = FakeField("")
         field.hostDelays = safari
-        var rig = QueueRig(field, config: .init(animated: true))
+        var rig = QueueRig(field, config: .init())
         type("- ", &rig)
         rig.drain()
         dictate("the meeting is at three", run: "m", &rig)
@@ -139,7 +139,7 @@ import Testing
     /// F1, with the raw version of the new speech coalesced away: the cleanup is the first the keyboard sees of it. The
     /// unit that joins known words with unseen ones shows its raw words, so the new ones still start at the caret.
     @Test func aCleanupJoiningUnseenSpeechStillStartsTheNewWordsAtTheCaret() {
-        var rig = QueueRig(FakeField(""), config: .init(animated: true))
+        var rig = QueueRig(FakeField(""), config: .init())
         type("- ", &rig)
         dictate("the meeting is at three", run: "m", &rig)
         rig.drain()
@@ -158,7 +158,7 @@ import Testing
         let items = ["buy some milk", "call the plumber tomorrow", "water the plants"]
         var field = FakeField("")
         field.hostDelays = safari
-        var rig = QueueRig(field, config: .init(animated: true))
+        var rig = QueueRig(field, config: .init())
         for i in items.indices {
             type(i == 0 ? "- " : "\n- ", &rig)
             rig.queue.enqueue(LiveDictationSnapshot(runID: "list", version: i + 1, segments: Self.segments(Array(items[...i]))))
@@ -182,7 +182,7 @@ import Testing
         let items = ["buy some milk", "call the plumber tomorrow", "water the plants"]
         var field = FakeField("")
         field.hostDelays = safari
-        var rig = QueueRig(field, config: .init(animated: true))
+        var rig = QueueRig(field, config: .init())
         for i in items.indices {
             type(i == 0 ? "- " : "\n- ", &rig)
             rig.queue.enqueue(LiveDictationSnapshot(runID: "list", version: i + 1, segments: Self.segments(Array(items[...i]))))
@@ -205,7 +205,7 @@ import Testing
     func wordsAfterTheUserTypedInsideTheTakeStartAtTheirCaret(safari: Bool) {
         var field = FakeField("")
         field.hostDelays = safari
-        var rig = QueueRig(field, config: .init(animated: true))
+        var rig = QueueRig(field, config: .init())
         rig.queue.enqueue(snap(1, "the boat leaves at noon"))
         rig.drain()
         rig.field.tap(at: 8); rig.outsidePending = true // after "the boat"

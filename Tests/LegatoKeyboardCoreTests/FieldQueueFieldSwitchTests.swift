@@ -29,7 +29,7 @@ import Testing
     func aCleanupForTheLastFieldNeverJumpsIntoAnEmptyOne(safari: Bool) {
         var field = FakeField("Notes\n- ")
         field.hostDelays = safari
-        var rig = QueueRig(field, config: .init(animated: true))
+        var rig = QueueRig(field, config: .init())
         rig.queue.enqueue(snap(1, "one two three four five six seven eight nine ten eleven twelve", run: "a"))
         rig.drain()
         let fieldA = switchField(&rig, to: "", safari: safari)
@@ -56,7 +56,7 @@ import Testing
     func aJumpThatGoesNowhereDropsItsWorkAndIsNeverRetried(safari: Bool) {
         var field = FakeField("- the meeting is at three\n- bring the laptop\n- ")
         field.hostDelays = safari
-        var rig = QueueRig(field, config: .init(animated: true))
+        var rig = QueueRig(field, config: .init())
         rig.queue.enqueue(snap(1, "one two three four five six", run: "long"))
         rig.drain()
         _ = switchField(&rig, to: "- the meeting is at three", safari: safari)

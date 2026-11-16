@@ -3,11 +3,13 @@ import Foundation
 
 /// A text field that misbehaves like real hosts: late reports, a short window around the cursor, Safari's block echo
 /// (`"\n "` where a window starts at a block), and emoji that move as one unit. With `hostDelays` it also behaves like
-/// Safari as measured (2026-11 caret spike):
-/// - the proxy reports a move at once (optimistically), while the host applies it 25–50 ms later;
-/// - the host applies an edit 5–110 ms after it was sent, so ops sent close together can land out of order;
+/// Safari as measured (2026-11 caret spike, and the burst probe of 2026-11-16):
+/// - the proxy reports every op at once (optimistically), while the host applies a move 25–50 ms later and an edit
+///   5–110 ms later; ops land in the order sent (a burst of hop, delete run, insert and hop back landed 15/15);
 /// - an edit sent right after a move leaves the proxy on its post-move report until the next move.
-/// `reorders` and `staleTriggers` count when the keyboard set off the last two: the queue must never.
+/// `reorders` counts ops that landed out of order (never, by the measured model); `staleTriggers` counts edits sent right
+/// after a move (a chunk does that by design: its return hop refreshes the proxy). `Host` presets add the rest of the
+/// measured behaviour (windows, units, dropped overshoot, Safari's stale first callback, identity on empty).
 struct FakeField {
     var text: [Character]
     var caret: Int
@@ -27,6 +29,35 @@ struct FakeField {
     var staleReportsAfterTap = 0
     /// Reports never show a selection (Safari's opaque Select All): the caret shows at its end, nothing selected.
     var hidesSelection = false
+
+    // Measured on the iPhone (2026-11-16, `docs/field-editing.md`, "Measured host behaviour").
+    /// Windows stop at a line break on either side (WhatsApp, Notes), without Safari's "\n " echo.
+    var cutsAtLineBreaks = false
+    /// A move past the end of the text is dropped entirely: the caret stays (WhatsApp).
+    var dropsOvershoot = false
+    /// The first report of a new host turn after a move still shows the caret where it was (Safari's first callback).
+    var staleFirstMoveReport = false
+    /// The field gets a new document identity when its text becomes empty (Notes, Safari).
+    var newIdentityWhenEmpty = false
+    /// The field's document identity (changes with `newIdentityWhenEmpty`).
+    private(set) var identity = 0
+    /// Host callbacks (`textDidChange`) so far: one per move; the keyboard's own inserts and deletes make none.
+    private(set) var callbacks = 0
+    private var staleMove: (caret: Int, armed: Bool)?
+
+    enum Host { case whatsApp, notes, safari }
+    /// A field that behaves like `host` as measured.
+    static func host(_ host: Host, _ text: String = "", caret: Int? = nil) -> FakeField {
+        var field = FakeField(text, caret: caret)
+        switch host {
+        case .whatsApp: field.window = 300; field.cutsAtLineBreaks = true; field.dropsOvershoot = true
+        case .notes: field.window = 300; field.cutsAtLineBreaks = true; field.newIdentityWhenEmpty = true
+        case .safari:
+            field.window = 100; field.movesByCharacters = true; field.hostDelays = true
+            field.staleFirstMoveReport = true; field.newIdentityWhenEmpty = true
+        }
+        return field
+    }
     private var truthLog: [[Character]] = []
     private var staleShow: (text: [Character], caret: Int, left: Int)?
     var nowMs = 0.0
@@ -97,17 +128,22 @@ struct FakeField {
     var string: String { String(text) }
     var settled: Bool { pending.isEmpty }
 
-    private static func report(text: [Character], caret: Int, selection: Int, window: Int, blockEcho: Bool) -> FieldQueue.Report {
+    private static func report(text: [Character], caret: Int, selection: Int, window: Int, blockEcho: Bool,
+                               cutsAtLineBreaks: Bool = false) -> FieldQueue.Report {
         var start = max(0, caret - window)
         var prefix = ""
         if blockEcho, let breakIndex = text[start..<caret].lastIndex(where: \.isNewline) {
             start = breakIndex + 1
             prefix = "\n "
+        } else if cutsAtLineBreaks, let breakIndex = text[start..<caret].lastIndex(where: \.isNewline) {
+            start = breakIndex + 1
         }
         let before = prefix + String(text[start..<caret])
         let selected = selection > 0 ? String(text[caret..<(caret + selection)]) : nil
         let afterStart = caret + selection
-        let after = String(text[afterStart..<min(text.count, afterStart + window)])
+        var afterEnd = min(text.count, afterStart + window)
+        if cutsAtLineBreaks, let breakIndex = text[afterStart..<afterEnd].firstIndex(where: \.isNewline) { afterEnd = breakIndex }
+        let after = String(text[afterStart..<afterEnd])
         return .init(before: before, after: after, selected: selected)
     }
 
@@ -115,9 +151,9 @@ struct FakeField {
     var current: FieldQueue.Report {
         let shown = proxy ?? (text, caret, selection)
         if hidesSelection {
-            return Self.report(text: shown.text, caret: shown.caret + shown.selection, selection: 0, window: window, blockEcho: blockEcho)
+            return Self.report(text: shown.text, caret: shown.caret + shown.selection, selection: 0, window: window, blockEcho: blockEcho, cutsAtLineBreaks: cutsAtLineBreaks)
         }
-        return Self.report(text: shown.text, caret: shown.caret, selection: shown.selection, window: window, blockEcho: blockEcho)
+        return Self.report(text: shown.text, caret: shown.caret, selection: shown.selection, window: window, blockEcho: blockEcho, cutsAtLineBreaks: cutsAtLineBreaks)
     }
 
     /// Now and then a report shows less before the caret than the window (never more, never other text).
@@ -136,8 +172,14 @@ struct FakeField {
     /// their way (a report that goes back to an older state).
     private var proxy: (text: [Character], caret: Int, selection: Int)?
 
-    /// One host turn at `nowMs`: ops due land, and the (possibly late, possibly stale) report comes back.
-    mutating func tick() -> FieldQueue.Report {
+    /// One host turn at `nowMs`: ops due land, and the (possibly late, possibly stale) report comes back. `fresh`: a new
+    /// turn (a callback), not the keyboard reading the proxy again right after its own op.
+    mutating func tick(fresh: Bool = true) -> FieldQueue.Report {
+        if fresh, let stale = staleMove, stale.armed {
+            // Safari's first callback after a move: the old caret, once.
+            staleMove = nil
+            return Self.report(text: text, caret: min(stale.caret, text.count), selection: 0, window: window, blockEcho: blockEcho, cutsAtLineBreaks: cutsAtLineBreaks)
+        }
         let due = pending.filter { $0.at <= nowMs }.sorted { $0.at < $1.at }
         for item in due {
             pending.removeAll { $0.seq == item.seq }
@@ -153,7 +195,7 @@ struct FakeField {
         if truthLog.count > 12 { truthLog.removeFirst() }
         if var stale = staleShow, stale.left > 0 {
             stale.left -= 1; staleShow = stale.left > 0 ? stale : nil
-            return Self.report(text: stale.text, caret: min(stale.caret, stale.text.count), selection: 0, window: window, blockEcho: blockEcho)
+            return Self.report(text: stale.text, caret: min(stale.caret, stale.text.count), selection: 0, window: window, blockEcho: blockEcho, cutsAtLineBreaks: cutsAtLineBreaks)
         }
         history.append(current)
         if history.count > lagTicks + 1 { history.removeFirst(history.count - lagTicks - 1) }
@@ -180,10 +222,9 @@ struct FakeField {
             if nowMs - lastMoveSentMs < 30 { stuck = current; staleTriggers += 1 }
             delay = Double.random(in: 5...110, using: &rng)
         }
-        // Ops of one kind in a row land in the order sent (the spike: 20 chained moves at 30 ms all in order; no
-        // insert/insert reordering in the UAT journals); ops of different kinds can overtake each other.
+        // Ops land in the order sent (burst probe, 2026-11-16: every stage in order, in every host).
         var at = nowMs + delay
-        if let last = pending.max(by: { $0.seq < $1.seq }), Self.sameKind(last.send.op, send.op) { at = max(at, last.at + 1) }
+        if let last = pending.max(by: { $0.seq < $1.seq }) { at = max(at, last.at + 1) }
         pending.append((seq, at, send))
     }
 
@@ -209,7 +250,13 @@ struct FakeField {
             }
         }
         let from = caret
+        let wasEmpty = text.isEmpty
         defer {
+            if newIdentityWhenEmpty, text.isEmpty, !wasEmpty { identity += 1 }
+            if case .move = send.op {
+                callbacks += 1
+                if staleFirstMoveReport, send.writer != .outside { staleMove = (from, true) }
+            }
             if checks, case .move = send.op {
                 let crossed = min(from, caret)..<max(from, caret)
                 if crossed.contains(where: { epochs[$0] != userActions }) {
@@ -220,6 +267,7 @@ struct FakeField {
         switch send.op {
         case .move(let units):
             if selection > 0 { if units >= 0 { caret += selection }; selection = 0 }
+            if dropsOvershoot, units > 0, String(text[caret...]).utf16.count < units { break }
             var remaining = abs(units)
             while remaining > 0 {
                 if units > 0 {
@@ -323,15 +371,15 @@ struct QueueRig {
     /// known, where they tapped, so the queue's choice does not become the expectation.
     mutating func fieldSwitched() { outsideAtMs = clockMs; switchedAtMs = clockMs }
     private var switchedAtMs = -1_000_000.0
-    private var switching: Bool { clockMs - switchedAtMs < FieldQueue.confirmLimitMs + 200 }
+    private var switching: Bool { clockMs - switchedAtMs < FieldQueue.checkDeadlineMs + 400 }
     /// An op sent now races with an outside action: the queue has not resynced since, or it was a moment ago (an
     /// op already on its way, a report still late).
-    private var racing: Bool { outsidePending || clockMs - outsideAtMs < FieldQueue.confirmLimitMs + 200 }
+    private var racing: Bool { outsidePending || clockMs - outsideAtMs < FieldQueue.checkDeadlineMs + 400 }
 
     /// Prints every step (`LEGATO_STRESS_TRACE=1`).
     var trace = ProcessInfo.processInfo.environment["LEGATO_STRESS_TRACE"] == "1"
 
-    init(_ field: FakeField, config: FieldQueue.Config = .init(animated: false)) {
+    init(_ field: FakeField, config: FieldQueue.Config = .init()) {
         self.field = field
         var config = config
         config.movesByCharacters = field.movesByCharacters
@@ -344,8 +392,10 @@ struct QueueRig {
         clockMs += tickMs
         field.nowMs = clockMs
         var elapsed = tickMs
-        for _ in 0..<64 {
-            let report = field.tick()
+        for iteration in 0..<64 {
+            // The first read of a tick is a host callback; the reads that follow the keyboard's own ops are the proxy's
+            // immediate view.
+            let report = field.tick(fresh: iteration == 0)
             let action = queue.step(report: report, elapsedMs: elapsed)
             elapsed = 0
             var syncUserCaret = false
@@ -378,7 +428,7 @@ struct QueueRig {
             if writer == .user, case .insert(let s) = op, s.count > 1 { send.runPrefix = s.count - 1 }
             if syncUserCaret { send.userOffset = queue.userCursor - queue.cursor }
             field.send(send)
-            if field.lagTicks > 0 || field.hostDelays { break }
+            if field.lagTicks > 0 || field.hostDelays, !queue.isInChunk { break }
         }
     }
 

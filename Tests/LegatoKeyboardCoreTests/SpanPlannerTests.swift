@@ -3,7 +3,7 @@ import Testing
 
 @Suite struct SpanPlannerTests {
     private func spans(_ old: String, _ new: String) -> [SpanPlanner.Span] {
-        SpanPlanner.spans(from: Array(old), to: Array(new), moveSettleMs: FieldQueue.moveSettleMs, editSettleMs: FieldQueue.editSettleMs)
+        SpanPlanner.spans(from: Array(old), to: Array(new), moveSettleMs: 0, editSettleMs: 0)
     }
 
     /// Applies the spans back to front as the queue does.
@@ -67,7 +67,7 @@ import Testing
 
     @Test func aTailAppendIsLeftToTheTypewriter() {
         let old = Array("we need slides fr"), new = Array("we need slides for the meeting")
-        let result = SpanPlanner.spans(from: old, to: new, leaveTailAppend: true, moveSettleMs: FieldQueue.moveSettleMs, editSettleMs: FieldQueue.editSettleMs)
+        let result = SpanPlanner.spans(from: old, to: new, leaveTailAppend: true, moveSettleMs: 0, editSettleMs: 0)
         #expect(result.isEmpty || result.allSatisfy { $0.end < old.count || $0.start < $0.end })
     }
 

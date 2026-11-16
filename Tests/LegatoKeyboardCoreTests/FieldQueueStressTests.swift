@@ -145,7 +145,8 @@ struct ListSession {
         field.lagTicks = chance(0.3) ? Int.random(in: 1...3, using: &rng) : 0
         field.window = Int.random(in: 20...80, using: &rng)
         field.blockEcho = chance(0.3)
-        var rig = QueueRig(field, config: .init(animated: chance(0.6)))
+        _ = chance(0.6) // was the typewriter setting; drawn so seeds keep their sessions
+        var rig = QueueRig(field, config: .init())
         let items = (0..<Int.random(in: 2...4, using: &rng)).map { _ in
             (0..<Int.random(in: 1...4, using: &rng)).map { _ in pick(words) }.joined(separator: " ")
         }
@@ -202,7 +203,7 @@ struct ListSession {
         if chance(0.5) { rig.drain() }
         publishCleanup(&rig)
         guard rig.drain(limitMs: 60_000) else { return "no stall: the queue did not drain (text \(rig.field.string.debugDescription))" }
-        if rig.field.reorders > 0 || rig.field.staleTriggers > 0 { return "host timing traps: \(rig.field.reorders) reorders, \(rig.field.staleTriggers) stale" }
+        if rig.field.reorders > 0 { return "host timing trap: \(rig.field.reorders) reorders" }
         if let frozen = rig.field.frozenEdits.first { return "dictation edited after the user acted: \(frozen)" }
         if let edit = rig.field.liveEditsAfterUser.first { return "dictation made a \(edit) after the user acted" }
         let lines = String(rig.field.string.dropFirst(initial.count)).components(separatedBy: "\n")
@@ -331,7 +332,8 @@ struct StressSession {
         // Drawn apart from the session's generator, so earlier seeds replay the same sessions.
         if field.hostDelays, Bool.random(using: &extra) { field.staleReportsAfterTap = Int.random(in: 1...4, using: &extra) }
         let clean = chance(0.35)
-        var rig = QueueRig(field, config: .init(animated: chance(0.5)))
+        _ = chance(0.5) // was the typewriter setting; drawn so seeds keep their sessions
+        var rig = QueueRig(field, config: .init())
         // The cleanup comes late: after the take is typed and the user edited and moved (real Claude cleanup, ~20 s).
         let lateCleanup = lateCleanups && Double.random(in: 0..<1, using: &late) < 0.4
 
@@ -432,26 +434,17 @@ struct StressSession {
             if let range = scope.range(of: pick(["alpha", "beta", "river", "stone", "a", "e"])) {
                 rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: before, after: after,
                                                   target: Bool.random(using: &extra) ? scope.uppercased() // a whole-scope rewrite
-                                                      : scope.replacingCharacters(in: range, with: "MAGIC"), cursorAtEnd: false, paced: true))
+                                                      : scope.replacingCharacters(in: range, with: "MAGIC"), cursorAtEnd: false))
             }
         }
     }
 
     private func check(_ rig: QueueRig, drained: Bool, clean: Bool, initial: String, caret: Int, target: String, keys: [String]) -> String? {
         guard drained else { return "no stall: the queue did not drain (text \(rig.field.string.debugDescription))" }
-        // The host's timing traps: ops landing out of order, a report stuck after an edit right behind a move.
-        if rig.field.reorders > 0 { return "\(rig.field.reorders) ops landed out of order (sent too close together)" }
-        if rig.field.staleTriggers > 0 { return "\(rig.field.staleTriggers) edits went right behind a move (stale reports)" }
-        // One op in flight: a confirmation or a resync between any two ops.
+        // No-corruption checks only (#299): a chunk's ops go back to back, so the old one-op-in-flight and
+        // no-edit-behind-a-move assertions no longer apply.
+        if rig.field.reorders > 0 { return "\(rig.field.reorders) ops landed out of order" }
         let fields = retired + [rig.field]
-        var open = false
-        for (ms, event) in rig.events {
-            switch event {
-            case .sent: if open { return "two ops in flight at \(Int(ms)) ms" }; open = true
-            case .confirmed, .resync: open = false
-            default: break
-            }
-        }
         // Dictation never deletes or moves over text from before the user's last action (racing with it aside).
         for field in fields {
             if let frozen = field.frozenEdits.first { return "dictation edited after the user acted: \(frozen) (text \(field.string.debugDescription))" }
