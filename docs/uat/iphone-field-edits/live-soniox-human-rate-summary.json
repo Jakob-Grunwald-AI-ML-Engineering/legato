@@ -15,6 +15,6 @@
     22.241433374991175,
     27.338021042000037
   ],
-  "physicalReplayMeasured": false,
-  "privateMatchingPCM": "/Users/work/Library/Caches/legato/iphone-field-edits/soniox/pcm/long-synthetic.pcm"
+  "physicalReplayMeasured": true,
+  "physicalReplayOutcome": "Natural empty-field insertion and pause cleanup confirmed; c355a35 speech-tail starvation reproduced and awaits fix."
 }
