@@ -774,7 +774,7 @@ final class KeyboardController {
                     if let runID = drop.runID { updateCleanup { $0.failed(runID: runID) } }
                     if let snapshot = liveSnapshot, snapshot.runID == drop.runID, snapshot.complete {
                         // Terminally refused buffered takes leave the outbox too; History retains their text.
-                        link.writeLiveDictationAck(.init(runID: snapshot.runID, version: snapshot.version, complete: true, stats: liveStats))
+                        link.writeLiveDictationAck(.init(runID: snapshot.runID, version: snapshot.version, complete: true, stats: liveStats, delivered: false))
                     }
 
                     // The take's final text could not stand whole in the field (the user typed or moved since, or the
@@ -891,7 +891,7 @@ final class KeyboardController {
             liveSeen = snapshot
             if snapshot.complete, !blockedLiveCompleted {
                 blockedLiveCompleted = true
-                link.writeLiveDictationAck(.init(runID: snapshot.runID, version: snapshot.version, complete: true, stats: liveStats))
+                link.writeLiveDictationAck(.init(runID: snapshot.runID, version: snapshot.version, complete: true, stats: liveStats, delivered: false))
                 if !liveRecoveryDismissed {
                     liveRecoveryNotice = "The full take is in Legato's History."
                     syncRowTakeover()
@@ -899,7 +899,14 @@ final class KeyboardController {
             }
             return
         }
-        guard snapshot.runID != ignoredLiveRunID else { return }
+        guard snapshot.runID != ignoredLiveRunID else {
+            liveSeen = snapshot
+            if snapshot.complete {
+                // A cleared draft retires its publication, never authorizes a cleanup read of its successor.
+                link.writeLiveDictationAck(.init(runID: snapshot.runID, version: snapshot.version, complete: true, stats: liveStats, delivered: false))
+            }
+            return
+        }
         liveSeen = snapshot
         blockedLiveRunID = nil; blockedLiveCompleted = false
         if snapshot.runID != liveSnapshot?.runID {
@@ -963,7 +970,7 @@ final class KeyboardController {
 
     private func writeLiveAck(version: Int?, complete: Bool) {
         guard let runID = liveSnapshot?.runID else { return }
-        link.writeLiveDictationAck(.init(runID: runID, version: version, complete: complete, stats: liveStats))
+        link.writeLiveDictationAck(.init(runID: runID, version: version, complete: complete, stats: liveStats, delivered: version == nil ? nil : true))
     }
 
     private static func milliseconds(_ duration: Duration) -> Double {
