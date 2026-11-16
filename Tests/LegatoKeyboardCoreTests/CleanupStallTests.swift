@@ -17,11 +17,11 @@ import Testing
         #expect(cleanupLanded)
         #expect(rig.field.string == "Check the memo, Signal message?")
         #expect(rig.field.reorders == 0)
-        // One verified swap: the take's characters in one delete, the cleaned take in one insert.
-        #expect(rig.sent[before...].map(\.op) == [.deleteBackward(35), .insert("Check the memo, Signal message?")])
+        // Only the filler changes; the rest of the take is never deleted or reinserted.
+        #expect(rig.sent[before...].map(\.op) == [.move(-15)] + Array(repeating: .deleteBackward(1), count: 4) + [.move(15)])
     }
 
-    private func interruptedCleanup(seed: UInt64) -> QueueRig {
+    private func interruptedCleanup(seed: UInt64) throws -> QueueRig {
         let prefix = "Keep this note. "
         let raw = "the meeting starts soon"
         var field = FakeField(prefix)
@@ -31,17 +31,18 @@ import Testing
         rig.queue.enqueue(snap(1, raw))
         let rawLanded = rig.drain()
         #expect(rawLanded)
-        rig.queue.enqueue(snap(2, raw.capitalized, complete: true))
+        // This correction requires an insertion, so the tap races a real minimal edit already on its way.
+        rig.queue.enqueue(snap(2, "the meeting starts very soon", complete: true))
         var sawIssuedInsert = false
         for _ in 0..<500 {
             let count = rig.sent.count
             rig.tick()
-            if rig.sent.count > count, rig.sent.last?.op == .insert(raw.capitalized) {
+            if rig.sent.count > count, rig.sent.last?.op == .insert("v") {
                 sawIssuedInsert = true
                 break
             }
         }
-        #expect(sawIssuedInsert)
+        try #require(sawIssuedInsert)
         rig.field.tap(at: 9)
         rig.queue.paused = true
         rig.run(ms: 400)
@@ -53,22 +54,23 @@ import Testing
     }
 
     @Test(arguments: [UInt64(7), 19, 42])
-    func aTapAndRecoveryReadOnTheOtherSideOfAnIssuedInsertPreserveTheUnrelatedPrefix(seed: UInt64) {
-        var rig = interruptedCleanup(seed: seed)
+    func aTapAndRecoveryReadOnTheOtherSideOfAnIssuedInsertPreserveTheUnrelatedPrefix(seed: UInt64) throws {
+        var rig = try interruptedCleanup(seed: seed)
         let finished = rig.drain()
         #expect(finished)
-        // The swap's insert may land where the user tapped (it was on its way): the keyboard never deletes there after
-        // the tap. The user's text stays whole, the take's words stand once (where they landed), and a misplaced take is
-        // reported.
+        // The in-flight letter may land at the tap. Neither the unrelated prefix nor the already-spoken letters
+        // can be deleted during recovery; the source words must still occur once.
+        let original = zip(rig.field.text, rig.field.origin).filter { $0.1 == .initial || $0.1 == .live }.map(\.0)
+        #expect(String(original) == "Keep this note. the meeting starts soon")
         #expect(rig.field.string.hasPrefix("Keep this"))
-        #expect(rig.field.string.hasSuffix("note. ") || rig.field.string.contains("note. The Meeting Starts Soon"))
-        #expect(rig.field.string.components(separatedBy: "Meeting").count == 2, "\(rig.field.string.debugDescription) \(rig.drops)")
-        if !rig.field.string.hasSuffix("The Meeting Starts Soon") { #expect(rig.drops.contains { $0.runID == "r" }) }
+        #expect(rig.field.string.components(separatedBy: "the meeting starts").count == 2)
+        #expect(rig.field.string.components(separatedBy: "soon").count == 2)
+        #expect(rig.field.string.hasSuffix("the meeting starts very soon") || rig.drops.contains { $0.runID == "r" })
         #expect(!rig.field.deletions.contains { $0.origin == .initial && $0.by != .outside })
     }
 
-    @Test func missingOwnershipWindowsReleaseWaitingTypingWithAnExplicitUnresolvedFailure() {
-        var rig = interruptedCleanup(seed: 7)
+    @Test func missingOwnershipWindowsReleaseWaitingTypingWithAnExplicitUnresolvedFailure() throws {
+        var rig = try interruptedCleanup(seed: 7)
         rig.field.window = 0
         let requested = rig.clockMs
         rig.queue.enqueue(.insert("Q"))
@@ -78,6 +80,12 @@ import Testing
         #expect((key?.ms ?? .infinity) - requested <= FieldQueue.userBoundMs + FieldQueue.transitMs + rig.tickMs)
         #expect(rig.drops.contains { $0.id.hasPrefix("stray:") && $0.reason == .unplaceable })
         #expect(!rig.field.deletions.contains { $0.origin == .initial && $0.by != .outside })
+        // The key and stray failure are already released. The remaining minimal correction has its own bounded
+        // parked-scope wait, starting after recovery yields; it must also terminate without ownership evidence.
+        let finished = rig.drain(limitMs: FieldQueue.parkLimitMs + rig.tickMs)
+        #expect(finished)
+        let original = zip(rig.field.text, rig.field.origin).filter { $0.1 == .initial || $0.1 == .live }.map(\.0)
+        #expect(String(original) == "Keep this note. the meeting starts soon")
         #expect(rig.queue.isIdle, "\(rig.queue.debugState) \(rig.field.string.debugDescription) \(rig.events.suffix(40).map { "\($0.event)" })")
     }
 

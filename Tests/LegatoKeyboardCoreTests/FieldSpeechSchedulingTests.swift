@@ -32,15 +32,21 @@ import Testing
         #expect(String(target.authoritative) == revised)
     }
 
-    @Test func keyboardTakesARevisionNearTheCaretWithoutJumping() {
+    @Test func keyboardAppendsWhileSpeakingThenAppliesOnlyTheChangedLetterDuringAPause() {
         var rig = QueueRig(FakeField(""), config: .init(animated: false, prioritizeSpeech: true))
         rig.queue.enqueue(snap(1, "we saw a boat"))
         do { let drained = rig.drain(); #expect(drained) }
         let start = rig.sent.count
         rig.queue.enqueue(snap(2, "We saw a boat today"))
         do { let drained = rig.drain(); #expect(drained) }
+        #expect(rig.field.string == "we saw a boat today")
+        #expect(rig.sent[start...].map(\.op) == [.insert(" today")])
+        #expect(!rig.events.contains { $0.event == .liveApplied(runID: "r", version: 2, complete: false) })
+        let paused = rig.sent.count
+        rig.queue.setSpeaking(false, runID: "r")
+        do { let drained = rig.drain(); #expect(drained) }
         #expect(rig.field.string == "We saw a boat today")
-        #expect(rig.sent[start...].map(\.op) == [.deleteBackward(13), .insert("We saw a boat today")])
+        #expect(rig.sent[paused...].map(\.op) == [.move(-18), .deleteBackward(1), .insert("W"), .move(18)])
         #expect(rig.events.contains { $0.event == .liveApplied(runID: "r", version: 2, complete: false) })
     }
 
