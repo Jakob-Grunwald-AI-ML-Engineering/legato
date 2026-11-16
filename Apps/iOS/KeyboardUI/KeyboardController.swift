@@ -456,8 +456,9 @@ final class KeyboardController {
         #if DEBUG || LEGATO_INTERNAL
         nativeTextChangeCount += 1
         #endif
-        if !queue.hasRecentOwnOperation, !isFieldBusy {
-            queue.externalContextChanged(report: currentReport)
+        if !isFieldBusy {
+            let idleMs = lastStepAt.map { Self.milliseconds(ContinuousClock.now - $0) } ?? 0
+            queue.externalContextChanged(report: currentReport, elapsedSinceLastStepMs: idleMs)
         }
         documentDidChange()
     }
@@ -466,8 +467,9 @@ final class KeyboardController {
         #if DEBUG || LEGATO_INTERNAL
         nativeSelectionChangeCount += 1
         #endif
-        if !queue.hasRecentOwnOperation, !isFieldBusy {
-            queue.externalSelectionChanged(report: currentReport)
+        if !isFieldBusy {
+            let idleMs = lastStepAt.map { Self.milliseconds(ContinuousClock.now - $0) } ?? 0
+            queue.externalSelectionChanged(report: currentReport, elapsedSinceLastStepMs: idleMs)
         }
         documentDidChange()
     }
