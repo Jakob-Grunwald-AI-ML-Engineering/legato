@@ -24,6 +24,12 @@ if [ "$platform" = ios ]; then
   needles+=(MeetingFixtures offline-fixture meetings-real-microphone)
   controls+=(MeetingFixtures offline-fixture meetings-real-microphone)
   files+=(Debug/IOSMeetingFixture.swift Debug/IOSMeetingFixture.swift Debug/IOSMeetingFixture.swift)
+  needles+=(clipboard-preserve clipboard-fixture clipboard-restore DebugClipboard)
+  controls+=(clipboard-preserve clipboard-fixture clipboard-restore "enum DebugClipboard")
+  files+=(Debug/DebugClipboard.swift Debug/DebugClipboard.swift Debug/DebugClipboard.swift Debug/DebugClipboard.swift)
+  needles+=(keyboard-probe KeyboardProbe FieldProbeLink)
+  controls+=(keyboard-probe "enum KeyboardProbe" FieldProbeLink)
+  files+=(Debug/KeyboardProbe.swift Debug/KeyboardProbe.swift Debug/KeyboardProbe.swift)
 fi
 if [ "$platform" = mac ]; then
   # Mac retired the dedicated composer and its probe. Keep scanning the old leak strings,

@@ -161,7 +161,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func textDidChange(_ textInput: (any UITextInput)?) {
         super.textDidChange(textInput)
-        controller?.documentDidChange()
+        controller?.textDidChange()
         switchForAutoFillIfNeeded()
     }
 
@@ -169,7 +169,7 @@ final class KeyboardViewController: UIInputViewController {
     /// report only `textDidChange`, which comes to the same handler.
     override func selectionDidChange(_ textInput: (any UITextInput)?) {
         super.selectionDidChange(textInput)
-        controller?.documentDidChange()
+        controller?.selectionDidChange()
         switchForAutoFillIfNeeded()
     }
 }

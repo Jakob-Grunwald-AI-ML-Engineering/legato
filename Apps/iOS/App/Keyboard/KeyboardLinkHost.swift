@@ -43,7 +43,7 @@ final class KeyboardLinkHost {
         let instructionChannel = InstructionFieldChannel(store: LinkStore(backing))
         self.instructionChannel = instructionChannel
         keyboardSession.instruction.field = instructionChannel
-        dictation.attachCleanupField(instructionChannel, duringPauses: false)
+        dictation.attachCleanupField(instructionChannel, duringPauses: true)
         let liveChannel = LiveDictationLink(store: LinkStore(backing))
         let publishDictation: @MainActor () -> Void = { [weak self, weak dictation] in
             guard let self, let dictation, dictation.mode != .live else { return }
@@ -80,6 +80,9 @@ final class KeyboardLinkHost {
                 }
                 var value = DictationStatus()
                 value.fieldCleanupOutcome = dictation.fieldCleanupOutcome
+                value.speechRunID = dictation.liveRun?.runID
+                value.speechActivity = dictation.liveRun == nil ? nil : dictation.speechIsActive
+
                 value.audioRoute = self.keyboardSession?.route ?? .idle
                 value.dictationTail = self.keyboardSession?.dictationTail
                 value.dictationTake = dictation.takeDisplay

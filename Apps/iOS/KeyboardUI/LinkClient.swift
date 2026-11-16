@@ -42,7 +42,11 @@ final class LinkClient {
     /// Calls `handler` on the main actor for every note of instruction mode the app posts: the strip changed
     /// (`link.instruction`), a field read is asked for (`link.read`), an edit is to land (`link.instruction.edit`).
     func observeInstruction(_ handler: @escaping @MainActor () -> Void) {
-        for name in [LinkChannel.Note.instruction, LinkChannel.Note.read, LinkChannel.Note.instructionEdit] {
+        var notes = [LinkChannel.Note.instruction, LinkChannel.Note.read, LinkChannel.Note.instructionEdit]
+        #if DEBUG || LEGATO_INTERNAL
+        notes.append(FieldProbeLink.note)
+        #endif
+        for name in notes {
             observers.append(DarwinObserver(name: name) { Task { @MainActor in handler() } })
         }
     }
@@ -72,6 +76,11 @@ final class LinkClient {
         guard let store else { return }
         LiveDictationLink(store: store).acknowledge(ack)
     }
+
+    #if DEBUG || LEGATO_INTERNAL
+    func takeFieldProbe() -> FieldProbeRequest? { store.map { FieldProbeLink(store: $0).takeRequest() } ?? nil }
+    func writeFieldProbe(_ reply: FieldProbeReply) { if let store { FieldProbeLink(store: store).reply(reply) } }
+    #endif
 
     // MARK: Instruction mode
 

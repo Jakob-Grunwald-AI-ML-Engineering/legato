@@ -88,6 +88,11 @@ final class KeyboardController {
     /// The one writer of the field (see the type's comment), and the field it belongs to.
     @ObservationIgnored private var queue = FieldQueue()
     @ObservationIgnored private var queueDocumentID: String?
+    /// A host can reuse documentIdentifier after Send. This identity belongs to one draft,
+    /// and is invalidated by an observed external clear before any late cleanup can apply.
+    @ObservationIgnored private var draftID = UUID().uuidString
+    @ObservationIgnored private var draftHadText = false
+
     @ObservationIgnored private var pumping = false
     /// When the queue last stepped: each step is given the time since, so a field that held still while the ticker
     /// slept counts as still (a run that comes after a tap starts at once, not after the quiet wait).
@@ -318,6 +323,10 @@ final class KeyboardController {
         seenDictationNoticeID = value.dictationNoticeID ?? seenDictationNoticeID
         let wasOpen = routeOpen
         dictationPresentation = value
+        if let runID = value.speechRunID, let active = value.speechActivity {
+            queue.setSpeaking(active, runID: runID)
+            pump()
+        }
         if let outcome = value.fieldCleanupOutcome, outcome != seenFieldCleanupOutcome {
             seenFieldCleanupOutcome = outcome
             if outcome.runID == liveSnapshot?.runID, document.documentID == liveDocumentID,
@@ -386,6 +395,9 @@ final class KeyboardController {
     }
 
     func disappeared() {
+        #if DEBUG || LEGATO_INTERNAL
+        endFieldProbe()
+        #endif
         correctionPoll?.cancel(); correctionPoll = nil
         isVisible = false
         if let snapshot = liveSnapshot, !snapshot.complete || snapshot.version != liveAckedVersion || !queue.isIdle {
@@ -433,7 +445,38 @@ final class KeyboardController {
 
     /// The field, its traits or the cursor changed (a new field, another return key, a tap in the text): the
     /// extension's `textDidChange` and `selectionDidChange` both come here.
+    /// Opaque host selections can keep the same windows and report no selectedText. Preserve
+    /// this external-event provenance before ordinary reconciliation could mistake it for a caret.
+    #if DEBUG || LEGATO_INTERNAL
+    @ObservationIgnored private var nativeTextChangeCount = 0
+    @ObservationIgnored private var nativeSelectionChangeCount = 0
+    #endif
+
+    func textDidChange() {
+        #if DEBUG || LEGATO_INTERNAL
+        nativeTextChangeCount += 1
+        #endif
+        if !queue.hasRecentOwnOperation, !isFieldBusy {
+            queue.externalContextChanged(report: currentReport)
+        }
+        documentDidChange()
+    }
+
+    func selectionDidChange() {
+        #if DEBUG || LEGATO_INTERNAL
+        nativeSelectionChangeCount += 1
+        #endif
+        if !queue.hasRecentOwnOperation, !isFieldBusy {
+            queue.externalSelectionChanged(report: currentReport)
+        }
+        documentDidChange()
+    }
+
     func documentDidChange() {
+        #if DEBUG || LEGATO_INTERNAL
+        if probeLease != nil, document.documentID != probeFieldID || document.isSecureTextEntry { endFieldProbe() }
+        #endif
+        observeDraftBoundary()
         // A walk moves the cursor on purpose: nothing of it is the user's. The queue's own ops come back here too; it
         // reads them from the next report.
         if isFieldBusy {
@@ -520,6 +563,35 @@ final class KeyboardController {
     /// The text before the user's cursor as the queue will leave it: what producers (typed lines, host text) plan against.
     private var queueContextBefore: String { queue.seeded ? queue.projectedBefore : shown(document.contextBefore) }
 
+    /// `hasText` distinguishes an actual cleared editor from an unreadable/stale empty proxy
+    /// window. Observe before the field-read early return so clear → type is not hidden by a read.
+    private func observeDraftBoundary() {
+        if document.hasText {
+            draftHadText = true
+            return
+        }
+        guard document.contextBefore.isEmpty, document.contextAfter.isEmpty,
+              document.selectedText?.isEmpty != false else { return }
+        if queue.ownsEmptyReport {
+            // A valid cleanup may remove an all-filler draft. Consume that owned empty state
+            // now so its next idle observation cannot masquerade as a later external Send.
+            draftHadText = false
+            return
+        }
+        guard draftHadText else { return }
+        draftHadText = false
+        draftID = UUID().uuidString
+        fieldOperationCancelled = true
+        if let id = activeInstructionID { link.cancelInstruction(id) }
+        for instructionID in magicEditIDs.values { link.cancelInstruction(instructionID) }
+        cancelRevokedInstructionEdits()
+        forgetLiveRun()
+        resetQueue(reason: "draft-cleared")
+        fieldRead = nil
+        sessionSpan.broken()
+        trace?("field draft cleared")
+    }
+
     private var currentReport: FieldQueue.Report {
         .init(before: shown(document.contextBefore), after: shown(document.contextAfter), selected: document.selectedText)
     }
@@ -537,6 +609,7 @@ final class KeyboardController {
                 }
                 resetQueue(reason: "field")
             }
+            draftID = UUID().uuidString; draftHadText = false
             queueDocumentID = id
             journal.write(.init(t: Self.uptimeMs, kind: .field, field: id))
             if let rebound {
@@ -612,6 +685,7 @@ final class KeyboardController {
         pumping = true
         defer { pumping = false }
         syncQueueField()
+        observeDraftBoundary()
         let now = ContinuousClock.now
         var elapsed = lastStepAt.map { Self.milliseconds(now - $0) } ?? 0
         lastStepAt = now
@@ -843,6 +917,9 @@ final class KeyboardController {
         guard isVisible, !document.isSecureTextEntry else { return }
         updateCleanup { $0.received(snapshot, at: Date()) }
         enqueue(snapshot)
+        if dictationPresentation.speechRunID == snapshot.runID, let active = dictationPresentation.speechActivity {
+            queue.setSpeaking(active, runID: snapshot.runID)
+        }
         pump()
     }
 
@@ -948,7 +1025,8 @@ final class KeyboardController {
     /// A mismatch gets one bounded look around, under the queue's own cursor lease. Reading is separate from
     /// changing: only shared policy may turn its evidence into new minimal edits after restoration was verified.
     private func beginQueueRecovery() {
-        guard recoveryTask == nil, isVisible, !isTornDown, let request = queue.recoveryRequest else { return }
+        guard recoveryTask == nil, isVisible, !isTornDown, !queue.hasUnverifiedInput,
+              let request = queue.recoveryRequest else { return }
         let taskID = UUID(), fieldID = document.documentID
         recoveryTaskID = taskID
         recoveryTask = Task { [weak self] in
@@ -1120,7 +1198,8 @@ final class KeyboardController {
     /// show text that is no longer there. A move of one character and back makes it report afresh; each move is given
     /// the settle gap (the proxy shows a move before the host applied it). Not with a selection (a move would collapse it).
     @discardableResult private func refreshContext() async -> Bool {
-        guard queue.ownsRead, isVisible, !isTornDown, !shouldCancelFieldOperation, !Task.isCancelled else { return false }
+        guard queue.ownsRead, isVisible, !isTornDown, !queue.hasUnverifiedInput,
+              !shouldCancelFieldOperation, !Task.isCancelled else { return false }
         guard document.selectedText?.isEmpty != false else { return true }
         let id = document.documentID
         let origin = (before: shown(document.contextBefore), after: shown(document.contextAfter))
@@ -1247,6 +1326,19 @@ final class KeyboardController {
         let strip = link.readInstructionStrip()
         if strip != instructionStrip { instructionStrip = strip; instructionStripAt = Date(); syncRowTakeover() }
         guard isVisible, !serving else { return }
+        #if DEBUG || LEGATO_INTERNAL
+        if let request = link.takeFieldProbe() {
+            serving = true
+            Task { [weak self] in
+                await self?.serveFieldProbe(request)
+                self?.serving = false
+                self?.receiveInstruction()
+            }
+            return
+        }
+        // The explicit development lease suspends every normal reader and writer.
+        if probeLease != nil { return }
+        #endif
         // One at a time: a read never walks while an edit's ops are still landing, and the other way round.
         if let request = link.takeReadRequest() {
             serving = true
@@ -1265,6 +1357,100 @@ final class KeyboardController {
         }
     }
 
+    #if DEBUG || LEGATO_INTERNAL
+    @ObservationIgnored private var probeLease: UUID?
+    @ObservationIgnored private var probeSessionID: String?
+    @ObservationIgnored private var probeFieldID: String?
+    @ObservationIgnored private var probeExpiry: Task<Void, Never>?
+
+    /// Abandonment timeout is an operational safety policy, not a host latency measurement.
+    private func refreshProbeExpiry() {
+        probeExpiry?.cancel()
+        let lease = probeLease
+        probeExpiry = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(120))
+            guard !Task.isCancelled, let self, self.probeLease == lease else { return }
+            self.endFieldProbe()
+        }
+    }
+
+    /// Leave the caret exactly where the operator put it; discard stale plans and seed from host truth.
+    private func endFieldProbe() {
+        guard probeLease != nil else { return }
+        probeExpiry?.cancel(); probeExpiry = nil
+        probeLease = nil; probeSessionID = nil; probeFieldID = nil
+        isReadingField = false
+        fieldOperationCancelled = true
+        forgetLiveRun()
+        resetQueue(reason: "probe-ended")
+        queue.externalSelectionChanged(report: currentReport)
+        sessionSpan.broken(); fieldRead = nil
+        if isVisible { documentDidChange() }
+    }
+
+    private func serveFieldProbe(_ request: FieldProbeRequest) async {
+        let start = Self.uptimeMs
+        func reply(_ error: String? = nil, _ observations: [FieldProbeObservation] = []) {
+            link.writeFieldProbe(FieldProbeReply(request: request, active: probeLease != nil,
+                ownsLease: probeLease != nil && queue.ownsRead && cursorReadID == probeLease,
+                fieldID: document.documentID, error: error, observations: observations))
+        }
+        func observation() -> FieldProbeObservation {
+            let secure = document.isSecureTextEntry
+            return FieldProbeObservation(elapsedMs: Self.uptimeMs - start, uptimeMs: Self.uptimeMs,
+                before: secure ? "" : document.contextBefore, after: secure ? "" : document.contextAfter,
+                selected: secure ? nil : document.selectedText, hasText: document.hasText,
+                fieldID: document.documentID, secure: secure,
+                nativeTextChangeCount: nativeTextChangeCount, nativeSelectionChangeCount: nativeSelectionChangeCount)
+        }
+        guard (0...10_000).contains(request.milliseconds), request.delta != Int.min,
+              Date().timeIntervalSince(request.at) <= LinkChannel.requestMaxAge else {
+            return reply("Invalid or expired probe operation.")
+        }
+        guard isVisible, !isTornDown, document.documentID != nil, !document.isSecureTextEntry else {
+            endFieldProbe()
+            return reply("Probe requires a visible nonsecure field.")
+        }
+        if request.action == .begin {
+            guard probeLease == nil else { return reply("A probe session already owns the field. End it first.") }
+            syncQueueField()
+            guard let lease = await pauseQueue() else { return reply("The queue could not grant an exclusive probe lease.") }
+            probeLease = lease; probeSessionID = request.sessionID; probeFieldID = document.documentID
+            isReadingField = true
+            fieldOperationCancelled = false
+            refreshProbeExpiry()
+            return reply(nil, [observation()])
+        }
+        guard probeLease != nil, probeSessionID == request.sessionID,
+              document.documentID == probeFieldID, cursorReadID == probeLease, queue.ownsRead else {
+            if probeSessionID == request.sessionID { endFieldProbe() }
+            return reply("The probe session is absent or its field/keyboard changed. Begin again.")
+        }
+        refreshProbeExpiry()
+        switch request.action {
+        case .begin: break // handled above
+        case .end:
+            let final = observation()
+            endFieldProbe()
+            reply(nil, [final])
+        case .read, .status:
+            reply(nil, [observation()])
+        case .move, .pause:
+            if request.action == .move { dispatch(.move(request.delta), reading: true) }
+            var samples = request.action == .move ? [observation()] : []
+            if request.milliseconds > 0 { try? await Task.sleep(for: .milliseconds(request.milliseconds)) }
+            guard !Task.isCancelled, isVisible, document.documentID == probeFieldID,
+                  probeSessionID == request.sessionID, cursorReadID == probeLease, queue.ownsRead,
+                  !document.isSecureTextEntry else {
+                endFieldProbe()
+                return reply("The field changed during the probe operation.")
+            }
+            if request.action == .pause || request.milliseconds > 0 { samples.append(observation()) }
+            reply(nil, samples)
+        }
+    }
+    #endif
+
     /// Reads the field for the app (`link.read`). The context comes from what is known without moving the cursor (the
     /// windows around it, the session's text) and walks up only when no session text exists and the field shows more.
     /// `toCap` walks up and then down (below the cursor only the host's window is known until then), to the cap in all.
@@ -1273,6 +1459,10 @@ final class KeyboardController {
         defer { completeFieldOperation() }
         guard Date().timeIntervalSince(request.at) <= LinkChannel.requestMaxAge, let documentID = document.documentID, !document.isSecureTextEntry else {
             return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "No text field to read."))
+        }
+        guard !queue.hasUnverifiedInput else {
+            return link.writeReadReply(FieldReadReply(id: request.id, state: .failed,
+                error: "This app did not confirm the cursor or text context. Nothing was moved or edited."))
         }
         // The keyboard's own writes on their way land first; then the queue lands the op in flight and brings the caret
         // home, and the read has the cursor to itself until it ends. That can take longer than the app waits for a first
@@ -1294,7 +1484,7 @@ final class KeyboardController {
             }
             markRead(request.instructionID)
             return link.writeReadReply(FieldReadReply(id: request.id, state: .done,
-                above: queue.expectedBefore, below: queue.expectedAfter, documentID: documentID))
+                above: queue.expectedBefore, below: queue.expectedAfter, documentID: documentID, draftID: draftID))
         }
         guard await refreshContext() else {
             return link.writeReadReply(FieldReadReply(id: request.id, state: .failed,
@@ -1410,6 +1600,14 @@ final class KeyboardController {
         guard let documentID = document.documentID, edit.documentID == nil || edit.documentID == documentID, !document.isSecureTextEntry else {
             return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The text field changed, so nothing was edited."))
         }
+        observeDraftBoundary()
+        guard !queue.hasUnverifiedInput else {
+            return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false,
+                reason: "This app did not confirm the cursor or text context. Nothing was moved or edited."))
+        }
+        guard edit.draftID == nil || edit.draftID == draftID else {
+            return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The draft was sent or cleared, so nothing was edited."))
+        }
         guard !link.instructionCancelled(edit.instructionID) else {
             return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The instruction was cancelled before editing."))
         }
@@ -1484,6 +1682,9 @@ final class KeyboardController {
     /// A key, a pan or a word-row tap while a walk reads the field: the walk stops (and puts the cursor back), the
     /// instruction is cancelled, and the input lands after it. Nothing waits for more than that.
     private func userPreemptsFieldRead() {
+        #if DEBUG || LEGATO_INTERNAL
+        endFieldProbe()
+        #endif
         guard isFieldBusy || activeInstructionID != nil, isReadingField || isNudging else { return }
         fieldOperationCancelled = true
         if let id = activeInstructionID { link.cancelInstruction(id) }

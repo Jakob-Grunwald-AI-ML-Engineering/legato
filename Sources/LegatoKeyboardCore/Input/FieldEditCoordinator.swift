@@ -4,6 +4,10 @@ import Foundation
 public struct FieldEditCoordinator: Sendable {}
 
 public extension FieldEditCoordinator {
+    /// Explicit product responsiveness target for typing, cursor movement and resumed speech.
+    /// This is a requirement, not a measured host latency or a cleanup completion deadline.
+    static let inputResponseTargetMs = 500.0
+
     /// Shared ordered operation barrier used by both platform queues. Region placement stays in the adapter,
     /// because a proxy exposes bounded windows while Accessibility exposes absolute ranges.
     struct Operations: Sendable, Equatable {

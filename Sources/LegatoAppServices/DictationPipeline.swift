@@ -156,6 +156,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     @ObservationIgnored public var onSpeechActivity: (@MainActor (Bool) -> Void)?
     @ObservationIgnored public private(set) var fieldCleanup: FieldCleanupSession?
     @ObservationIgnored private var voiceActive = true
+    public var speechIsActive: Bool { voiceActive }
+
     @ObservationIgnored private var cleanupDuringPauses = false
     @ObservationIgnored public var cleanupFieldAvailable: @MainActor () -> Bool = { true }
     @ObservationIgnored private var fieldEntry: (id: UUID, raw: String)?

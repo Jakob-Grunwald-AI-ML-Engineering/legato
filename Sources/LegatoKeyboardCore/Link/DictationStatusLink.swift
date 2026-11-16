@@ -7,6 +7,10 @@ public enum DictationTakePhase: String, Sendable, Codable, Equatable { case buff
 /// Lightweight dictation controls and presentation. Text delivery stays on LiveDictationLink.
 public struct DictationStatus: Codable, Equatable, Sendable {
     public var fieldCleanupOutcome: CleanupFieldOutcome?
+    /// Acoustic/semantic activity belongs to this run; absent from older hosts.
+    public var speechRunID: String?
+    public var speechActivity: Bool?
+
     public var audioRoute = AudioRoute.idle
     public var error: String?
     public var voiceIsolationStatus: String?
