@@ -2,6 +2,7 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 import LegatoMac
+import LegatoKeyboardCore
 
 /// The field queue's temporary native selection owns this process-scoped keyboard handoff.
 /// Other processes and idle fields always pass through. Original events, including key-up,
@@ -9,15 +10,16 @@ import LegatoMac
 final class NativeInputHandoff: @unchecked Sendable {
     static let shared = NativeInputHandoff()
     // User responsiveness requirement, split between native work and the reserved return home.
-    static let budget = 0.5
+    static let budget = FieldEditCoordinator.inputResponseTargetMs / 1000
     private static let replayTag: Int64 = 0x4c454741544f4846
     private struct Held {
         let event: CGEvent
         let userData: Int64
     }
-    private enum Phase { case idle, borrowed, replaying, blocked }
     private let lock = NSLock()
-    private var phase = Phase.idle
+    private var lease = NativeInputLease()
+    private var phase: NativeInputLease.Phase { lease.phase }
+    private var fieldID: AnyHashable?
     private var pid: pid_t = 0
     private var port: CFMachPort?
     private var thread: TapLoop?
@@ -32,7 +34,7 @@ final class NativeInputHandoff: @unchecked Sendable {
 
     private init() {}
 
-    @MainActor func begin(pid: pid_t) -> Bool {
+    @MainActor func begin(pid: pid_t, fieldID: AnyHashable) -> Bool {
         guard lock.withLock({ phase == .idle }) else { return false }
         if self.pid != pid || port == nil {
             if let port { CGEvent.tapEnable(tap: port, enable: false); CFMachPortInvalidate(port) }
@@ -52,7 +54,8 @@ final class NativeInputHandoff: @unchecked Sendable {
         guard let port, CGEvent.tapIsEnabled(tap: port) else { return false }
         return lock.withLock {
             guard phase == .idle else { return false }
-            started = ProcessInfo.processInfo.systemUptime; homing = false; phase = .borrowed
+            started = ProcessInfo.processInfo.systemUptime; homing = false; self.fieldID = fieldID
+            _ = lease.begin()
             return true
         }
     }
@@ -76,20 +79,20 @@ final class NativeInputHandoff: @unchecked Sendable {
             guard phase == .borrowed else { return false }
             lastDuration = ProcessInfo.processInfo.systemUptime - started
             guard homeVerified else {
-                failures += 1; phase = .blocked
+                failures += 1; lease.finish(homeVerified: false, hasPendingEvents: !held.isEmpty || !posted.isEmpty)
                 return false // retained events and a failed unit; never a responsiveness pass
             }
             if lastDuration > Self.budget { failures += 1 }
-            phase = .replaying
+            lease.finish(homeVerified: true, hasPendingEvents: !held.isEmpty || !posted.isEmpty)
             postHeld()
             return lastDuration <= Self.budget
         }
     }
 
     private func postHeld() {
-        guard posted.isEmpty else { return }
+        guard phase == .replaying, posted.isEmpty else { return }
         posted = held; held = []
-        if posted.isEmpty { phase = .idle; return }
+        if posted.isEmpty { lease.drained(); return }
         for item in posted { item.event.postToPid(pid) }
     }
 
@@ -101,10 +104,10 @@ final class NativeInputHandoff: @unchecked Sendable {
                 let original = posted.removeFirst()
                 event.setIntegerValueField(.eventSourceUserData, value: original.userData)
                 replayed += 1
-                if posted.isEmpty { postHeld() }
+                if posted.isEmpty, phase == .replaying { postHeld() }
                 return Unmanaged.passUnretained(event)
             }
-            guard phase != .idle else { return Unmanaged.passUnretained(event) }
+            guard lease.capturesInput else { return Unmanaged.passUnretained(event) }
             let copy = event.copy() ?? event // Held retains the original if copying is unavailable.
             let data = copy.getIntegerValueField(.eventSourceUserData)
             copy.setIntegerValueField(.eventSourceUserData, value: Self.replayTag)
@@ -113,13 +116,29 @@ final class NativeInputHandoff: @unchecked Sendable {
         }
     }
 
-    fileprivate func disabled() { lock.withLock { failures += 1; phase = .blocked } }
+    fileprivate func disabled() { lock.withLock { failures += 1; lease.disable(hasPendingEvents: !held.isEmpty || !posted.isEmpty) } }
+    /// An explicit click can recover held-but-never-posted events. Unacknowledged
+    /// posted events are uncertain and are never replayed a second time.
+    @MainActor func recover(pid: pid_t, fieldID: AnyHashable, verifiedClick: Bool) -> Bool {
+        guard let port else { return false }
+        if !CGEvent.tapIsEnabled(tap: port) { CGEvent.tapEnable(tap: port, enable: true) }
+        guard CGEvent.tapIsEnabled(tap: port) else { return false }
+        return lock.withLock {
+            guard self.pid == pid, self.fieldID == fieldID, posted.isEmpty,
+                  lease.recover(verifiedClick: verifiedClick, hasPendingEvents: !held.isEmpty) else { return false }
+            postHeld()
+            return true
+        }
+    }
+
     var failureNotice: String? {
         lock.withLock {
             guard phase == .blocked else { return nil }
             return held.isEmpty && posted.isEmpty
                 ? "Native edits stopped because the cursor could not be restored."
-                : "Typing is paused because the cursor could not be restored. Pending key events are retained."
+                : posted.isEmpty
+                    ? "Cleanup paused. Pending keys are kept. Click the same field to restore them."
+                    : "Cleanup paused. Pending key delivery could not be confirmed; keys will not be replayed automatically."
         }
     }
     var diagnostics: [String: Any] {

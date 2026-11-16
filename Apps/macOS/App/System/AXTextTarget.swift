@@ -366,12 +366,26 @@ final class AXTextTarget: TextTarget {
     private var nativeInputUnavailable = false
     private var nativeClickMark = 0
     func beginNativeInputUnit() -> Bool {
-        guard !nativeInputUnavailable, isFocused(), NativeInputHandoff.shared.begin(pid: pid) else { return false }
+        guard !nativeInputUnavailable, isFocused(), NativeInputHandoff.shared.begin(pid: pid, fieldID: AnyHashable(ElementKey(element: element))) else { return false }
         nativeClickMark = RealInput.shared.clickCount
         return true
     }
     var nativeInputProtected: Bool { NativeInputHandoff.shared.protected && RealInput.shared.clickCount == nativeClickMark }
     var nativeInputNotice: String? { NativeInputHandoff.shared.failureNotice }
+    func recoverNativeInputAfterClick() -> Bool {
+        guard let click = RealInput.shared.lastClick, click.count > nativeClickMark,
+              isFocused(), Self.security(of: element) == .notPassword,
+              let frame = Self.frame(of: element), frame.contains(click.point),
+              let first = try? selectedRange(), let second = try? selectedRange(), first == second,
+              isFocused() else { return false }
+        // The gate also checks the original field token; rebinding to a password,
+        // another editor or another field in the same process cannot release old keys.
+        let recovered = NativeInputHandoff.shared.recover(pid: pid,
+            fieldID: AnyHashable(ElementKey(element: element)), verifiedClick: true)
+        if recovered { nativeClickMark = RealInput.shared.clickCount }
+        return recovered
+    }
+
     func prepareNativeInputHome() { NativeInputHandoff.shared.prepareHome() }
     func endNativeInputUnit(homeVerified: Bool) -> Bool {
         let ok = NativeInputHandoff.shared.finish(homeVerified: homeVerified)
@@ -520,11 +534,9 @@ final class AXTextTarget: TextTarget {
             subrole = string(kAXSubroleAttribute)
             domID = string("AXDOMIdentifier").flatMap { $0.isEmpty ? nil : $0 }
             domClasses = ((try? AXTextTarget.copyAttribute(element, "AXDOMClassList")) as? [String]).flatMap { $0.isEmpty ? nil : $0 }
-            var point = CGPoint.zero, size = CGSize.zero
-            if let value = (try? AXTextTarget.copyAttribute(element, kAXPositionAttribute)) ?? nil, CFGetTypeID(value) == AXValueGetTypeID(),
-               AXValueGetValue(unsafeDowncast(value, to: AXValue.self), .cgPoint, &point) { x = Int(point.x.rounded()) } else { x = nil }
-            if let value = (try? AXTextTarget.copyAttribute(element, kAXSizeAttribute)) ?? nil, CFGetTypeID(value) == AXValueGetTypeID(),
-               AXValueGetValue(unsafeDowncast(value, to: AXValue.self), .cgSize, &size) { width = Int(size.width.rounded()) } else { width = nil }
+            let frame = AXTextTarget.frame(of: element)
+            x = frame.map { Int($0.minX.rounded()) }
+            width = frame.map { Int($0.width.rounded()) }
         }
 
         /// A fresh element in the same place: same window, role and subrole, DOM id and classes, x and width. Something
@@ -719,6 +731,17 @@ final class AXTextTarget: TextTarget {
         let error = AXUIElementCopyParameterizedAttributeValue(element, key as CFString, value, &result)
         guard error == .success else { throw AXTargetError.attribute(error) }
         return result
+    }
+
+    private static func frame(of element: AXUIElement) -> CGRect? {
+        var point = CGPoint.zero, size = CGSize.zero
+        guard let position = (try? copyAttribute(element, kAXPositionAttribute)) ?? nil,
+              CFGetTypeID(position) == AXValueGetTypeID(),
+              AXValueGetValue(unsafeDowncast(position, to: AXValue.self), .cgPoint, &point),
+              let extent = (try? copyAttribute(element, kAXSizeAttribute)) ?? nil,
+              CFGetTypeID(extent) == AXValueGetTypeID(),
+              AXValueGetValue(unsafeDowncast(extent, to: AXValue.self), .cgSize, &size) else { return nil }
+        return CGRect(origin: point, size: size)
     }
 
     private static func rect(from value: CFTypeRef) throws -> CGRect {

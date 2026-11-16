@@ -112,6 +112,7 @@ public protocol TextTarget: AnyObject {
     func beginNativeInputUnit() -> Bool
     var nativeInputProtected: Bool { get }
     var nativeInputNotice: String? { get }
+    func recoverNativeInputAfterClick() -> Bool
     func prepareNativeInputHome()
     func endNativeInputUnit(homeVerified: Bool) -> Bool
 
@@ -136,6 +137,7 @@ public extension TextTarget {
     func beginNativeInputUnit() -> Bool { true }
     var nativeInputProtected: Bool { false }
     var nativeInputNotice: String? { nil }
+    func recoverNativeInputAfterClick() -> Bool { false }
     func prepareNativeInputHome() {}
     func endNativeInputUnit(homeVerified: Bool) -> Bool { homeVerified }
 

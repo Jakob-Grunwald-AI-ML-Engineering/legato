@@ -78,16 +78,18 @@ final class RealInput: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
     private var clicks = 0
+    private var clickPoint: CGPoint?
     /// Where clicks are Legato's own (the dictation pill's buttons, in global display coordinates, origin top left):
     /// they act on Legato, not on the field, so they are not the user's input.
     private var ownArea = CGRect.null
     var count: Int { lock.withLock { value } }
     var clickCount: Int { lock.withLock { clicks } }
+    var lastClick: (count: Int, point: CGPoint)? { lock.withLock { clickPoint.map { (clicks, $0) } } }
     func bump(at point: CGPoint? = nil) {
         lock.withLock {
             if let point, ownArea.contains(point) { return }
             value &+= 1
-            if point != nil { clicks &+= 1 }
+            if let point { clicks &+= 1; clickPoint = point }
         }
     }
     func setOwnArea(_ rect: CGRect) { lock.withLock { ownArea = rect } }

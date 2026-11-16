@@ -231,7 +231,17 @@ import LegatoMac
     }
 
     /// The user typed or clicked: the queue takes their caret and text from the next read and replans around them.
-    public func relinquish() { panelOwned = false; queue.userActed() }
+    public func relinquish() {
+        panelOwned = false; queue.userActed()
+        guard let target, target.nativeInputNotice != nil else { return }
+        Task { @MainActor [weak self, weak target] in
+            guard let self, let target else { return }
+            await sleep(MacFieldQueue.keySettle)
+            if target.recoverNativeInputAfterClick() {
+                report("Cursor recovered. Cleanup is paused for this take.")
+            }
+        }
+    }
     public func cancel(instructionID: String) {
         guard activeInstructionID == instructionID else { return }
         activeInstructionID = nil
