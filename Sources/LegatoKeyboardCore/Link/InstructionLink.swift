@@ -206,8 +206,13 @@ public struct ScopedEditAck: Codable, Sendable, Equatable {
     public var partial: String?
     /// Ops went out and the edit stopped before the end; without `partial` the field's text is unknown.
     public var stopped: Bool?
-    public init(id: String, applied: Bool, cursor: Int? = nil, reason: String? = nil, partial: String? = nil, stopped: Bool? = nil) {
+    /// Not applied because the scope could not be found or verified again (`FieldQueue.DropReason.unplaceable`): the
+    /// field may hold part of the edit. A cleanup reads it afresh and runs once more (`FieldCleanupSession`).
+    public var unplaceable: Bool?
+    public init(id: String, applied: Bool, cursor: Int? = nil, reason: String? = nil, partial: String? = nil, stopped: Bool? = nil,
+                unplaceable: Bool? = nil) {
         self.id = id; self.applied = applied; self.cursor = cursor; self.reason = reason; self.partial = partial; self.stopped = stopped
+        self.unplaceable = unplaceable
     }
 }
 

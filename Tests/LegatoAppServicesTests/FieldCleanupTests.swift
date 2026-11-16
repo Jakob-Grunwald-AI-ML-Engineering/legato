@@ -341,3 +341,90 @@ private final class FieldCleaner: SentenceCleaning {
         #expect(nextEndpoint)
     }
 }
+
+/// A field that cannot place an edit (the keyboard's queue dropped it as unplaceable), having lost one character to it.
+@MainActor private final class UnplaceableField: InstructionField {
+    var text: String
+    var refusals: Int
+    var applied: [ScopedEdit] = []
+    init(_ text: String, refusals: Int) { self.text = text; self.refusals = refusals }
+    func publish(_ strip: InstructionStrip) {}
+    func read(_ kind: FieldReadRequest.Kind, instructionID: String, reading: @escaping @MainActor () -> Void) async throws -> FieldReadReply {
+        .init(id: instructionID, state: .done, above: text, below: "", stop: .start, stopBelow: .start, documentID: "field")
+    }
+    func apply(_ edit: ScopedEdit) async -> ScopedEditAck? {
+        guard refusals == 0 else {
+            refusals -= 1
+            text = text.replacingOccurrences(of: "bread", with: "read")
+            return .init(id: edit.id, applied: false, unplaceable: true)
+        }
+        guard edit.scopeText == text else { return .init(id: edit.id, applied: false) }
+        applied.append(edit); text = edit.target
+        return .init(id: edit.id, applied: true, cursor: text.utf16.count)
+    }
+}
+
+@Suite @MainActor struct FieldCleanupRepassTests {
+    private func session(_ field: UnplaceableField, inputs: @escaping @MainActor (String) -> Void) -> FieldCleanupSession {
+        let session = FieldCleanupSession()
+        session.field = field
+        session.clean = { text, _ in
+            inputs(text)
+            return text.replacingOccurrences(of: " read", with: " bread").replacingOccurrences(of: "teh", with: "the")
+        }
+        return session
+    }
+
+    @Test func anUnplaceableCleanupEditGetsOnePassMoreOnTheFieldAsItIsReadThen() async {
+        let field = UnplaceableField("We bring teh bread", refusals: 1)
+        var inputs: [String] = []
+        let session = session(field) { inputs.append($0) }
+        session.request(final: true)
+        await session.settle()
+        #expect(inputs == ["We bring teh bread", "We bring teh read"], "The second pass cleans what the field holds now")
+        #expect(field.text == "We bring the bread")
+        #expect(session.lastApplied)
+    }
+
+    @Test func aPausePassThatCouldNotBePlacedIsRepeatedToo() async {
+        let words = (0..<60).map { "word\($0)" }.joined(separator: " ")
+        let field = UnplaceableField(words + " teh bread", refusals: 1)
+        var inputs: [String] = []
+        let session = session(field) { inputs.append($0) }
+        session.request()
+        await session.settle()
+        #expect(inputs.count == 2)
+        #expect(field.text == words + " the bread")
+    }
+
+    @Test func theAutomaticPassIsNeverFollowedByAnother() async {
+        let field = UnplaceableField("We bring teh bread", refusals: 5)
+        var inputs: [String] = []
+        let session = session(field) { inputs.append($0) }
+        session.request(final: true)
+        await session.settle()
+        #expect(inputs.count == 2)
+        #expect(field.applied.isEmpty && !session.lastApplied)
+        // The stop's pass (or the next pause's) still runs as before, with one more pass of its own at most.
+        session.request(final: true)
+        await session.settle()
+        #expect(inputs.count == 4)
+    }
+
+    @Test func anEditRefusedForAnotherReasonAsksForNoPass() async {
+        @MainActor final class Refusing: InstructionField {
+            func publish(_ strip: InstructionStrip) {}
+            func read(_ kind: FieldReadRequest.Kind, instructionID: String, reading: @escaping @MainActor () -> Void) async throws -> FieldReadReply {
+                .init(id: instructionID, state: .done, above: "We bring teh bread", below: "", stop: .start, stopBelow: .start, documentID: "field")
+            }
+            func apply(_ edit: ScopedEdit) async -> ScopedEditAck? { .init(id: edit.id, applied: false, reason: "The text changed.") }
+        }
+        let field = Refusing(), session = FieldCleanupSession()
+        session.field = field
+        var passes = 0
+        session.clean = { _, _ in passes += 1; return "We bring the bread" }
+        session.request(final: true)
+        await session.settle()
+        #expect(passes == 1)
+    }
+}

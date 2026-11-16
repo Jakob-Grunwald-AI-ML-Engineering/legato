@@ -60,6 +60,9 @@ final class NativeInputHandoff: @unchecked Sendable {
         }
     }
 
+    /// A new dictation run: an earlier run's failure with nothing retained no longer blocks native edits.
+    func beginRun() { lock.withLock { lease.beginRun(hasPendingEvents: !held.isEmpty || !posted.isEmpty) } }
+
     var protected: Bool { lock.withLock { phase == .borrowed } }
     func prepareHome() { lock.withLock { homing = true } }
 

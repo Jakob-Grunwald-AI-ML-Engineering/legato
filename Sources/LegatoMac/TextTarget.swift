@@ -104,6 +104,9 @@ public protocol TextTarget: AnyObject {
     /// transport and offer guarded keys instead. This sends no input, returns true only on an actual downgrade,
     /// and is never called for an uncertain or partially landed write.
     func recoverWriteFailure() -> Bool
+    /// A rich web editor: it stores a space at the end of a line as a no-break space (WebKit and Chromium both), so
+    /// text read from it is compared with spaces folded.
+    var showsNoBreakSpaces: Bool { get }
     /// Whether the field is edited with synthetic keys instead (`press`), each one verified by reading it back.
     var typesKeys: Bool { get }
     /// A counter of the user's real key presses and clicks: a key planned at one mark is refused at another.
@@ -133,6 +136,7 @@ public extension TextTarget {
     var editsInPlace: Bool { true }
     func recoverWriteFailure() -> Bool { false }
     var typesKeys: Bool { false }
+    var showsNoBreakSpaces: Bool { false }
     var inputMark: Int { 0 }
     func beginNativeInputUnit() -> Bool { true }
     var nativeInputProtected: Bool { false }

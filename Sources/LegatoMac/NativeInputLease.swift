@@ -23,6 +23,11 @@ public struct NativeInputLease: Sendable {
     public mutating func disable(hasPendingEvents: Bool) {
         if phase != .idle || hasPendingEvents { phase = .blocked }
     }
+    /// A failure stops native edits for the dictation run it happened in, not for the process: the next run starts
+    /// idle in whatever field it finds. Events still retained from the failure keep it blocked until `recover`.
+    public mutating func beginRun(hasPendingEvents: Bool) {
+        if phase == .blocked, !hasPendingEvents { phase = .idle }
+    }
     /// The adapter must independently confirm a new explicit click, the original
     /// nonsecure field and a stable caret before releasing events retained at failure.
     @discardableResult public mutating func recover(verifiedClick: Bool, hasPendingEvents: Bool) -> Bool {

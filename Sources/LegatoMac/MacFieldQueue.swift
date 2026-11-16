@@ -665,10 +665,15 @@ public final class MacFieldQueue {
             count = cap
         }
         guard let text = try? target.text(in: UTF16Range(location: base, length: count)) else { return nil }
-        return (Document(base: base, text: Self.folded(text, keyed: Self.keyed(target)) as NSString, length: length), selection)
+        return (Document(base: base, text: Self.folded(text, keyed: Self.foldsSpaces(target)) as NSString, length: length), selection)
     }
 
     private static func keyed(_ target: any TextTarget) -> Bool { !target.editsInPlace && target.typesKeys }
+    private static func foldsSpaces(_ target: any TextTarget) -> Bool { keyed(target) || target.showsNoBreakSpaces }
+    /// The field's text there as the queue compares it with its own (`folded`).
+    private func shown(_ target: any TextTarget, in range: UTF16Range) -> String? {
+        (try? target.text(in: range)).map { Self.folded($0, keyed: Self.foldsSpaces(target)) }
+    }
 
     /// Keystroke fields: a rich editor shows a typed space as a no-break space (Chromium does at the end of a line, and
     /// turns it back once more text follows). The queue reads both as a space, so its own spaces are recognised.
@@ -1232,7 +1237,7 @@ public final class MacFieldQueue {
             return await failed(region, after: after, reason: "write", unchanged: nativeWriteUnchanged(region, doc: doc, target: target))
         }
         // Read back the region and the caret before anything else goes out.
-        let shown = try? target.text(in: UTF16Range(location: region.start, length: String(after).utf16.count))
+        let shown = shown(target, in: UTF16Range(location: region.start, length: String(after).utf16.count))
         guard shown == String(after) else {
             // The op may still land: the caret it leaves is ours too.
             expectedSelections.append(UTF16Range(location: range.location + text.utf16.count, length: 0))
@@ -1890,7 +1895,7 @@ public final class MacFieldQueue {
 
     private func nativeWriteUnchanged(_ region: Region, doc: Document, target: any TextTarget) -> Bool {
         (try? target.textLength()) == doc.length
-            && (try? target.text(in: UTF16Range(location: region.start, length: String(region.current).utf16.count))) == String(region.current)
+            && shown(target, in: UTF16Range(location: region.start, length: String(region.current).utf16.count)) == String(region.current)
     }
 
     private func failed(_ region: Region, after: [Character], reason: String, unchanged: Bool = false) async -> Bool {

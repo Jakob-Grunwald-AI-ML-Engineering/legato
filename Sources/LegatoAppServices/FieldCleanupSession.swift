@@ -21,6 +21,8 @@ import LegatoKeyboardCore
     private var lastRead = ""
     private var coverage = FieldCleanupChunks.Coverage()
     private var pendingText = ""
+    /// The next pass is the one automatic pass after an edit the field could not place: it asks for no further one.
+    private var repassing = false
     public private(set) var lastApplied = false
 
     public init() {}
@@ -30,10 +32,11 @@ import LegatoKeyboardCore
         task?.cancel(); task = nil
         if let requestID { field?.cancel(instructionID: requestID) }
         requestID = nil; requested = false; finalRequested = false; lastRead = ""; coverage = .init()
-        pendingText = ""; lastApplied = false
+        pendingText = ""; repassing = false; lastApplied = false
     }
 
-    /// Repeated pauses coalesce. A stop always gets a fresh pass, including long takes.
+    /// Repeated pauses coalesce. A stop always gets a fresh pass, including long takes. An edit the field could not
+    /// place (`ScopedEditAck.unplaceable`) gets one pass more on the text as it is read then, never a loop.
     public func request(final: Bool = false, pendingText: String = "") {
         requested = true; finalRequested = finalRequested || final
         if !pendingText.isEmpty { self.pendingText = pendingText }
@@ -46,8 +49,9 @@ import LegatoKeyboardCore
                 let final = finalRequested
                 let pending = self.pendingText
                 self.pendingText = ""
-                requested = false; finalRequested = false
-                await pass(final: final, pending: pending, generation: token)
+                let repass = repassing
+                requested = false; finalRequested = false; repassing = false
+                await pass(final: final, pending: pending, repass: repass, generation: token)
             }
             if token == generation { task = nil }
         }
@@ -66,7 +70,7 @@ import LegatoKeyboardCore
         return true
     }
 
-    private func pass(final: Bool, pending: String, generation token: Int) async {
+    private func pass(final: Bool, pending: String, repass: Bool, generation token: Int) async {
         guard let field else { return }
         lastApplied = false
         let id = UUID().uuidString
@@ -134,9 +138,14 @@ import LegatoKeyboardCore
             guard token == generation else { return }
             lastApplied = ack?.applied == true
             if ack?.applied == true { coverage.confirm(proposed: target, actual: merged, documentID: fresh.documentID, complete: whole) }
+            if ack?.unplaceable == true, ack?.applied != true, !repass, pending.isEmpty {
+                // The field may hold part of this edit: the same text read again is still to be cleaned.
+                lastRead = ""; requested = true; finalRequested = finalRequested || final; repassing = true
+            }
             let status: CleanupFieldStatus = ack?.applied == true ? (target == source ? .keptAsTyped : .cleaned) : ack?.stopped == true || ack == nil ? .undelivered : .keptAsTyped
             await onResult(source, ack?.applied == true ? merged : ack?.partial ?? current, status)
-            diagnostics?("field.cleanup", ["final": final, "sourceChars": source.count, "targetChars": target.count, "status": status.rawValue])
+            diagnostics?("field.cleanup", ["final": final, "sourceChars": source.count, "targetChars": target.count, "status": status.rawValue,
+                                           "repass": repass, "unplaceable": ack?.unplaceable == true])
         } catch {
             guard token == generation, !Task.isCancelled else { return }
             await onResult("", "", .undelivered)

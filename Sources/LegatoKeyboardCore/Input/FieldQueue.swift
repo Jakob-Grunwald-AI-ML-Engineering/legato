@@ -112,7 +112,8 @@ public struct FieldQueue: Sendable {
         /// A report showed an older confirmed state: lag until a fresh report (after a nudge) keeps showing it.
         case stale
         /// A fresh report kept showing an older state: the host lost what followed. The model goes back to it and the
-        /// lost edits are made again (the user's lost keys go once more).
+        /// lost edits are made again (the user's lost keys go once more). A scoped edit's own inserts and deletes are
+        /// not taken for lost on that report: its scope waits for a fresh read (`parkUnverifiedEdits`).
         case reverted
         /// A jump of the keyboard's own went nowhere (the report kept showing the caret where it was): the text it was
         /// for is not in this field. Its work drops and the model starts over from the report (`reseeded` follows).
@@ -260,6 +261,9 @@ public struct FieldQueue: Sendable {
         var lastAfter: [Character] = []
         /// The user typed or edited while the span was lost: a change found there may be theirs.
         var userActedParked = false
+        /// Parked by `revert`: the text it holds if the edit's inserts and deletes the report no longer showed did
+        /// reach the host after all (`lastText`: if they did not). Only a fresh read tells which (`FieldRecovery`).
+        var landedText: [Character]?
     }
     private var spans: [Int: Span] = [:]
     private var nextSpanID = 0
@@ -489,7 +493,7 @@ public struct FieldQueue: Sendable {
             case .replan(let placement):
                 guard restored, let id = Int(placement.id), var span = spans[id] else { continue }
                 span.start = placement.range.lowerBound; span.end = placement.range.upperBound
-                span.lastText = Array(placement.text); span.parked = false
+                span.lastText = Array(placement.text); span.parked = false; span.landedText = nil
                 spans[id] = span
                 events.append(.resync(.recoveryReplanned))
             case .stop(let key, _):
@@ -506,7 +510,8 @@ public struct FieldQueue: Sendable {
         let pieces = Set(runs.flatMap { $0.pieces.map(\.spanID) })
         let targets = spans.sorted { $0.key < $1.key }.compactMap { id, span -> FieldRecovery.Target? in
             guard span.parked, !span.anchor, !span.userChanged, !span.edited, !span.lastText.isEmpty, !pieces.contains(id) else { return nil }
-            return .init(id: String(id), expected: String(span.lastText), before: String(span.lastBefore), after: String(span.lastAfter))
+            return .init(id: String(id), expected: String(span.lastText), landed: span.landedText.map { String($0) },
+                         before: String(span.lastBefore), after: String(span.lastAfter))
         }
         guard let request = recovery.begin(generation: recoveryGeneration, revision: recoveryRevision, targets: targets) else { return }
         recoveryRequest = request
@@ -2841,7 +2846,9 @@ public struct FieldQueue: Sendable {
         if older.index == nil, let input = flight?.input, flight?.retried == false { lostInputs.append(input) }
         unconfirmedInHistory = false
         abortUnit()
+        let newer = ModelState(text: text, cursor: cursor, userCursor: userCursor, selection: selection, spans: spans)
         restore(older.state)
+        parkUnverifiedEdits(newer: newer)
         if older.at != older.state.cursor {
             cursor = older.at; userCursor = older.at
             closeOpenPieces(.cursor)
@@ -2863,6 +2870,39 @@ public struct FieldQueue: Sendable {
         staleNudgeSent = false; staleNudgeDue = false
         lagging = []
         events.append(.resync(.reverted))
+    }
+
+    /// A report that keeps showing an older state does not prove the host lost an edit's inserts and deletes since:
+    /// Safari can apply one after the stale check's fresh report and never report it (measured on an iPhone: the
+    /// delete landed, the model went back, and the edit's next jump was planned one character off). The scope of a
+    /// queued edit that differs between the two states is therefore parked with both texts. Nothing is planned in it
+    /// until a fresh read shows which one the field holds (`requestRecoveryIfNeeded`, asked when the edit is next
+    /// started: after the user's input, with the caret home), and the model starts over from that read. A scope that
+    /// shows neither drops the edit. Typed lines (no scope to find) and hosts without a reader go back as before.
+    private mutating func parkUnverifiedEdits(newer: ModelState) {
+        guard config.canReadAround else { return }
+        for state in editLane where state.revision == nil && !state.edit.atCursor {
+            guard let id = state.spanID, let was = newer.spans[id], !was.parked, !was.anchor,
+                  was.start >= 0, was.start <= was.end, was.end <= newer.text.count else { continue }
+            let landed = Array(newer.text[was.start..<was.end])
+            if var span = spans[id] {
+                let lost = chars(of: span)
+                guard !span.parked, lost != landed, !lost.isEmpty else { continue }
+                span.lastText = lost; span.landedText = landed
+                span.lastBefore = Array(text[max(0, span.start - Self.contextChars)..<span.start])
+                span.lastAfter = Array(text[span.end..<min(text.count, span.end + Self.contextChars)])
+                span.parked = true; span.userActedParked = false
+                spans[id] = span
+            } else if newer.text != text, !landed.isEmpty {
+                // Placed after the older state: only the text it was last planned against is known.
+                var span = was
+                span.lastText = landed; span.landedText = nil
+                span.lastBefore = Array(newer.text[max(0, was.start - Self.contextChars)..<was.start])
+                span.lastAfter = Array(newer.text[was.end..<min(newer.text.count, was.end + Self.contextChars)])
+                span.parked = true; span.userActedParked = false
+                spans[id] = span
+            }
+        }
     }
 
     /// The report is the model with a few characters more right at the caret (another keyboard typed there): they go
@@ -2890,7 +2930,8 @@ public struct FieldQueue: Sendable {
 
     /// Parked spans come back where their text is found again, once and uniquely.
     private mutating func unparkSpans() {
-        for (id, var span) in spans where span.parked {
+        // A span parked for an unverified edit is found by a fresh read only: the model's own text proves nothing.
+        for (id, var span) in spans where span.parked && span.landedText == nil {
             let needle = span.lastText
             // A short text may well stand elsewhere too (the user's own words): only a long one is found again.
             guard needle.count >= Self.relocateChars, needle.count <= text.count else { continue }

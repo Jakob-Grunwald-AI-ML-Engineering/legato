@@ -1084,7 +1084,7 @@ final class KeyboardController {
             }
             let policy = FieldRecovery()
             let knownAmbiguity = self.queue.recoveryHasKnownAmbiguity
-            if !knownAmbiguity, policy.canResolve(request, text: origin.before + origin.after) {
+            if !knownAmbiguity, !request.needsRead, policy.canResolve(request, text: origin.before + origin.after) {
                 self.queue.completeRecovery(request, report: origin, restored: true)
                 self.handle(self.queue.drainEvents()); return
             }
@@ -1129,7 +1129,7 @@ final class KeyboardController {
                 // the same units when it moves and restores, rather than guessing UTF-16 again.
                 if let collapses = above.collapsesBreaks { reader.collapsesBreaks = collapses }
                 if let characters = above.movesByCharacters { reader.movesByCharacters = characters }
-                if !knownAmbiguity, policy.canResolve(request, text: above.text + origin.after) {
+                if !knownAmbiguity, !request.needsRead, policy.canResolve(request, text: above.text + origin.after) {
                     let returned = self.currentReport
                     if FieldMatch.confirms(expectedBefore: origin.before, expectedAfter: origin.after,
                                            reportedBefore: returned.before, reportedAfter: returned.after) {
@@ -1681,6 +1681,7 @@ final class KeyboardController {
         case .dropped(let drop)?:
             sessionSpan.broken()
             trace?("instruction edit dropped reason=\(drop.reason.rawValue) ms=\(ms)")
+            let unplaceable: Bool? = drop.reason == .unplaceable ? true : nil
             let reason = switch drop.reason {
             case .changed, .userEdited: "The text changed, so the edit was not made. The original and rewrite are available in History."
             case .selectionChanged: "The selection changed, so nothing was edited."
@@ -1689,9 +1690,10 @@ final class KeyboardController {
             }
             // Partly landed: the scope as it stands now, so an undo can still put the original back.
             if let partial = drop.partial, partial != edit.scopeText {
-                link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: reason, partial: partial, stopped: true))
+                link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: reason, partial: partial, stopped: true,
+                                                           unplaceable: unplaceable))
             } else {
-                link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: reason))
+                link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: reason, unplaceable: unplaceable))
             }
         default:
             link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The instruction was cancelled. The original and rewrite are available in History."))

@@ -46,4 +46,25 @@ struct NativeInputLeaseTests {
         #expect(lease.phase == .idle)
         #expect(!lease.capturesInput)
     }
+    @Test func aNewRunClearsAFailureThatRetainsNothing() {
+        var lease = NativeInputLease()
+        _ = lease.begin()
+        lease.finish(homeVerified: false, hasPendingEvents: false)
+        lease.beginRun(hasPendingEvents: false)
+        #expect(lease.phase == .idle)
+        #expect(lease.canBegin)
+    }
+    @Test func aNewRunKeepsAFailureWithRetainedKeysBlocked() {
+        var lease = NativeInputLease()
+        _ = lease.begin()
+        lease.finish(homeVerified: false, hasPendingEvents: true)
+        lease.beginRun(hasPendingEvents: true)
+        #expect(lease.phase == .blocked)
+    }
+    @Test func aNewRunNeverInterruptsABorrow() {
+        var lease = NativeInputLease()
+        _ = lease.begin()
+        lease.beginRun(hasPendingEvents: false)
+        #expect(lease.phase == .borrowed)
+    }
 }

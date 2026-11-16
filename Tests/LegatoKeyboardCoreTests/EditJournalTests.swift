@@ -11,6 +11,8 @@ enum JournalReplay {
         var sent: [ShadowOp] = []
         var recorded: [ShadowOp] = []
         var events: [FieldQueue.Event] = []
+        /// The queue as the journal left it, to go on from there.
+        var queue = FieldQueue()
     }
 
     static func run(_ entries: [EditJournal.Entry], config: FieldQueue.Config = .init()) -> Result {
@@ -34,6 +36,7 @@ enum JournalReplay {
             default: break
             }
         }
+        result.queue = queue
         return result
     }
 

@@ -325,6 +325,8 @@ final class AXTextTarget: TextTarget {
     /// Editable fields without scoped AX writes use synthetic keys, each independently read back by the queue.
     /// Readable pages do not take keys: a letter typed there could invoke a site shortcut.
     var typesKeys: Bool { !nativeInputUnavailable && writeCapabilities.typesKeys }
+    /// WebKit content (it alone advertises AXTextOperation); Chromium is keyed and folds already.
+    var showsNoBreakSpaces: Bool { supportsTextOperation() }
     private var writeCapabilities: FieldWriteCapabilities {
         if let writeCapabilitiesCache { return writeCapabilitiesCache }
         var selectedTextSettable: DarwinBoolean = false
