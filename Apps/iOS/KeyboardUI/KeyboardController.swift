@@ -974,26 +974,26 @@ final class KeyboardController {
     /// Before a walk moves the cursor to read the field: the queue pauses, lands the op in flight and brings the caret
     /// back to the user's cursor (bounded). The walk then has the cursor to itself; `resumeQueue` lets the queue go on.
     @ObservationIgnored private var cursorReadID: UUID?
-    private func pauseQueue(limit: Duration = .milliseconds(2500)) async -> UUID? {
+    private func pauseQueue(limit: Duration = .milliseconds(FieldEditCoordinator.inputResponseTargetMs)) async -> UUID? {
         let clock = ContinuousClock(), start = clock.now, fieldID = document.documentID
         // Magic and mismatch recovery may both need the cursor. A failed waiter never releases the current owner's lease.
         while cursorReadID != nil || queue.paused || isFieldBusy {
-            guard !Task.isCancelled, !isTornDown, isVisible, document.documentID == fieldID,
+            guard !Task.isCancelled, !(activeInstructionID != nil && shouldCancelFieldOperation), !isTornDown, isVisible, document.documentID == fieldID,
                   clock.now - start < limit else { return nil }
             try? await Task.sleep(for: Self.tickInterval)
         }
-        guard !Task.isCancelled, !isTornDown, isVisible, document.documentID == fieldID else { return nil }
+        guard !Task.isCancelled, !(activeInstructionID != nil && shouldCancelFieldOperation), !isTornDown, isVisible, document.documentID == fieldID else { return nil }
         let id = UUID()
         cursorReadID = id
         queue.paused = true
         pump()
         while !queue.isHome, !isTornDown, isVisible, !Task.isCancelled,
-              document.documentID == fieldID, clock.now - start < limit {
+              !(activeInstructionID != nil && shouldCancelFieldOperation), document.documentID == fieldID, clock.now - start < limit {
             try? await Task.sleep(for: Self.tickInterval)
             pump()
         }
         guard cursorReadID == id, document.documentID == fieldID, !Task.isCancelled, isVisible,
-              queue.acquireRead() else {
+              !(activeInstructionID != nil && shouldCancelFieldOperation), queue.acquireRead() else {
             resumeQueue(id)
             trace?("queue pause timed out or cancelled")
             return nil
@@ -1004,13 +1004,34 @@ final class KeyboardController {
     /// Before a read for an instruction: the keyboard's own writes on their way (a cleanup landing) go in first, so the
     /// read shows them (bounded; the edit is placed through anything later, `FieldQueue.markRead`).
     private func landOwnWork(limit: Duration = .seconds(3)) async {
-        let clock = ContinuousClock(), start = clock.now
+        let clock = ContinuousClock(), start = clock.now, fieldID = document.documentID
         pump()
-        while queue.hasOwnWork, !isTornDown, isVisible, clock.now - start < limit {
+        while queue.hasOwnWork, !isTornDown, isVisible, !Task.isCancelled,
+              !shouldCancelFieldOperation, document.documentID == fieldID, clock.now - start < limit {
             try? await Task.sleep(for: Self.tickInterval)
             pump()
         }
         if queue.hasOwnWork { trace?("own work before read timed out") }
+    }
+
+    /// Live snapshots and field reads arrive on separate notifications. A final revision may
+    /// arrive while homing yields, so never keep its writer paused behind the reader's lease.
+    private func pauseQueueAfterOwnWork(limit: Duration = .seconds(3)) async -> UUID? {
+        let start = ContinuousClock.now, fieldID = document.documentID
+        while ContinuousClock.now - start < limit {
+            receiveLiveDictation()
+            guard !Task.isCancelled, !shouldCancelFieldOperation, isVisible, !isTornDown,
+                  document.documentID == fieldID, !queue.hasUnverifiedInput else { return nil }
+            await landOwnWork(limit: max(.zero, limit - (ContinuousClock.now - start)))
+            guard !queue.hasOwnWork, !Task.isCancelled, !shouldCancelFieldOperation,
+                  document.documentID == fieldID, !queue.hasUnverifiedInput else { return nil }
+            let remaining = max(.zero, limit - (ContinuousClock.now - start))
+            guard let lease = await pauseQueue(limit: min(remaining, .milliseconds(FieldEditCoordinator.inputResponseTargetMs))) else { return nil }
+            receiveLiveDictation()
+            if !queue.hasOwnWork { return lease }
+            resumeQueue(lease)
+        }
+        return nil
     }
 
     private func resumeQueue(_ id: UUID) {
@@ -1474,8 +1495,9 @@ final class KeyboardController {
         // home, and the read has the cursor to itself until it ends. That can take longer than the app waits for a first
         // answer: it hears that the read is under way.
         if !queue.isHome || queue.hasOwnWork { link.writeReadReply(FieldReadReply(id: request.id, state: .reading)) }
-        if request.kind == .context || request.kind == .contextInPlace || request.kind == .cleanup { await landOwnWork() }
-        guard let readLease = await pauseQueue() else {
+        let needsOwnWork = request.kind == .context || request.kind == .contextInPlace || request.kind == .cleanup
+        let lease = needsOwnWork ? await pauseQueueAfterOwnWork() : await pauseQueue()
+        guard let readLease = lease else {
             return link.writeReadReply(FieldReadReply(id: request.id, state: .failed, error: "The field is busy. Try again in a moment."))
         }
         defer { resumeQueue(readLease) }
@@ -1618,7 +1640,7 @@ final class KeyboardController {
             return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The instruction was cancelled before editing."))
         }
         let queued = FieldQueue.Edit(id: edit.id, kind: .magic, before: edit.before, after: edit.after, selected: edit.selected,
-                                     target: edit.target, cursorAtEnd: edit.selected != nil, paced: true, readID: edit.instructionID)
+                                     target: edit.target, cursorAtEnd: edit.cursorAtEnd, paced: true, readID: edit.instructionID)
         let started = Date()
         let outcome: FieldQueue.Event? = await withCheckedContinuation { continuation in
             magicEditIDs[edit.id] = edit.instructionID
@@ -1691,7 +1713,7 @@ final class KeyboardController {
         #if DEBUG || LEGATO_INTERNAL
         endFieldProbe()
         #endif
-        guard isFieldBusy || activeInstructionID != nil, isReadingField || isNudging else { return }
+        guard isReadingField || isNudging || cursorReadID != nil else { return }
         fieldOperationCancelled = true
         if let id = activeInstructionID { link.cancelInstruction(id) }
     }
