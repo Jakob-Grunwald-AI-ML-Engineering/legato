@@ -253,7 +253,15 @@ import Testing
         if selection { queue.externalSelectionChanged(report: empty, hasText: false) }
         else { queue.externalContextChanged(report: empty, hasText: false) }
         #expect(queue.hasUnverifiedInput)
-        for _ in 0..<20 { #expect(queue.step(report: empty, elapsedMs: 100) == .idle) }
+        // The take's words still go in at the caret (plain inserts only); a report that never changes lifts nothing.
+        var sent: [ShadowOp] = []
+        for _ in 0..<20 {
+            guard case .send(let op) = queue.step(report: empty, elapsedMs: 100) else { continue }
+            sent.append(op); queue.operationDispatched()
+        }
+        #expect(sent.first == .insert("a"))
+        #expect(sent.allSatisfy { if case .insert = $0 { true } else { false } })
+        #expect(queue.hasUnverifiedInput)
     }
 
     private func justConfirmedMove() -> (FieldQueue, FieldQueue.Report) {

@@ -419,6 +419,8 @@ public struct FieldQueue: Sendable {
         var retried = false
         /// A deliberate user action in an opaque selection is allowed, but never replayed against the old model.
         var acceptsRawUserReport = false
+        /// A take's words typed while the selection or context was unverified (`heldSpeechNext`).
+        var heldSpeech: HeldSpeech?
         var isMove: Bool
         /// A report counts only this long after the last send (a move's settle gap).
         var settleMs: Double
@@ -429,6 +431,11 @@ public struct FieldQueue: Sendable {
         var lastReport: Report?
         /// A jump of the keyboard's own to this span (a region's or an edit's).
         var jumpSpan: Int?
+    }
+    /// The report a held insert of speech was sent on, and the piece's span it went to.
+    private struct HeldSpeech: Sendable, Equatable {
+        var report: Report
+        var spanID: Int
     }
     private var coordinator = FieldEditCoordinator.Operations()
     private var inFlight: InFlight? {
@@ -548,7 +555,10 @@ public struct FieldQueue: Sendable {
     }
 
     /// A nil selection following an external selection callback can be an opaque Safari Select All.
-    /// Identical windows cannot prove a collapsed caret, so automatic actions remain held.
+    /// Identical windows cannot prove a collapsed caret, so every automatic action that needs to know where the
+    /// caret is remains held (revisions, edits, recovery reads, any move or delete). A take's words still go in
+    /// at the caret as plain inserts (`heldSpeechNext`), as the user's keys do: the report they change is the
+    /// evidence that lifts the hold.
     public enum UnverifiedInput: String, Sendable { case selection, externalContext }
     private var opaqueSelectionBaseline: Report?
     public private(set) var unverifiedInputReason: UnverifiedInput?
@@ -902,8 +912,40 @@ public struct FieldQueue: Sendable {
             events.append(.confirmed(waitedMs: waited))
             return next()
         }
+        if let flight = inFlight, let held = flight.heldSpeech {
+            // No cursor probe and no retry: only a report that held still after the host's transit says what the
+            // insert did (an optimistic echo cannot show a selection it replaced).
+            guard coordinator.settled, sinceSendMs >= Self.transitMs, reportStableMs >= Self.moveSettleMs else {
+                inFlight?.waitedMs += elapsedMs
+                return .wait
+            }
+            if report == held.report {
+                // The proxy shows nothing of it yet. A plain insert at the caret counts as landed after the confirm
+                // window, so the take is never stuck behind a report that does not move; the hold stays.
+                guard flight.waitedMs + elapsedMs >= Self.confirmLimitMs else {
+                    inFlight?.waitedMs += elapsedMs
+                    return .wait
+                }
+                inFlight = nil
+                events.append(.resync(.assumed))
+            } else if case .insert(let typed) = flight.op, Self.shows(report, insert: typed, after: held.report),
+                      matches(report, anywhere: false) {
+                guard confirm(flight, report: report) else { return .wait }
+            } else {
+                // Not the old text with the insert (it replaced a selection no report showed, or the field had
+                // changed unseen): the report is the model. The piece goes on where its text stands before the caret.
+                inFlight = nil
+                reseed(report, flight: flight)
+                if var span = spans[held.spanID], span.parked, !span.lastText.isEmpty, cursor == userCursor, selection == 0,
+                   cursor >= span.lastText.count, text[(cursor - span.lastText.count)..<cursor].elementsEqual(span.lastText) {
+                    span.start = cursor - span.lastText.count; span.end = cursor; span.parked = false
+                    spans[held.spanID] = span
+                }
+            }
+        }
         if hasUnverifiedInput, inFlight == nil {
-            guard let item = userLane.first else { return .idle }
+            // The take's words still go in at the caret; everything else of the keyboard's own stays held.
+            guard let item = userLane.first else { return next() }
             guard case .input(let input, _) = item else { return .idle }
             userLane.removeFirst()
             let op: ShadowOp
@@ -935,18 +977,7 @@ public struct FieldQueue: Sendable {
             if settled, matches(report, anywhere: flight.anywhere),
                flight.anywhere || !pins(report, in: flight.pre) || (flight.staleCheck && flight.op == .move(0)),
                !lagging.contains(where: { pins(report, in: $0.state) }) {
-                if flight.anywhere { relocate(report) }
-                guard coordinator.confirm(matches: true) else { return .wait }
-                events.append(.confirmed(waitedMs: flight.waitedMs))
-                lastSendConfirmed = true
-                confirmedHistory.append((flight.pre, flight.input, 0))
-                unconfirmedInHistory = false
-                if confirmedHistory.count > Self.historyCount { confirmedHistory.removeFirst() }
-                staleNudgeSent = false
-                userActed = false
-                merge(report)
-                inFlight = nil
-                lagging = []
+                guard confirm(flight, report: report) else { return .wait }
             } else if !settled {
                 flight.waitedMs += elapsedMs
                 inFlight = flight
@@ -1011,6 +1042,34 @@ public struct FieldQueue: Sendable {
         return next()
     }
 
+    /// The report shows the op in flight as the model has it: it is confirmed (unless the barrier still settles).
+    private mutating func confirm(_ flight: InFlight, report: Report) -> Bool {
+        if flight.anywhere { relocate(report) }
+        guard coordinator.confirm(matches: true) else { return false }
+        events.append(.confirmed(waitedMs: flight.waitedMs))
+        lastSendConfirmed = true
+        confirmedHistory.append((flight.pre, flight.input, 0))
+        unconfirmedInHistory = false
+        if confirmedHistory.count > Self.historyCount { confirmedHistory.removeFirst() }
+        staleNudgeSent = false
+        userActed = false
+        merge(report)
+        inFlight = nil
+        lagging = []
+        return true
+    }
+
+    /// The report shows what `held` showed with `insert` typed at its caret. An insert that replaced a selection no
+    /// report showed leaves only itself: text the window showed before is gone.
+    static func shows(_ report: Report, insert: String, after held: Report) -> Bool {
+        guard report.selected == nil else { return false }
+        let before = FieldReader.trusted(before: report.before), old = FieldReader.trusted(before: held.before)
+        guard before.hasSuffix(insert) else { return false }
+        let kept = before.dropLast(insert.count)
+        return kept.isEmpty == old.isEmpty && (kept.hasSuffix(old) || old.hasSuffix(kept))
+            && report.after.isEmpty == held.after.isEmpty && (report.after.hasPrefix(held.after) || held.after.hasPrefix(report.after))
+    }
+
     // MARK: Choosing the next op
 
     /// The next op, held back while it would follow the last one too soon for its kind: ops of one kind at the caret
@@ -1038,6 +1097,7 @@ public struct FieldQueue: Sendable {
     }
 
     private mutating func plannedNext() -> Action {
+        if hasUnverifiedInput { return heldSpeechNext() }
         // An op that never confirmed may still be on its way: nothing follows it before the host's transit.
         if !lastSendConfirmed, sinceSendMs < Self.transitMs {
             if inFlight == nil { for ri in runs.indices { ack(ri) } }
@@ -1668,12 +1728,58 @@ public struct FieldQueue: Sendable {
         return nil
     }
 
-    private mutating func startUntypedRest(_ ri: Int) -> Action? {
+    /// While the selection or context is unverified (`hasUnverifiedInput`), a take's words still to be typed go in
+    /// at the caret, as the user's keys do: a region's start with its separator and the open piece's untyped end,
+    /// through the ordinary writer. Only ever an insert, never a move or a delete: a piece that needs more than an
+    /// append (a revision, a lost place, a caret away from the user's) waits for the hold to lift. An insert that
+    /// replaces a selection no report showed is accepted, as for a key; its report then becomes the model (`step`).
+    private mutating func heldSpeechNext() -> Action {
+        // An op that never confirmed may still be on its way: nothing follows it before the host's transit.
+        if !lastSendConfirmed, sinceSendMs < Self.transitMs { return .wait }
+        if case .space? = unit?.owner { return nextInUnit() }
+        guard !paused, unit == nil, swap == nil, strayInsertion == nil, tapRace == nil, userLost == nil, userLane.isEmpty,
+              selection == 0, cursor == userCursor, let report = lastReport else { return .idle }
+        for ri in runs.indices { applyPending(ri) }
+        for ri in runs.indices where rawAppendPending(runs[ri]) {
+            guard let piece = runs[ri].pieces.last(where: { $0.tEnd == nil }) else {
+                if let action = startUntypedRest(ri, held: true) { return action }
+                continue
+            }
+            guard liveRevision(for: piece) == nil, let span = spans[piece.spanID] else { continue }
+            let rest = heldAppend(piece, in: runs[ri], span: span)
+            guard !rest.isEmpty else { continue }
+            let action = append(rest, to: piece)
+            if case .send = action { inFlight?.heldSpeech = HeldSpeech(report: report, spanID: piece.spanID) }
+            return action
+        }
+        return .idle
+    }
+
+    /// The open piece's next words at the caret: one grapheme per op when animated, at the backlog's pace.
+    private mutating func append(_ rest: [Character], to piece: Piece) -> Action {
+        var count = rest.count, credit = 0.0
+        if config.animated {
+            let pace = paceAllows(ops: queuedBacklog())
+            guard pace.go else { return .wait }
+            count = 1; credit = pace.credit
+        }
+        let slice = Array(rest.prefix(count))
+        let spanID = piece.spanID
+        let action = send(.insert(String(slice)), lane: .live) { q in
+            q.insertAtCursor(slice, owner: spanID)
+            q.userCursor = q.cursor
+        }
+        paceCreditMs = credit
+        return action
+    }
+
+    private mutating func startUntypedRest(_ ri: Int, held: Bool = false) -> Action? {
         guard let from = untypedRest(of: runs[ri]) else { return nil }
         guard reportStableMs >= Self.stableMs || !config.animated else { return .wait }
         // The piece starts at the user's cursor (a reseed can leave the caret away from it).
-        if cursor != userCursor { return send(.move(units(to: userCursor)), lane: .live, moveTo: userCursor) }
-        if let action = liveStart(ri) { return action }
+        if cursor != userCursor { return held ? nil : send(.move(units(to: userCursor)), lane: .live, moveTo: userCursor) }
+        // Held: no move to the word's end, the words go in where the caret is.
+        if !held, let action = liveStart(ri) { return action }
         let anchor = String(text[max(0, userCursor - 200)..<userCursor])
         unit = Unit(ops: [.startRegion(run: runs[ri].runID, tStart: from, anchor: anchor)], owner: .space, paced: false)
         return nextInUnit()
@@ -1740,23 +1846,7 @@ public struct FieldQueue: Sendable {
         if cursor != userCursor { return send(.move(units(to: userCursor)), lane: .live, moveTo: userCursor) }
         if nearRevision(ri, pi) { desired = Array(desiredText(runs[ri].pieces[pi], in: runs[ri])) }
         guard desired != current else { return nil }
-        if desired.starts(with: current) {
-            // One grapheme per op when animated, at the backlog's pace.
-            var count = desired.count - current.count, credit = 0.0
-            if config.animated {
-                let pace = paceAllows(ops: queuedBacklog())
-                guard pace.go else { return .wait }
-                count = 1; credit = pace.credit
-            }
-            let slice = Array(desired[current.count..<(current.count + count)])
-            let spanID = piece.spanID
-            let action = send(.insert(String(slice)), lane: .live) { q in
-                q.insertAtCursor(slice, owner: spanID)
-                q.userCursor = q.cursor
-            }
-            paceCreditMs = credit
-            return action
-        }
+        if desired.starts(with: current) { return append(Array(desired[current.count...]), to: piece) }
         // A verified revision of the last words: what differs goes, then is typed again.
         let k = current.count - Self.commonPrefix(current, desired)
         guard !runs[ri].userActed, k <= Self.nearChars, verifiesBefore(k, span: span) else {
