@@ -26,6 +26,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from preservation import user_text_damage
+
 REPO = Path(__file__).resolve().parents[3]
 CTL = REPO / "scripts/device/ctl.sh"
 BUNDLE = "de.gruenwald.legato"
@@ -682,6 +684,8 @@ def check(res: Result, args) -> None:
             want, have = typed_keys.count(c), text.lower().count(c)
             if have != want:
                 res.failures.append(("4", f"user key {c!r}: typed {want}, field has {have}"))
+        for failure in user_text_damage(entries, text, MARKERS):
+            res.failures.append(("4", failure))
         # A key the keyboard got before it typed anything of the take (its first words not heard yet) is text the take
         # follows, like text typed before the mic: the take's own edits do not come after it.
         first_live = next((i for i, e in enumerate(entries) if e.get("kind") == "sent" and e.get("lane") == "live"), None)
@@ -689,18 +693,15 @@ def check(res: Result, args) -> None:
         first = during[0] if during else None
         if first is not None:
             stop = next((i for i, e in enumerate(entries) if e.get("kind") == "live" and e.get("snapshot", {}).get("complete")), len(entries))
-            bad = []
-            for i, e in enumerate(entries):
-                if i <= first or e.get("kind") != "sent" or e.get("lane") == "user":
-                    continue
-                op = e.get("op") or {}
-                if (op.get("delete") or 0) > 0 or (op.get("move") or 0) != 0:
-                    bad.append((i, e.get("lane"), op, "after stop" if i >= stop else "while speaking"))
-                elif "insert" in op and i >= stop and args.strict_inserts:
-                    bad.append((i, e.get("lane"), op, "insert after stop"))
-            if bad:
-                res.failures.append(("4", f"{len(bad)} Legato delete/move after the user's first input: "
-                                          + "; ".join(f"{l}:{o} {w}" for _, l, o, w in bad[:3])))
+            # Conditional edits are allowed after user input. Verify the characters they
+            # touch instead of enforcing the retired permanent-freeze policy.
+            if args.strict_inserts:
+                # Optional legacy diagnostic, not the default conditional-edit contract.
+                bad = [e for i, e in enumerate(entries) if i > first and i >= stop
+                       and e.get("kind") == "sent" and e.get("lane") != "user"
+                       and "insert" in (e.get("op") or {})]
+                if bad:
+                    res.failures.append(("4", f"{len(bad)} automatic insertions after stop under --strict-inserts"))
             # 6. the take goes on at the caret after the user acted: every word spoken after the user's last action
             #    reaches the field (a word whose provisional form differed may stay as first typed, so it is not counted)
             missing = words_missing_after(take, text, max(res.acted_at) if res.acted_at else None, args.speed)
