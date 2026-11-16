@@ -16,5 +16,5 @@
     27.338021042000037
   ],
   "physicalReplayMeasured": true,
-  "physicalReplayOutcome": "Natural empty-field insertion and pause cleanup confirmed; c355a35 speech-tail starvation reproduced and awaits fix."
+  "physicalReplayOutcome": "7838631 physical replay confirmed natural empty-field insertion, pause correction and admitted suffix/native input responses below 500 ms in the measured sample; full stress and fresh UAT remain separate."
 }
