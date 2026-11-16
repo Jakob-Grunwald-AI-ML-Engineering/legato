@@ -1,5 +1,7 @@
 # Legato internal harness
 
+For guest-only Mac field acceptance, use the [native macOS VM workflow](mac-vm.md).
+
 `scripts/device/ctl.sh [--target device|sim|mac] <command>` drives internal builds through one file inbox, registry and JSONL protocol. Device remains the default. Ordinary Release builds exclude the endpoint, overlays and session-probe entry points.
 
 ```bash
