@@ -212,13 +212,11 @@ struct TakeSession {
             default: break
             }
         }
-        if let bad = rig.field.deletions.first(where: { ($0.by == .live || $0.by == .edit) && $0.origin != .live && !$0.racing }) {
+        if let bad = rig.field.deletions.first(where: { ($0.by == .live || $0.by == .edit) && $0.origin != .live && $0.origin != .edit && !$0.racing }) {
             return "the keyboard (\(bad.by.rawValue)) deleted \(String(bad.char).debugDescription) written by \(bad.origin.rawValue)"
         }
-        if let frozen = rig.field.frozenEdits.first { return "dictation edited after the user acted: \(frozen) (text \(rig.field.string.debugDescription))" }
-        if let edit = rig.field.ownEditsAfterUser.first {
-            return "the keyboard (\(edit.writer.rawValue)) made a \(edit.what) after the user acted (text \(rig.field.string.debugDescription))"
-        }
+        // Conditional revisions may revisit unchanged dictated words after user actions. The
+        // provenance check above still rejects every nonracing delete of user/initial/outside text.
         // A long delete is only the stop's swap: its insert follows at once, unless a tap raced with the delete (the
         // insert then does not go where the take was not seen to go, and the take is reported).
         let live = rig.events.compactMap { if case .sent(let op, .live) = $0.event { op } else { nil } }
@@ -242,7 +240,7 @@ struct TakeSession {
             let text = rig.field.text, origin = rig.field.origin
             for i in 0...text.count {
                 if i < text.count, text[i].isLetter || text[i].isNumber {
-                    word.append(text[i]); whole = whole && origin[i] == .live && !rig.field.raced[i]
+                    word.append(text[i]); whole = whole && (origin[i] == .live || origin[i] == .edit) && !rig.field.raced[i]
                 } else {
                     if whole, word.hasSuffix("q"), word.first?.isLetter == true, word.dropLast().last?.isNumber == true {
                         counts[word.lowercased(), default: 0] += 1

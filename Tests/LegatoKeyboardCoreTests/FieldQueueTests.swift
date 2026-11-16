@@ -114,8 +114,8 @@ import Testing
         #expect(rig.field.string == "Hello there! and more")
     }
 
-    /// The user's key froze the words before it: a later revision of them is never made (it is in History).
-    @Test func aRevisionOfWordsBeforeAUserKeyIsNeverMade() {
+    /// A key divides the speech pieces; unchanged words before it remain conditionally correctable.
+    @Test func aRevisionOfUntouchedWordsBeforeAUserKeyStillLands() {
         var rig = QueueRig(FakeField(""))
         rig.queue.enqueue(snap(1, "first words"))
         rig.drain()
@@ -126,8 +126,8 @@ import Testing
         let from = rig.sent.count
         rig.queue.enqueue(snap(3, "First words then more", complete: true))
         rig.drain()
-        #expect(rig.field.string == "first words. then more")
-        #expect(rig.sent.count == from)
+        #expect(rig.field.string == "First words. then more")
+        #expect(rig.sent[from...].allSatisfy { if case .deleteBackward(let n) = $0.op { n == 1 } else { true } })
         #expect(rig.drops.map(\.reason) == [.userEdited])
     }
 
@@ -261,8 +261,7 @@ import Testing
         #expect(rig.drops.map(\.reason) == [.userEdited])
     }
 
-    /// UAT: after the user acted, the recogniser heard a delivered word again as another ("whether" → "weather"). The
-    /// word stays as typed and the words after it still go in, once.
+    /// Revised recognizer words still align later speech after a user key; the user's letter survives.
     @Test(arguments: [false, true])
     func aRevisedWordAfterTheUserActedDoesNotStopTheTake(safari: Bool) {
         var field = FakeField("")
@@ -282,8 +281,8 @@ import Testing
         rig.drain()
         rig.queue.enqueue(snap(6, "check the forecast weather is fine today and there boat sails", complete: true))
         rig.drain()
-        #expect(rig.field.string == "check the forecastx whether is fine today and their boat sails")
-        #expect(!rig.sent.contains { if case .deleteBackward = $0.op { true } else { false } })
+        #expect(rig.field.string == "check the forecastx weather is fine today and there boat sails")
+        #expect(rig.sent.allSatisfy { if case .deleteBackward(let n) = $0.op { n == 1 } else { true } })
         #expect(rig.drops.map(\.reason) == [.userEdited])
     }
 
@@ -549,7 +548,7 @@ import Testing
         return rig
     }
 
-    @Test func aLateCleanupAfterUserEditsIsNeverMade() {
+    @Test func lateCleanupPreservesDeletedWordsAndReturnsTheUsersCaret() {
         var rig = Self.typedWithDeletes()
         #expect(rig.field.string == "please remember to send the quarterly report to the whol team before afterno")
         // The user taps right after "please"; the cleanup arrives much later.
@@ -560,15 +559,15 @@ import Testing
             .init(id: 0, text: "Please remember to send the quarterly report to the whole team before Friday afternoon.", cleaned: true, final: true),
         ], complete: true))
         let drained = rig.drain(); #expect(drained)
-        // The user edited the take and moved: nothing of the keyboard's own goes, the cleanup is in History.
-        #expect(rig.field.string == "please remember to send the quarterly report to the whol team before afterno")
-        #expect(!rig.events[from...].contains { if case .sent(_, let lane) = $0.event { lane != .user } else { false } })
+        // Independent corrections land without restoring deleted user words or disturbing their caret.
+        #expect(rig.field.string == "Please remember to send the quarterly report to the whol team before afterno.")
+        #expect(rig.events[from...].allSatisfy { if case .sent(.deleteBackward(let n), _) = $0.event { n == 1 } else { true } })
         #expect(rig.queue.userCursor == 6 && rig.field.caret == 6)
         #expect(rig.events.contains { $0.event == .liveApplied(runID: "r", version: 2, complete: true) })
         #expect(rig.drops.map(\.reason) == [.userEdited])
     }
 
-    @Test func aCleanupAfterTheUserDeletedAndMovedIsNeverMade() {
+    @Test func cleanupWorksAroundADeletedWordAndMovedCaret() {
         var rig = QueueRig(FakeField(""))
         rig.queue.enqueue(snap(1, "alpha beta gamma delta"))
         rig.drain()
@@ -580,7 +579,7 @@ import Testing
             .init(id: 0, text: "Alpha beta, gamma Delta.", cleaned: true, final: true),
         ], complete: true))
         rig.drain()
-        #expect(rig.field.string == "alpha beta gamma delt")
+        #expect(rig.field.string == "Alpha beta, gamma delt.")
         #expect(rig.drops.map(\.reason) == [.userEdited])
     }
 

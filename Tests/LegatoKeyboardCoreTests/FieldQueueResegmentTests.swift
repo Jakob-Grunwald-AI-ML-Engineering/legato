@@ -136,25 +136,26 @@ import Testing
         #expect(host.drops.contains { $0.runID == "r" && $0.text == "The boat left the harbour early." })
     }
 
-    @Test func aTakeTheUserTypedAfterIsKept() {
+    @Test func userTerminalPunctuationWinsWhileUntouchedTextIsCorrected() {
         var host = typed("the boat left the harbour early")
         host.queue.enqueue(.insert("!"))
         host.run(steps: 40)
         host.queue.takeStopped("r")
         host.queue.enqueue(Self.final)
         host.run()
-        #expect(host.text == "the boat left the harbour early!")
+        #expect(host.text == "The boat left the harbour early!")
         #expect(host.drops.contains { $0.runID == "r" && $0.reason == .userEdited })
     }
 
-    @Test func anUntouchedTakeIsSwappedInOneDeleteAndOneInsert() {
+    @Test func anUntouchedTakeChangesOnlyTheDifferingCharacters() {
         var host = typed("the boat left the harbour early")
         let from = host.events.count
         host.queue.enqueue(Self.final)
         host.run()
         #expect(host.text == "The boat left the harbour early.")
         let ops = host.events[from...].compactMap { if case .sent(let op, _) = $0 { op } else { nil } }
-        #expect(ops == [.deleteBackward(31), .insert("The boat left the harbour early.")])
+        #expect(ops.filter { if case .deleteBackward = $0 { true } else { false } } == [.deleteBackward(1)])
+        #expect(ops.compactMap { if case .insert(let text) = $0 { text } else { nil } }.sorted() == [".", "T"])
         #expect(host.drops.isEmpty)
     }
 }
