@@ -2,39 +2,25 @@ import Foundation
 
 /// The one writer of a bound text field on iOS: every insert, delete and cursor move the keyboard makes goes through
 /// it, so it alone knows where the cursor is. Pure: the keyboard feeds it what happens (user input, dictation
-/// snapshots, edits to land) and the field's report on every step, and carries out the one `ShadowOp` a step hands over.
+/// snapshots, edits to land) and the field's report on every step, and carries out the `ShadowOp` a step hands over.
+/// The rules (#299, `docs/field-editing.md`):
 ///
-/// - Model: the known text around the cursor (`text`), learned from reports and kept up to date by simulating every op
-///   sent. `cursor` is where the field's caret is; `userCursor` is where it belongs to the user (a jump unit takes the
-///   caret away from it and back).
-/// - One op in flight: the next op goes out only after a report confirms the last one (the report must pin the
-///   expected cursor in the model at that place and nowhere else, `FieldMatch`).
-/// - Lanes: user input (keys, delete, cursor pans, word-row and undo edits) goes first, behind at most the op in flight
-///   (bounded by `userBoundMs`, then a resync). Edits (`Edit`: Magic, typed lines, host text) come next, then live
-///   dictation runs (`LiveDictationSnapshot`, coalesced to the newest per run). A key waits (bounded, `keyHoldMaxMs`)
-///   until the take's text already heard is typed, and a stopped take until it is complete (`flushBeforeKeys`): appends
-///   only, never a revision or the stop's swap.
-/// - Planning happens when an item starts, against the model as it is then. An edit's change away from the cursor is a
-///   jump unit: move to the change, delete and insert only the differing characters (`ShadowEditPlanner.diff`), move back.
-///   Nothing else goes out while a unit runs; user input ends the unit early (the caret goes back first) and the rest
-///   is planned again later.
-/// - Never freezes: a report that does not confirm leads to a resync (re-locate the model around the cursor, unique
-///   matches only, or take the report as the new model) and planning goes on. An edit is dropped only when its text
-///   cannot be placed or the user changed it (`Event.dropped`).
-/// - Live dictation types only at the caret and trusts the model (the keyboard is the field's only writer; an iOS
-///   keyboard sees a short window of it): a run's words go in one grapheme at a time at its open piece's end, the
-///   user's caret. A revision of the piece's last words goes in while speaking only when every changed character lies
-///   within `nearChars` of the caret for legacy hosts without activity admission. Production hosts release revisions
-///   through the conditional edit lane in confirmed pauses or at stop. Every unchanged character remains in place;
-///   a stop-time block swap is only an end-verified fallback after a failed jump. Otherwise text stays as typed with
-///   recovery in History. A take never starts inside a word (`liveStart`).
-/// - User typing, deletion and movement close the current speech piece; later words start at the user's caret.
-///   Corrections still visit unchanged portions of earlier pieces. The shared merge protects user changes, including
-///   changes made while an edit was on its way. Pieces remain independently anchored across typed separators.
-/// - Field switches look like taps (Safari gives a page's fields one identity): a jump counts only when a report pins
-///   it, and one that went nowhere or stopped short drops its work once and reseeds the model (`Resync.jumpFailed`).
-/// - Instruction edits carry the read they came from (`markRead`): their scope is found through every change since,
-///   and only the user's changes in it cancel them.
+/// 1. Shadow document: the field as known (`ShadowDocument`), kept current by the observer (`observe`, every callback,
+///    idle or not) separately from the chunks that edit it.
+/// 2. Chunks, not characters: speech, a Soniox revision, a cleanup and a user key are each one chunk, executed whole.
+/// 3. One place per chunk (`chunk`): hops there, one delete run and one insert, the hop back to the user's caret.
+/// 4. Hops stay within what the field showed (`hop`); after each the report is looked at and the rest corrected (`look`).
+/// 5. No fixed waits: ops go back to back on the proxy's immediate view; one check after the chunk (the report with the
+///    return move's callback), and one deadline (`checkDeadlineMs`) for a result that never shows.
+/// 6. A failed check re-reads (`resync`); an edit that cannot be placed again drops, and the app runs a fresh cleanup.
+///    Nothing is restored blindly. A tap that split a chunk is explained from the report (`explainTap`) or re-read.
+/// 7. User input wins: a key waits only for the chunk that is running.
+///
+/// Lanes: user input goes first, then edits (`Edit`: Magic, cleanup, typed lines, host text), then live dictation runs
+/// (`LiveDictationSnapshot`, coalesced to the newest per run). Planning happens when an item starts, against the model
+/// as it is then. Live dictation types at its open piece's end, the user's caret, and pieces close on the user's input;
+/// cleanup may change hand-typed text only when it was in the cleanup's input (`placeThroughRead`, `FieldMerge`).
+public struct FieldQueue: Sendable {
 public struct FieldQueue: Sendable {
     // MARK: Public types
 
@@ -672,7 +658,7 @@ public struct FieldQueue: Sendable {
         userLane.append(.input(input))
     }
 
-    /// The rest of the word the open piece's typewriter has shown only part of, at the user's cursor.
+    /// The rest of the word the open piece shows only part of (the recognizer's head grew it), at the user's cursor.
     private func openPieceWordRest() -> [Character]? {
         guard cursor == userCursor, selection == 0, let (ri, pi) = openPieceIndex(), let span = spans[runs[ri].pieces[pi].spanID],
               !span.parked, span.end == userCursor else { return nil }
@@ -712,7 +698,7 @@ public struct FieldQueue: Sendable {
     }
 
     /// The user stopped the take (the mic key; the app's snapshots say so too, `LiveDictationSnapshot.stopped`): no more
-    /// speech joins it, so keys wait for its text (`flushBeforeKeys`).
+    /// speech joins it.
     public mutating func takeStopped(_ runID: String) {
         guard let index = runs.firstIndex(where: { $0.runID == runID }) else { return }
         runs[index].stopped = true
@@ -1153,7 +1139,7 @@ public struct FieldQueue: Sendable {
         return desired.starts(with: current) ? Array(desired[current.count...]) : []
     }
 
-    /// A key at the open piece's end while the typewriter has shown only part of a word: the word's rest goes in
+    /// A key at the open piece's end while it shows only part of a word: the word's rest goes in
     /// with the key, in one insert (with a space when the key starts a word), so the key lands after the word.
     private mutating func finishWordBeforeKey(_ key: String) -> Action? {
         guard let restChars = openPieceWordRest(), let (ri, pi) = openPieceIndex() else { return nil }
@@ -1569,7 +1555,6 @@ public struct FieldQueue: Sendable {
     /// append (a revision, a lost place, a caret away from the user's) waits for the hold to lift. An insert that
     /// replaces a selection no report showed is accepted, as for a key; its report then becomes the model (`step`).
     private mutating func heldSpeechNext() -> Action {
-        // An op that never confirmed may still be on its way: nothing follows it before the host's transit.
         if case .space? = unit?.owner { return nextInUnit() }
         guard !paused, unit == nil, swap == nil, strayInsertion == nil, tapRace == nil, userLost == nil, userLane.isEmpty,
               selection == 0, cursor == userCursor, let report = lastReport else { return .idle }
@@ -1647,7 +1632,7 @@ public struct FieldQueue: Sendable {
         return action
     }
 
-    /// The open piece of run `ri` at the user's caret: its delivered words go in one grapheme at a time; a revision of
+    /// The open piece of run `ri` at the user's caret: its delivered words go in whole; a revision of
     /// its last words (`nearChars`) goes in once the report shows the text it deletes.
     private mutating func typeOpenPiece(_ ri: Int) -> Action? {
         guard let pi = runs[ri].pieces.lastIndex(where: { $0.tEnd == nil }) else { return nil }

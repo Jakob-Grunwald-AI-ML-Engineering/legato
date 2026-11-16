@@ -4,8 +4,8 @@ import Foundation
 ///
 /// - Spans use the shared desktop grapheme diff. Nearby changes share a cursor jump, but unchanged letters,
 ///   whitespace and punctuation always stay in the host. A cost estimate never broadens a replacement.
-/// - Pace: one grapheme per op with a 5 ms minimum gap, matching the Mac trial. The queue separately confirms each
-///   operation and preserves the host's move/edit safety windows. No extra pause between words.
+/// - Pace (the Mac's): one grapheme per op with a 5 ms minimum gap. No extra pause between words. The iPhone sends each
+///   span unpaced, as one chunk (`FieldQueue`).
 public enum SpanPlanner {
     /// A change of `old[start..<end]` into `text` (grapheme offsets into the old text).
     public struct Hunk: Sendable, Equatable {
