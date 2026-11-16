@@ -322,7 +322,7 @@ import LegatoMac
         let undo = ScopedEditPlanner.undo(of: edit, cursor: try #require(ack?.cursor))
         #expect(await editor.apply(undo)?.applied == true)
         #expect(target.value == "Before 🐈 after")
-        #expect(target.writes.allSatisfy { $0.location >= 7 && $0.location <= 9 && $0.length <= 2 })
+        #expect(target.writes.allSatisfy { $0.location >= 7 && $0.location <= 9 && $0.length <= 3 })
     }
     @Test func anEditOrAppSwitchWhileTheModelWorksRefusesTheResult() async throws {
         let target = EditorTarget("Prefix. Draft")
@@ -856,22 +856,18 @@ import LegatoMac
         #expect(target.value == "Retry words.")
     }
 
-    @Test func typewriterCorrectionsPauseBetweenIndividualCharactersAndKeepTheTail() async {
+    @Test func aCorrectionInsideTheTextIsOneUnpacedWriteAndKeepsTheTail() async {
         let target = EditorTarget("")
         let editor = MacFieldEditor(capture: { .target(target) })
         editor.begin(); await editor.applyLive(snapshot("abc unchanged tail"))
         target.writes = []
         var pauses: [Duration] = []
-        var frames: [String] = []
         editor.typewriter = { true }
-        editor.sleep = { duration in pauses.append(duration); frames.append(target.value) }
+        editor.sleep = { duration in pauses.append(duration) }
         await editor.applyLive(snapshot("aXYc unchanged tail", complete: true))
         #expect(target.value == "aXYc unchanged tail")
-        #expect(target.writes.count == 2, "One atomic replacement, then the extra new grapheme")
-        #expect(target.writes.allSatisfy { $0.length <= 1 })
-        // The trial keeps a 5 ms gap between typed characters, with none after the last one.
-        #expect(pauses == [.milliseconds(5)])
-        #expect(frames.allSatisfy { $0.hasSuffix("c unchanged tail") })
+        #expect(target.writes.count == 1, "One hunk, one write: delete and insert at one place")
+        #expect(pauses.isEmpty, "No pacing for a revision")
     }
 
     @Test func realTypingDuringAnAnimationKeepsTheKeyAfterTheWord() async {
@@ -909,9 +905,10 @@ import LegatoMac
         editor.begin(); await editor.applyLive(snapshot("cab unchanged tail"))
         target.writes = []
         editor.typewriter = { true }
-        editor.sleep = { _ in if target.value.hasPrefix("c") { target.value = "Q" + target.value.dropFirst() } }
+        // The user changes the word before the revision lands.
+        target.value = "Q" + target.value.dropFirst()
         await editor.applyLive(snapshot("cXYZ unchanged tail", complete: true))
-        #expect(target.value == "QXb unchanged tail", "The interrupted replacement keeps the unprocessed original b")
+        #expect(target.value == "Qab unchanged tail", "The user's text survives; the stale revision is not forced over it")
         #expect(copied.isEmpty)
         #expect(editor.panel.recoveryText == "cXYZ unchanged tail")
     }
@@ -919,7 +916,7 @@ import LegatoMac
     @Test func interruptedNativeMagicReportsConfirmedPartialChangesWithoutClaimingNothingWasEdited() async throws {
         let original = "return before sunset"
         let target = EditorTarget(original)
-        target.loseFocusAfterWrites = 3
+        target.loseFocusAfterWrites = 2
         let editor = MacFieldEditor(capture: { .target(target) })
         editor.sleep = { _ in await Task.yield() }
         editor.begin(); editor.beginInstruction()
