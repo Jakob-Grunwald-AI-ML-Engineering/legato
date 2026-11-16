@@ -20,6 +20,7 @@ import UIKit
         started = true
         KeyboardProbe.register(harness)
         DebugClipboard.register(harness)
+        DebugHistory.register(harness)
         harness.register("meeting-state") { _ in await AppController.shared.meetings.diagnostics() }
         harness.register("state") { _ in
             #if DEBUG

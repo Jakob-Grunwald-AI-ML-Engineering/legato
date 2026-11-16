@@ -132,3 +132,7 @@ Diagnostics (internal builds): `live2.*` lines in `Library/Caches/audio-diag.jso
 ## Interactive raw keyboard probe
 
 Development builds expose one operator-chosen raw proxy action at a time through [`keyboard-probe.sh`](keyboard-probe.md), with an exclusive queue lease. This is a measurement tool, not a production reader or a predefined test walk.
+
+## Exact persisted History lookup
+
+Internal builds support `ctl.sh send history-entry <run-UUID>` followed by `ctl.sh wait <command-id>`. The existing History store reads the persisted file and returns only that exact entry, or `found: false`; there is no list operation. Use known synthetic run IDs to verify raw-text recovery and confirmed cleanup status after sending or clearing a field. Replies and bridge logs contain that entry's full text: keep raw output private unless the entry and all field context are synthetic. Ordinary Release builds exclude this endpoint.
