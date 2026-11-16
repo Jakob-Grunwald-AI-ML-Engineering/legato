@@ -678,7 +678,7 @@ public final class MacFieldQueue {
     /// Keystroke fields: a rich editor shows a typed space as a no-break space (Chromium does at the end of a line, and
     /// turns it back once more text follows). The queue reads both as a space, so its own spaces are recognised.
     static func folded(_ text: String, keyed: Bool) -> String {
-        keyed && text.contains("\u{00A0}") ? text.replacingOccurrences(of: "\u{00A0}", with: " ") : text
+        keyed ? text.foldingNoBreakSpaces : text
     }
 
     /// One op at most. False when the field cannot take one now (unfocused, unreadable, an edit not yet placeable).

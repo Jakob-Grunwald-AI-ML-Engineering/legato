@@ -716,8 +716,9 @@ final class AXTextTarget: TextTarget {
             "AXTextOperationSmartReplace": false
         ]
         let result = try parameter("AXTextOperation", operation) as? [String]
+        // WebKit keeps a space at the end of a line as a no-break space (measured in Safari: `plain` + U+00A0).
         guard result == [text], isFocused(),
-              try self.text(in: .init(location: range.location, length: text.utf16.count)) == text else {
+              try self.text(in: .init(location: range.location, length: text.utf16.count)).foldingNoBreakSpaces == text.foldingNoBreakSpaces else {
             throw AXTargetError.unexpectedValue
         }
         // WebKit selects a nonempty replacement. Every TextTarget replacement promises a

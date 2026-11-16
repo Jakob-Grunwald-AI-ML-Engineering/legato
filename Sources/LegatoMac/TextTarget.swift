@@ -131,6 +131,11 @@ public protocol TextTarget: AnyObject {
     var fieldKey: AnyHashable? { get }
 }
 
+public extension String {
+    /// A rich editor's no-break spaces read as the spaces that were written (see `TextTarget.showsNoBreakSpaces`).
+    var foldingNoBreakSpaces: String { contains("\u{00A0}") ? replacingOccurrences(of: "\u{00A0}", with: " ") : self }
+}
+
 public enum TextTargetReadError: Error { case unsupported }
 public extension TextTarget {
     var editsInPlace: Bool { true }
