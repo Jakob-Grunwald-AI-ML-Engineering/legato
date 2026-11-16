@@ -339,6 +339,8 @@ public struct FieldQueue: Sendable {
         var owners: [Int?] = []
         /// The report the first op went out on.
         var sentOn: Report?
+        /// Host callbacks since the chunk's first op: each of its moves makes one when the host applies it, in order.
+        var callbacks = 0
     }
     /// The report a held insert of speech was sent on, and the piece's span it went to.
     private struct HeldSpeech: Sendable, Equatable {
@@ -482,26 +484,49 @@ public struct FieldQueue: Sendable {
         inFlight != nil || ownsRead || sinceSendMs + max(0, elapsedMs) < Self.checkDeadlineMs
     }
 
-    public mutating func externalSelectionChanged(report: Report, hasText: Bool? = nil, elapsedSinceLastStepMs: Double = 0) {
-        guard !hasRecentOwnOperation(elapsedMs: elapsedSinceLastStepMs), !confirmEmptyField(report, hasText: hasText) else { return }
-        opaqueSelectionBaseline = report.selected == nil ? (lastReport ?? report) : nil
-        unverifiedInputReason = opaqueSelectionBaseline == nil ? nil : .selection
+    /// Where a report comes from: the host's text or selection callback, or a new document identity of the bound field.
+    public enum Callback: String, Sendable { case text, selection, identity }
+
+    /// The observer's way in: every proxy callback, idle or not, and a new document identity. The report is classified
+    /// against the shadow (`ShadowObservation`); the next step acts on it (a seam re-reads, a stitch moves the user's
+    /// cursor, an extension grows the shadow). Within the deadline of the keyboard's own last op a callback is that op's
+    /// (Safari's first callback after a move still shows the old place): it is only classified. Otherwise a selection
+    /// callback that shows no selection, or a text callback whose windows stayed as they were, may be Safari's opaque
+    /// Select All or text the proxy has not caught up with: everything that needs to know where the caret is holds until a
+    /// report changes (`hasUnverifiedInput`); a take's words still go in at the caret (`heldSpeechNext`). A new identity
+    /// is the same field when the report shows the shadow (`.match`, `.extends`, `.stitch`): Notes and Safari issue one
+    /// when a field becomes empty, WhatsApp once with no visible cause. The adapter starts over only on `.seam`.
+    @discardableResult
+    public mutating func observe(_ report: Report, callback: Callback, hasText: Bool? = nil, elapsedSinceLastStepMs: Double = 0) -> ShadowObservation {
+        let observation = seeded ? doc.observe(report) : .seam
+        if callback == .identity {
+            if observation != .seam { events.append(.resync(.identityKept)) }
+            return observation
+        }
+        guard !hasRecentOwnOperation(elapsedMs: elapsedSinceLastStepMs), !confirmEmptyField(report, hasText: hasText) else { return observation }
+        switch callback {
+        case .selection:
+            opaqueSelectionBaseline = report.selected == nil ? (lastReport ?? report) : nil
+            unverifiedInputReason = opaqueSelectionBaseline == nil ? nil : .selection
+        case .text, .identity:
+            opaqueSelectionBaseline = lastReport ?? report
+            unverifiedInputReason = .externalContext
+        }
         if opaqueSelectionBaseline != nil {
             abortUnit()
             recoveryRequest = nil
             recoveryRevision &+= 1
         }
+        return observation
     }
 
-    /// A native text callback whose proxy windows stayed old is not a readable insertion yet.
-    /// Use the same admission barrier as an opaque selection, without blind refresh movements.
-    public mutating func externalContextChanged(report: Report, hasText: Bool? = nil, elapsedSinceLastStepMs: Double = 0) {
-        guard !hasRecentOwnOperation(elapsedMs: elapsedSinceLastStepMs), !confirmEmptyField(report, hasText: hasText) else { return }
-        opaqueSelectionBaseline = lastReport ?? report
-        unverifiedInputReason = .externalContext
-        abortUnit()
-        recoveryRequest = nil
-        recoveryRevision &+= 1
+    /// The draft was cleared outside the keyboard (Send): the field reads empty and says it has no text, while the shadow
+    /// held text, and no op of the keyboard's own explains it (an own op within the deadline, or a clear of its own).
+    /// A clear observed in the same instant as the keyboard's own move is not believed (#299, task 9): it is looked at
+    /// again once the deadline passed.
+    public func observesClearedDraft(_ report: Report, hasText: Bool, elapsedSinceLastStepMs: Double = 0) -> Bool? {
+        guard !hasText, report.before.isEmpty, report.after.isEmpty, report.selected == nil, !ownsEmptyReport else { return false }
+        return hasRecentOwnOperation(elapsedMs: elapsedSinceLastStepMs) ? nil : true
     }
 
     /// Empty proxy windows can be stale; the native field's independent hasText=false
@@ -742,7 +767,10 @@ public struct FieldQueue: Sendable {
     /// that does not, inside `checkDeadlineMs`, is not acted on (Safari's first callback after a move still shows the old
     /// place; a host applies a burst in stages). At the deadline the check has failed: the queue re-reads (`resync`) and
     /// plans what is left against what it read.
-    public mutating func step(report: Report, elapsedMs: Double) -> Action {
+    ///
+    /// `callback`: the report came with a host callback (`textDidChange`, `selectionDidChange`), not from reading the proxy
+    /// again right after an op of the keyboard's own (its echo). Only moves make callbacks (measured).
+    public mutating func step(report: Report, elapsedMs: Double, callback: Bool = true) -> Action {
         guard !ownsRead else { return .wait }
         if config.prioritizeSpeech {
             // Delivery metadata is independent of the OS operation in flight. See the newest heard tail before
@@ -766,6 +794,7 @@ public struct FieldQueue: Sendable {
         }
         sinceSendMs += elapsedMs
         inFlight?.waitedMs += elapsedMs
+        if callback { inFlight?.callbacks += 1 }
         // Only the user selects: a selection the model does not have says the user acted at the caret.
         if report.selected != nil, selection == 0 { userActed = true }
         if let race = tapRace { tapRace = race.ageMs + elapsedMs < 2 * Self.checkDeadlineMs ? (race.sends, race.ageMs + elapsedMs) : nil }
@@ -872,7 +901,12 @@ public struct FieldQueue: Sendable {
             if case .move = flight.op { endsWithMove = true }
             // Repetitive text in a short window may fit elsewhere too: fitting at the caret is enough for a chunk.
             let shows = flight.anywhere ? matches(report, anywhere: true) : consistent(report)
-            if shows, flight.anywhere || endsWithMove || !fits(report, in: flight.pre) {
+            // A chunk that ends with its hop back is checked by the read that comes with that move's callback (one callback
+            // for each of its moves came): the host applied the chunk by then, in order. The proxy's own echo before it
+            // proves nothing yet.
+            let moves = flight.ops.reduce(0) { if case .move = $1 { $0 + 1 } else { $0 } }
+            let heard = !endsWithMove || (callback && flight.callbacks >= moves) || flight.waitedMs >= Self.checkDeadlineMs
+            if shows, heard, flight.anywhere || endsWithMove || !fits(report, in: flight.pre) {
                 guard confirm(flight, report: report) else { return .wait }
             } else if flight.waitedMs < Self.checkDeadlineMs {
                 // Not shown yet: no seam. The user's input goes behind the chunk all the same (`plannedNext`).
@@ -906,7 +940,8 @@ public struct FieldQueue: Sendable {
     private mutating func look(_ report: Report, from: Int, units: Int, visited: [Int]) -> Bool {
         guard report.selected == nil, selection == 0 else { return false }
         let found = doc.positions(of: report)
-        guard !found.contains(where: { $0 == from || visited.contains($0) }) else { return false }
+        // A report that fits a place the chunk had the caret at (other than the target: a hop back to its start) may be late.
+        guard !found.contains(where: { $0 != cursor && ($0 == from || visited.contains($0)) }) else { return false }
         if found.contains(cursor) { return true }
         let byCharacters = !movesByCharacters
         var at = from, left = abs(units)
@@ -2139,6 +2174,7 @@ public struct FieldQueue: Sendable {
         flight.jumpSpan = joining?.jumpSpan
         flight.input = joining?.input
         flight.visited = joining?.visited ?? []
+        flight.callbacks = joining?.callbacks ?? 0
         inFlight = flight
         coordinator.dispatched()
         lastSentOp = op; lastSentLane = lane

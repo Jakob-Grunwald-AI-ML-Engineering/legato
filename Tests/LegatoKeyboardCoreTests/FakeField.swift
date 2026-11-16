@@ -41,8 +41,16 @@ struct FakeField {
     var newIdentityWhenEmpty = false
     /// The field's document identity (changes with `newIdentityWhenEmpty`).
     private(set) var identity = 0
-    /// Host callbacks (`textDidChange`) so far: one per move; the keyboard's own inserts and deletes make none.
+    /// Host callbacks (`textDidChange`) so far: one per move as it lands (two in Safari, the first stale); the keyboard's
+    /// own inserts and deletes make none. `unheard` are those no fresh report has carried yet (`takeCallback`).
     private(set) var callbacks = 0
+    private var unheard = 0
+    /// Whether the next fresh report comes with a host callback.
+    mutating func takeCallback() -> Bool {
+        guard unheard > 0 else { return false }
+        unheard -= 1
+        return true
+    }
     private var staleMove: (caret: Int, armed: Bool)?
 
     enum Host { case whatsApp, notes, safari }
@@ -174,7 +182,8 @@ struct FakeField {
 
     /// One host turn at `nowMs`: ops due land, and the (possibly late, possibly stale) report comes back. `fresh`: a new
     /// turn (a callback), not the keyboard reading the proxy again right after its own op.
-    mutating func tick(fresh: Bool = true) -> FieldQueue.Report {
+    /// `callback`: the read comes with a host callback, which carries the host's state at that moment (no lag).
+    mutating func tick(fresh: Bool = true, callback: Bool = false) -> FieldQueue.Report {
         if fresh, let stale = staleMove, stale.armed {
             // Safari's first callback after a move: the old caret, once.
             staleMove = nil
@@ -199,6 +208,7 @@ struct FakeField {
         }
         history.append(current)
         if history.count > lagTicks + 1 { history.removeFirst(history.count - lagTicks - 1) }
+        if callback { return truncated(stuck ?? current) }
         return truncated(stuck ?? history.first!)
     }
 
@@ -254,7 +264,8 @@ struct FakeField {
         defer {
             if newIdentityWhenEmpty, text.isEmpty, !wasEmpty { identity += 1 }
             if case .move = send.op {
-                callbacks += 1
+                let calls = staleFirstMoveReport ? 2 : 1
+                callbacks += calls; unheard += calls
                 if staleFirstMoveReport, send.writer != .outside { staleMove = (from, true) }
             }
             if checks, case .move = send.op {
@@ -395,8 +406,9 @@ struct QueueRig {
         for iteration in 0..<64 {
             // The first read of a tick is a host callback; the reads that follow the keyboard's own ops are the proxy's
             // immediate view.
-            let report = field.tick(fresh: iteration == 0)
-            let action = queue.step(report: report, elapsedMs: elapsed)
+            let callback = iteration == 0 && field.takeCallback()
+            let report = field.tick(fresh: iteration == 0, callback: callback)
+            let action = queue.step(report: report, elapsedMs: elapsed, callback: callback)
             elapsed = 0
             var syncUserCaret = false
             for event in queue.drainEvents() {

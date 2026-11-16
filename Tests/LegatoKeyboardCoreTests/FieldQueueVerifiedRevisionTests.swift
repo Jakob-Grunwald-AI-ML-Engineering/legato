@@ -141,7 +141,7 @@ import Testing
         var queue = FieldQueue(config: .init())
         let old = FieldQueue.Report(before: "a complete selected draft")
         _ = queue.step(report: old, elapsedMs: 200)
-        queue.externalSelectionChanged(report: old)
+        queue.observe(old, callback: .selection)
         queue.enqueue(FieldQueue.Edit(kind: .magic, before: old.before, target: "A complete selected draft"))
         for _ in 0..<20 { #expect(queue.step(report: old, elapsedMs: 33) == .idle) }
         #expect(queue.hasUnverifiedSelection)
@@ -159,7 +159,7 @@ import Testing
         var queue = FieldQueue()
         let end = FieldQueue.Report(before: "alpha beta")
         _ = queue.step(report: end, elapsedMs: 200)
-        queue.externalSelectionChanged(report: end)
+        queue.observe(end, callback: .selection)
         #expect(queue.hasUnverifiedSelection)
         _ = queue.step(report: end, elapsedMs: 50)
         #expect(queue.hasUnverifiedSelection)
@@ -171,7 +171,7 @@ import Testing
         var queue = FieldQueue()
         let stale = FieldQueue.Report(before: "Le")
         _ = queue.step(report: stale, elapsedMs: 200)
-        queue.externalContextChanged(report: stale)
+        queue.observe(stale, callback: .text)
         queue.enqueue(FieldQueue.Edit(kind: .magic, before: "Le", target: "LE"))
         for _ in 0..<20 { #expect(queue.step(report: stale, elapsedMs: 100) == .idle) }
         #expect(queue.hasUnverifiedContext && queue.hasUnverifiedInput)
@@ -208,8 +208,8 @@ import Testing
         var rig = QueueRig(FakeField(""), config: .init(prioritizeSpeech: true))
         let empty = FieldQueue.Report(before: "")
         _ = rig.queue.step(report: empty, elapsedMs: 200)
-        if selection { rig.queue.externalSelectionChanged(report: empty, hasText: false) }
-        else { rig.queue.externalContextChanged(report: empty, hasText: false) }
+        if selection { rig.queue.observe(empty, callback: .selection, hasText: false) }
+        else { rig.queue.observe(empty, callback: .text, hasText: false) }
         #expect(!rig.queue.hasUnverifiedInput)
         rig.queue.enqueue(snap(1, "first words", complete: true))
         let drained = rig.drain()
@@ -224,15 +224,15 @@ import Testing
             var queue = FieldQueue()
             let empty = FieldQueue.Report(before: "")
             _ = queue.step(report: empty, elapsedMs: 200)
-            if selection { queue.externalSelectionChanged(report: empty, hasText: hasText) }
-            else { queue.externalContextChanged(report: empty, hasText: hasText) }
+            if selection { queue.observe(empty, callback: .selection, hasText: hasText) }
+            else { queue.observe(empty, callback: .text, hasText: hasText) }
             #expect(queue.hasUnverifiedInput)
         }
         var queue = FieldQueue()
         let nonempty = FieldQueue.Report(before: "a complete selected draft")
         _ = queue.step(report: nonempty, elapsedMs: 200)
-        if selection { queue.externalSelectionChanged(report: nonempty, hasText: false) }
-        else { queue.externalContextChanged(report: nonempty, hasText: false) }
+        if selection { queue.observe(nonempty, callback: .selection, hasText: false) }
+        else { queue.observe(nonempty, callback: .text, hasText: false) }
         #expect(queue.hasUnverifiedInput)
     }
 
@@ -241,10 +241,10 @@ import Testing
         var queue = FieldQueue()
         let empty = FieldQueue.Report(before: "")
         _ = queue.step(report: empty, elapsedMs: 200)
-        queue.externalContextChanged(report: empty)
+        queue.observe(empty, callback: .text)
         queue.enqueue(snap(1, "an older held take", complete: true))
-        if selection { queue.externalSelectionChanged(report: empty, hasText: false) }
-        else { queue.externalContextChanged(report: empty, hasText: false) }
+        if selection { queue.observe(empty, callback: .selection, hasText: false) }
+        else { queue.observe(empty, callback: .text, hasText: false) }
         #expect(queue.hasUnverifiedInput)
         // The take's words still go in at the caret (plain inserts only); a report that never changes lifts nothing.
         var sent: [ShadowOp] = []
@@ -276,8 +276,8 @@ import Testing
         var (queue, report) = justConfirmedMove()
         // No step while idle: the in-queue clock is deliberately still at the move.
         #expect(!queue.hasRecentOwnOperation(elapsedMs: 2_000))
-        if selection { queue.externalSelectionChanged(report: report, elapsedSinceLastStepMs: 2_000) }
-        else { queue.externalContextChanged(report: report, elapsedSinceLastStepMs: 2_000) }
+        if selection { queue.observe(report, callback: .selection, elapsedSinceLastStepMs: 2_000) }
+        else { queue.observe(report, callback: .text, elapsedSinceLastStepMs: 2_000) }
         #expect(queue.hasUnverifiedInput)
         #expect(queue.hasUnverifiedSelection == selection)
         #expect(queue.hasUnverifiedContext == !selection)
@@ -288,8 +288,8 @@ import Testing
         var (queue, report) = justConfirmedMove()
         let withinTransit = FieldQueue.checkDeadlineMs - 1
         #expect(queue.hasRecentOwnOperation(elapsedMs: withinTransit))
-        if selection { queue.externalSelectionChanged(report: report, elapsedSinceLastStepMs: withinTransit) }
-        else { queue.externalContextChanged(report: report, elapsedSinceLastStepMs: withinTransit) }
+        if selection { queue.observe(report, callback: .selection, elapsedSinceLastStepMs: withinTransit) }
+        else { queue.observe(report, callback: .text, elapsedSinceLastStepMs: withinTransit) }
         #expect(!queue.hasUnverifiedInput)
         #expect(queue.hasRecentOwnOperation(elapsedMs: -2_000))
     }
@@ -301,14 +301,14 @@ import Testing
         queue.enqueue(.move(-4))
         #expect(queue.step(report: start, elapsedMs: 0) == .send(.move(-4)))
         #expect(queue.hasRecentOwnOperation(elapsedMs: 2_000))
-        queue.externalSelectionChanged(report: start, elapsedSinceLastStepMs: 2_000)
+        queue.observe(start, callback: .selection, elapsedSinceLastStepMs: 2_000)
         #expect(!queue.hasUnverifiedInput)
         let moved = FieldQueue.Report(before: "alpha ", after: "beta")
         _ = queue.step(report: moved, elapsedMs: 0)
         let acquired = queue.acquireRead()
         #expect(acquired)
         #expect(queue.hasRecentOwnOperation(elapsedMs: 2_000))
-        queue.externalContextChanged(report: moved, elapsedSinceLastStepMs: 2_000)
+        queue.observe(moved, callback: .text, elapsedSinceLastStepMs: 2_000)
         #expect(!queue.hasUnverifiedInput)
     }
 

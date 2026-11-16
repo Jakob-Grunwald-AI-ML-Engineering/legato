@@ -16,7 +16,7 @@ public enum FieldMatch {
 
     /// Every cursor position (characters into `text`) the field's report fits. Before the cursor the report is the
     /// known text's end there (hosts trim their context), or reaches back past the start of the known text; nothing
-    /// reported before it fits only the start. After the cursor the report starts with the known text there, or is a
+    /// reported before it fits the start, or a line's start. After the cursor the report starts with the known text there, or is a
     /// trimmed part of it, or goes on past it; nothing reported after it fits anywhere.
     ///
     /// A block-based host's window that starts at a block's start begins with "\n " (`FieldReader.trusted(before:)`):
@@ -70,7 +70,9 @@ public enum FieldMatch {
 
     private static func fits(in text: [Character], reportedBefore rb: [Character], reportedAfter ra: [Character]) -> [Int] {
         func beforeFits(_ p: Int) -> Bool {
-            if rb.isEmpty { return p == 0 }
+            // Nothing before the cursor: the field's start, or a line's (WhatsApp and Notes cut their windows at line
+            // breaks, measured 2026-11-16).
+            if rb.isEmpty { return p == 0 || text[p - 1].isNewline }
             if p >= rb.count { return text[(p - rb.count)..<p].elementsEqual(rb) }
             return p >= reverseMatchChars && rb[(rb.count - p)...].elementsEqual(text[..<p])
         }

@@ -174,3 +174,39 @@ public struct ShadowDocument: Sendable, Equatable {
         return (front, back)
     }
 }
+
+/// What a report says about the shadow (`ShadowDocument.observe`). The observer keeps the shadow current from every proxy
+/// callback, separately from the chunks that edit the field.
+public enum ShadowObservation: Sendable, Equatable {
+    /// The report shows the shadow at its caret.
+    case match
+    /// The report shows the shadow at its caret and text beyond what the shadow knew there.
+    case extends
+    /// The report shows known text, at one other place only: the caret is there (a tap, a jump into known text).
+    case stitch(at: Int)
+    /// The report shows text the shadow cannot place (a paste, another field, text replaced whole): an unknown region.
+    case seam
+}
+
+extension ShadowDocument {
+    /// Classifies a report against the shadow. `evidence`: how much agreeing text a stitch takes (finding text again by a
+    /// short window may find another field's).
+    public func observe(_ report: FieldQueue.Report, evidence: Int = FieldQueue.relocateChars) -> ShadowObservation {
+        let selected = report.selected ?? ""
+        let before = FieldReader.trusted(before: report.before)
+        let found = positions(of: report)
+        if found.contains(cursor), selected.count == selection, fitsSelection(cursor, selected) {
+            let knownAfter = text.count - cursor - selection
+            return before.count > cursor || report.after.count > knownAfter ? .extends : .match
+        }
+        // The shadow knows little before the caret and the report reaches back past it, agreeing with all of it.
+        if before.count > cursor, cursor >= 1, before.suffix(cursor).elementsEqual(text[..<cursor]), selected.count == selection,
+           FieldMatch.positions(in: Array(before.prefix(before.count - cursor)) + text, reportedBefore: report.before,
+                                reportedAfter: selected + report.after) == [before.count] {
+            return .extends
+        }
+        let inside = found.filter { selected.count + report.after.count <= text.count - $0 && before.count <= $0 }
+        if found.count == 1, inside == found, hasEvidence(report, chars: evidence) { return .stitch(at: found[0]) }
+        return .seam
+    }
+}

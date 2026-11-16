@@ -19,8 +19,8 @@ import Testing
     /// The native callback with an unchanged report and no selection shown.
     private func hold(_ rig: inout QueueRig, _ reason: Reason) {
         switch reason {
-        case .selection: rig.queue.externalSelectionChanged(report: rig.field.current, hasText: true, elapsedSinceLastStepMs: 2_000)
-        case .externalContext: rig.queue.externalContextChanged(report: rig.field.current, hasText: true, elapsedSinceLastStepMs: 2_000)
+        case .selection: rig.queue.observe(rig.field.current, callback: .selection, hasText: true, elapsedSinceLastStepMs: 2_000)
+        case .externalContext: rig.queue.observe(rig.field.current, callback: .text, hasText: true, elapsedSinceLastStepMs: 2_000)
         }
     }
 
@@ -100,7 +100,7 @@ import Testing
         var queue = FieldQueue(config: .init())
         let stale = FieldQueue.Report(before: "Le")
         _ = queue.step(report: stale, elapsedMs: 200)
-        queue.externalContextChanged(report: stale)
+        queue.observe(stale, callback: .text)
         queue.enqueue(snap(1, "hello"))
         #expect(queue.step(report: stale, elapsedMs: 200) == .send(.insert(" hello")))
         queue.operationDispatched()
@@ -124,8 +124,8 @@ import Testing
         let old = FieldQueue.Report(before: Self.draft)
         _ = queue.step(report: old, elapsedMs: 200)
         switch reason {
-        case .selection: queue.externalSelectionChanged(report: old)
-        case .externalContext: queue.externalContextChanged(report: old)
+        case .selection: queue.observe(old, callback: .selection)
+        case .externalContext: queue.observe(old, callback: .text)
         }
         queue.enqueue(FieldQueue.Edit(id: "magic", kind: .magic, before: Self.draft, target: "New draft safe 4471"))
         queue.enqueue(snap(1, "the cat waits"))
