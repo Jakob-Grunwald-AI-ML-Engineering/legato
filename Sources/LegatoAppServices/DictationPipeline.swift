@@ -69,6 +69,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         return snapshot
     }
     public func acknowledgeDelivery(_ ack: LiveDictationAck) {
+        if ack.runID == liveRun?.runID, ack.delivered != nil, let version = ack.version,
+           version >= (liveDeliveryAck?.version ?? -1) { liveDeliveryAck = ack }
         guard ack.complete, let first = outbox.first, first.lineID == ack.runID,
               first.final, snapshot(for: first).version == ack.version else { return }
         deliveryStates[first.lineID] = nil
@@ -159,16 +161,24 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     public var speechIsActive: Bool { voiceActive }
 
     @ObservationIgnored private var cleanupDuringPauses = false
+    @ObservationIgnored private var waitsForLiveDelivery = false
+    @ObservationIgnored private var liveDeliveryAck: LiveDictationAck?
     @ObservationIgnored public var cleanupFieldAvailable: @MainActor () -> Bool = { true }
     @ObservationIgnored private var fieldEntry: (id: UUID, raw: String)?
     public private(set) var fieldCleanupOutcome: CleanupFieldOutcome?
 
     /// Production field hosts use the same field cleanup owner. Hosts without a readable field
     /// retain transcript cleanup (buffered delivery and panel-only integrations).
-    public func attachCleanupField(_ field: any InstructionField, duringPauses: Bool) {
+    public func attachCleanupField(_ field: any InstructionField, duringPauses: Bool, waitsForLiveDelivery: Bool = false) {
         let cleanup = FieldCleanupSession()
         cleanup.field = field
         cleanupDuringPauses = duringPauses
+        self.waitsForLiveDelivery = waitsForLiveDelivery
+        cleanup.awaitDelivery = { [weak self] in
+            guard let self else { return false }
+            guard self.waitsForLiveDelivery, self.mode == .live, let run = self.liveRun, run.complete else { return true }
+            return await self.waitForLiveDelivery(runID: run.runID, generation: self.takeGeneration)
+        }
         cleanup.canApply = { [weak self] in
             guard let self else { return false }
             return self.mode != .live || self.liveRun?.complete == true || (self.cleanupDuringPauses && !self.voiceActive)
@@ -215,6 +225,18 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         }
         cleanup.diagnostics = { [weak self] event, fields in self?.diagnostics?(event, fields) }
         fieldCleanup = cleanup
+    }
+
+    /// A final snapshot can still be waiting for its transport's coalesced publication, or for the host queue.
+    /// Its exact acknowledgement orders cleanup reads after those writes without holding the user's cursor.
+    private func waitForLiveDelivery(runID: String, generation: Int) async -> Bool {
+        let started = streamTime()
+        while generation == takeGeneration, let run = liveRun, run.runID == runID, !Task.isCancelled {
+            if let ack = liveDeliveryAck, ack.runID == runID, ack.complete, ack.version == run.snapshot.version { return ack.delivered == true }
+            guard streamTime() - started < liveTimeout else { return false }
+            do { try await clock.sleep(for: .milliseconds(20)) } catch { return false }
+        }
+        return false
     }
 
     public func boundary(_ reason: String) {
@@ -742,6 +764,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         fieldCleanup?.reset()
         liveHistoryFallbacks = []
         let run = LiveDictationRun()
+        liveDeliveryAck = nil
         liveRun = run
         liveAnchor = String(contextBefore().suffix(600))
         diagnostics?("live2.run.start", ["run": String(run.runID.prefix(8))])
@@ -783,7 +806,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         liveSubmitted = [:]; liveKeys = [:]; liveFinishedAt = nil
         held = nil; heldAwaitsStop = false; liveTakeOpen = false
         guard liveRun != nil else { return }
-        liveRun = nil
+        liveRun = nil; liveDeliveryAck = nil
         onLiveChange?(nil)
     }
 

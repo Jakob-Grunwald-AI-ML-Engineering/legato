@@ -9,13 +9,16 @@ import LegatoKeyboardCore
     var text: String
     var cursor: Int
     var edits: [ScopedEdit] = []
+    var reads = 0
+    var complete = true
     var draftID: String?
     var beforeApply: (() -> Void)?
     init(_ text: String) { self.text = text; cursor = text.count }
     func publish(_ strip: InstructionStrip) {}
     func read(_ kind: FieldReadRequest.Kind, instructionID: String, reading: @escaping @MainActor () -> Void) async throws -> FieldReadReply {
-        .init(id: instructionID, state: .done, above: String(text.prefix(cursor)), below: String(text.dropFirst(cursor)),
-              stop: .start, stopBelow: .start, documentID: "field", draftID: draftID)
+        reads += 1
+        return .init(id: instructionID, state: .done, above: String(text.prefix(cursor)), below: String(text.dropFirst(cursor)),
+                     stop: complete ? .start : .unread, stopBelow: complete ? .start : .unread, documentID: "field", draftID: draftID)
     }
     func apply(_ edit: ScopedEdit) async -> ScopedEditAck? {
         beforeApply?()
@@ -34,6 +37,12 @@ private final class FieldCleaner: SentenceCleaning {
         #expect(input.fieldDocument)
         return input.text.replacingOccurrences(of: "teh", with: "the")
     }
+}
+
+@MainActor private func awaitCleanupTest(_ condition: @MainActor () -> Bool) async {
+    let deadline = ContinuousClock.now + .seconds(5)
+    while !condition(), ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(2)) }
+    #expect(condition())
 }
 
 @Suite @MainActor struct FieldCleanupTests {
@@ -167,6 +176,115 @@ private final class FieldCleaner: SentenceCleaning {
         #expect(pipeline.outbox.isEmpty)
         #expect(pipeline.takePhase == .buffering)
         #expect(pipeline.fieldCleanupOutcome?.status == .cleaned, "Presentation receives the confirmed outcome even without a History store")
+    }
+
+    @Test func finalCleanupReadsOnlyAfterTheExactRawVersionLands() async throws {
+        let clock = VirtualClock()
+        let field = CleanupField("teh old boat.")
+        field.complete = false // Like an iOS queue snapshot: changed bounded scopes cannot be merged safely.
+        let pipeline = DictationPipeline(cleaner: FieldCleaner(), clock: clock, supportsLive: true)
+        pipeline.attachCleanupField(field, duringPauses: true, waitsForLiveDelivery: true)
+        pipeline.beginTake()
+        await pipeline.receive(.init(sequence: 0, text: "teh green boat.", words: [], reason: "endpoint"))
+        let finishing = Task { await pipeline.finishTake() }
+        await awaitCleanupTest { pipeline.liveRun?.complete == true && clock.sleeperCount == 1 }
+        let snapshot = try #require(pipeline.liveRun?.snapshot)
+        #expect(field.reads == 0)
+        // A stale complete version, another run, or a partial acknowledgement cannot release cleanup.
+        for ack in [
+            LiveDictationAck(runID: snapshot.runID, version: snapshot.version - 1, complete: true, stats: .init(), delivered: true),
+            .init(runID: "other-run", version: snapshot.version, complete: true, stats: .init(), delivered: true),
+            .init(runID: snapshot.runID, version: snapshot.version, complete: false, stats: .init(), delivered: true)
+        ] {
+            let arms = clock.armCount
+            pipeline.acknowledgeDelivery(ack)
+            clock.advance(by: .milliseconds(20))
+            await awaitCleanupTest { clock.armCount > arms && clock.sleeperCount == 1 }
+            #expect(field.reads == 0)
+        }
+        field.text = "teh green boat."; field.cursor = field.text.count
+        pipeline.acknowledgeDelivery(.init(runID: snapshot.runID, version: snapshot.version, complete: true, stats: .init(), delivered: true))
+        // Statistics-only updates, including older adapters, cannot erase positive delivery evidence.
+        pipeline.acknowledgeDelivery(.init(runID: snapshot.runID, version: nil, complete: true, stats: .init()))
+        pipeline.acknowledgeDelivery(.init(runID: snapshot.runID, version: snapshot.version, complete: true, stats: .init()))
+        clock.advance(by: .milliseconds(20))
+        await finishing.value
+        #expect(field.reads == 2)
+        #expect(field.text == "the green boat.")
+        #expect(pipeline.fieldCleanupOutcome?.status == .cleaned)
+    }
+
+    @Test func missingFinalDeliveryTimesOutWithoutReadingOrEditingTheOldScope() async {
+        let clock = VirtualClock()
+        let field = CleanupField("teh old boat.")
+        let pipeline = DictationPipeline(cleaner: FieldCleaner(), clock: clock, supportsLive: true)
+        pipeline.attachCleanupField(field, duringPauses: true, waitsForLiveDelivery: true)
+        pipeline.beginTake()
+        await pipeline.receive(.init(sequence: 0, text: "teh green boat.", words: [], reason: "endpoint"))
+        let finishing = Task { await pipeline.finishTake() }
+        await awaitCleanupTest { clock.sleeperCount == 1 }
+        clock.advance(by: .seconds(6)) // Existing liveTimeout policy; this is no field or keyboard lock.
+        await finishing.value
+        #expect(field.reads == 0)
+        #expect(field.edits.isEmpty)
+        #expect(field.text == "teh old boat.")
+        #expect(pipeline.fieldCleanupOutcome?.status == .undelivered)
+    }
+
+    @Test func resetCancelsTheFinalDeliveryWaitWithoutReportingIntoTheNextTake() async {
+        let clock = VirtualClock()
+        let field = CleanupField("teh old boat.")
+        let pipeline = DictationPipeline(cleaner: FieldCleaner(), clock: clock, supportsLive: true)
+        pipeline.attachCleanupField(field, duringPauses: true, waitsForLiveDelivery: true)
+        pipeline.beginTake()
+        await pipeline.receive(.init(sequence: 0, text: "teh green boat.", words: [], reason: "endpoint"))
+        let finishing = Task { await pipeline.finishTake() }
+        await awaitCleanupTest { clock.sleeperCount == 1 }
+        await pipeline.reset()
+        await finishing.value
+        #expect(clock.sleeperCount == 0)
+        #expect(field.reads == 0)
+        #expect(field.edits.isEmpty)
+        #expect(pipeline.fieldCleanupOutcome == nil)
+    }
+
+    @Test(arguments: [false, true])
+    func terminalReceiptNeverReadsOrCleansTheSuccessorDraft(afterModel: Bool) async throws {
+        let clock = VirtualClock()
+        let field = CleanupField("teh green boat.")
+        let historyURL = FileManager.default.temporaryDirectory.appending(path: "legato-delivery-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: historyURL) }
+        let history = JSONLHistoryStore(fileURL: historyURL)
+        let pipeline = DictationPipeline(history: history, cleaner: FieldCleaner(), clock: clock,
+                                        supportsLive: true, groupsLiveHistory: true)
+        pipeline.attachCleanupField(field, duringPauses: true, waitsForLiveDelivery: true)
+        pipeline.beginTake()
+        await pipeline.receive(.init(sequence: 0, text: "teh green boat.", words: [], reason: "endpoint"))
+        let finishing = Task { await pipeline.finishTake() }
+        await awaitCleanupTest { pipeline.liveRun?.complete == true && clock.sleeperCount == 1 }
+        let snapshot = try #require(pipeline.liveRun?.snapshot)
+        let reject = {
+            field.text = "next draft"; field.cursor = field.text.count; field.draftID = "next"
+            pipeline.acknowledgeDelivery(.init(runID: snapshot.runID, version: snapshot.version, complete: true,
+                                               stats: .init(), delivered: false))
+        }
+        if afterModel {
+            pipeline.fieldCleanup?.clean = { _, _ in reject(); return "the green boat." }
+            pipeline.acknowledgeDelivery(.init(runID: snapshot.runID, version: snapshot.version, complete: true,
+                                               stats: .init(), delivered: true))
+        } else { reject() }
+        clock.advance(by: .milliseconds(20))
+        await finishing.value
+        await pipeline.settleHistory()
+        #expect(field.reads == (afterModel ? 1 : 0))
+        #expect(field.edits.isEmpty)
+        #expect(field.text == "next draft")
+        #expect(pipeline.fieldCleanupOutcome?.status == .undelivered)
+        let saved = try #require(try await JSONLHistoryStore(fileURL: historyURL).recent(limit: 1).first)
+        #expect(saved.rawText == "teh green boat.")
+        #expect(saved.text == "teh green boat.")
+        #expect(saved.cleanupFieldStatus == .undelivered)
+        #expect(saved.cleanupResultText == nil)
     }
 
     @Test func modelResultWaitsWhenSpeechResumes() async {

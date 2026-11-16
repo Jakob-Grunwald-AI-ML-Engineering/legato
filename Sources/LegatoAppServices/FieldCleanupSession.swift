@@ -8,6 +8,8 @@ import LegatoKeyboardCore
 @MainActor public final class FieldCleanupSession {
     public weak var field: (any InstructionField)?
     public var canApply: @MainActor () -> Bool = { true }
+    /// Cross-process speech delivery must settle before either scope read. This wait owns no field lease.
+    public var awaitDelivery: @MainActor () async -> Bool = { true }
     public var clean: @MainActor (String, Bool) async -> String? = { _, _ in nil }
     public var onResult: @MainActor (String, String, CleanupFieldStatus) async -> Void = { _, _, _ in }
     public var diagnostics: (@MainActor (String, [String: Any]) -> Void)?
@@ -53,6 +55,17 @@ import LegatoKeyboardCore
 
     public func settle() async { await task?.value }
 
+    private func deliveryReady(final: Bool, source: String, generation token: Int) async -> Bool {
+        let ready = await awaitDelivery()
+        guard token == generation, !Task.isCancelled else { return false }
+        guard ready else {
+            await onResult(source, "", .undelivered)
+            diagnostics?("field.cleanup", ["final": final, "status": "deliveryUnconfirmed"])
+            return false
+        }
+        return true
+    }
+
     private func pass(final: Bool, pending: String, generation token: Int) async {
         guard let field else { return }
         lastApplied = false
@@ -60,6 +73,7 @@ import LegatoKeyboardCore
         requestID = id
         defer { field.cancel(instructionID: id); if requestID == id { requestID = nil } }
         do {
+            guard await deliveryReady(final: final, source: "", generation: token) else { return }
             let reply = try await field.read(.cleanup, instructionID: id, reading: {})
             guard token == generation, !Task.isCancelled else { return }
             guard reply.state == .done, reply.selection?.isEmpty != false else {
@@ -92,6 +106,7 @@ import LegatoKeyboardCore
             // Re-read just before applying: existing shared three-way merge keeps user changes
             // and accepts only cleanup changes in untouched words. Bounded windows cannot prove
             // common document extent, so they require an exact match instead.
+            guard await deliveryReady(final: final, source: source, generation: token) else { return }
             let fresh = try await field.read(.cleanup, instructionID: id, reading: {})
             guard token == generation, !Task.isCancelled else { return }
             guard fresh.state == .done, fresh.documentID == reply.documentID, fresh.draftID == reply.draftID, fresh.selection?.isEmpty != false else {
