@@ -27,7 +27,7 @@ The five host baselines, corrected native Select All preservation, native Paste 
 
 Physical matching-PCM replay, pause correction and the quiet-tail fix are confirmed. The final period confirmed in 158.123 ms, Space in 95.613 ms, q in 178.716 ms, and the longest of six cursor responses in 455.377 ms. Unicode raw movement and native list continuation are measured. Still required: both full original stress seeds, fresh integrated UAT, and final cleanup of unchanged owned fixtures; the parent owns current gate/acceptance state. Target less than 500 ms; any observed interruption over 1 second fails. Do not substitute cleanup duration, provider latency, debug transfer time or deliberate probe delay for input interruption.
 
-The user has authorized physical testing, microphone arming, short serial provider calls and sending only to verified self. The official WhatsApp Message yourself system label and (You) badge must still be checked before another send. The user restored phone readiness and authorized continued phone testing; Mac foreground work remains paused.
+The user has authorized physical testing, microphone arming, short serial provider calls and sending only to verified self. The official WhatsApp Message yourself system label and (You) badge must still be checked before another send. The user subsequently paused phone testing after the verified handback. Do not resume phone foreground, bridge, install, retry or input actions without explicit resumption. Mac foreground work remains paused.
 
 ## Ready matching replay
 
