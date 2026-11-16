@@ -1,9 +1,9 @@
 {
-  "status": "DRAFT_ACCEPTANCE_FAILED",
+  "status": "DRAFT_PHONE_RECHECK_PENDING",
   "pr": "https://github.com/Jakob-Grunwald-AI-ML-Engineering/legato/pull/298",
   "branch": "feat/iphone-field-edits",
   "base": "1007a83235dc705679449f528d4ab188dea72761",
-  "productRevision": "783863142ea5406bd619edbadd57490cddc2051f",
+  "productRevision": "b960ed3",
   "unchangedProductAndSwiftTestTrees": {
     "Apps": {
       "tested": "639a136f4923e1997a481f9786364eaebaf93e19",
@@ -148,7 +148,7 @@
     "draftsAndNewerClipboardPreserved": true
   },
   "remainingLimits": [
-    "Fresh acceptance failed; four product findings open (fresh-uat.md).",
+    "iPhone recheck of the cleanup recovery fix is untested.",
     "Physical external hardware keyboard behavior not established by WDA.",
     "Recorded-PCM/provider tests do not establish microphone or recognition quality.",
     "Own unchanged fixture cleanup remains access-blocked; preserve unknown additions and newer clipboard."
@@ -191,5 +191,11 @@
     "allIOSSimulatorsStopped": true,
     "normalLegatoProcessRestartedOrChanged": false,
     "userConfirmedImprovement": true
+  },
+  "recheck": {
+    "revision": "b960ed3",
+    "mac": "PASS (guest, offline fixtures)",
+    "phone": "UNTESTED: WDA needs the owner passcode for Enable UI Automation",
+    "localGate": "PASS on c915d7f; b960ed3 passed LegatoMacTests (245) and the Mac build"
   }
 }

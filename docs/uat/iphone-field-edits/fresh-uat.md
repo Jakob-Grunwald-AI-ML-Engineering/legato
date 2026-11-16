@@ -1,6 +1,6 @@
 # Fresh acceptance result
 
-Result: **failed on both platforms** (2026-11-16, product source `7838631`). The PR stays draft. Two fresh agents without implementation context explored live, one or two actions at a time; the conductor reproduced or traced each failure below independently.
+Result: **first round failed on both platforms** (2026-11-16, product source `7838631`). After fixes (`b960ed3`) the Mac recheck passed; the iPhone recheck is untested. The PR stays draft. Two fresh agents without implementation context explored live, one or two actions at a time; the conductor reproduced or traced each failure below independently.
 
 ## Physical iPhone (real keyboard extension, Safari fields, recorded speech at speed 1)
 
@@ -21,3 +21,11 @@ Result: **failed on both platforms** (2026-11-16, product source `7838631`). The
 ## Access notes
 
 The earlier Mac blocker (`hotkeysEnabled=false`) cleared with a plain relaunch after the guest permissions were granted. The phone needed a restarted WDA runner and a new session. Handback: phone on Home, bridge idle/unarmed, VM stopped, WDA runner and fixture server stopped, no simulator booted. Raw journals and screenshots stay private (`fresh-phone-uat`, `fresh-mac-uat`).
+
+## Recheck after fixes (`c915d7f`, `b960ed3`)
+
+Fixes: an aborted cleanup edit is parked, resolved from a fresh field read and followed by one new cleanup pass (iPhone); a failed native edit blocks only its own dictation run (Mac); WebKit's trailing no-break space is accepted by the scoped write check and the read-back (Mac). Letters typed during speech and then removed by cleanup were in the cleaner's input, which is the decided behaviour; no change.
+
+- **Mac guest: passed.** Safari `contenteditable` takes dictation fully (empty, prefilled, multi-line, typing in between, 26 keys typed during the stop cleanup); TextEdit and the textarea still hold; a cleared draft stays cleared; a run that fell back to the pill stays there and the next run writes normally without a relaunch.
+- Mac friction left open: Safari autocorrect capitalising a dictated word (`charlie` → `Charlie`) fails the caret check and sends the rest of that run to the pill, where the kept text mixes the raw sentence with a partial cleanup; a stale pill stays on screen until dismissed; the first dictation after Safari launches goes to the pill. Arrow-key caret moves and a pause-triggered cleanup stayed untested.
+- **iPhone: untested.** The new build is installed, but the WDA runner cannot start until the owner enters the passcode on the phone's "Enable UI Automation" prompt.
