@@ -2,11 +2,13 @@ import Foundation
 import LegatoKeyboardCore
 
 /// One exact native-field plan. The expensive diff is built once; verified writes advance its expected text.
-/// Atomic replacement pairs preserve old graphemes until their replacements are ready, including on interruption.
+/// One step per hunk: a replacement is one write, so old graphemes stay until their replacement is in.
 struct NativeEditPlan: Sendable {
     struct Step: Sendable, Equatable {
         var range: Range<Int>
         var replacement: [Character]
+        /// One grapheme of new speech at the end of the text, typed at the typewriter pace. Every other step is a whole hunk.
+        var typewriter = false
     }
     let desired: [Character]
     let paced: Bool
@@ -20,20 +22,14 @@ struct NativeEditPlan: Sendable {
         var steps: [Step] = [], shift = 0
         for change in FieldEditCoordinator.changes(from: current, to: desired) {
             let start = change.start + shift, removed = change.end - change.start
-            if !paced || change.text.isEmpty {
-                steps.append(Step(range: start..<(start + removed), replacement: change.text))
+            // A hunk is one chunk: its deletes and inserts go out together at one place. Only new speech appended at the
+            // end of the text is typed grapheme by grapheme (the typewriter).
+            if paced, removed == 0, change.end == current.count, change.text.count > 1 {
+                for i in 0..<change.text.count {
+                    steps.append(Step(range: (start + i)..<(start + i), replacement: [change.text[i]], typewriter: true))
+                }
             } else {
-                let paired = min(removed, change.text.count)
-                for i in 0..<paired {
-                    steps.append(Step(range: (start + i)..<(start + i + 1), replacement: [change.text[i]]))
-                }
-                // Only genuinely deleted old characters remain after all ready replacements were paired.
-                if removed > paired { steps.append(Step(range: (start + paired)..<(start + removed), replacement: [])) }
-                if change.text.count > paired {
-                    for i in paired..<change.text.count {
-                        steps.append(Step(range: (start + i)..<(start + i), replacement: [change.text[i]]))
-                    }
-                }
+                steps.append(Step(range: start..<(start + removed), replacement: change.text))
             }
             shift += change.text.count - removed
         }

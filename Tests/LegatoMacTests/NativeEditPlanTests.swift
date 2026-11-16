@@ -4,17 +4,34 @@ import LegatoKeyboardCore
 @testable import LegatoMac
 
 @Suite struct NativeEditPlanTests {
-    @Test func anInterruptedUppercaseReplacementRetainsEveryUnprocessedOriginalLetter() {
-        let original = "return before sunset and keep every remaining word"
+    @Test func aReplacementIsOneWholeHunkStepSoNoInterruptionLeavesAGap() {
+        let original = "return before sunset"
         var plan = NativeEditPlan(current: Array(original), desired: Array(original.uppercased()), paced: true)
-        for _ in 0..<9 {
-            guard let step = plan.next, let after = plan.afterNext else { Issue.record("plan ended early"); return }
-            #expect(step.range.count == 1 && step.replacement.count == 1)
-            #expect(String(after).lowercased() == original, "An interrupted replacement never leaves a deleted-word gap")
-            let advanced = plan.confirm(after)
-            #expect(advanced)
+        var lengths: [Int] = []
+        while let step = plan.next, let after = plan.afterNext {
+            #expect(!step.typewriter)
+            lengths.append(step.range.count)
+            #expect(after.count == original.count, "A replaced hunk never leaves a deleted-word gap")
+            let confirmed = plan.confirm(after)
+            #expect(confirmed)
         }
-        #expect(plan.expected.count == original.count)
+        #expect(lengths == [6, 6, 6], "one step per changed word")
+        #expect(String(plan.expected) == original.uppercased())
+    }
+
+    @Test func aTailHunkAndAMidTextHunkAreOneStepEachAndOnlyNewSpeechIsTyped() {
+        let tail = NativeEditPlan(current: Array("we saw a boat"), desired: Array("we saw a boat today"), paced: true)
+        #expect(tail.next?.typewriter == true, "new speech at the end keeps the typewriter")
+        let flushed = NativeEditPlan(current: Array("we saw a boat"), desired: Array("we saw a boat today"), paced: false)
+        #expect(flushed.next == .init(range: 13..<13, replacement: Array(" today")))
+        let mid = NativeEditPlan(current: Array("we saw a boat today"), desired: Array("we saw a big red boat today"), paced: true)
+        var midCopy = mid, midSteps = 0
+        while let after = midCopy.afterNext { #expect(midCopy.next?.typewriter == false); _ = midCopy.confirm(after); midSteps += 1 }
+        #expect(midSteps == 1, "a mid-text insert is one write")
+        let cleanup = NativeEditPlan(current: Array("um we saw a boat"), desired: Array("We saw a boat."), paced: true)
+        var steps = 0, copy = cleanup
+        while let after = copy.afterNext { #expect(copy.next?.typewriter == false || copy.next?.replacement.count == 1); _ = copy.confirm(after); steps += 1 }
+        #expect(steps <= 3, "a cleanup is a few hunks, not one step per character")
     }
 
     @Test(arguments: [("a colour boat", "a color boat"), ("abc", "x"), ("x", "abc"), ("a⛵️b", "a🌊b"), ("old tail", ""), ("", "new tail")])
@@ -42,12 +59,16 @@ import LegatoKeyboardCore
     var ignoreWrites = false
     var trailingSpaceBecomesNoBreak = false
     var homeFailures = 0
+    var reads = 0
+    var readsAtWrite: [Int] = []
+    var ignoreFirstWrites = 0
+    var onWrite: (() -> Void)?
     var showsNoBreakSpaces: Bool { trailingSpaceBecomesNoBreak }
     func endNativeInputUnit(homeVerified: Bool) -> Bool { if !homeVerified { homeFailures += 1 }; return homeVerified }
     init(_ text: String) { value = text; selection = .init(location: text.utf16.count, length: 0) }
     func isFocused() -> Bool { focused }
     func selectedRange() throws -> UTF16Range { selection }
-    func textLength() throws -> Int { value.utf16.count }
+    func textLength() throws -> Int { reads += 1; return value.utf16.count }
     func text(in range: UTF16Range) throws -> String {
         if readsFailAfterWrite, writes > 0 { throw TextTargetReadError.unsupported }
         let at = min(range.location, value.utf16.count)
@@ -55,7 +76,8 @@ import LegatoKeyboardCore
     }
     func setSelectedRange(_ range: UTF16Range) throws { selection = range }
     func replace(_ range: UTF16Range, with text: String) throws {
-        if ignoreWrites { writes += 1; return }
+        if ignoreWrites || ignoreFirstWrites > 0 { ignoreFirstWrites = max(0, ignoreFirstWrites - 1); writes += 1; return }
+        readsAtWrite.append(reads)
         value = (value as NSString).replacingCharacters(in: NSRange(location: range.location, length: range.length), with: text)
         if trailingSpaceBecomesNoBreak {
             value = value.replacingOccurrences(of: "\u{00A0}", with: " ")
@@ -63,6 +85,7 @@ import LegatoKeyboardCore
         }
         selection = .init(location: range.location + text.utf16.count, length: 0)
         writes += 1; snapshots.append(value)
+        onWrite?()
         if let limit = loseFocusAfter, writes >= limit { focused = false }
     }
 }
@@ -188,39 +211,71 @@ import LegatoKeyboardCore
     @Test func focusLossReportsPartialConfirmedWorkAndLeavesUnprocessedLettersIntact() async {
         let original = "return before sunset"
         let field = NativePlanField(original)
-        field.loseFocusAfter = 3
+        field.loseFocusAfter = 2
         let queue = MacFieldQueue(target: field)
         var clock = ContinuousClock.now
         queue.now = { clock }
         queue.sleep = { duration in clock += duration; await Task.yield() }
         let result = await queue.edit(.init(range: .init(location: 0, length: original.utf16.count), scope: original, target: original.uppercased()))
         #expect(result == .stopped(.focusLost))
-        #expect(field.writes == 3)
-        #expect(field.value.lowercased() == original)
+        #expect(field.writes == 2)
+        #expect(field.value == "RETURN BEFORE sunset")
         #expect(field.value.count == original.count)
     }
 
-    @Test func anOutsidePrefixInvalidatesThePlanAndRemainsUntouched() async {
+    @Test func aKeyDuringAChunkWaitsOnlyForThatChunkAndItsTextSurvives() async {
         let original = "return before sunset"
         let field = NativePlanField("Header " + original)
         let bound = MacFieldQueue(target: field)
-        var prefixed = false
-        bound.sleep = { [weak bound] _ in
-            if field.writes == 3, !prefixed {
-                prefixed = true
-                field.value = "OUTSIDE " + field.value
-                field.selection = .init(location: 8, length: 0)
-                bound?.userActed()
-            }
-            await Task.yield()
+        bound.sleep = { _ in await Task.yield() }
+        var typed = false
+        var writesAtKey = 0
+        bound.journal = { [weak bound] entry in
+            guard entry.kind == .verified, field.writes == 1, !typed else { return }
+            typed = true
+            writesAtKey = field.writes
+            field.value = "OUTSIDE " + field.value
+            field.selection = .init(location: 8, length: 0)
+            bound?.userActed()
         }
         let result = await bound.edit(.init(range: .init(location: 7, length: original.utf16.count), scope: original,
                                             before: "Header ", target: original.uppercased()))
         guard case .applied = result else { Issue.record("prefix interrupted the unchanged owned scope"); return }
+        #expect(writesAtKey == 1, "the running chunk finished whole before the key was seen")
         #expect(field.value == "OUTSIDE Header " + original.uppercased())
-        #expect(bound.nativePlanBuilds == 2)
+        #expect(field.writes == 3, "one write per changed word, the rest replanned after the key")
         #expect(field.selection == .init(location: 8, length: 0))
     }
+
+    @Test func eachChunkIsPlannedFromAFreshReadAndAutomaticEditsWaitForNothing() async {
+        let original = "um we saw a colour boat today"
+        let field = NativePlanField(original)
+        let queue = MacFieldQueue(target: field)
+        var pauses = 0
+        queue.sleep = { _ in pauses += 1; await Task.yield() }
+        let result = await queue.edit(.init(range: .init(location: 0, length: original.utf16.count), scope: original,
+                                            target: "We saw a color boat today."))
+        guard case .applied = result else { Issue.record("cleanup did not apply"); return }
+        #expect(field.value == "We saw a color boat today.")
+        #expect(field.writes >= 2 && field.writes <= 4, "one write per hunk, not per character")
+        #expect(pauses == 0, "no paced waits between the chunks of an automatic edit")
+        for (before, after) in zip(field.readsAtWrite, field.readsAtWrite.dropFirst()) {
+            #expect(after > before, "the field is read again before every chunk")
+        }
+    }
+
+    @Test func aChunkWhoseCheckFailsReadsAgainAndPlansTheMissingTextFresh() async {
+        let original = "return before sunset"
+        let field = NativePlanField(original)
+        field.ignoreFirstWrites = 1
+        let queue = MacFieldQueue(target: field)
+        queue.sleep = { _ in await Task.yield() }
+        let result = await queue.edit(.init(range: .init(location: 0, length: original.utf16.count), scope: original, target: original.uppercased()))
+        guard case .applied = result else { Issue.record("edit did not recover"); return }
+        #expect(field.value == original.uppercased())
+        #expect(field.writes == 4, "the failed write plus one per word, with no blind restore")
+    }
+
     @Test func anUnconfirmedFirstWriteRemainsUncertainWhenFocusIsLost() async {
         let original = "return before sunset"
         let field = NativePlanField(original)
