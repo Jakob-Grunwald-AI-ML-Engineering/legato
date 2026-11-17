@@ -92,6 +92,8 @@ import LegatoMac
     private var activeInstructionID: String?
     /// The active read was a cleanup's (`FieldReadRequest.Kind.cleanup`).
     private var activeReadIsCleanup = false
+    /// The field as each cleanup pass's shadow showed it (the pass's id), so the result is rebased through every change since.
+    private var shadowReads: [(id: String, text: String)] = []
     private var streamedRunID: String?
     /// Runs this editor saw; a rebind retires them, so a late cleanup never follows into another field or session.
     private var seenRunIDs: Set<String> = []
@@ -567,6 +569,8 @@ import LegatoMac
             end = text.substring(to: span.end).count
         }
         activeInstructionID = id; activeReadIsCleanup = true
+        shadowReads.append((id, snapshot.text))
+        if shadowReads.count > 4 { shadowReads.removeFirst() }
         readSelection = selection; readText = snapshot.text; readRange = UTF16Range(location: 0, length: text.length)
         instructionCursor = selection
         return FieldShadow(id: id, runID: streamedRunID ?? "", above: above, below: below, takeStart: start, takeEnd: end,
@@ -575,10 +579,29 @@ import LegatoMac
 
     /// Magic's result (or its undo) goes to the queue as one edit of the text it read; the user's typing or clicks
     /// meanwhile rebase it, and only a scope the user changed is refused.
-    public func apply(_ edit: ScopedEdit) async -> ScopedEditAck? {
+    public func apply(_ original: ScopedEdit) async -> ScopedEditAck? {
+        var edit = original
         func refused(_ reason: String) -> ScopedEditAck { .init(id: edit.id, applied: false, reason: reason) }
         guard edit.documentID == documentID, let target else { return refused("The focused field changed. Nothing was edited.") }
         guard activeInstructionID == edit.instructionID else { return refused("A newer field read owns this edit. Nothing was edited.") }
+        // A cleanup pass planned from the shadow: what the field shows now is the base, the pass's changes land only in
+        // the words nobody changed since (the user's typing, speech typed meanwhile). `FieldMerge`, as on the iPhone.
+        if let index = shadowReads.firstIndex(where: { $0.id == edit.instructionID }) {
+            let read = shadowReads.remove(at: index).text
+            if edit.selected == nil, edit.before + edit.after == read {
+                guard let length = try? target.textLength(), let current = try? target.text(in: .init(location: 0, length: length)),
+                      let caret = try? target.selectedRange(), caret.length == 0, caret.end <= length
+                else { return .init(id: edit.id, applied: false, reason: "The field changed. Nothing was edited.", unplaceable: true) }
+                if current != read {
+                    let merged = String(FieldMerge.rebase(base: Array(read), kept: Array(current), incoming: Array(edit.target)).text)
+                    guard merged != current else { return refused("The words changed meanwhile. Nothing was edited.") }
+                    let ns = current as NSString
+                    edit.before = ns.substring(to: caret.location); edit.after = ns.substring(from: caret.end); edit.target = merged
+                    readSelection = caret; readText = current; readRange = .init(location: 0, length: length)
+                    instructionCursor = caret
+                }
+            }
+        }
         guard let anchor = readSelection ?? instructionCursor else { return refused("The field changed. Nothing was edited.") }
         let range: UTF16Range
         if let selected = edit.selected {

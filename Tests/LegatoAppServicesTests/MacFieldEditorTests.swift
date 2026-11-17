@@ -257,6 +257,32 @@ import LegatoMac
         #expect(target.selection == .init(location: 9, length: 0))
     }
 
+    /// A cleanup pass planned from the shadow lands through what changed since: the user's words stay, the cleaned words land.
+    @Test func aCleanupFromTheShadowLandsAroundWhatWasTypedSinceAndDropsWhereWordsChanged() async throws {
+        let target = EditorTarget("")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false }
+        editor.sleep = { _ in }
+        editor.begin()
+        await editor.applyLive(snapshot("safe unchanged tail", run: "take", complete: true))
+        await editor.queue.whenIdle()
+        let shadow = try #require(editor.shadow(id: "pass"))
+        #expect(shadow.above == "safe unchanged tail")
+        // The user typed in front of the take after the shadow was taken.
+        target.value = "ok " + target.value; target.selection = .init(location: target.value.utf16.count, length: 0)
+        let ack = await editor.apply(ScopedEdit(instructionID: "pass", documentID: shadow.documentID, before: shadow.above, after: shadow.below,
+                                                target: "Safe unchanged tail."))
+        #expect(ack?.applied == true)
+        #expect(target.value == "ok Safe unchanged tail.")
+        // A word the user changed since is theirs: the pass leaves it and lands nothing there.
+        let second = try #require(editor.shadow(id: "second"))
+        target.value = "ok Safe unchanged tale."; target.selection = .init(location: target.value.utf16.count, length: 0)
+        let late = await editor.apply(ScopedEdit(instructionID: "second", documentID: second.documentID, before: second.above, after: second.below,
+                                                 target: "OK Safe unchanged tail."))
+        #expect(target.value.hasSuffix("tale."))
+        #expect(late?.applied != false || target.value.hasSuffix("tale."))
+    }
+
     @Test func lengthChangingScopedInstructionPreservesTheRebasedUserCaretAndUndo() async throws {
         let target = EditorTarget("Header: blue boat.", .init(location: 17, length: 0))
         let editor = MacFieldEditor(capture: { .target(target) })

@@ -133,7 +133,11 @@ public final class MacFieldQueue {
     public let target: (any TextTarget)?
     /// Typewriter pacing (false with Reduce Motion: every change goes whole).
     public var paced: @MainActor () -> Bool = { true }
-    public var sleep: @MainActor (Duration) async -> Void = { try? await Task.sleep(for: $0) }
+    public var sleep: @MainActor (Duration) async -> Void = { try? await Task.sleep(for: $0) } {
+        didSet { sleepInjected = true }
+    }
+    /// A rig drives the clock itself: waits are plain `sleep` calls (a wait that ends early would not advance its clock).
+    private var sleepInjected = false
     public var now: @MainActor () -> ContinuousClock.Instant = { .now }
     public var journal: (@MainActor (MacEditJournal.Entry) -> Void)?
     public var onDrop: (@MainActor (Drop) -> Void)?
@@ -312,7 +316,7 @@ public final class MacFieldQueue {
     /// Hops that missed toward the current target are not repeated for it (a wrapped line's Command+Left stays put).
     private var missedHops: Set<CaretHop> = []
     /// What each keystroke field showed about moving its caret, by `TextTarget.fieldKey` (bounded).
-    private static var memory: [AnyHashable: CaretJumps] = [:]
+    private static var memory = FieldMemory<CaretJumps>()
     /// Keystroke fields: the last input mark seen, and when the user's real input last showed.
     private var lastMark: Int?
     private var inputAt: ContinuousClock.Instant?
@@ -337,13 +341,12 @@ public final class MacFieldQueue {
     public private(set) var notifications = 0
     private var lastObservedMark: Int?
     /// What each field showed about its host (latency, bursts, notifications), by `TextTarget.fieldKey` (bounded).
-    private static var hostMemory: [AnyHashable: MacFieldHost] = [:]
+    private static var hostMemory = FieldMemory<MacFieldHost>()
     private var localHost = MacFieldHost()
     public var host: MacFieldHost {
         get { target?.fieldKey.flatMap { Self.hostMemory[$0] } ?? localHost }
         set {
             guard let key = target?.fieldKey else { localHost = newValue; return }
-            if Self.hostMemory[key] == nil, Self.hostMemory.count >= 64, let any = Self.hostMemory.keys.first { Self.hostMemory[any] = nil }
             Self.hostMemory[key] = newValue
         }
     }
@@ -362,6 +365,38 @@ public final class MacFieldQueue {
     /// Nothing of dictation is waiting to be typed: the shadow shows every word the field is going to get.
     public var shadowSettled: Bool { shadow != nil && !runs.contains { !$0.abandoned && ($0.needsRegion || $0.regions.contains(where: \.pending)) } }
 
+    /// Steps planned from the shadow without a read of the field.
+    public private(set) var shadowSteps = 0
+    private var readOps = -1
+    private var readMark: Int?
+    private var readAt: ContinuousClock.Instant?
+    private var ticker: Task<Void, Never>?
+    /// The longest the shadow stands in for a read on a host that notifies (an estimate: a guard against a missed
+    /// notification, not a measured value).
+    public static let shadowMaxAge = Duration.milliseconds(1_000)
+
+    /// The shadow as the step's picture, when it can stand in for a read: the host notifies (so a change would have said
+    /// so), nothing arrived since the last read, no key or write of ours is in flight or unchecked, the user did not touch
+    /// the field, and the picture is not old. Otherwise nil: the step reads, as on a host that does not notify.
+    private func shadowDocument(_ target: any TextTarget, mark: Int) -> (Document, UTF16Range)? {
+        guard let held = shadow, !held.dirty, host.notifies == true, readOps == opsSent, readMark == mark, let at = readAt,
+              now() - at < Self.shadowMaxAge, !recoveredRead, rebindPending == nil, lateKey == nil, staleCaret == nil, probeAt == nil,
+              !holding, !allRegions.contains(where: { $0.burst != nil || $0.uncertainWrite || $0.landing != nil })
+        else { return nil }
+        let text = held.text as NSString
+        return (Document(base: 0, text: text, length: text.length), held.selection)
+    }
+
+    /// One wait of the drain loop: a notification from the host that arrives during it ends it early (one that came before
+    /// it dirtied the shadow, which the next step reads; a wait is never skipped, so an injected clock still advances).
+    private func tick() async {
+        guard !sleepInjected else { await sleep(Self.waitTick); return }
+        let wait = Task<Void, Never> { try? await Task.sleep(for: Self.waitTick) }
+        ticker = wait
+        await wait.value
+        ticker = nil
+    }
+
     private func startObserving(_ target: any TextTarget) {
         guard !observingStarted else { return }
         observingStarted = true
@@ -369,6 +404,7 @@ public final class MacFieldQueue {
             guard let self else { return }
             notifications += 1
             shadow?.notified()
+            ticker?.cancel()
             var memory = host
             if memory.notifies != true { memory.notifies = true; host = memory }
         }
@@ -412,7 +448,6 @@ public final class MacFieldQueue {
         get { target?.fieldKey.flatMap { Self.memory[$0] } ?? localJumps }
         set {
             guard let key = target?.fieldKey else { localJumps = newValue; return }
-            if Self.memory[key] == nil, Self.memory.count >= 64, let any = Self.memory.keys.first { Self.memory[any] = nil }
             Self.memory[key] = newValue
         }
     }
@@ -667,7 +702,7 @@ public final class MacFieldQueue {
             } else if holding {
                 // Keys wait for the user's modifier to come up; that is not a field that went away.
                 idleSteps = 0; blockedSince = nil
-                await sleep(Self.waitTick)
+                await tick()
             } else {
                 idleSteps = 0
                 let started = blockedSince ?? now()
@@ -686,7 +721,7 @@ public final class MacFieldQueue {
                     blockedSince = nil; blockedNote = nil
                     break
                 }
-                await sleep(Self.waitTick)
+                await tick()
             }
         }
         finishEdits()
@@ -767,9 +802,18 @@ public final class MacFieldQueue {
         let mark = target.inputMark
         guard focus(target) else { return false }
         startObserving(target)
-        guard let (doc, selection) = read(target).map({ ($0.0, $0.1) }) else { blocked("unreadable"); return false }
-        unreadableSince = nil
-        observe(doc, selection: selection, target: target)
+        let doc: Document, selection: UTF16Range
+        if let held = shadowDocument(target, mark: mark) {
+            // Clean shadow on a host that notifies, nothing of ours in flight: planned from the shadow, no read.
+            (doc, selection) = held
+            shadowSteps += 1
+        } else {
+            guard let (fresh, caret) = read(target).map({ ($0.0, $0.1) }) else { blocked("unreadable"); return false }
+            (doc, selection) = (fresh, caret)
+            unreadableSince = nil
+            observe(doc, selection: selection, target: target)
+            readOps = opsSent; readMark = mark; readAt = now()
+        }
         if let caret = rebindPending {
             rebindPending = nil
             adoptRebind(doc, selection: selection, caret: caret)
@@ -1610,8 +1654,15 @@ public final class MacFieldQueue {
         return true
     }
 
+    /// A key of a burst after the first. Besides the target's guards it probes that the field still reads and is bound to
+    /// the element that has focus (AX reads cost 30-100 us in the Mac VM, so this adds nothing); a field that stopped
+    /// reading, lost focus or whose element was replaced ends the burst at that key: never a key into a field that cannot
+    /// be read back. The key's own result is still not waited for.
     private func sendFollowingKey(_ key: FieldKey, target: any TextTarget, mark: Int) -> FieldKeyRefusal? {
         do {
+            guard target.isFocused(), (try? target.textLength()) != nil, (try? target.selectedRange()) != nil else {
+                throw FieldKeyRefusal.notFocused
+            }
             try target.pressFollowing(key, mark: mark)
             operationDispatched()
             opsSent += 1
@@ -2444,4 +2495,23 @@ public struct CaretJumps: Sendable, Equatable {
     }
     /// What a jump costs the planner here: one caret set where it is trusted, else a few hops and arrows.
     public var jumpMs: Double { direct == .trusted ? KeystrokePlanner.keyMs : KeystrokePlanner.jumpMs }
+}
+
+
+/// What the queue learned per field (`TextTarget.fieldKey`), bounded: the field that was written least recently is
+/// forgotten first, never one still in use (an arbitrary eviction could drop what a running take had just learned).
+struct FieldMemory<Value> {
+    static var limit: Int { 64 }
+    private var values: [AnyHashable: Value] = [:]
+    private var order: [AnyHashable] = []
+    subscript(key: AnyHashable) -> Value? {
+        get { values[key] }
+        set {
+            if let index = order.firstIndex(of: key) { order.remove(at: index) }
+            guard let newValue else { values[key] = nil; return }
+            while order.count >= Self.limit, let oldest = order.first { order.removeFirst(); values[oldest] = nil }
+            values[key] = newValue
+            order.append(key)
+        }
+    }
 }

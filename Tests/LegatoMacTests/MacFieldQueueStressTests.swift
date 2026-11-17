@@ -1316,6 +1316,35 @@ private struct SeededRandom {
         #expect(field.selection == UTF16Range(location: (head + typed).utf16.count, length: 0))
     }
 
+    /// Edge, CodeMirror list editor (Mac VM, 2026-11-17, `Fixtures/journal-edge-cm-*.jsonl`): the caret is at the end of the
+    /// last item, followed by the empty last line's break; the first key landed, the next one did not verify, recovery
+    /// refused (`changedOrAmbiguous`) and the take dropped `userChanged`. Replayed through the reader over the hidden
+    /// break between the two items: the take must land, at the caret, with the break after it untouched.
+    @Test(arguments: ["journal-edge-cm-1.jsonl", "journal-edge-cm-2.jsonl"], [false, true])
+    func aTakeInAnEdgeCodeMirrorListLandsAtTheCaretBeforeTheEmptyLastLine(journal: String, verifiedKeys: Bool) async throws {
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Fixtures/\(journal)")
+        let entries = try String(contentsOf: url, encoding: .utf8).split(separator: "\n").compactMap {
+            try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+        }
+        let take = try #require(entries.first { $0["kind"] as? String == "live" }?["text"] as? String)
+        let read = try #require(entries.first { $0["kind"] as? String == "sent" }?["read"] as? String)
+        let field = FakeAXField(read.replacingOccurrences(of: "|", with: ""), rng: SeededRandom(51))
+        field.keys = true
+        field.selection = UTF16Range(location: read.components(separatedBy: "|")[0].utf16.count, length: 0)
+        let reader = ReaderField(field)
+        let queue = MacFieldQueue(target: reader)
+        queue.paced = { true }
+        queue.verifiedKeysOnly = verifiedKeys
+        var drops: [MacFieldQueue.Drop] = []
+        queue.onDrop = { drops.append($0) }
+        var trail: [String] = []
+        queue.journal = { trail.append("\($0.kind.rawValue) \($0.text ?? "") \($0.detail ?? "") \($0.reason ?? "")") }
+        await replay(queue, field: field, script: [(ms: 0, text: String(take.prefix(12))), (ms: 400, text: take)])
+        let expected = "- first item\n- second item " + take + "\n"
+        #expect(field.string.replacingOccurrences(of: "\u{00A0}", with: " ") == expected, "\(trail.suffix(25).joined(separator: "\n"))")
+        #expect(drops.isEmpty, "\(drops)")
+    }
+
     /// Pinned: neither the focused element nor its editable root reads. The take is never dropped: what was typed stays,
     /// and the rest goes on in the panel (`onUnreadable`) after the grace, whole when nothing was typed yet.
     @Test(arguments: [false, true]) func aFieldThatReadsNeitherItselfNorItsRootGoesOnInThePanel(midTake: Bool) async {

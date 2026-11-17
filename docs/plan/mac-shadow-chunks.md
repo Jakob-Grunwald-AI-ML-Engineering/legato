@@ -2,7 +2,7 @@
 
 Status: **planned 2026-11-17, branch `feat/mac-shadow-chunks`.**
 
-Round 1 (Mac), 2026-11-17: tasks 2-4, 6-Mac and 7 done in code and unit tests (`MacFieldShadow`/`MacFieldHost`, `AXObserver` behind `TextTarget`, native entrance + one check, keyed bursts with fallback, Mac per-sentence cleanup from the shadow, journaled recovery refusals); package suites run, VM acceptance not run. Task 5 (list editors) not done beyond the refusal split: no list-editor fake or journal replay yet, caret moves across hidden breaks and recovery context unchanged. The queue still reads the field every step (the shadow classifies, cleanup starts from it); planning from the shadow and a notification wake are open.
+Round 2 (Mac), 2026-11-18: planning from the shadow with a notification wake, shadow-based cleanup placement through changes since (`FieldMerge`), per-key readability probe in bursts, LRU field memory done in code and unit tests; the Edge CodeMirror journals are fixtures and replay green through the existing hidden-break reader. Still open: a `<ul>` marker list fake, reproducing the list-editor drop faithfully (unverified on Edge), VM acceptance not run.
 
 ## Goal and scope
 
