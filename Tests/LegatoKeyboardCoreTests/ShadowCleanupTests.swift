@@ -71,6 +71,27 @@ import Testing
         }
     }
 
+    /// Device run 4 (Notes, 2026-11-17): a take dictated in front of the field's own ". " ends "terrace.|. ". The sentence's
+    /// cleanup drops one of the two periods; it must be the one after the caret, so the take's end stays in front of the
+    /// caret and a key pressed right after speech lands behind "terrace." (it went in before the period: "terracez.").
+    @Test func aDoubledPeriodAtTheCaretGoesAfterIt() {
+        var rig = QueueRig(FakeField.host(.notes, "We should be done by late afternoon. I think the room is booked.", caret: 35))
+        rig.run(ms: 100)
+        rig.queue.enqueue(snap(1, "Then it is coffee and cake on the terrace."))
+        rig.drain()
+        #expect(rig.field.string == "We should be done by late afternoon Then it is coffee and cake on the terrace.. I think the room is booked.")
+        guard case .ready(let before, let after, _) = rig.queue.shadow(of: "r", version: 1) else { Issue.record("no shadow"); return }
+        rig.queue.markRead("pass", mergingUser: true)
+        rig.queue.enqueue(FieldQueue.Edit(id: "pass", kind: .magic, before: before, after: after,
+                                          target: "We should be done by late afternoon. Then it is coffee and cake on the terrace. I think the room is booked.",
+                                          cursorAtEnd: false, readID: "pass"))
+        rig.drain()
+        #expect(rig.applied == ["pass"])
+        rig.queue.enqueue(.insert("z"))
+        rig.drain()
+        #expect(rig.field.string == "We should be done by late afternoon. Then it is coffee and cake on the terrace.z I think the room is booked.")
+    }
+
     /// Speech typed while the model worked stays; the result lands in the text it was for.
     @Test func speechTypedMeanwhileStays() {
         var rig = typed("teh review is moved.")

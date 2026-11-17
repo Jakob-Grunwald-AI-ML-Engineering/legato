@@ -1320,9 +1320,11 @@ public struct FieldQueue: Sendable {
     /// group is left after this one.
     private func chunk(spanID: Int, from current: [Character], to target: [Character]) -> (ops: [QOp], last: Bool)? {
         guard let span = spans[spanID] else { return nil }
-        let groups = SpanPlanner.spans(from: current, to: target, leaveTailAppend: false, paceMs: 0, moveSettleMs: 0, editSettleMs: 0)
-        guard let group = groups.last else { return nil }
         let base = span.start
+        let caret = userCursor - base
+        let groups = SpanPlanner.spans(from: current, to: target, leaveTailAppend: false, caret: (0...current.count).contains(caret) ? caret : nil,
+                                       paceMs: 0, moveSettleMs: 0, editSettleMs: 0)
+        guard let group = groups.last else { return nil }
         var ops: [QOp] = []
         let between = userCursor - (base + group.end)
         if group.hunks.count == 1, cursor == userCursor, between >= 0, between <= SpanPlanner.mergeGap, base + group.end + between <= span.end,
