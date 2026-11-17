@@ -378,7 +378,9 @@ public final class MacFieldQueue {
         runs[index].speaking = speaking && !complete
         let delivery = runs[index].speechTarget.update(Array(text), speaking: runs[index].speaking)
         retarget(&runs[index], to: delivery)
-        note(.live, id: nil, run: runID, text: text, detail: "v\(version)")
+        // `held=`: characters of the snapshot not delivered (a revision held for a pause, or text not placed yet).
+        let held = runs[index].speechTarget.hasDeferredRevision ? " held=\(text.count - delivery.count)" : ""
+        note(.live, id: nil, run: runID, text: text, detail: "v\(version)\(held)")
         historyChanged()
         schedule()
     }
