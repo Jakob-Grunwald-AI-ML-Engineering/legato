@@ -14,6 +14,10 @@ public struct KeptText: Codable, Sendable, Equatable {
         self.draftID = draftID
     }
 
+    /// Something to show: text that is not blank, from a draft (`draftID`). An item from an older format or without its
+    /// draft is stale: nothing would ever end it.
+    public var isShowable: Bool { draftID != nil && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
     /// The word row's view of it: the end of the text (what was said last), cut from the head.
     public func preview(maxCharacters: Int) -> String {
         let flat = text.split(whereSeparator: \.isNewline).joined(separator: " ")
@@ -28,11 +32,20 @@ public struct KeptTextStore: Sendable {
 
     public init(_ store: LinkStore) { self.store = store }
 
-    public func read() -> KeptText? { store.read(KeptText.self, forKey: Self.key) }
+    /// The item when it can be shown (`KeptText.isShowable`). Anything else stored under the key (an older format, an
+    /// item without its draft, blank text) is removed: the row never shows an empty or stale item.
+    public func read() -> KeptText? {
+        guard let item = store.read(KeptText.self, forKey: Self.key), item.isShowable else {
+            if store.hasValue(forKey: Self.key) { clear() }
+            return nil
+        }
+        return item
+    }
 
-    /// Keeps `text` (trimmed) in place of any earlier item; nothing happens for blank text. Returns what was stored.
+    /// Keeps `text` (trimmed) for draft `draftID` in place of any earlier item; nothing happens for blank text. Returns
+    /// what was stored.
     @discardableResult
-    public func keep(_ text: String, draftID: String? = nil, at now: Date = Date()) -> KeptText? {
+    public func keep(_ text: String, draftID: String, at now: Date = Date()) -> KeptText? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let item = KeptText(text: trimmed, at: now, draftID: draftID)

@@ -5,14 +5,34 @@ import Testing
 @Suite struct KeptTextTests {
     @Test func keepsOneItemAndReplacesIt() {
         let store = KeptTextStore(LinkStore(MemoryLinkStore()))
-        store.keep("  first take \n")
+        store.keep("  first take \n", draftID: "d")
         #expect(store.read()?.text == "first take")
-        store.keep("second take")
+        store.keep("second take", draftID: "d")
         #expect(store.read()?.text == "second take")
-        store.keep("   ")
+        store.keep("   ", draftID: "d")
         #expect(store.read()?.text == "second take")
         store.clear()
         #expect(store.read() == nil)
+    }
+
+    /// #299 round 4: the row showed an empty "Kept" chip from an item an older build stored. An item without its draft,
+    /// with blank text, or in a format that no longer decodes is never shown, and leaves the store.
+    @Test func neverAnEmptyOrStaleItem() {
+        let backing = MemoryLinkStore(), link = LinkStore(backing)
+        let store = KeptTextStore(link)
+        link.write(KeptText(text: "older build, no draft"), forKey: KeptTextStore.key)
+        #expect(store.read() == nil)
+        #expect(!link.hasValue(forKey: KeptTextStore.key), "the stale item is removed")
+        link.write(KeptText(text: "  \n ", draftID: "d"), forKey: KeptTextStore.key)
+        #expect(store.read() == nil)
+        backing.set(Data(#"{"words":"an older format"}"#.utf8), forKey: KeptTextStore.key)
+        #expect(store.read() == nil)
+        #expect(!link.hasValue(forKey: KeptTextStore.key))
+        #expect(!KeptText(text: "", draftID: "d").isShowable)
+        #expect(!KeptText(text: "words").isShowable)
+        #expect(KeptText(text: "words", draftID: "d").isShowable)
+        store.keep("five.", draftID: "d")
+        #expect(store.read()?.text == "five.")
     }
 
     @Test func previewCutsFromTheHead() {

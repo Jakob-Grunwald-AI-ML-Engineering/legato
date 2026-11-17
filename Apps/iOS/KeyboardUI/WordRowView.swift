@@ -18,7 +18,7 @@ struct WordRowView: View {
 
     var body: some View {
         Group {
-            if controller.keptRowOpen, controller.statusText == nil, let kept = controller.keptText {
+            if controller.keptRowOpen, controller.statusText == nil, let kept = controller.keptText, kept.isShowable {
                 keptRow(kept)
             } else if let recovery = controller.liveRecoveryNotice {
                 HStack(spacing: 8) {
@@ -140,7 +140,8 @@ struct WordRowView: View {
         let words = controller.suggestions
         let highlighted = controller.highlightedSuggestionRank.flatMap { ranks.firstIndex(of: $0) }
         return HStack(spacing: 0) {
-            if controller.keptText != nil { keptChip }
+            // Never an empty or stale chip: only an item with text, from a draft.
+            if controller.keptText?.isShowable == true { keptChip }
             ForEach(Array(ranks.enumerated()), id: \.offset) { position, rank in
                 SuggestionSlot(controller: controller, word: rank < words.count ? words[rank] : nil,
                                rank: rank, fontSize: fontSize, highlighted: highlighted == position,

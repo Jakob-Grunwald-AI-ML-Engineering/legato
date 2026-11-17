@@ -257,7 +257,7 @@ final class KeyboardController {
         liveRecoveryNotice = nil
         syncRowTakeover()
     }
-    func openKeptText() { if keptText != nil { keptRowOpen = true } }
+    func openKeptText() { if keptText?.isShowable == true { keptRowOpen = true } }
     func dismissKeptText() {
         keptStore?.clear()
         keptText = nil
