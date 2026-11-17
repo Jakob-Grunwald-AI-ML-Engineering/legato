@@ -933,11 +933,13 @@ public struct FieldQueue: Sendable {
             }
             let chunkHeard = inFlight?.heard == true
             // The deadline counts from the chunk's last op until a callback showed the chunk, then from the last op behind it.
+            // It grows with the chunk's delete run (`HostProfile.deadlineMs(deletes:)`).
             let waited = flight.behind != nil && !chunkHeard ? flight.chunkMs : flight.waitedMs
-            let heard = !hops || chunkHeard || waited >= deadlineMs
+            let deadline = host.deadlineMs(deletes: flight.ops.reduce(0) { if case .deleteBackward(let n) = $1 { $0 + n } else { $0 } })
+            let heard = !hops || chunkHeard || waited >= deadline
             if shows, heard, flight.anywhere || hops || !fits(report, in: flight.pre) {
                 guard confirm(flight, report: report) else { return .wait }
-            } else if waited < deadlineMs {
+            } else if waited < deadline {
                 // Not shown yet: no seam. The user's input and speech at the caret go behind the chunk all the same
                 // (`plannedNext`).
                 return next()

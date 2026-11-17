@@ -63,6 +63,16 @@ import Testing
         #expect(profile.callbacks == .perStage)
     }
 
+    /// Device run 4 (WhatsApp): after small chunks the learned deadline was 104 ms; a chunk deleting 23 graphemes showed at
+    /// about 104 ms, its check failed by a hair and a read walk took 1.8 s. A chunk's deadline grows with its delete run.
+    @Test func aLongDeleteRunGetsMoreTimeThanTheLearnedLatency() {
+        var profile = HostProfile()
+        for ms in [30.0, 62, 18, 41, 26] { profile.heard(afterMs: ms, callbacks: 1) }
+        #expect(profile.deadlineMs(deletes: 0) == profile.deadlineMs)
+        #expect(profile.deadlineMs(deletes: 23) >= profile.deadlineMs + 23 * 3, "\(profile.summary)")
+        #expect(profile.deadlineMs(deletes: 23) > 104 + 40)
+    }
+
     @Test func aNewFieldStartsOverASentDraftDoesNot() {
         var rig = edited(.whatsApp, edits: 3)
         let learned = rig.queue.host

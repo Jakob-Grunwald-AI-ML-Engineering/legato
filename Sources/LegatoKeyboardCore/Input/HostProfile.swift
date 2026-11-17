@@ -45,6 +45,15 @@ public struct HostProfile: Sendable, Equatable {
         return min(Self.maxDeadlineMs, max(Self.minDeadlineMs, latencyMs + 4 * deviationMs))
     }
 
+    /// A host applies a delete run one delete at a time, so a chunk's result shows later the more it deletes. Device run 4
+    /// (WhatsApp, 2026-11-17): a chunk deleting 9 graphemes showed at 46 ms, one deleting 23 at about 104 ms, just past its
+    /// learned 104 ms deadline, and the failed check cost a 1.8 s read walk. About 4 ms a delete: two samples, an estimate
+    /// (Notes applies 500 deletes in about 300 ms).
+    public static let perDeleteMs = 4.0
+
+    /// The deadline of a chunk that deletes `deletes` graphemes: the learned one plus the delete run's own time.
+    public func deadlineMs(deletes: Int) -> Double { deadlineMs + Self.perDeleteMs * Double(max(0, deletes)) }
+
     /// A report: how much it shows around the caret.
     mutating func saw(_ report: FieldQueue.Report) {
         windowBefore = max(windowBefore, FieldReader.trusted(before: report.before).count)
