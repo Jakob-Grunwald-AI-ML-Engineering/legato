@@ -10,9 +10,16 @@ import LegatoKeyboardCore
     public var canApply: @MainActor () -> Bool = { true }
     /// Cross-process speech delivery must settle before either scope read. This wait owns no field lease.
     public var awaitDelivery: @MainActor () async -> Bool = { true }
-    /// The passage to clean, whether it is the stop's final pass, and the text that stands before it in the field (context
-    /// only: the cleaner continues it, never repeats or edits it).
-    public var clean: @MainActor (_ passage: String, _ final: Bool, _ before: String) async -> String? = { _, _, _ in nil }
+    /// The passage to clean; whether it is a pass over the whole take (the stop's, or a long pause's: one call); the text
+    /// that stands before it in the field (context only: the cleaner continues it, never repeats or edits it); and on a
+    /// whole-take pass the take's raw recognized words (reference only: they show corrections across sentences that
+    /// earlier passes tidied away; never inserted).
+    public var clean: @MainActor (_ passage: String, _ whole: Bool, _ before: String, _ raw: String?) async -> String? = { _, _, _, _ in nil }
+    /// The field's text as the keyboard's shadow has it (`FieldShadow`), asked with the live run's snapshot instead of a
+    /// field read (iPhone, #299 round 4). Nil, or a nil answer (no live run): the pass reads the field.
+    public var shadow: (@MainActor (_ passID: String) async -> FieldShadow?)?
+    /// The take's raw recognized words for a whole-take pass (nil: none known).
+    public var rawWords: @MainActor () -> String? = { nil }
     /// Why the last `clean` call gave nil (`timeout`, `failed`, `rejected`): set by the `clean` closure, for diagnostics.
     public var cleanFailure: String?
     public var onResult: @MainActor (String, String, CleanupFieldStatus) async -> Void = { _, _, _ in }
@@ -23,7 +30,9 @@ import LegatoKeyboardCore
     private var requested = false
     private var finalRequested = false
     private var sentenceRequested = false
+    private var wholeRequested = false
     private var lastRead = ""
+    private var lastWholeRead = ""
     private var coverage = FieldCleanupChunks.Coverage()
     private var pendingText = ""
     /// The next pass is the one automatic pass after an edit the field could not place: it asks for no further one.
@@ -36,16 +45,19 @@ import LegatoKeyboardCore
         generation += 1
         task?.cancel(); task = nil
         if let requestID { field?.cancel(instructionID: requestID) }
-        requestID = nil; requested = false; finalRequested = false; sentenceRequested = false; lastRead = ""; coverage = .init()
+        requestID = nil; requested = false; finalRequested = false; sentenceRequested = false; wholeRequested = false
+        lastRead = ""; lastWholeRead = ""; coverage = .init()
         pendingText = ""; repassing = false; lastApplied = false
     }
 
     /// Repeated pauses coalesce. A stop always gets a fresh pass, including long takes. An edit the field could not
     /// place (`ScopedEditAck.unplaceable`) gets one pass more on the text as it is read then, never a loop. `sentence`:
     /// a sentence just ended (iPhone): the pass goes without waiting for a full passage of new words; it cleans what is not
-    /// covered yet with the coverage's overlap (about the sentence before) as context.
-    public func request(final: Bool = false, pendingText: String = "", sentence: Bool = false) {
+    /// covered yet with the coverage's overlap (about the sentence before) as context. `whole`: a long pause; the pass covers
+    /// the whole take with its raw words, as the stop's does.
+    public func request(final: Bool = false, pendingText: String = "", sentence: Bool = false, whole: Bool = false) {
         requested = true; finalRequested = finalRequested || final; sentenceRequested = sentenceRequested || sentence
+        wholeRequested = wholeRequested || whole
         if !pendingText.isEmpty { self.pendingText = pendingText }
         guard task == nil else { return }
         let token = generation
@@ -54,13 +66,14 @@ import LegatoKeyboardCore
             while requested, !Task.isCancelled, token == generation {
                 // A pause pass starts in a pause; a sentence's pass starts at once (only its result waits for a gap).
                 guard canApply() || sentenceRequested else { break }
-                // The stop's pass covers the sentence's too.
-                let final = finalRequested, sentence = sentenceRequested && !finalRequested
+                // The stop's pass covers the sentence's too, and so does a whole-take pass.
+                let final = finalRequested, whole = finalRequested || wholeRequested
+                let sentence = sentenceRequested && !whole
                 let pending = self.pendingText
                 self.pendingText = ""
                 let repass = repassing
-                requested = false; finalRequested = false; sentenceRequested = false; repassing = false
-                await pass(final: final, sentence: sentence, pending: pending, repass: repass, generation: token)
+                requested = false; finalRequested = false; sentenceRequested = false; wholeRequested = false; repassing = false
+                await pass(final: final, whole: whole, sentence: sentence, pending: pending, repass: repass, generation: token)
             }
             if token == generation { task = nil }
         }
@@ -93,19 +106,45 @@ import LegatoKeyboardCore
         return Int(parts.seconds * 1000 + parts.attoseconds / 1_000_000_000_000_000)
     }
 
-    private func pass(final: Bool, sentence: Bool = false, pending: String, repass: Bool, generation token: Int) async {
+    /// One pass. The field's text comes from the keyboard's shadow for a live run (no read; the keyboard marks the read
+    /// under the pass's id and merges the edit around every change since, `FieldQueue.placeThroughRead`), else from a
+    /// read, re-read before the edit (buffered words still to be inserted, the Mac). Logs one `field.cleanup` line with
+    /// the phases' times since the request (ms): `shadowSentMs` (the keyboard sent its text), `shadowMs` (it arrived) or
+    /// `readMs`, `modelStartMs`, `modelEndMs`, `applySentMs`, `confirmedMs`.
+    private func pass(final: Bool, whole: Bool, sentence: Bool = false, pending: String, repass: Bool, generation token: Int) async {
         guard let field else { return }
         lastApplied = false
         let id = UUID().uuidString
         requestID = id
-        let started = ContinuousClock.now
+        let started = ContinuousClock.now, startedAt = Date()
+        var phases: [String: Any] = [:]
+        func mark(_ phase: String) { phases[phase] = Self.ms(since: started) }
         func log(_ status: String, _ extra: [String: Any] = [:]) {
-            report(status, final: final, sentence: sentence, repass: repass, started: started, extra)
+            var fields = phases.merging(extra) { _, new in new }
+            fields["whole"] = whole
+            report(status, final: final, sentence: sentence, repass: repass, started: started, fields)
         }
         defer { field.cancel(instructionID: id); if requestID == id { requestID = nil } }
         do {
             guard await deliveryReady(final: final, source: "", generation: token) else { return }
-            let reply = try await field.read(.cleanup, instructionID: id, reading: {})
+            let reply: FieldReadReply
+            var takeStart: Int?
+            var shadowed = false
+            if pending.isEmpty, let ask = shadow, let answer = await ask(id) {
+                guard token == generation, !Task.isCancelled else { return }
+                mark("shadowMs")
+                phases["shadowSentMs"] = max(0, Int(answer.at.timeIntervalSince(startedAt) * 1000))
+                if let why = answer.refused {
+                    log("shadowRefused", ["why": why]); await onResult("", "", .undelivered); return
+                }
+                reply = FieldReadReply(id: id, state: .done, above: answer.above, below: answer.below,
+                                       documentID: answer.documentID, draftID: answer.draftID)
+                takeStart = answer.takeStart
+                shadowed = true
+            } else {
+                reply = try await field.read(.cleanup, instructionID: id, reading: {})
+                mark("readMs")
+            }
             guard token == generation, !Task.isCancelled else { return }
             guard reply.state == .done, reply.selection?.isEmpty != false else {
                 log("readRefused"); await onResult("", "", .undelivered); return
@@ -114,34 +153,49 @@ import LegatoKeyboardCore
             let insertion = FieldInsertion.prepare(pending, contextBefore: reply.above, capitalization: .none)
             let following = insertion.isEmpty ? "" : FieldInsertion.trailingSeparator(after: insertion, before: reply.below.first)
             let source = reply.above + insertion + following + reply.below
-            guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  final || source != lastRead else { log("unchanged"); return }
+            guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, final || source != (whole ? lastWholeRead : lastRead) else {
+                log("unchanged"); return
+            }
             let complete = reply.stop == .start && reply.stopBelow == .start
-            let uncovered = final ? source.startIndex : coverage.start(in: source, documentID: reply.documentID, complete: complete)
-            var start = uncovered, end = source.endIndex
-            if sentence {
-                // A sentence's pass cleans whole sentences: from the start of the one the uncovered text begins in (so the
-                // sentence before is in it when the overlap reaches back) to the end of the last finished one. The words
-                // after it are the next sentence, still being said: they are neither sent nor edited.
-                start = FieldCleanupChunks.sentenceStart(of: uncovered, in: source)
-                // Only a sentence that ends past what is cleaned already makes a pass.
-                let cleanedEnd = coverage.end(in: source, documentID: reply.documentID, complete: complete) ?? uncovered
-                guard let finished = FieldCleanupChunks.finishedSentencesEnd(in: source, after: max(uncovered, cleanedEnd)) else {
-                    log("noSentence"); return
+            var start = source.startIndex, end = source.endIndex
+            if whole {
+                // The whole take: from the start of the sentence it begins in (the field's start when the shadow does not
+                // know where it begins), with its raw words.
+                if let takeStart, takeStart > 0, takeStart < source.count {
+                    start = FieldCleanupChunks.sentenceStart(of: source.index(source.startIndex, offsetBy: takeStart), in: source)
                 }
-                end = finished
+            } else {
+                let uncovered = coverage.start(in: source, documentID: reply.documentID, complete: complete)
+                start = uncovered
+                if sentence {
+                    // A sentence's pass cleans whole sentences: from the start of the one the uncovered text begins in (so
+                    // the sentence before is in it when the overlap reaches back) to the end of the last finished one. The
+                    // words after it are the next sentence, still being said: they are neither sent nor edited.
+                    start = FieldCleanupChunks.sentenceStart(of: uncovered, in: source)
+                    // Only a sentence that ends past what is cleaned already makes a pass.
+                    let cleanedEnd = coverage.end(in: source, documentID: reply.documentID, complete: complete) ?? uncovered
+                    guard let finished = FieldCleanupChunks.finishedSentencesEnd(in: source, after: max(uncovered, cleanedEnd)) else {
+                        log("noSentence"); return
+                    }
+                    end = finished
+                }
             }
             let passage = String(source[start..<end])
             let words = FieldCleanupChunks.wordStarts(in: passage).count
-            guard final || sentence || words >= FieldCleanupChunks.words else { log("short", ["words": words]); return }
-            lastRead = source
+            guard whole || sentence || words >= FieldCleanupChunks.words else { log("short", ["words": words]); return }
+            if whole { lastWholeRead = source } else { lastRead = source }
+            let raw = whole ? rawWords() : nil
             cleanFailure = nil
+            mark("modelStartMs")
             let modelStarted = ContinuousClock.now
-            let cleaned = await clean(passage, final, String(source[..<start]))
+            let cleaned = await clean(passage, whole, String(source[..<start]), raw)
             let modelMs = Self.ms(since: modelStarted)
+            mark("modelEndMs")
             guard token == generation, !Task.isCancelled else { return }
+            let counts: [String: Any] = ["modelMs": modelMs, "words": words, "sourceChars": source.count, "shadow": shadowed,
+                                         "rawWords": raw.map { FieldCleanupChunks.wordStarts(in: $0).count } ?? 0]
             guard let cleaned = cleaned.map({ FieldCleanupChunks.keepingLineBreaks(of: passage, in: $0) }) else {
-                log("modelFailed", ["reason": cleanFailure ?? "failed", "modelMs": modelMs, "words": words, "sourceChars": source.count])
+                log("modelFailed", counts.merging(["reason": cleanFailure ?? "failed"]) { _, new in new })
                 await onResult(source, baseline, pending.isEmpty ? .keptAsTyped : .undelivered)
                 return
             }
@@ -156,10 +210,43 @@ import LegatoKeyboardCore
             }
             let gapMs = Self.ms(since: waitStarted)
             guard token == generation, !Task.isCancelled else { return }
+            if shadowed {
+                // No re-read: the keyboard places the edit through every change since it sent its shadow and merges it
+                // around them (the field's text wins); a field that still matches takes it at once. An edit it cannot
+                // place drops, and one fresh pass follows.
+                var fields = counts
+                fields["gapMs"] = gapMs
+                guard target != source else {
+                    lastApplied = true
+                    coverage.confirm(proposed: covered, actual: source, documentID: reply.documentID, complete: false)
+                    log("noChange", fields.merging(["why": "cleanAsTyped"]) { _, new in new })
+                    await onResult(source, source, .keptAsTyped)
+                    return
+                }
+                let edit = ScopedEdit(instructionID: id, documentID: reply.documentID, before: reply.above, after: reply.below,
+                                      target: target, draftID: reply.draftID)
+                mark("applySentMs")
+                let ack = await field.apply(edit)
+                mark("confirmedMs")
+                guard token == generation else { return }
+                let applied = ack?.applied == true
+                lastApplied = applied
+                // The field's text past the passage may have grown meanwhile: coverage ends where the cleaned text does.
+                if applied { coverage.confirm(proposed: covered, actual: target, documentID: reply.documentID, complete: false) }
+                if !applied, ack != nil, ack?.stopped != true, !repass { repassNext(final: final, whole: whole, sentence: sentence) }
+                let status: CleanupFieldStatus = applied ? .cleaned : ack?.stopped == true || ack == nil ? .undelivered : .keptAsTyped
+                await onResult(source, applied ? target : ack?.partial ?? source, status)
+                fields["targetChars"] = target.count; fields["applied"] = applied; fields["unplaceable"] = ack?.unplaceable == true
+                if !applied { fields["why"] = Self.why(ack) }
+                log(status.rawValue, fields)
+                return
+            }
             // Re-read just before applying: the shared three-way merge keeps every change made since the read (the
-            // user's, and speech typed meanwhile) and accepts cleanup changes only in untouched words.
+            // user's, and speech typed meanwhile) and accepts cleanup changes only in untouched words. Kept for buffered
+            // words still to be inserted (they need the read exactly) and fields without a shadow (the Mac).
             guard await deliveryReady(final: final, source: source, generation: token) else { return }
             let fresh = try await field.read(.cleanup, instructionID: id, reading: {})
+            mark("rereadMs")
             guard token == generation, !Task.isCancelled else { return }
             guard fresh.state == .done, fresh.documentID == reply.documentID, fresh.draftID == reply.draftID, fresh.selection?.isEmpty != false else {
                 log("rereadRefused", ["modelMs": modelMs, "gapMs": gapMs]); await onResult(source, "", .undelivered); return
@@ -172,9 +259,9 @@ import LegatoKeyboardCore
                 log("draftCleared", ["modelMs": modelMs, "gapMs": gapMs]); await onResult(source, "", .undelivered); return
             }
             let whole = reply.stop == .start && reply.stopBelow == .start && fresh.stop == .start && fresh.stopBelow == .start
-            // A bounded read (the iPhone's shadow) is merged too when the text before the cleaned passage still opens the
-            // field as read: both reads then start at the same place, and what changed since (speech typed during the model
-            // call, a key) is the field's. Buffered words still to be inserted need the read exactly.
+            // A bounded read is merged too when the text before the cleaned passage still opens the field as read, so both
+            // reads start at the same place, and what changed since (speech typed during the model call, a key) is the
+            // field's. Buffered words still to be inserted need the read exactly.
             let sameStart = pending.isEmpty && current.hasPrefix(source[..<start])
             guard current == baseline || whole || sameStart else {
                 log("fieldChanged", ["modelMs": modelMs, "gapMs": gapMs, "sourceChars": source.count, "currentChars": current.count])
@@ -193,29 +280,36 @@ import LegatoKeyboardCore
             }
             let edit = ScopedEdit(instructionID: id, documentID: reply.documentID,
                                   before: fresh.above, after: fresh.below, target: merged, draftID: fresh.draftID)
+            mark("applySentMs")
             let ack = await field.apply(edit)
+            mark("confirmedMs")
             guard token == generation else { return }
             lastApplied = ack?.applied == true
             if ack?.applied == true { coverage.confirm(proposed: covered, actual: merged, documentID: fresh.documentID, complete: whole) }
-            if ack?.unplaceable == true, ack?.applied != true, !repass, pending.isEmpty {
-                // The field may hold part of this edit: the same text read again is still to be cleaned.
-                lastRead = ""; requested = true; finalRequested = finalRequested || final; repassing = true
-                sentenceRequested = sentenceRequested || sentence
-            }
+            if ack?.unplaceable == true, ack?.applied != true, !repass, pending.isEmpty { repassNext(final: final, whole: whole, sentence: sentence) }
             let status: CleanupFieldStatus = ack?.applied == true ? (target == source ? .keptAsTyped : .cleaned) : ack?.stopped == true || ack == nil ? .undelivered : .keptAsTyped
             await onResult(source, ack?.applied == true ? merged : ack?.partial ?? current, status)
             var fields: [String: Any] = ["sourceChars": source.count, "targetChars": target.count, "unplaceable": ack?.unplaceable == true,
                                          "applied": ack?.applied == true, "modelMs": modelMs, "gapMs": gapMs, "mergeDropped": merge.dropped,
                                          "moved": current != baseline]
             // Why the field did not take it: no answer, the place was not found again, it stopped partway, or refused.
-            if ack?.applied != true {
-                fields["why"] = ack == nil ? "noAck" : ack?.unplaceable == true ? "unplaceable" : ack?.stopped == true ? "stopped" : "refused"
-            }
+            if ack?.applied != true { fields["why"] = Self.why(ack) }
             log(status.rawValue, fields)
         } catch {
             guard token == generation, !Task.isCancelled else { return }
             log("readFailed")
             await onResult("", "", .undelivered)
         }
+    }
+
+    private func repassNext(final: Bool, whole: Bool, sentence: Bool) {
+        // The field may hold part of this edit: the text as it is then is cleaned once more, never in a loop.
+        lastRead = ""; lastWholeRead = ""; requested = true; repassing = true
+        finalRequested = finalRequested || final; wholeRequested = wholeRequested || (whole && !final)
+        sentenceRequested = sentenceRequested || sentence
+    }
+
+    private static func why(_ ack: ScopedEditAck?) -> String {
+        ack == nil ? "noAck" : ack?.unplaceable == true ? "unplaceable" : ack?.stopped == true ? "stopped" : "refused"
     }
 }

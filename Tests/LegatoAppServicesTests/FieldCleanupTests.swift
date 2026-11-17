@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 import LegatoAgent
 import LegatoCore
@@ -72,7 +73,7 @@ private final class FieldCleaner: SentenceCleaning {
         let session = FieldCleanupSession()
         session.field = field
         var inputs: [String] = []
-        session.clean = { input, _, _ in
+        session.clean = { input, _, _, _ in
             inputs.append(input)
             if inputs.count == 1 {
                 field.text = "Heading\n" + first + " " + added
@@ -96,7 +97,7 @@ private final class FieldCleaner: SentenceCleaning {
         let field = CleanupField("teh red boat sails")
         let session = FieldCleanupSession()
         session.field = field
-        session.clean = { text, _, _ in
+        session.clean = { text, _, _, _ in
             field.text = "teh blue boat sails"; field.cursor = field.text.count
             return "the red boat sails."
         }
@@ -111,7 +112,7 @@ private final class FieldCleaner: SentenceCleaning {
         let session = FieldCleanupSession()
         session.field = field
         var status: CleanupFieldStatus?
-        session.clean = { _, _, _ in field.text = ""; field.cursor = 0; return "the boat." }
+        session.clean = { _, _, _, _ in field.text = ""; field.cursor = 0; return "the boat." }
         session.onResult = { _, _, result in status = result }
         session.request(final: true)
         await session.settle()
@@ -126,7 +127,7 @@ private final class FieldCleaner: SentenceCleaning {
         field.draftID = "sent-draft"
         let session = FieldCleanupSession()
         session.field = field
-        session.clean = { _, _, _ in
+        session.clean = { _, _, _, _ in
             // Even identical text may be a new message after Send.
             field.draftID = "next-draft"
             return "the boat."
@@ -143,7 +144,7 @@ private final class FieldCleaner: SentenceCleaning {
         field.draftID = "first"
         let session = FieldCleanupSession()
         session.field = field
-        session.clean = { _, _, _ in "the boat." }
+        session.clean = { _, _, _, _ in "the boat." }
         field.beforeApply = { field.draftID = "next" }
         session.request(final: true)
         await session.settle()
@@ -157,7 +158,7 @@ private final class FieldCleaner: SentenceCleaning {
         let session = FieldCleanupSession()
         session.field = field
         var results = 0
-        session.clean = { _, _, _ in session.reset(); return "the boat" }
+        session.clean = { _, _, _, _ in session.reset(); return "the boat" }
         session.onResult = { _, _, _ in results += 1 }
         session.request(final: true)
         await session.settle()
@@ -272,7 +273,7 @@ private final class FieldCleaner: SentenceCleaning {
         var status: CleanupFieldStatus?
         session.diagnostics = { _, fields in events.append(fields) }
         session.onResult = { _, _, result in status = result }
-        session.clean = { _, _, _ in session.cleanFailure = "rejected"; return nil }
+        session.clean = { _, _, _, _ in session.cleanFailure = "rejected"; return nil }
         session.request(final: true)
         await session.settle()
         #expect(status == .keptAsTyped)
@@ -292,7 +293,7 @@ private final class FieldCleaner: SentenceCleaning {
         let session = FieldCleanupSession()
         session.field = field
         var calls: [(passage: String, before: String)] = []
-        session.clean = { passage, _, before in
+        session.clean = { passage, _, before, _ in
             calls.append((passage, before))
             // A model that capitalises whatever it is given first, and punctuates.
             return passage.prefix(1).uppercased() + passage.dropFirst().replacingOccurrences(of: "Bahnhof so", with: "Bahnhof, so")
@@ -313,7 +314,7 @@ private final class FieldCleaner: SentenceCleaning {
         let session = FieldCleanupSession()
         session.field = field
         var calls: [(passage: String, before: String)] = []
-        session.clean = { passage, _, before in
+        session.clean = { passage, _, before, _ in
             calls.append((passage, before))
             return passage.prefix(1).uppercased() + passage.dropFirst()
         }
@@ -346,7 +347,7 @@ private final class FieldCleaner: SentenceCleaning {
         let session = FieldCleanupSession()
         session.field = field
         var calls: [(passage: String, final: Bool)] = []
-        session.clean = { passage, final, _ in
+        session.clean = { passage, final, _, _ in
             calls.append((passage, final))
             return final ? "The review is moved to Wednesday." : passage
         }
@@ -395,7 +396,7 @@ private final class FieldCleaner: SentenceCleaning {
         session.field = field
         var events: [[String: Any]] = []
         session.diagnostics = { _, fields in events.append(fields) }
-        session.clean = { passage, _, _ in passage.replacingOccurrences(of: "teh", with: "The") }
+        session.clean = { passage, _, _, _ in passage.replacingOccurrences(of: "teh", with: "The") }
         session.request(final: true)
         await session.settle()
         #expect(events.last?["applied"] as? Bool == false)
@@ -475,7 +476,7 @@ private final class FieldCleaner: SentenceCleaning {
                                                stats: .init(), delivered: false))
         }
         if afterModel {
-            pipeline.fieldCleanup?.clean = { _, _, _ in reject(); return "the green boat." }
+            pipeline.fieldCleanup?.clean = { _, _, _, _ in reject(); return "the green boat." }
             pipeline.acknowledgeDelivery(.init(runID: snapshot.runID, version: snapshot.version, complete: true,
                                                stats: .init(), delivered: true))
         } else { reject() }
@@ -500,7 +501,7 @@ private final class FieldCleaner: SentenceCleaning {
         var paused = true
         var answered = false
         session.canApply = { paused }
-        session.clean = { _, _, _ in paused = false; answered = true; return "the boat" }
+        session.clean = { _, _, _, _ in paused = false; answered = true; return "the boat" }
         session.request(final: true)
         while !answered { await Task.yield() }
         #expect(field.edits.isEmpty)
@@ -568,7 +569,7 @@ private final class FieldCleaner: SentenceCleaning {
     private func session(_ field: UnplaceableField, inputs: @escaping @MainActor (String) -> Void) -> FieldCleanupSession {
         let session = FieldCleanupSession()
         session.field = field
-        session.clean = { text, _, _ in
+        session.clean = { text, _, _, _ in
             inputs(text)
             return text.replacingOccurrences(of: " read", with: " bread").replacingOccurrences(of: "teh", with: "the")
         }
@@ -622,9 +623,162 @@ private final class FieldCleaner: SentenceCleaning {
         let field = Refusing(), session = FieldCleanupSession()
         session.field = field
         var passes = 0
-        session.clean = { _, _, _ in passes += 1; return "We bring the bread" }
+        session.clean = { _, _, _, _ in passes += 1; return "We bring the bread" }
         session.request(final: true)
         await session.settle()
         #expect(passes == 1)
+    }
+}
+
+/// #299 round 4: on iPhone a pass starts from the keyboard's shadow of the field (`FieldShadow`), sent with no read, and
+/// its edit goes without a re-read (the keyboard places it through every change since and merges around them).
+@Suite @MainActor struct ShadowCleanupPassTests {
+    private func shadowed(_ field: CleanupField, takeStart: Int? = nil, asks: @escaping @MainActor () -> Void = {}) -> FieldCleanupSession {
+        let session = FieldCleanupSession()
+        session.field = field
+        session.shadow = { id in
+            asks()
+            return FieldShadow(id: id, runID: "r", above: String(field.text.prefix(field.cursor)), below: String(field.text.dropFirst(field.cursor)),
+                               takeStart: takeStart, documentID: "field", draftID: field.draftID)
+        }
+        return session
+    }
+
+    @Test func aPassFromTheShadowReadsNothingAndAppliesAtOnce() async throws {
+        let field = CleanupField("teh boat sails. we meet at six.")
+        let session = shadowed(field)
+        var lines: [[String: Any]] = []
+        session.diagnostics = { event, fields in if event == "field.cleanup" { lines.append(fields) } }
+        session.clean = { passage, _, _, _ in passage.replacingOccurrences(of: "teh", with: "The").replacingOccurrences(of: "we", with: "We") }
+        session.request(sentence: true)
+        await session.settle()
+        #expect(field.reads == 0, "no read before the model, no re-read after it")
+        #expect(field.edits.count == 1)
+        #expect(field.edits.first?.before == "teh boat sails. we meet at six.")
+        #expect(field.text == "The boat sails. We meet at six.")
+        #expect(session.lastApplied)
+        let line = try #require(lines.last)
+        #expect(line["status"] as? String == "cleaned")
+        for phase in ["shadowSentMs", "shadowMs", "modelStartMs", "modelEndMs", "applySentMs", "confirmedMs"] {
+            #expect(line[phase] is Int, "\(phase) is logged")
+        }
+    }
+
+    /// The keyboard could not place the edit (the field changed in a way no merge explains): it drops, and one fresh pass
+    /// starts from a new shadow.
+    @Test func anEditTheKeyboardCannotPlaceRunsOneFreshPass() async {
+        let field = CleanupField("teh boat sails.")
+        var asks = 0
+        let session = shadowed(field) { asks += 1 }
+        session.clean = { passage, _, _, _ in
+            // The first result comes back to a field that changed meanwhile (the stub field takes only an exact match).
+            if asks == 1 { field.text = "teh boat sails today."; field.cursor = field.text.count }
+            return passage.replacingOccurrences(of: "teh", with: "The")
+        }
+        session.request(final: true)
+        await session.settle()
+        #expect(asks == 2)
+        #expect(field.edits.count == 2)
+        #expect(field.text == "The boat sails today.")
+    }
+
+    /// The pass at stop covers the whole take (from its start in the field, not the text before it) and gets the take's
+    /// raw words: sentence passes tidied "Uh, no sorry," away, the raw words still show the correction.
+    @Test func theWholeTakePassGetsTheRawWordsAndResolvesACorrectionAcrossSentences() async {
+        let field = CleanupField("Hi Anna, see below. The review is moved to Tuesday. Wednesday.")
+        let session = shadowed(field, takeStart: "Hi Anna, see below. ".count)
+        let raw = "the review is moved to tuesday uh no sorry wednesday"
+        session.rawWords = { raw }
+        var calls: [(passage: String, whole: Bool, before: String, raw: String?)] = []
+        session.clean = { passage, whole, before, rawWords in
+            calls.append((passage, whole, before, rawWords))
+            // A stub model: the raw words show the correction the text no longer shows.
+            guard rawWords?.contains("no sorry") == true else { return passage }
+            return passage.replacingOccurrences(of: "Tuesday. Wednesday.", with: "Wednesday.")
+        }
+        session.request(final: true)
+        await session.settle()
+        #expect(calls.count == 1)
+        #expect(calls.first?.whole == true)
+        #expect(calls.first?.passage == "The review is moved to Tuesday. Wednesday.")
+        #expect(calls.first?.before == "Hi Anna, see below. ")
+        #expect(calls.first?.raw == raw)
+        #expect(field.text == "Hi Anna, see below. The review is moved to Wednesday.")
+        // A sentence's pass gets no raw words.
+        field.text += " Bring teh slides."; field.cursor = field.text.count
+        session.request(sentence: true)
+        await session.settle()
+        #expect(calls.last?.whole == false && calls.last?.raw == nil)
+    }
+
+    /// A long pause runs the whole-take pass too, once per change of the take.
+    @Test func aLongPausesWholePassRunsOncePerChange() async {
+        let field = CleanupField("The review is moved to Tuesday. Wednesday.")
+        let session = shadowed(field, takeStart: 0)
+        session.rawWords = { "the review is moved to tuesday uh no sorry wednesday" }
+        var calls = 0
+        session.clean = { passage, whole, _, raw in
+            calls += 1
+            #expect(whole && raw != nil)
+            return passage
+        }
+        session.request(whole: true)
+        await session.settle()
+        session.request(whole: true)
+        await session.settle()
+        #expect(calls == 1, "the same take is not cleaned whole again")
+    }
+}
+
+private final class RawCapturingCleaner: SentenceCleaning {
+    let inputs = Mutex<[DictationTakeInput]>([])
+    func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence {
+        .init(sentenceID: input.sentenceID, sequence: input.sequence, text: input.text)
+    }
+    func cleanTake(_ input: DictationTakeInput) async throws -> String {
+        inputs.withLock { $0.append(input) }
+        return input.text.replacingOccurrences(of: "teh", with: "the")
+    }
+}
+
+@Suite @MainActor struct ShadowPipelineTests {
+    /// The pipeline asks the keyboard for its shadow with the run's next snapshot and waits for it (no read); a long pause
+    /// runs the whole-take pass with the take's raw words.
+    @Test func aSentencePassAsksTheShadowAndALongPauseCleansTheWholeTake() async throws {
+        let clock = VirtualClock()
+        let field = CleanupField("")
+        let cleaner = RawCapturingCleaner()
+        let pipeline = DictationPipeline(cleaner: cleaner, clock: clock, supportsLive: true)
+        pipeline.attachCleanupField(field, duringPauses: true, waitsForLiveDelivery: true, perSentence: true)
+        var asked: [String] = []
+        // The keyboard: types each snapshot, and answers an ask from its shadow.
+        pipeline.onLiveChange = { snapshot in
+            guard let snapshot else { return }
+            field.text = snapshot.text; field.cursor = field.text.count
+            if let ask = snapshot.shadowAsk, !asked.contains(ask) { asked.append(ask) }
+        }
+        pipeline.takeFieldShadow = { id in
+            asked.contains(id) ? FieldShadow(id: id, runID: "r", above: field.text, documentID: "field") : nil
+        }
+        pipeline.beginTake()
+        await pipeline.receive(.init(sequence: 0, text: "teh green boat sails out today.", words: [], reason: "endpoint"))
+        // The sentence's result waits for a gap between words: the endpoint brings it (and arms the long pause).
+        await awaitCleanupTest { asked.count == 1 }
+        pipeline.boundary("endpoint")
+        await awaitCleanupTest { field.edits.count == 1 }
+        #expect(asked.count >= 1, "the sentence's pass asked for the shadow")
+        #expect(field.reads == 0)
+        #expect(field.edits.last?.target == "the green boat sails out today.")
+        let sentenceInput = try #require(cleaner.inputs.withLock { $0 }.last)
+        #expect(sentenceInput.rawWords == nil)
+        // A pause long enough: the whole take, with its raw words.
+        await pipeline.fieldCleanup?.settle()
+        await awaitCleanupTest { clock.sleeperCount >= 1 }
+        clock.advance(by: DictationPipeline.wholeTakePause)
+        await awaitCleanupTest { cleaner.inputs.withLock { $0 }.contains { $0.rawWords != nil } }
+        await pipeline.fieldCleanup?.settle()
+        let whole = try #require(cleaner.inputs.withLock { $0 }.last { $0.rawWords != nil })
+        #expect(whole.rawWords == "teh green boat sails out today.")
+        #expect(field.reads == 0)
     }
 }

@@ -758,11 +758,12 @@ final class KeyboardController {
         journal.write(entry)
     }
 
-    private func markRead(_ id: String) {
+    private func markRead(_ id: String, mergingUser: Bool = false) {
         syncQueueField()
-        queue.markRead(id)
+        queue.markRead(id, mergingUser: mergingUser)
         var entry = EditJournal.Entry(t: Self.uptimeMs, kind: .read, field: queueDocumentID)
         entry.id = id
+        if mergingUser { entry.reason = "shadow" }
         journal.write(entry)
     }
 
@@ -824,6 +825,7 @@ final class KeyboardController {
             lastStepAt = ContinuousClock.now
         }
         if let open = queue.openRegion { sessionSpan.track(runID: open.runID, anchor: open.anchor, region: open.text) }
+        answerShadowAsk()
         startTickerIfNeeded()
         // A recovery request may replace the one a running task captured while homing.
         // Schedule from pending state as well as its one-shot event.
@@ -1100,6 +1102,33 @@ final class KeyboardController {
         guard liveRunning != value else { return }
         liveRunning = value
         syncRowTakeover()
+    }
+
+    /// The last cleanup pass whose ask for the field's text was answered (`LiveDictationSnapshot.shadowAsk`).
+    @ObservationIgnored private var answeredShadowAsk: String?
+
+    /// A cleanup pass asked for the field's text with the run's snapshot: it is answered from the shadow once that
+    /// snapshot's words are typed, with no field read (#299 round 4). The read is marked under the pass's id, so its edit
+    /// is placed through every change made meanwhile and merged around them (the user's included).
+    private func answerShadowAsk() {
+        guard let snapshot = liveSnapshot, let ask = snapshot.shadowAsk, ask != answeredShadowAsk,
+              isVisible, !isTornDown, let documentID = document.documentID, documentID == queueDocumentID else { return }
+        if document.isSecureTextEntry {
+            answeredShadowAsk = ask
+            return link.writeFieldShadow(FieldShadow(id: ask, runID: snapshot.runID, refused: "secure"))
+        }
+        switch queue.shadow(of: snapshot.runID, version: snapshot.version) {
+        case .notYet: return
+        case .refused(let why):
+            answeredShadowAsk = ask
+            link.writeFieldShadow(FieldShadow(id: ask, runID: snapshot.runID, refused: why))
+        case .ready(let before, let after, let takeStart):
+            answeredShadowAsk = ask
+            markRead(ask, mergingUser: true)
+            link.writeFieldShadow(FieldShadow(id: ask, runID: snapshot.runID, above: before, below: after, takeStart: takeStart,
+                                              documentID: documentID, draftID: draftID))
+        }
+        trace?("cleanup shadow sent")
     }
 
     private func writeLiveAck(version: Int?, complete: Bool) {

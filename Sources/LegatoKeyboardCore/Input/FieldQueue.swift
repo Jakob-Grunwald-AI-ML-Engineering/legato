@@ -275,6 +275,9 @@ public struct FieldQueue: Sendable {
         /// The spans then: their text was read, so what they insert at the scope's edge is a change of it.
         var spanIDs: Set<Int>
         var changes: [Change] = []
+        /// A cleanup's read (`FieldShadow`): the user's changes since do not cancel its edit, the edit is merged around
+        /// them (the field's text wins, `FieldMerge`). An instruction's read is cancelled by them.
+        var mergesUser = false
     }
     private var readMarks: [ReadMark] = []
     static let readMarkCount = 4
@@ -736,10 +739,14 @@ public struct FieldQueue: Sendable {
 
     /// The field is read now for an instruction (the queue home): an edit carrying `id` as its `readID` is placed
     /// through the changes made since. A later mark of the same id replaces it.
-    public mutating func markRead(_ id: String) {
+    /// `mergingUser`: a cleanup's read (the keyboard's shadow sent for a pass): its edit is merged around the user's
+    /// changes since, not cancelled by them.
+    public mutating func markRead(_ id: String, mergingUser: Bool = false) {
         guard seeded else { return }
         readMarks.removeAll { $0.id == id }
-        readMarks.append(ReadMark(id: id, text: text, cursor: userCursor, spanIDs: Set(spans.keys)))
+        var mark = ReadMark(id: id, text: text, cursor: userCursor, spanIDs: Set(spans.keys))
+        mark.mergesUser = mergingUser
+        readMarks.append(mark)
         if readMarks.count > Self.readMarkCount { readMarks.removeFirst() }
     }
 
@@ -1878,6 +1885,32 @@ public struct FieldQueue: Sendable {
         return Array(Set(run.pieces.dropFirst().compactMap(\.startSegment))).sorted()
     }
 
+    /// What the shadow can tell a cleanup pass about the field (`FieldShadow`) once run `runID`'s words up to `version`
+    /// are typed: the text before and after the user's caret and where the run's text starts in it.
+    public enum ShadowAnswer: Sendable, Equatable {
+        case ready(before: String, after: String, takeStart: Int?)
+        /// Not yet: the version's words are still on their way, or an op's check is open.
+        case notYet
+        /// No text to give: the field's selection or context is unverified, or nothing is known of it.
+        case refused(String)
+    }
+
+    public func shadow(of runID: String, version: Int) -> ShadowAnswer {
+        guard seeded else { return .refused("unseeded") }
+        guard !hasUnverifiedInput else { return .refused("unverified") }
+        guard selection == 0 else { return .refused("selection") }
+        guard inFlight == nil, swap == nil, recoveryRequest == nil, userLost == nil, strayInsertion == nil, tapRace == nil else { return .notYet }
+        var takeStart: Int?
+        if let run = runs.first(where: { $0.runID == runID }) {
+            guard run.pending == nil, (run.version ?? -1) >= version, !rawAppendPending(run) else { return .notYet }
+            takeStart = run.pieces.compactMap { spans[$0.spanID] }.filter { !$0.parked }.map(\.start).min()
+        } else if !retiredRunIDs.contains(runID) {
+            // Not seen yet: its snapshot comes first.
+            return .notYet
+        }
+        return .ready(before: String(text[..<userCursor]), after: String(text[userCursor...]), takeStart: takeStart)
+    }
+
     /// A snapshot's text: its segments, trimmed, joined by a space where a reader expects one.
     static func target(of snapshot: LiveDictationSnapshot) -> String { snapshot.text }
 
@@ -2944,7 +2977,7 @@ public struct FieldQueue: Sendable {
                 s = shift(s); e = shift(e)
             }
         }
-        if userTouched { return .userEdited }
+        if userTouched, !mark.mergesUser { return .userEdited }
         guard s >= 0, s <= e, e <= text.count else { return nil }
         // The parts the read knew beyond the model: they must agree with what the model shows there now, or grow it.
         let front = Array(before.prefix(before.count - kb)), back = Array(after.suffix(after.count - ka))
@@ -2955,7 +2988,10 @@ public struct FieldQueue: Sendable {
         if m < back.count { text += back.suffix(back.count - m) }
         s -= front.count; e += back.count
         let now = Array(text[s..<e])
-        let target = FieldMerge.rebase(base: before + after, kept: Array(edit.target), incoming: now).text
+        // An instruction's result wins over the keyboard's own changes since; a cleanup's changes give way to every
+        // change since (the user's, speech typed meanwhile) and land only in untouched words.
+        let target = mark.mergesUser ? FieldMerge.rebase(base: before + after, kept: now, incoming: Array(edit.target)).text
+            : FieldMerge.rebase(base: before + after, kept: Array(edit.target), incoming: now).text
         return .placed(addSpan(Span(start: s, end: e)), target: String(target))
     }
 

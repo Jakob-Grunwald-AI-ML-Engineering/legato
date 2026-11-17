@@ -189,7 +189,17 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             guard let self else { return false }
             return self.mode != .live || self.liveRun?.complete == true || (self.cleanupDuringPauses && !self.voiceActive)
         }
-        cleanup.clean = { [weak self] text, final, before in
+        if perSentence {
+            // iPhone: a pass starts from the keyboard's shadow of the field (no read), asked with the run's snapshot.
+            cleanup.shadow = { [weak self] id in await self?.askShadow(id) }
+        }
+        // A whole-take pass gets the take's raw words as recognized (the finals, before any cleanup).
+        cleanup.rawWords = { [weak self] in
+            guard let self, self.mode == .live, let run = self.liveRun, !run.isSplit else { return nil }
+            let raw = run.wholeRaw.text
+            return raw.isEmpty ? nil : raw
+        }
+        cleanup.clean = { [weak self] text, whole, before, raw in
             guard let self else { return nil }
             var client: any SentenceCleaning = self.cleaner
             #if DEBUG || LEGATO_INTERNAL
@@ -200,9 +210,10 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             let terms = Array(await self.loadTerms().prefix(200))
             var calls = 0
             let attempt: @MainActor (String, String) async -> FieldCleanupChunks.Attempt = { part, context in
-                // The whole text gets the retry; its halves after a rejection one call each.
+                // The whole text gets the retry; its halves after a rejection one call each. Only the whole text gets
+                // the raw words: a half would read words of the other half in them.
                 let result = await cleaner.clean(.init(takeID: UUID().uuidString, text: part, vocabulary: terms,
-                                                       textBeforeCursor: context, fieldDocument: true),
+                                                       textBeforeCursor: context, fieldDocument: true, rawWords: calls == 0 ? raw : nil),
                                                  attempts: calls == 0 ? 2 : 1)
                 calls += 1
                 switch result {
@@ -225,7 +236,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
                 case .failed(let reason): cleanup?.cleanFailure = reason; return nil
                 }
             }
-            return final ? await clean(text, before) : await FieldCleanupChunks.clean(text, before: before, using: clean)
+            return whole ? await clean(text, before) : await FieldCleanupChunks.clean(text, before: before, using: clean)
         }
         cleanup.onResult = { [weak self] source, confirmed, status in
             guard let self else { return }
@@ -253,6 +264,27 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         fieldCleanup = cleanup
     }
 
+    /// The keyboard's shadow of the field (`FieldShadow`), taken from the link by pass id (the iPhone keyboard link sets it).
+    @ObservationIgnored public var takeFieldShadow: (@MainActor (_ id: String) -> FieldShadow?)?
+    /// How long a pass waits for the keyboard's shadow: its snapshot's words are typed first.
+    static let shadowWait = Duration.seconds(3)
+
+    /// A cleanup pass asks the keyboard for the field's text with the live run's next snapshot (`shadowAsk`) and waits for
+    /// its shadow: no field read (#299 round 4). Nil when no live run carries the ask (the pass reads the field).
+    private func askShadow(_ id: String) async -> FieldShadow? {
+        guard mode == .live, let take = takeFieldShadow, var run = liveRun else { return nil }
+        let generation = takeGeneration
+        run.askShadow(id)
+        publishLive(run)
+        let started = streamTime()
+        while generation == takeGeneration, !Task.isCancelled {
+            if let shadow = take(id) { return shadow }
+            guard streamTime() - started < Self.shadowWait else { break }
+            do { try await clock.sleep(for: .milliseconds(10)) } catch { break }
+        }
+        return FieldShadow(id: id, runID: run.runID, refused: "noAnswer")
+    }
+
     /// A final snapshot can still be waiting for its transport's coalesced publication, or for the host queue.
     /// Its exact acknowledgement orders cleanup reads after those writes without holding the user's cursor.
     private func waitForLiveDelivery(runID: String, generation: Int) async -> Bool {
@@ -274,9 +306,28 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         guard mode == .live, reason == "endpoint" else { return }
         setVoiceActive(false)
         if cleanupDuringPauses { fieldCleanup?.request() }
+        if cleanupSentences { scheduleWholePause() }
+    }
+
+    /// A pause this long after an endpoint runs the whole-take pass with the raw words, as the stop does. Unmeasured: a
+    /// guess between a breath (well under a second) and the speaker being done; to be measured on the phone.
+    public static let wholeTakePause = Duration.seconds(3)
+    @ObservationIgnored private var wholePause: Task<Void, Never>?
+
+    private func scheduleWholePause() {
+        wholePause?.cancel()
+        guard let runID = liveRun?.runID else { return }
+        wholePause = Task { [weak self] in
+            guard let self else { return }
+            do { try await self.clock.sleep(for: Self.wholeTakePause) } catch { return }
+            guard !Task.isCancelled, !self.voiceActive, self.mode == .live, let run = self.liveRun, run.runID == runID, !run.complete,
+                  let cleanup = self.fieldCleanup, self.cleanupFieldAvailable() else { return }
+            cleanup.request(whole: true)
+        }
     }
 
     private func setVoiceActive(_ active: Bool) {
+        if active { wholePause?.cancel(); wholePause = nil }
         guard voiceActive != active else { return }
         voiceActive = active
         onSpeechActivity?(active)
@@ -837,6 +888,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     func settleHistory() async { await liveHistoryWrite?.value }
 
     private func endLiveRun() {
+        wholePause?.cancel(); wholePause = nil
         liveSubmitted = [:]; liveKeys = [:]; liveFinishedAt = nil
         held = nil; heldAwaitsStop = false; liveTakeOpen = false
         guard liveRun != nil else { return }
