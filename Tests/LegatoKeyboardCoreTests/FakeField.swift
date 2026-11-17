@@ -41,10 +41,13 @@ struct FakeField {
     var newIdentityWhenEmpty = false
     /// The field's document identity (changes with `newIdentityWhenEmpty`).
     private(set) var identity = 0
-    /// Host callbacks (`textDidChange`) so far: one per move as it lands (two in Safari, the first stale); the keyboard's
-    /// own inserts and deletes make none. `unheard` are those no fresh report has carried yet (`takeCallback`).
+    /// Host callbacks (`textDidChange`) so far: in Safari two per move as it lands (the first stale); in WhatsApp and Notes
+    /// one for all moves since the last fresh report (a burst comes back as one callback, measured); the keyboard's own
+    /// inserts and deletes make none. `unheard` are those no fresh report has carried yet (`takeCallback`).
     private(set) var callbacks = 0
     private var unheard = 0
+    /// Moves since the last fresh report come back as one host callback (WhatsApp, Notes: #299 probe bursts).
+    var coalescesCallbacks = false
     /// Whether the next fresh report comes with a host callback.
     mutating func takeCallback() -> Bool {
         guard unheard > 0 else { return false }
@@ -64,7 +67,9 @@ struct FakeField {
         var field = FakeField(text, caret: caret)
         switch host {
         case .whatsApp: field.window = 300; field.cutsAtLineBreaks = true; field.dropsOvershoot = true; field.blindAfterMove = true
+            field.coalescesCallbacks = true
         case .notes: field.window = 300; field.cutsAtLineBreaks = true; field.newIdentityWhenEmpty = true; field.blindAfterMove = true
+            field.coalescesCallbacks = true
         case .safari:
             field.window = 100; field.movesByCharacters = true; field.hostDelays = true
             field.staleFirstMoveReport = true; field.newIdentityWhenEmpty = true; field.blindAfterMove = true
@@ -279,8 +284,12 @@ struct FakeField {
         defer {
             if newIdentityWhenEmpty, text.isEmpty, !wasEmpty { identity += 1 }
             if case .move = send.op {
-                let calls = staleFirstMoveReport ? 2 : 1
-                callbacks += calls; unheard += calls
+                if coalescesCallbacks {
+                    if unheard == 0 { callbacks += 1; unheard = 1 }
+                } else {
+                    let calls = staleFirstMoveReport ? 2 : 1
+                    callbacks += calls; unheard += calls
+                }
                 if staleFirstMoveReport, send.writer != .outside { staleMove = (from, true) }
             }
             if checks, case .move = send.op {

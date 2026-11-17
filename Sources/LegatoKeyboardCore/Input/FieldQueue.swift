@@ -327,8 +327,6 @@ public struct FieldQueue: Sendable {
         var owners: [Int?] = []
         /// The report the first op went out on.
         var sentOn: Report?
-        /// Host callbacks since the chunk's first op: each of its moves makes one when the host applies it, in order.
-        var callbacks = 0
     }
     /// The report a held insert of speech was sent on, and the piece's span it went to.
     private struct HeldSpeech: Sendable, Equatable {
@@ -785,7 +783,6 @@ public struct FieldQueue: Sendable {
         }
         sinceSendMs += elapsedMs
         inFlight?.waitedMs += elapsedMs
-        if callback { inFlight?.callbacks += 1 }
         // Only the user selects: a selection the model does not have says the user acted at the caret.
         if report.selected != nil, selection == 0 { userActed = true }
         if let race = tapRace { tapRace = race.ageMs + elapsedMs < 2 * Self.checkDeadlineMs ? (race.sends, race.ageMs + elapsedMs) : nil }
@@ -892,11 +889,11 @@ public struct FieldQueue: Sendable {
             if case .move = flight.op { endsWithMove = true }
             // Repetitive text in a short window may fit elsewhere too: fitting at the caret is enough for a chunk.
             let shows = flight.anywhere ? matches(report, anywhere: true) : consistent(report)
-            // A chunk that ends with its hop back is checked by the read that comes with that move's callback (one callback
-            // for each of its moves came): the host applied the chunk by then, in order. The proxy's own echo before it
-            // proves nothing yet.
-            let moves = flight.ops.reduce(0) { if case .move = $1 { $0 + 1 } else { $0 } }
-            let heard = !endsWithMove || (callback && flight.callbacks >= moves) || flight.waitedMs >= Self.checkDeadlineMs
+            // A chunk that ends with its hop back is checked by the first host callback whose report shows its end state: the
+            // host applied the chunk by then, in order. WhatsApp and Notes send one callback for a whole burst, Safari one
+            // per stage (the first still at the old place), so the callback's report decides, not a count. The proxy's own
+            // echo before it proves nothing yet.
+            let heard = !endsWithMove || callback || flight.waitedMs >= Self.checkDeadlineMs
             if shows, heard, flight.anywhere || endsWithMove || !fits(report, in: flight.pre) {
                 guard confirm(flight, report: report) else { return .wait }
             } else if flight.waitedMs < Self.checkDeadlineMs {
@@ -2185,7 +2182,6 @@ public struct FieldQueue: Sendable {
         flight.jumpSpan = joining?.jumpSpan
         flight.input = joining?.input
         flight.visited = joining?.visited ?? []
-        flight.callbacks = joining?.callbacks ?? 0
         inFlight = flight
         coordinator.dispatched()
         lastSentOp = op; lastSentLane = lane

@@ -154,6 +154,26 @@ import Testing
 }
 
 @Suite struct ChunkCheckTests {
+    /// WhatsApp and Notes answer a whole burst (hop, delete run, insert, hop back) with one callback (#299 probe): a
+    /// chunk that ends with its hop back is confirmed by that callback, not by the deadline. Each one used to wait out
+    /// the full 400 ms on the phone (run 3 journal: 16 of 19 cleanup chunks at 403–601 ms).
+    @Test(arguments: [FakeField.Host.whatsApp, .notes])
+    func aChunkEndingWithItsHopBackIsConfirmedByTheBurstsOneCallback(host: FakeField.Host) {
+        // The proxy's echo after the hop already shows the text there (as in the run 3 journal), so the whole burst goes out
+        // in one turn and comes back as one callback.
+        var field = FakeField.host(host, "the cat sat on the mat and looked out of the window")
+        field.blindAfterMove = false
+        var rig = QueueRig(field)
+        rig.run(ms: 100)
+        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: "the cat sat on the mat and looked out of the window",
+                                          target: "the dog sat on the mat and looked out of the window", cursorAtEnd: false))
+        rig.drain()
+        #expect(String(rig.field.text) == "the dog sat on the mat and looked out of the window")
+        let waits = rig.events.compactMap { if case .confirmed(let waited) = $0.event { waited } else { nil } }
+        #expect(!waits.isEmpty)
+        #expect(waits.allSatisfy { $0 < FieldQueue.checkDeadlineMs / 2 }, "confirmed waits \(waits)")
+    }
+
     /// The host takes the hops but loses the edit: at the deadline the check fails and the queue re-reads (the report is
     /// the model, no blind restore, nothing undone). The edit is answered `unplaceable`, which makes the app's cleanup
     /// run one fresh pass on the text as read (`FieldCleanupSession`).
