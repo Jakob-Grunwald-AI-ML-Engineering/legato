@@ -1708,7 +1708,7 @@ public struct FieldQueue: Sendable {
 
     /// A new piece of run `ri` at the user's caret, its words from delivered offset `tStart`.
     private mutating func startRegion(_ ri: Int, tStart: Int, anchor: String) {
-        let id = addSpan(Span(start: userCursor, end: userCursor))
+        let id = addSpan(Span(start: userCursor, end: userCursor, dictated: true))
         // In front of text without a space (a caret put inside a word or before one): the space after the piece goes in
         // at its end once the take is done (the caret never goes back for it).
         let glued = userCursor < text.count && !FieldInsertion.trailingSeparator(after: "x", before: text[userCursor]).isEmpty
@@ -3046,7 +3046,7 @@ public struct FieldQueue: Sendable {
         // change since (the user's, speech typed meanwhile) and land only in untouched words.
         let target = mark.mergesUser ? FieldMerge.rebase(base: before + after, kept: now, incoming: Array(edit.target)).text
             : FieldMerge.rebase(base: before + after, kept: Array(edit.target), incoming: now).text
-        return .placed(addSpan(Span(start: s, end: e)), target: String(target))
+        return .placed(addSpan(Span(start: s, end: e, cleanup: mark.mergesUser)), target: String(target))
     }
 
     private enum Placement: Equatable { case placed(Int), ambiguous, absent }

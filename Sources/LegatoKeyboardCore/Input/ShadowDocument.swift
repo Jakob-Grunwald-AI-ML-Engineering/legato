@@ -14,9 +14,12 @@ public struct ShadowDocument: Sendable, Equatable {
         var userChanged = false
         /// Another edit (Magic) rewrote part of it: a dictation region there is left as it is.
         var edited = false
-        /// The keyboard's span that deleted some of its text (the last one): what that one types at its edges replaces the
-        /// deleted text and belongs to it (a cleanup that made "Um. so" "So" left the take starting after the "S").
-        var rewrittenBy: Int?
+        /// A dictation piece: a cleanup's text at its edges is its own (`cleanup`).
+        var dictated = false
+        /// A cleanup's scope (a pass from the shadow): what it types at a dictation piece's edge belongs to the piece, so
+        /// the take keeps it and a later pass sends it again instead of adding it twice (#299 device run 6: "Um. so" made
+        /// "So" left the take starting after the "S", and every later pass typed another; a period after the last word).
+        var cleanup = false
         /// Behind a seam: its bounds mean nothing until the observer finds its text again (`lastText`).
         var parked = false
         /// An edit's anchor: text inserted right at it goes after it.
@@ -50,13 +53,14 @@ public struct ShadowDocument: Sendable, Equatable {
     mutating func insertAtCursor(_ chars: [Character], owner: Int?) {
         guard !chars.isEmpty else { return }
         let i = cursor, n = chars.count
+        let cleanup = owner.flatMap { spans[$0] }?.cleanup == true
         text.insert(contentsOf: chars, at: i)
         for (id, var span) in spans {
             if id != owner, span.start < i, i < span.end { if owner == nil { span.userChanged = true } else { span.edited = true } }
-            // The span's own place: its owner types at its end; the keyboard's text where it deleted the span's, inside.
-            let replaces = owner != nil && span.rewrittenBy == owner
-            if span.start > i || (span.start == i && id != owner && !span.anchor && !replaces) { span.start += n }
-            if span.end > i || (span.end == i && (id == owner || replaces)) { span.end += n }
+            // The span's own place: its owner types at its end; a cleanup at a piece's edges, inside.
+            let edge = span.dictated && cleanup
+            if span.start > i || (span.start == i && id != owner && !span.anchor && !edge) { span.start += n }
+            if span.end > i || (span.end == i && (id == owner || edge)) { span.end += n }
             span.end = max(span.end, span.start)
             spans[id] = span
         }
@@ -71,9 +75,7 @@ public struct ShadowDocument: Sendable, Equatable {
         text.removeSubrange(a..<b)
         func shift(_ p: Int) -> Int { p >= b ? p - n : (p > a ? a : p) }
         for (id, var span) in spans {
-            if id != owner, span.start < b, a < span.end {
-                if owner == nil { span.userChanged = true } else { span.edited = true; span.rewrittenBy = owner }
-            }
+            if id != owner, span.start < b, a < span.end { if owner == nil { span.userChanged = true } else { span.edited = true } }
             span.start = shift(span.start); span.end = shift(span.end)
             spans[id] = span
         }

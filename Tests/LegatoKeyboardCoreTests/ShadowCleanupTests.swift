@@ -171,6 +171,44 @@ import Testing
         #expect(rig.field.string == "the dog waits by the gold boat")
     }
 
+    /// A take dictated after a line in Notes, cleaned from the shadow the way `FieldCleanupSession` makes a pass.
+    private struct TakeRig {
+        var rig: QueueRig
+        let line: String
+        var version = 0
+
+        init(after line: String) {
+            self.line = line
+            rig = QueueRig(FakeField.host(.notes, line, caret: line.count))
+            rig.run(ms: 100)
+        }
+
+        mutating func say(_ segments: [String], ask: String) {
+            version += 1
+            rig.queue.enqueue(.init(runID: "r", version: version,
+                                    segments: segments.enumerated().map { .init(id: $0.offset, text: $0.element, final: true) },
+                                    shadowAsk: ask))
+            rig.drain()
+        }
+
+        /// One pass: the take's text goes to the model, which answers `cleaned` whatever part of the take it was sent.
+        /// Returns the take's text as sent.
+        @discardableResult mutating func pass(_ id: String, cleaned: String) -> String {
+            var answer = rig.queue.shadow(of: "r", version: version)
+            for _ in 0..<200 where answer == .notYet { rig.tick(); answer = rig.queue.shadow(of: "r", version: version) }
+            guard case .ready(let before, let after, let take?) = answer else { Issue.record("no shadow: \(answer)"); return "" }
+            let text = Array(before + after)
+            #expect(line.hasSuffix(String(text[..<take.lowerBound])), "pass \(id): the take starts after the line")
+            rig.queue.markRead(id, mergingUser: true)
+            let target = String(text[..<take.lowerBound]) + cleaned + String(text[take.upperBound...])
+            rig.queue.enqueue(FieldQueue.Edit(id: id, kind: .magic, before: before, after: after, target: target,
+                                              cursorAtEnd: false, readID: id))
+            rig.drain()
+            #expect(rig.applied.last == id)
+            return String(text[take])
+        }
+    }
+
     /// Device run 6 (Notes, `dictation-replay-fragments.json`): the first sentence pass made "Um. so, uh, the plan" "So the
     /// plan", deleting the take's opening and typing "S" where it began. The take's start then stood after that "S": the
     /// next pass and the stop's sent "o the plan …", the model answered "So the plan …", and each put another "S" in front
@@ -178,45 +216,40 @@ import Testing
     /// a cleanup applied once is not applied again.
     @Test func aPassAtTheTakesStartIsNeverAppliedTwice() {
         let line = "Then it is coffee and cake on the terrace.\n"
-        var rig = QueueRig(FakeField.host(.notes, line, caret: line.count))
-        rig.run(ms: 100)
-        var version = 0
-        func say(_ segments: [String], ask: String? = nil) {
-            version += 1
-            rig.queue.enqueue(.init(runID: "r", version: version,
-                                    segments: segments.enumerated().map { .init(id: $0.offset, text: $0.element, final: true) },
-                                    shadowAsk: ask))
-            rig.drain()
-        }
+        var take = TakeRig(after: line)
         let first = ["Um.", "so, uh, the plan", "is to repaint the fence on Saturday", "if the weather holds."]
         let cleanFirst = "So the plan is to repaint the fence on Saturday if the weather holds."
         let all = first + ["Yeah.", "And, um, I think", "we need two more cans of paint."]
         let cleanAll = cleanFirst + " Yeah. And I think we need two more cans of paint."
-        /// One pass as `FieldCleanupSession` makes it from the shadow: the take's text goes to the model, which answers
-        /// with the cleaned sentences it was dictating, whatever part of the first word it was sent.
-        func pass(_ id: String, opening: String, cleaned: String) {
-            var answer = rig.queue.shadow(of: "r", version: version)
-            for _ in 0..<200 where answer == .notYet { rig.tick(); answer = rig.queue.shadow(of: "r", version: version) }
-            guard case .ready(let before, let after, let take?) = answer else { Issue.record("no shadow: \(answer)"); return }
-            let text = Array(before + after)
-            #expect(line.hasSuffix(String(text[..<take.lowerBound])) && String(text[take]).hasPrefix(opening),
-                    "pass \(id): the take starts where it began: \(String(text[take]).debugDescription)")
-            rig.queue.markRead(id, mergingUser: true)
-            let target = String(text[..<take.lowerBound]) + cleaned + String(text[take.upperBound...])
-            rig.queue.enqueue(FieldQueue.Edit(id: id, kind: .magic, before: before, after: after, target: target,
-                                              cursorAtEnd: false, readID: id))
-            rig.drain()
-            #expect(rig.applied.last == id)
-        }
-        say(first, ask: "sentence")
-        pass("sentence", opening: "Um. so", cleaned: cleanFirst)
-        #expect(rig.field.string == line + cleanFirst)
-        say(all, ask: "later")
-        pass("later", opening: "So the plan", cleaned: cleanAll)
-        #expect(rig.field.string == line + cleanAll)
-        say(all + ["Um."], ask: "stop")
-        pass("stop", opening: "So the plan", cleaned: cleanAll)
-        #expect(rig.field.string == line + cleanAll)
+        take.say(first, ask: "sentence")
+        #expect(take.pass("sentence", cleaned: cleanFirst).hasPrefix("Um. so"))
+        #expect(take.rig.field.string == line + cleanFirst)
+        take.say(all, ask: "later")
+        #expect(take.pass("later", cleaned: cleanAll).hasPrefix("So the plan"))
+        #expect(take.rig.field.string == line + cleanAll)
+        take.say(all + ["Um."], ask: "stop")
+        #expect(take.pass("stop", cleaned: cleanAll).hasPrefix("So the plan"))
+        #expect(take.rig.field.string == line + cleanAll)
+    }
+
+    /// A pass that only adds text at the take's edge (the period after its last word, a word in front of its first) adds
+    /// the take's text: a later pass and the stop's send it with the take and get the same sentence back, so they change
+    /// nothing ("paint..", "So, So, the plan" before).
+    @Test(arguments: [
+        ("we need two more cans of paint", "We need two more cans of paint."),
+        ("the plan is to repaint the fence.", "So, the plan is to repaint the fence."),
+    ])
+    func aPassThatOnlyAddsAtTheTakesEdgeIsNeverAppliedTwice(said: String, cleaned: String) {
+        let line = "Then it is coffee and cake on the terrace.\n"
+        var take = TakeRig(after: line)
+        take.say([said], ask: "sentence")
+        #expect(take.pass("sentence", cleaned: cleaned) == said)
+        #expect(take.rig.field.string == line + cleaned)
+        take.say([said], ask: "later")
+        #expect(take.pass("later", cleaned: cleaned) == cleaned, "the pass sends what the first one made")
+        take.say([said], ask: "stop")
+        #expect(take.pass("stop", cleaned: cleaned) == cleaned)
+        #expect(take.rig.field.string == line + cleaned)
     }
 
     /// Speech typed while the model worked stays; the result lands in the text it was for.
