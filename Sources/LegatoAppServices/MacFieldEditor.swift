@@ -15,7 +15,8 @@ import LegatoMac
     /// The finished text is being typed into the app.
     public fileprivate(set) var inserting = false
     public fileprivate(set) var deliveryText = ""
-    /// Text that could not be delivered. It remains separate from the next take and is never inserted automatically.
+    /// Text that could not be delivered: only words the field never got, never a take that landed. It remains separate
+    /// from the next take and is never inserted automatically; a later session's kept text replaces it.
     public fileprivate(set) var recovery = PanelTake()
     public var recoveryText: String { recovery.text }
     public init() {}
@@ -76,6 +77,11 @@ import LegatoMac
     private var wholeRecoveryRuns: Set<String> = []
     private var dismissedRecoveryRuns: Set<String> = []
     private var latestRunTexts: [String: String] = [:]
+    /// The session whose kept text the panel holds.
+    private var recoverySession = 0
+    /// Cleanup edits sent through this field's queue: a cleanup rewrites words that already landed, so its drop keeps
+    /// nothing (the take stays as typed and in History).
+    private var cleanupEditIDs: Set<String> = []
     /// A handed-over run typed something: the panel's text continues it and brings its own spacing.
     private var continuesTyped = false
     private var target: (any TextTarget)?
@@ -84,6 +90,8 @@ import LegatoMac
     public var canCleanField: Bool { target != nil && !panel.active && !passwordField }
     private var documentID = UUID().uuidString
     private var activeInstructionID: String?
+    /// The active read was a cleanup's (`FieldReadRequest.Kind.cleanup`).
+    private var activeReadIsCleanup = false
     private var streamedRunID: String?
     /// Runs this editor saw; a rebind retires them, so a late cleanup never follows into another field or session.
     private var seenRunIDs: Set<String> = []
@@ -120,6 +128,8 @@ import LegatoMac
             panel.recovery.stream(id: id, text: "", final: true, retracted: true)
             return
         }
+        // One item, the latest: a session's first kept text replaces what an earlier session kept.
+        if recoverySession != sessionGeneration { panel.recovery = PanelTake(); recoverySession = sessionGeneration }
         panel.recovery.line(id: id, text)
     }
 
@@ -136,6 +146,7 @@ import LegatoMac
     /// Binds the focused field to a fresh queue. The panel session (its words and whether it runs) is left to the caller.
     private func bind() {
         queue.reset(.cancelled)
+        cleanupEditIDs = []
         retiredRunIDs.formUnion(seenRunIDs); seenRunIDs = []
         target = nil; streamedRunID = nil; activeInstructionID = nil; fieldUnreadable = false
         readSelection = nil; readText = nil; readRange = nil; instructionCursor = nil
@@ -218,7 +229,11 @@ import LegatoMac
     private func dropped(_ drop: MacFieldQueue.Drop) {
         guard !drop.text.isEmpty, drop.reason != .cancelled else { return }
         if let notice = target?.nativeInputNotice { report(notice) }
-        guard let runID = drop.runID else { retain(drop.text, id: drop.id); return }
+        guard let runID = drop.runID else {
+            // A refused Magic result is new text the field never got; a refused cleanup only restyles words already there.
+            if !cleanupEditIDs.contains(drop.id) { retain(drop.text, id: drop.id) }
+            return
+        }
         guard !dismissedRecoveryRuns.contains(runID) else { return }
         if drop.typed == 0 {
             wholeRecoveryRuns.insert(runID)
@@ -524,7 +539,7 @@ import LegatoMac
         if kind != .cleanup, let stop = FieldReader.structuralStopBelow(in: below) {
             below = String(below[..<stop.index]); belowStop = stop.kind
         }
-        activeInstructionID = instructionID
+        activeInstructionID = instructionID; activeReadIsCleanup = kind == .cleanup
         readSelection = selection; readText = snapshot; readRange = range; instructionCursor = selection
         var sessionLength = 0
         if let span = queue.lastRegionAtCaret, span.range.end == selection.location, selection.length == 0 {
@@ -563,6 +578,7 @@ import LegatoMac
         let before = context(range.location - beforeLength, beforeLength)
         let after = context(range.end, MacFieldQueue.contextChars)
         readSelection = nil; readText = nil; readRange = nil
+        if activeReadIsCleanup { cleanupEditIDs.insert(edit.id) }
         let result = await queue.edit(.init(id: edit.id, range: range, scope: edit.scopeText, before: before, after: after,
                                             target: edit.target, caretAfter: edit.cursorAtEnd))
         switch result {

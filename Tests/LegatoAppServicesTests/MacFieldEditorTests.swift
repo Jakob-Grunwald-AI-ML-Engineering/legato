@@ -416,6 +416,44 @@ import LegatoMac
         #expect(reports.isEmpty && copies.isEmpty)
     }
 
+    /// Takes that landed keep nothing, also when the field refuses their cleanup (a list line the field changed while the
+    /// model worked): the cleanup only restyles words already there.
+    @Test func landedTakesWhoseCleanupTheFieldRefusedKeepNothing() async throws {
+        let target = EditorTarget("")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false }
+        editor.sleep = { _ in }
+        var copies: [String] = []
+        editor.recover = { copies.append($0) }
+        for (index, item) in ["A: first item", "B: second item", "C: third item"].enumerated() {
+            if index > 0 { target.value += "\n- " } else { target.value = "- " }
+            target.selection = .init(location: target.value.utf16.count, length: 0)
+            editor.begin()
+            await editor.applyLive(snapshot(item, run: "take\(index)", complete: true))
+            await editor.finish()
+            #expect(target.value.hasSuffix(item))
+            let read = try await editor.read(.cleanup, instructionID: "cleanup\(index)", reading: {})
+            target.value = target.value.replacingOccurrences(of: "item", with: "entry")
+            let cleanup = ScopedEdit(instructionID: "cleanup\(index)", documentID: read.documentID, before: read.above,
+                                     after: read.below, target: read.above.uppercased() + read.below)
+            #expect(await editor.apply(cleanup)?.applied == false)
+            #expect(editor.panel.recoveryText.isEmpty)
+        }
+        #expect(copies.isEmpty)
+    }
+
+    /// Kept text is one item, the latest session's, never a log of every take.
+    @Test func keptTextHoldsOnlyTheLatestSessionsMissingText() async {
+        let editor = MacFieldEditor(capture: { .password })
+        editor.insert = { _ in .retained(message: "Insertion could not be confirmed.") }
+        for (index, take) in ["First take.", "Second take.", "Third take."].enumerated() {
+            editor.begin()
+            await editor.applyLive(snapshot(take, run: "kept\(index)", complete: true))
+            await editor.finish()
+            #expect(editor.panel.recoveryText == take)
+        }
+    }
+
     @Test func oldCleanupCannotFollowMagicIntoANewFieldOrSelection() async throws {
         let old = EditorTarget(""), fresh = EditorTarget("Leave this alone", .init(location: 0, length: 5))
         var focused = old
