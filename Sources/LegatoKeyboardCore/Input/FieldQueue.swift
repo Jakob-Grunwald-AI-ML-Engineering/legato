@@ -337,6 +337,12 @@ public struct FieldQueue: Sendable {
         var callbacks = 0
         /// A host callback showed the chunk's end state.
         var heard = false
+        /// Ops went out behind a chunk with hops once its own ops were done (speech and keys at the caret: appends never
+        /// wait, #299 round 4): the model at the chunk's end before them, and where they start in `ops`. Hosts apply ops
+        /// in order (measured), so the chunk's check covers them: a callback that shows the chunk's end, with or without
+        /// them, is the chunk's; the proxy's view then shows them.
+        var behind: ModelState?
+        var behindFrom = 0
     }
     /// The report a held insert of speech was sent on, and the piece's span it went to.
     private struct HeldSpeech: Sendable, Equatable {
@@ -549,7 +555,9 @@ public struct FieldQueue: Sendable {
     public mutating func releaseRead() { coordinator.finishRead() }
     /// The adapter calls this after the OS send, never before planning or dispatch.
     public mutating func operationDispatched() {
-        coordinator.dispatched(); sinceSendMs = 0; inFlight?.waitedMs = 0; inFlight?.chunkMs = 0; inFlight?.callbacks = 0
+        coordinator.dispatched(); sinceSendMs = 0; inFlight?.waitedMs = 0
+        // An op behind a chunk is no op of the chunk: the chunk's latency still counts from its own last op.
+        if inFlight?.behind == nil { inFlight?.chunkMs = 0; inFlight?.callbacks = 0 }
     }
 
     private var sinceSendMs = 1_000.0
@@ -902,33 +910,41 @@ public struct FieldQueue: Sendable {
             // there (a burst lands whole, measured), and an edit inside the window would not fit.
             var endsWithMove = false
             if case .move = flight.op { endsWithMove = true }
+            // A chunk with hops, perhaps with speech or keys behind it (`behind`).
+            let hops = endsWithMove || flight.behind != nil
             // Repetitive text in a short window may fit elsewhere too: fitting at the caret is enough for a chunk.
             let shows = flight.anywhere ? matches(report, anywhere: true) : consistent(report)
             // A chunk that ends with its hop back is checked by the first host callback whose report shows its end state: the
             // host applied the chunk by then, in order. WhatsApp and Notes send one callback for a whole burst, Safari one
             // per stage (the first still at the old place), so the callback's report decides, not a count. The proxy's own
-            // echo before it proves nothing yet.
-            if endsWithMove, callback, shows, !flight.heard {
+            // echo before it proves nothing yet. With ops behind the chunk, a callback that shows the chunk's end without
+            // them is the chunk's too: they are inserts at the caret, which the proxy's view then shows.
+            if hops, callback, !flight.heard, shows || flight.behind.map({ fits(report, in: $0) }) == true {
                 // The host's latency for this field: from the chunk's last op to the callback that showed it.
                 inFlight?.heard = true
                 host.heard(afterMs: flight.chunkMs, callbacks: flight.callbacks)
             }
-            let heard = !endsWithMove || callback || flight.waitedMs >= deadlineMs
-            if shows, heard, flight.anywhere || endsWithMove || !fits(report, in: flight.pre) {
+            let chunkHeard = inFlight?.heard == true
+            // The deadline counts from the chunk's last op until a callback showed the chunk, then from the last op behind it.
+            let waited = flight.behind != nil && !chunkHeard ? flight.chunkMs : flight.waitedMs
+            let heard = !hops || chunkHeard || waited >= deadlineMs
+            if shows, heard, flight.anywhere || hops || !fits(report, in: flight.pre) {
                 guard confirm(flight, report: report) else { return .wait }
-            } else if flight.waitedMs < deadlineMs {
-                // Not shown yet: no seam. The user's input goes behind the chunk all the same (`plannedNext`).
-                return userLane.isEmpty ? .wait : next()
+            } else if waited < deadlineMs {
+                // Not shown yet: no seam. The user's input and speech at the caret go behind the chunk all the same
+                // (`plannedNext`).
+                return next()
             } else {
                 // The check failed: the field does not show the chunk. Re-read; what is left is planned against it.
                 inFlight = nil
-                if endsWithMove { host.timedOut() }
+                if hops, !chunkHeard { host.timedOut() }
                 if landedElsewhere(report, flight: flight) {
                     // The user tapped while their key was on its way: it landed where they tapped.
                     events.append(.resync(.cursorMoved))
                     return next()
                 }
                 events.append(.resync(.checkFailed))
+                if takeBackAppends(report, flight: flight) { return next() }
                 if !explainTap(report, flight: flight) { resync(report, pre: flight) }
             }
         } else if !consistent(report) {
@@ -998,9 +1014,11 @@ public struct FieldQueue: Sendable {
     private mutating func plannedNext() -> Action {
         if hasUnverifiedInput { return inFlight == nil ? heldSpeechNext() : .wait }
         if inFlight != nil {
-            // The running chunk goes on to its end; behind it only the user's input goes before the check.
+            // The running chunk goes on to its end; behind it only the user's input and speech at the caret go before the
+            // check (appends never wait; a chunk with hops never goes before the check of the one before).
             if let current = unit, !current.ops.isEmpty { return nextInUnit() }
-            guard !userLane.isEmpty, !paused, swap == nil, userLost == nil, strayInsertion == nil, selection == 0 else { return .wait }
+            guard !paused, swap == nil, userLost == nil, strayInsertion == nil, selection == 0 else { return .wait }
+            guard !userLane.isEmpty else { return appendBehind() ?? .wait }
             if let current = unit { unit = nil; finishUnit(current.owner) }
             guard cursor == userCursor else { return .wait }
             return nextUser() ?? .wait
@@ -1366,15 +1384,7 @@ public struct FieldQueue: Sendable {
                 userCursor = cursor
             case .startRegion(let runID, let tStart, let anchor):
                 current.ops.removeFirst(); unit = current
-                if let ri = runs.firstIndex(where: { $0.runID == runID }) {
-                    let id = addSpan(Span(start: userCursor, end: userCursor))
-                    // In front of text without a space (a caret put inside a word or before one): the space after the
-                    // piece goes in at its end once the take is done (the caret never goes back for it).
-                    let glued = userCursor < text.count && !FieldInsertion.trailingSeparator(after: "x", before: text[userCursor]).isEmpty
-                    runs[ri].pieces.append(Piece(spanID: id, tStart: tStart, anchor: anchor, startSegment: startSegment(at: tStart, in: runs[ri]),
-                                                 spaceAfter: glued))
-                    events.append(.regionStarted(runID: runID, anchorChars: anchor.count))
-                }
+                if let ri = runs.firstIndex(where: { $0.runID == runID }) { startRegion(ri, tStart: tStart, anchor: anchor) }
             case .delete(let count, let owner):
                 guard cursor >= count, count > 0 else { unit = nil; requeue(current.owner); return .wait }
                 current.ops.removeFirst(); unit = current
@@ -1564,6 +1574,55 @@ public struct FieldQueue: Sendable {
         return !heldAppend(piece, in: run, span: span).isEmpty
     }
 
+    /// Speech at the caret right behind a running chunk's ops, before its check (#299 round 4: appends never wait). Hosts
+    /// apply ops in order (measured), so the chunk's check covers the appended words too. Only a plain append of the open
+    /// piece (or a new piece of a take that typed already) at the user's caret: a revision, a move or a delete waits for
+    /// the check. Only in a field learned to answer a burst with one callback (`HostProfile.callbacks`, WhatsApp and
+    /// Notes): Safari answers stage by stage and keeps the proxy on its report after a move while an edit sent right
+    /// behind it lands (FakeField's measured model), so no check could see the words there; they wait for the check.
+    private mutating func appendBehind() -> Action? {
+        // Behind a chunk with hops (an edit's, a cleanup's), never behind a move of the user's own.
+        guard host.callbacks == .perBurst, let flight = inFlight, !flight.visited.isEmpty, flight.hopFrom == nil,
+              cursor == userCursor, selection == 0, !hasUnverifiedInput else { return nil }
+        for ri in runs.indices { applyPending(ri) }
+        for ri in runs.indices where rawAppendPending(runs[ri]) {
+            // The take's next words after a piece closed (a cleanup's chunk closes it): a new piece at the caret.
+            if !runs[ri].pieces.isEmpty, let from = untypedRest(of: runs[ri]) {
+                startRegion(ri, tStart: from, anchor: String(text[max(0, userCursor - 200)..<userCursor]))
+            }
+            guard let piece = runs[ri].pieces.last(where: { $0.tEnd == nil }), liveRevision(for: piece) == nil,
+                  let span = spans[piece.spanID], !span.parked, !span.userChanged, !span.edited, span.end == userCursor else { continue }
+            let rest = heldAppend(piece, in: runs[ri], span: span)
+            guard !rest.isEmpty else { continue }
+            return append(rest, to: piece)
+        }
+        return nil
+    }
+
+    /// A failed check of a chunk with speech behind it, where the report shows the chunk's end without the speech: the
+    /// chunk landed, the appended words did not show. They come out of the model (as a change of the keyboard's own, so a
+    /// read's changes still lead to it) and go again: nothing is lost. Only when every op behind the chunk was speech
+    /// at the caret; keys behind it take the ordinary re-read.
+    private mutating func takeBackAppends(_ report: Report, flight: InFlight) -> Bool {
+        guard let end = flight.behind, flight.behindFrom < flight.ops.count, flight.ops.count == flight.owners.count,
+              !consistent(report), fits(report, in: end) else { return false }
+        let ops = flight.ops[flight.behindFrom...], owners = flight.owners[flight.behindFrom...]
+        guard zip(ops, owners).allSatisfy({ op, owner in
+            if case .insert = op { owner != Self.unknownOwner } else { false }
+        }) else { return false }
+        let added = text.count - end.text.count
+        guard added > 0, cursor == end.cursor + added, selection == 0,
+              text[..<end.cursor].elementsEqual(end.text[..<end.cursor]), text[cursor...].elementsEqual(end.text[end.cursor...]) else {
+            return false
+        }
+        let owner = owners.first ?? nil
+        removeRange(end.cursor, cursor, owner: owner)
+        userCursor = cursor
+        if let current = unit { unit = nil; finishUnit(current.owner) }
+        merge(report)
+        return true
+    }
+
     /// Raw appends share the ordinary verified writer, but never wait behind a paused cleanup's remaining hunks.
     private mutating func nextLiveAppend() -> Action? {
         for ri in runs.indices where rawAppendPending(runs[ri]) {
@@ -1608,6 +1667,17 @@ public struct FieldQueue: Sendable {
             q.insertAtCursor(rest, owner: spanID)
             q.userCursor = q.cursor
         }
+    }
+
+    /// A new piece of run `ri` at the user's caret, its words from delivered offset `tStart`.
+    private mutating func startRegion(_ ri: Int, tStart: Int, anchor: String) {
+        let id = addSpan(Span(start: userCursor, end: userCursor))
+        // In front of text without a space (a caret put inside a word or before one): the space after the piece goes in
+        // at its end once the take is done (the caret never goes back for it).
+        let glued = userCursor < text.count && !FieldInsertion.trailingSeparator(after: "x", before: text[userCursor]).isEmpty
+        runs[ri].pieces.append(Piece(spanID: id, tStart: tStart, anchor: anchor, startSegment: startSegment(at: tStart, in: runs[ri]),
+                                     spaceAfter: glued))
+        events.append(.regionStarted(runID: runs[ri].runID, anchorChars: anchor.count))
     }
 
     private mutating func startUntypedRest(_ ri: Int, held: Bool = false) -> Action? {
@@ -2203,6 +2273,12 @@ public struct FieldQueue: Sendable {
         flight.jumpSpan = joining?.jumpSpan
         flight.input = joining?.input
         flight.visited = joining?.visited ?? []
+        // Behind a chunk with hops whose own ops are done: its check goes on covering what goes behind it.
+        if let joining, unit?.ops.isEmpty ?? true, !joining.visited.isEmpty {
+            flight.behind = joining.behind ?? opPre
+            flight.behindFrom = joining.behind == nil ? joining.ops.count : joining.behindFrom
+            flight.chunkMs = joining.chunkMs; flight.callbacks = joining.callbacks; flight.heard = joining.heard
+        }
         inFlight = flight
         coordinator.dispatched()
         lastSentOp = op; lastSentLane = lane
