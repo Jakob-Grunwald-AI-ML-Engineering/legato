@@ -27,6 +27,63 @@ final class AXTextTarget: TextTarget {
     /// Chromium web text reads through this: its value with the selection mapped into it, or its editable root.
     private var reader: AXFieldReader
 
+    /// Value and selection change notifications of the bound element (`observeChanges`).
+    private var observation: ChangeObservation?
+    private var changeHandler: (@MainActor () -> Void)?
+
+    func observeChanges(_ handler: @escaping @MainActor () -> Void) -> Bool {
+        changeHandler = handler
+        return registerObserver()
+    }
+
+    func stopObserving() {
+        changeHandler = nil
+        observation = nil
+    }
+
+    /// Registers the bound element; a rebind registers its fresh element and drops the old registration.
+    private func registerObserver() -> Bool {
+        observation = nil
+        guard changeHandler != nil else { return false }
+        guard let fresh = ChangeObservation(pid: pid, element: element, target: self) else { return false }
+        observation = fresh
+        return true
+    }
+
+    fileprivate func changed() { changeHandler?() }
+
+    /// An `AXObserver` on the main run loop for `kAXValueChangedNotification` and `kAXSelectedTextChangedNotification`.
+    /// Releasing it removes the run loop source. Notifications only say "look again": they are never counted
+    /// (Mac VM, 2026-11-17: one to several per operation, Chromium coalesces a burst).
+    private final class ChangeObservation {
+        private let observer: AXObserver
+        private let element: AXUIElement
+        init?(pid: pid_t, element: AXUIElement, target: AXTextTarget) {
+            var created: AXObserver?
+            let callback: AXObserverCallback = { _, _, _, refcon in
+                guard let refcon else { return }
+                let target = Unmanaged<AXTextTarget>.fromOpaque(refcon).takeUnretainedValue()
+                MainActor.assumeIsolated { target.changed() }
+            }
+            guard AXObserverCreate(pid, callback, &created) == .success, let created else { return nil }
+            let refcon = Unmanaged.passUnretained(target).toOpaque()
+            var added = 0
+            for name in [kAXValueChangedNotification, kAXSelectedTextChangedNotification] {
+                if AXObserverAddNotification(created, element, name as CFString, refcon) == .success { added += 1 }
+            }
+            guard added > 0 else { return nil }
+            CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(created), .defaultMode)
+            observer = created
+            self.element = element
+        }
+        deinit {
+            for name in [kAXValueChangedNotification, kAXSelectedTextChangedNotification] {
+                AXObserverRemoveNotification(observer, element, name as CFString)
+            }
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        }
+    }
+
     private init(element: AXUIElement, appElement: AXUIElement) {
         var process: pid_t = 0
         AXUIElementGetPid(appElement, &process)
@@ -473,6 +530,7 @@ final class AXTextTarget: TextTarget {
         editableCache = nil; textOperationSupported = nil; writeCapabilitiesCache = nil
         if !same { scopedWriteFailed = false }
         editor = Editor(of: focused)
+        if changeHandler != nil { _ = registerObserver() }
         return .rebound(sameEditor: same)
     }
 
@@ -642,6 +700,24 @@ final class AXTextTarget: TextTarget {
         case .text(let character):
             let text = String(character)
             sent = SyntheticEvent.typeable(text) ? SyntheticKeys.type(text) : paste(text, at: selection)
+        }
+        guard sent else { throw FieldKeyRefusal.unavailable }
+    }
+
+    /// A key of a burst after one still on its way: focus, no real input since `mark` and no modifier, without reading
+    /// the selection (the earlier keys of the burst have not moved it yet). Only keys a burst carries.
+    func pressFollowing(_ key: FieldKey, mark: Int) throws {
+        guard isFocused() else { throw FieldKeyRefusal.notFocused }
+        guard RealInput.shared.count == mark else { throw FieldKeyRefusal.userInput }
+        guard CGEventSource.flagsState(.hidSystemState).intersection(Self.modifiers).isEmpty else { throw FieldKeyRefusal.modifiersHeld }
+        let sent: Bool
+        switch key {
+        case .backspace: sent = SyntheticKeys.tap(kVK_Delete)
+        case .text(let character):
+            let text = String(character)
+            guard SyntheticEvent.typeable(text) else { throw FieldKeyRefusal.unavailable }
+            sent = SyntheticKeys.type(text)
+        default: throw FieldKeyRefusal.unavailable
         }
         guard sent else { throw FieldKeyRefusal.unavailable }
     }

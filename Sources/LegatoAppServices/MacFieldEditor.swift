@@ -551,6 +551,28 @@ import LegatoMac
                               moreBelow: belowStop == .cap, documentID: documentID)
     }
 
+    /// The field as the queue's shadow has it, for a cleanup pass (no flush, no read): the text above and below the caret and
+    /// where the newest run's text starts and ends in them (characters). Nil until the queue has typed every word it holds, so
+    /// the pass sees the words it cleans. The edit it leads to is placed by the queue like Magic's (`apply`), through whatever
+    /// the user changed since.
+    public func shadow(id: String) -> FieldShadow? {
+        guard !passwordField, queue.shadowSettled, let snapshot = queue.shadowSnapshot else { return nil }
+        let selection = snapshot.selection
+        let text = snapshot.text as NSString
+        guard selection.location >= 0, selection.end <= text.length else { return nil }
+        let above = text.substring(to: selection.location), below = text.substring(from: selection.end)
+        var start: Int?, end: Int?
+        if let span = queue.latestRunSpan, span.end <= text.length {
+            start = text.substring(to: span.location).count
+            end = text.substring(to: span.end).count
+        }
+        activeInstructionID = id; activeReadIsCleanup = true
+        readSelection = selection; readText = snapshot.text; readRange = UTF16Range(location: 0, length: text.length)
+        instructionCursor = selection
+        return FieldShadow(id: id, runID: streamedRunID ?? "", above: above, below: below, takeStart: start, takeEnd: end,
+                           documentID: documentID, refused: selection.length > 0 ? "selection" : nil)
+    }
+
     /// Magic's result (or its undo) goes to the queue as one edit of the text it read; the user's typing or clicks
     /// meanwhile rebase it, and only a scope the user changed is refused.
     public func apply(_ edit: ScopedEdit) async -> ScopedEditAck? {

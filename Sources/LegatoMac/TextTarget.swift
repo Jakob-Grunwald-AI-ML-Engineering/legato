@@ -123,12 +123,22 @@ public protocol TextTarget: AnyObject {
     /// since `mark`, no modifier held, and the selection is `selection`. Throws `FieldKeyRefusal` and sends nothing
     /// otherwise. Returning does not mean the key landed: the caller reads the field back.
     func press(_ key: FieldKey, mark: Int, selection: UTF16Range) throws
+    /// Sends one key of a burst that follows a key of the same burst still on its way: the same guards as `press`
+    /// except the selection, which the earlier keys have not moved yet (the guards read nothing else). The default
+    /// reads the selection and passes it, for targets without a cheaper guard.
+    func pressFollowing(_ key: FieldKey, mark: Int) throws
     /// Sets the selection through Accessibility under the same guards as `press` (focus, no real input since `mark`,
     /// the selection still `selection`). Returning does not mean it took: the caller reads it back.
     func setCaret(_ range: UTF16Range, mark: Int, selection: UTF16Range) throws
     /// Identifies the field across bindings (the same element bound again), so what the queue learned about it is
     /// remembered; nil when unknown.
     var fieldKey: AnyHashable? { get }
+    /// Registers for the host's value and selection change notifications on the bound element (rebinding follows the
+    /// element); `handler` runs on the main actor for every notification, for the user's keys and the queue's own writes
+    /// alike. Returns false when the host cannot notify. A notification only says "read again": the count and timing
+    /// vary by host (Mac VM, 2026-11-17: TextEdit and Safari one or more per operation, Edge coalesces a burst).
+    func observeChanges(_ handler: @escaping @MainActor () -> Void) -> Bool
+    func stopObserving()
 }
 
 public extension String {
@@ -153,6 +163,9 @@ public extension TextTarget {
     func press(_ key: FieldKey, mark: Int, selection: UTF16Range) throws { throw FieldKeyRefusal.unavailable }
     func setCaret(_ range: UTF16Range, mark: Int, selection: UTF16Range) throws { throw FieldKeyRefusal.unavailable }
     var fieldKey: AnyHashable? { nil }
+    func pressFollowing(_ key: FieldKey, mark: Int) throws { try press(key, mark: mark, selection: try selectedRange()) }
+    func observeChanges(_ handler: @escaping @MainActor () -> Void) -> Bool { false }
+    func stopObserving() {}
     func refocus(allowOther: Bool) -> FieldRefocus { .lost }
     func setSelectedRange(_ range: UTF16Range) throws { throw TextTargetReadError.unsupported }
     func textLength() throws -> Int { throw TextTargetReadError.unsupported }

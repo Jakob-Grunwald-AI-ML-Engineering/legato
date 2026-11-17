@@ -92,6 +92,7 @@ import LegatoMac
         return true
     }
     func press(_ key: FieldKey, mark: Int, selection planned: UTF16Range) throws {
+        guard focused else { throw FieldKeyRefusal.notFocused } // every real key passes the focus guard
         guard planned == selection else { throw FieldKeyRefusal.selectionMoved }
         if case .hop = key { throw FieldKeyRefusal.unavailable }
         keys.append(key)
@@ -824,6 +825,7 @@ import LegatoMac
     @Test func aHostWriteThatThrowsButLandedCounts() async throws {
         let target = EditorTarget("draft")
         let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false } // chunk contract here; the entrance burst has its own tests
         editor.begin(); editor.beginInstruction()
         let read = try await editor.read(.context, instructionID: "magic", reading: {})
         let edit = ScopedEdit(instructionID: "magic", documentID: read.documentID, before: "draft", after: "", target: "Revised")
@@ -835,6 +837,7 @@ import LegatoMac
     @Test func aHostThatIgnoresWritesStopsAfterBoundedRetries() async throws {
         let target = EditorTarget("draft")
         let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false } // chunk contract here; the entrance burst has its own tests
         editor.sleep = { _ in }
         editor.begin(); editor.beginInstruction()
         let read = try await editor.read(.context, instructionID: "magic", reading: {})
@@ -894,9 +897,10 @@ import LegatoMac
         #expect(target.value == "Retry words.")
     }
 
-    @Test func aCorrectionInsideTheTextIsOneUnpacedWriteAndKeepsTheTail() async {
+    @Test func aCorrectionInsideTheTextIsOneHunkEnteringAsAFastBurstAndKeepsTheTail() async {
         let target = EditorTarget("")
         let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false } // chunk contract here; the entrance burst has its own tests
         editor.begin(); await editor.applyLive(snapshot("abc unchanged tail"))
         target.writes = []
         var pauses: [Duration] = []
@@ -904,13 +908,14 @@ import LegatoMac
         editor.sleep = { duration in pauses.append(duration) }
         await editor.applyLive(snapshot("aXYc unchanged tail", complete: true))
         #expect(target.value == "aXYc unchanged tail")
-        #expect(target.writes.count == 1, "One hunk, one write: delete and insert at one place")
-        #expect(pauses.isEmpty, "No pacing for a revision")
+        #expect(target.writes.count >= 1, "One hunk: delete and first piece in one write at one place")
+        #expect(pauses.reduce(Duration.zero, +) <= .milliseconds(260), "A revision enters as a fast burst inside the entrance cap")
     }
 
     @Test func realTypingDuringAnAnimationKeepsTheKeyAfterTheWord() async {
         let target = EditorTarget("")
         let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false } // chunk contract here; the entrance burst has its own tests
         var copied = ""
         editor.recover = { copied = $0 }
         editor.typewriter = { true }

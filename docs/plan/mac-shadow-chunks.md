@@ -2,6 +2,8 @@
 
 Status: **planned 2026-11-17, branch `feat/mac-shadow-chunks`.**
 
+Round 1 (Mac), 2026-11-17: tasks 2-4, 6-Mac and 7 done in code and unit tests (`MacFieldShadow`/`MacFieldHost`, `AXObserver` behind `TextTarget`, native entrance + one check, keyed bursts with fallback, Mac per-sentence cleanup from the shadow, journaled recovery refusals); package suites run, VM acceptance not run. Task 5 (list editors) not done beyond the refusal split: no list-editor fake or journal replay yet, caret moves across hidden breaks and recovery context unchanged. The queue still reads the field every step (the shadow classifies, cleanup starts from it); planning from the shadow and a notification wake are open.
+
 ## Goal and scope
 
 Bring the Mac field queue to the iPhone's edit model (#299, `docs/field-editing.md` "The edit model") and give chunks on both platforms a fast typewriter entrance.
