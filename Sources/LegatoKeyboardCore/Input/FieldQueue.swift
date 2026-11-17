@@ -149,10 +149,14 @@ public struct FieldQueue: Sendable {
 
     // MARK: Tunables
 
+    /// The cold-start deadline (`HostProfile.coldDeadlineMs`): the per-field deadline (`deadlineMs`) before the host's
+    /// latency is learned, and the bound for anything that does not know the field.
+    public static let checkDeadlineMs = HostProfile.coldDeadlineMs
     /// The one deadline: how long a chunk's result may be missing from the report (the keyboard's own inserts and
-    /// deletes produce no host callback; Safari's last callback for a burst came at up to 260 ms, native apps under 60 ms)
-    /// before the queue re-reads. A report that does not show the chunk inside it is not a seam.
-    public static let checkDeadlineMs = 400.0
+    /// deletes produce no host callback) before the queue re-reads. A report that does not show the chunk inside it is not
+    /// a seam. Learned per field (`HostProfile`): the host's latency from a chunk's last op to the callback that shows it,
+    /// with a margin, within bounds; 400 ms until enough samples exist.
+    public var deadlineMs: Double { host.deadlineMs }
     /// Text found again away from the cursor (after a seam, or a scope that moved) must be at least this long.
     public static let relocateChars = 16
     /// Context on each side that must match too when text behind a seam is found again.
@@ -327,6 +331,12 @@ public struct FieldQueue: Sendable {
         var owners: [Int?] = []
         /// The report the first op went out on.
         var sentOn: Report?
+        /// Since the chunk's last op (not an append behind it), and the host callbacks since then: the latency sample
+        /// (`HostProfile`).
+        var chunkMs = 0.0
+        var callbacks = 0
+        /// A host callback showed the chunk's end state.
+        var heard = false
     }
     /// The report a held insert of speech was sent on, and the piece's span it went to.
     private struct HeldSpeech: Sendable, Equatable {
@@ -448,7 +458,7 @@ public struct FieldQueue: Sendable {
         if let flight = inFlight, flight.lane != .user, case .deleteBackward = flight.op { return true }
         // A synchronous proxy may confirm the final deletion before the adapter observes its
         // empty callback. Carry that automatic origin through the check's deadline only.
-        if lastSentLane != .user, sinceSendMs < Self.checkDeadlineMs,
+        if lastSentLane != .user, sinceSendMs < deadlineMs,
            case .deleteBackward? = lastSentOp { return true }
         return false
     }
@@ -470,7 +480,7 @@ public struct FieldQueue: Sendable {
     /// Native callbacks supply the idle wall time before pumping; observe it without advancing
     /// the queue clock, because the next step will account for that same interval exactly once.
     public func hasRecentOwnOperation(elapsedMs: Double) -> Bool {
-        inFlight != nil || ownsRead || sinceSendMs + max(0, elapsedMs) < Self.checkDeadlineMs
+        inFlight != nil || ownsRead || sinceSendMs + max(0, elapsedMs) < deadlineMs
     }
 
     /// Where a report comes from: the host's text or selection callback, or a new document identity of the bound field.
@@ -539,7 +549,7 @@ public struct FieldQueue: Sendable {
     public mutating func releaseRead() { coordinator.finishRead() }
     /// The adapter calls this after the OS send, never before planning or dispatch.
     public mutating func operationDispatched() {
-        coordinator.dispatched(); sinceSendMs = 0; inFlight?.waitedMs = 0
+        coordinator.dispatched(); sinceSendMs = 0; inFlight?.waitedMs = 0; inFlight?.chunkMs = 0; inFlight?.callbacks = 0
     }
 
     private var sinceSendMs = 1_000.0
@@ -574,8 +584,9 @@ public struct FieldQueue: Sendable {
     }
     private var strayInsertion: StrayInsertion?
     private var lastSentOp: ShadowOp?
-    /// The unit a hop's look showed the field moves by (it differs from the configured one).
-    private var learnedByCharacters: Bool?
+    /// What the queue learned about this field's host (the unit of a move, the window, the callback pattern, the
+    /// latency that sets `deadlineMs`). Starts over with a new field.
+    public private(set) var host = HostProfile()
     private var lastSentLane = Lane.live
     /// After a tap, ops sent before it may still land where the user tapped: the keyboard's own work resumes once the
     /// field held still this long (kept, see `docs/field-editing.md`).
@@ -637,7 +648,7 @@ public struct FieldQueue: Sendable {
     /// The queue's state in one line, for traces and the edit journal.
     public var debugState: String {
         var parts = ["user=\(userLane.count)", "edits=\(editLane.count)", "unit=\(unit.map { "\($0.ops.count)" } ?? "-")",
-                     "flight=\(inFlight != nil)", "sel=\(selection)", "lost=\(userLost.map { "\(String($0.before).debugDescription)|\(String($0.after).debugDescription) homed=\($0.homed)" } ?? "-")"]
+                     "flight=\(inFlight != nil)", "sel=\(selection)", "host=[\(host.summary)]", "lost=\(userLost.map { "\(String($0.before).debugDescription)|\(String($0.after).debugDescription) homed=\($0.homed)" } ?? "-")"]
         for run in runs {
             for piece in run.pieces {
                 let span = spans[piece.spanID]
@@ -735,16 +746,17 @@ public struct FieldQueue: Sendable {
         for spanID in spanIDs { finishSpan(spanID) }
     }
 
-    /// The field went away or changed: everything pending is dropped with events, and the model starts over.
-    public mutating func reset() {
+    /// The field went away or changed: everything pending is dropped with events, and the model starts over. What was
+    /// learned about the host starts over too, unless it is the same field (`keepingHost`: a draft sent or cleared).
+    public mutating func reset(keepingHost: Bool = false) {
         for item in userLane { if case .edit(let s) = item { drop(s, .reset) } }
         for state in editLane { drop(state, .reset) }
         if case .edit(let s, _)? = unit?.owner { drop(s, .reset) }
         for index in runs.indices { dropRun(at: index, reason: .reset) }
-        let config = config
-        let events = events
+        let config = config, events = events, host = host
         self = FieldQueue(config: config)
         self.events = events
+        if keepingHost { self.host = host }
     }
 
     // MARK: Step
@@ -772,21 +784,24 @@ public struct FieldQueue: Sendable {
         if let request = recoveryRequest {
             recoveryWaitMs += max(0, elapsedMs)
             // The adapter normally answers. An orphaned or superseded read must still terminate.
-            if recoveryWaitMs >= 2 * FieldRecovery.budgetMs + Self.checkDeadlineMs, inFlight == nil {
+            if recoveryWaitMs >= 2 * FieldRecovery.budgetMs + deadlineMs, inFlight == nil {
                 completeRecovery(request, report: nil, restored: false)
             }
         }
         if !paused, var stray = strayInsertion {
             stray.elapsedMs += max(0, elapsedMs)
             strayInsertion = stray
-            if stray.elapsedMs >= Self.checkDeadlineMs { refuseStrayInsertion() }
+            if stray.elapsedMs >= deadlineMs { refuseStrayInsertion() }
         }
         sinceSendMs += elapsedMs
         inFlight?.waitedMs += elapsedMs
+        inFlight?.chunkMs += elapsedMs
+        if callback { inFlight?.callbacks += 1 }
+        host.saw(report)
         // Only the user selects: a selection the model does not have says the user acted at the caret.
         if report.selected != nil, selection == 0 { userActed = true }
-        if let race = tapRace { tapRace = race.ageMs + elapsedMs < 2 * Self.checkDeadlineMs ? (race.sends, race.ageMs + elapsedMs) : nil }
-        recentSends = recentSends.compactMap { var sent = $0; sent.ageMs += elapsedMs; return sent.ageMs < 2 * Self.checkDeadlineMs ? sent : nil }
+        if let race = tapRace { tapRace = race.ageMs + elapsedMs < 2 * deadlineMs ? (race.sends, race.ageMs + elapsedMs) : nil }
+        recentSends = recentSends.compactMap { var sent = $0; sent.ageMs += elapsedMs; return sent.ageMs < 2 * deadlineMs ? sent : nil }
         if report == lastReport { reportStableMs += elapsedMs } else { lastReport = report; reportStableMs = 0 }
         if let baseline = opaqueSelectionBaseline,
            (unverifiedInputReason == .selection && report.selected != nil) || report != baseline {
@@ -806,13 +821,13 @@ public struct FieldQueue: Sendable {
         if let flight = inFlight, flight.acceptsRawUserReport {
             // No cursor probe and no retry: a key may have intentionally replaced an unreported selection. The proxy
             // shows the key at once; a report that does not change waits for the deadline.
-            guard report != flight.sentOn || flight.waitedMs >= Self.checkDeadlineMs else { return .wait }
+            guard report != flight.sentOn || flight.waitedMs >= deadlineMs else { return .wait }
             let inputs = userLane.compactMap { item -> UserItem? in
                 if case .input = item { return item }; return nil
             }
             let retired = runs.map(\.runID) + retiredRunIDs
             let waited = flight.waitedMs
-            reset()
+            reset(keepingHost: true)
             retiredRunIDs = Array(retired.suffix(32))
             userLane = inputs
             seed(report)
@@ -826,7 +841,7 @@ public struct FieldQueue: Sendable {
             if report == held.report {
                 // The proxy shows nothing of it yet. A plain insert at the caret counts as landed at the deadline, so
                 // the take is never stuck behind a report that does not move; the hold stays.
-                guard flight.waitedMs >= Self.checkDeadlineMs else { return .wait }
+                guard flight.waitedMs >= deadlineMs else { return .wait }
                 inFlight = nil
                 events.append(.resync(.assumed))
             } else if case .insert(let typed) = flight.op, Self.shows(report, insert: typed, after: held.report),
@@ -862,7 +877,7 @@ public struct FieldQueue: Sendable {
 
         // Past the deadline (nothing of the keyboard's own may still land), a report at a place no op was going to is
         // the user's tap.
-        if sinceSendMs >= Self.checkDeadlineMs, let tap = tappedElsewhere(report, flight: inFlight) {
+        if sinceSendMs >= deadlineMs, let tap = tappedElsewhere(report, flight: inFlight) {
             let flight = inFlight
             inFlight = nil
             userTapped(at: tap.at, flight: flight)
@@ -874,7 +889,7 @@ public struct FieldQueue: Sendable {
                     inFlight?.hopFrom = nil
                     return next()
                 }
-                guard flight.waitedMs >= Self.checkDeadlineMs else { return .wait }
+                guard flight.waitedMs >= deadlineMs else { return .wait }
                 inFlight = nil
                 events.append(.resync(.checkFailed))
                 if !explainTap(report, flight: flight) { resync(report, pre: flight) }
@@ -893,15 +908,21 @@ public struct FieldQueue: Sendable {
             // host applied the chunk by then, in order. WhatsApp and Notes send one callback for a whole burst, Safari one
             // per stage (the first still at the old place), so the callback's report decides, not a count. The proxy's own
             // echo before it proves nothing yet.
-            let heard = !endsWithMove || callback || flight.waitedMs >= Self.checkDeadlineMs
+            if endsWithMove, callback, shows, !flight.heard {
+                // The host's latency for this field: from the chunk's last op to the callback that showed it.
+                inFlight?.heard = true
+                host.heard(afterMs: flight.chunkMs, callbacks: flight.callbacks)
+            }
+            let heard = !endsWithMove || callback || flight.waitedMs >= deadlineMs
             if shows, heard, flight.anywhere || endsWithMove || !fits(report, in: flight.pre) {
                 guard confirm(flight, report: report) else { return .wait }
-            } else if flight.waitedMs < Self.checkDeadlineMs {
+            } else if flight.waitedMs < deadlineMs {
                 // Not shown yet: no seam. The user's input goes behind the chunk all the same (`plannedNext`).
                 return userLane.isEmpty ? .wait : next()
             } else {
                 // The check failed: the field does not show the chunk. Re-read; what is left is planned against it.
                 inFlight = nil
+                if endsWithMove { host.timedOut() }
                 if landedElsewhere(report, flight: flight) {
                     // The user tapped while their key was on its way: it landed where they tapped.
                     events.append(.resync(.cursorMoved))
@@ -912,7 +933,7 @@ public struct FieldQueue: Sendable {
             }
         } else if !consistent(report) {
             // Within the deadline of the keyboard's own last op the host may still be applying it: no seam yet.
-            if sinceSendMs < Self.checkDeadlineMs { return userLane.isEmpty ? .wait : next() }
+            if sinceSendMs < deadlineMs { return userLane.isEmpty ? .wait : next() }
             resync(report, pre: nil)
         } else if reportStableMs == 0 {
             merge(report)
@@ -940,7 +961,7 @@ public struct FieldQueue: Sendable {
         }
         guard at != cursor, found == [at], hasEvidence(report) else { return false }
         cursor = at
-        learnedByCharacters = byCharacters
+        host.movesByCharacters = byCharacters
         return true
     }
 
@@ -1207,7 +1228,7 @@ public struct FieldQueue: Sendable {
                 case .ambiguous, .absent:
                     // The report may still catch up with a cursor move; past the grace the text is not there.
                     state.unplacedMs += stepElapsedMs
-                    if lane == .edit, state.unplacedMs < Self.checkDeadlineMs { return .wait }
+                    if lane == .edit, state.unplacedMs < deadlineMs { return .wait }
                     if config.canReadAround, lane == .edit, !state.edit.atCursor, state.edit.selected == nil,
                        !(state.edit.before + state.edit.after).isEmpty {
                         var pending = Span(start: userCursor, end: userCursor)
@@ -1229,7 +1250,7 @@ public struct FieldQueue: Sendable {
             requestRecoveryIfNeeded()
             if recoveryRequest != nil { return .wait }
             state.unplacedMs += stepElapsedMs
-            if lane == .edit, state.unplacedMs < Self.checkDeadlineMs { return .wait }
+            if lane == .edit, state.unplacedMs < deadlineMs { return .wait }
             drop(state, .unplaceable); return .done
         }
         let current = chars(of: span)
@@ -1386,7 +1407,7 @@ public struct FieldQueue: Sendable {
         // Right after a move the proxy's own view shows nothing on the side it moved toward (WhatsApp, Safari: measured in
         // the #299 recheck journals); the host's callback brings that side. Nothing to see yet is no seam: the hop waits
         // for a report that shows the way, up to the deadline.
-        if visible == 0, sinceSendMs < Self.checkDeadlineMs { return .wait }
+        if visible == 0, sinceSendMs < deadlineMs { return .wait }
         let distance = abs(target - cursor)
         if let last = current.distance, distance >= last { current.stalls += 1 }
         current.distance = distance
@@ -1646,7 +1667,7 @@ public struct FieldQueue: Sendable {
         if spans[piece.spanID]?.parked == true {
             // Out of sight after a resync: it waits a moment to be found again at the caret.
             parkedPieceMs += stepElapsedMs
-            guard parkedPieceMs >= Self.checkDeadlineMs else { return .wait }
+            guard parkedPieceMs >= deadlineMs else { return .wait }
         }
         parkedPieceMs = 0
         guard let span = spans[piece.spanID], !span.parked, !span.userChanged, !span.edited, selection == 0, span.end == userCursor else {
@@ -2195,8 +2216,8 @@ public struct FieldQueue: Sendable {
     /// The field's units from the cursor to `index` (UTF-16, or characters in a field that moves by characters).
     private func units(to index: Int) -> Int { doc.units(to: index, byCharacters: movesByCharacters) }
 
-    /// The field's unit for moves: as configured, or as a look found it (`look`).
-    private var movesByCharacters: Bool { learnedByCharacters ?? config.movesByCharacters }
+    /// The field's unit for moves: as configured, or as a look found it (`look`, `HostProfile`).
+    private var movesByCharacters: Bool { host.movesByCharacters ?? config.movesByCharacters }
 
     // MARK: Model
 
@@ -2345,7 +2366,7 @@ public struct FieldQueue: Sendable {
             return
         }
         // Ambiguous: the model is kept, unless the report holds still that way (never a freeze): then it starts over.
-        if found.count > 1, flight != nil || reportStableMs < Self.checkDeadlineMs {
+        if found.count > 1, flight != nil || reportStableMs < deadlineMs {
             events.append(.resync(.ambiguous))
             return
         }

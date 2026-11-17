@@ -651,8 +651,9 @@ final class KeyboardController {
         let idleMs = lastStepAt.map { Self.milliseconds(ContinuousClock.now - $0) } ?? 0
         guard let cleared = queue.observesClearedDraft(currentReport, hasText: false, elapsedSinceLastStepMs: idleMs) else {
             draftRecheck?.cancel()
+            let wait = Int(queue.deadlineMs)
             draftRecheck = Task { [weak self] in
-                try? await Task.sleep(for: .milliseconds(Int(FieldQueue.checkDeadlineMs)))
+                try? await Task.sleep(for: .milliseconds(wait))
                 guard !Task.isCancelled, let self, !self.isTornDown else { return }
                 self.observeDraftBoundary()
             }
@@ -719,9 +720,12 @@ final class KeyboardController {
         correctionCapture?.reset()
         // The field changed or the keyboard went away: nothing more of a take's cleanup lands here.
         updateCleanup { $0.clear() }
-        queue.reset()
+        // What was learned about the host goes with the field; a sent or cleared draft is the same field.
+        let learned = queue.host.summary
+        queue.reset(keepingHost: reason == "draft-cleared")
         var entry = EditJournal.Entry(t: Self.uptimeMs, kind: .reset, field: queueDocumentID)
         entry.reason = reason
+        entry.detail = learned
         journal.write(entry)
         handle(queue.drainEvents())
         lastJournaledReport = nil
