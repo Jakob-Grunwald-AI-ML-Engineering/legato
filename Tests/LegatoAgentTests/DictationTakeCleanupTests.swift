@@ -234,3 +234,38 @@ private final class Collected: @unchecked Sendable {
     let good = PiecewiseCleaner([.init(pieces: [longClean], fails: false)])
     #expect(await DictationTakeCleaner(cleaner: good).cleanStreaming(input) { _ in }.rejected == false)
 }
+
+// MARK: #299 round 4: the whole-take pass gets the take's raw words as reference
+
+@Test func aWholeTakePassSendsItsRawWordsAndOnlyThen() async throws {
+    let fixture = TakeFixtureMessages(try takeEvents(["The review is moved to Wednesday."]))
+    let client = SentenceCleanupClient(client: fixture)
+    _ = try await client.cleanTake(.init(takeID: "take-1", text: "The review is moved to Tuesday. Wednesday.", fieldDocument: true,
+                                         rawWords: "the review is moved to tuesday uh no sorry wednesday"))
+    _ = try await client.cleanTake(.init(takeID: "take-2", text: "The review is moved to Tuesday.", fieldDocument: true))
+    var contents: [String] = []
+    for data in fixture.requests.withLock({ $0 }) {
+        let request = try JSONDecoder().decode(JSONValue.self, from: data)
+        let messages = try #require(request["messages"]).decode([JSONValue].self)
+        contents.append(try #require(messages.first?["content"]).decode(String.self))
+    }
+    #expect(contents.first?.contains(#""rawWords":"the review is moved to tuesday uh no sorry wednesday""#) == true)
+    #expect(contents.last?.contains("rawWords") == false)
+    #expect(PromptLayers.dictationTakeCleanup().contains("\"rawWords\""), "the prompt says how to use them")
+}
+
+/// The raw words are reference: a result that resolves a correction passes the guards; one that pours the raw words into
+/// the text does not.
+@Test func rawWordsAreNeverInsertedWholesale() async {
+    let text = "The review is moved to Tuesday. Wednesday."
+    let raw = "the review is moved to tuesday uh no sorry wednesday"
+    #expect(DictationTakeGuard.keepsToText(text, rawWords: raw, cleaned: "The review is moved to Wednesday."))
+    #expect(DictationTakeGuard.keepsToText(text, rawWords: nil, cleaned: "anything"))
+    #expect(!DictationTakeGuard.keepsToText(text, rawWords: raw, cleaned: "The review is moved to Tuesday, uh, no, sorry, Wednesday."))
+    let resolving = ScriptedTakeCleaner([.text("The review is moved to Wednesday.")])
+    let resolved = await DictationTakeCleaner(cleaner: resolving).clean(.init(takeID: "t", text: text, fieldDocument: true, rawWords: raw))
+    #expect(resolved == .cleaned("The review is moved to Wednesday."))
+    let pouring = ScriptedTakeCleaner([.text("The review is moved to Tuesday, uh, no, sorry, Wednesday.")])
+    let poured = await DictationTakeCleaner(cleaner: pouring).clean(.init(takeID: "t", text: text, fieldDocument: true, rawWords: raw))
+    #expect(poured == .failed(reason: "rejected"))
+}

@@ -3,7 +3,7 @@ import Testing
 
 @Suite struct FieldQueueVerifiedRevisionTests {
     @Test func farRevisionWaitsForTheRoutePauseThenChangesOnlyItsOwnLetters() {
-        var rig = QueueRig(FakeField(""), config: .init(animated: true, prioritizeSpeech: true))
+        var rig = QueueRig(FakeField(""), config: .init(prioritizeSpeech: true))
         let tail = " while the rest of the unchanged sentence continues all the way to the harbour"
         rig.queue.enqueue(snap(1, "the cat waits" + tail)); do { let drained = rig.drain(); #expect(drained) }
         rig.queue.enqueue(snap(2, "the dog waits" + tail)); do { let drained = rig.drain(); #expect(drained) }
@@ -12,13 +12,14 @@ import Testing
         rig.queue.setSpeaking(false, runID: "r")
         do { let drained = rig.drain(); #expect(drained) }
         #expect(rig.field.string == "the dog waits" + tail)
+        // One chunk: a hop to "cat", one delete run, one insert, the hop back.
         let edits = rig.sent[from...].map(\.op)
-        #expect(edits.filter { if case .deleteBackward = $0 { true } else { false } }.count == 3)
-        #expect(edits.filter { if case .insert = $0 { true } else { false } } == [.insert("d"), .insert("o"), .insert("g")])
+        #expect(edits.filter { if case .deleteBackward = $0 { true } else { false } } == [.deleteBackward(3)])
+        #expect(edits.filter { if case .insert = $0 { true } else { false } } == [.insert("dog")])
     }
 
     @Test func typingAfterTheTakeDoesNotFreezeUnchangedWords() {
-        var rig = QueueRig(FakeField(""), config: .init(animated: true, prioritizeSpeech: true))
+        var rig = QueueRig(FakeField(""), config: .init(prioritizeSpeech: true))
         rig.queue.enqueue(snap(1, "the cat waits")); do { let drained = rig.drain(); #expect(drained) }
         rig.queue.enqueue(.insert("!")); do { let drained = rig.drain(); #expect(drained) }
         rig.queue.enqueue(snap(2, "the dog waits", complete: true)); do { let drained = rig.drain(); #expect(drained) }
@@ -26,7 +27,7 @@ import Testing
     }
 
     @Test func theUsersChangedWordWinsWhileAnotherWordIsCorrected() {
-        var rig = QueueRig(FakeField(""), config: .init(animated: true, prioritizeSpeech: true))
+        var rig = QueueRig(FakeField(""), config: .init(prioritizeSpeech: true))
         rig.queue.enqueue(snap(1, "the cat waits near the boat")); do { let drained = rig.drain(); #expect(drained) }
         rig.queue.enqueue(.move(-15)); do { let drained = rig.drain(); #expect(drained) }
         rig.queue.enqueue(.insert("X")); do { let drained = rig.drain(); #expect(drained) }
@@ -40,7 +41,7 @@ import Testing
 
     @Test func resumedSpeechYieldsTheRevisionBeforeAnotherHunk() {
         var field = FakeField(""); field.hostDelays = true
-        var rig = QueueRig(field, config: .init(animated: true, prioritizeSpeech: true))
+        var rig = QueueRig(field, config: .init(prioritizeSpeech: true))
         let tail = " while the unchanged words keep going towards the boat in the harbour"
         rig.queue.enqueue(snap(1, "the cat waits" + tail)); do { let drained = rig.drain(); #expect(drained) }
         rig.queue.enqueue(snap(2, "the dog waits" + tail)); rig.queue.setSpeaking(false, runID: "r")
@@ -51,7 +52,7 @@ import Testing
         rig.run(ms: 500)
         let key = rig.sent.first { $0.ms >= start && $0.op == .insert("!") }
         #expect(key != nil)
-        #expect((key?.ms ?? .infinity) - start < FieldQueue.responsivenessTargetMs)
+        #expect((key?.ms ?? .infinity) - start < FieldEditCoordinator.inputResponseTargetMs)
         rig.queue.setSpeaking(false, runID: "r"); do { let drained = rig.drain(); #expect(drained) }
         #expect(rig.field.string.filter { $0 == "!" }.count == 1)
         #expect(rig.field.string.contains("the unchanged words keep going"))
@@ -63,55 +64,44 @@ import Testing
         let spoken = Array(repeating: "the old boat waits near the harbour", count: 3).joined(separator: " ")
         var field = FakeField(prefix); field.hostDelays = true
         field.rng = SeededGenerator(seed: 7)
-        var rig = QueueRig(field, config: .init(animated: true, prioritizeSpeech: true))
+        var rig = QueueRig(field, config: .init(prioritizeSpeech: true))
         rig.tickMs = 8
         rig.queue.enqueue(snap(1, spoken))
         let initial = rig.drain(); #expect(initial)
         rig.queue.enqueue(.insert(" "))
         let keyed = rig.drain(); #expect(keyed)
         let cleanup = FieldQueue.Edit(id: "pause-cleanup", kind: .magic, before: spoken,
-                                      target: spoken.capitalized, cursorAtEnd: false, paced: true)
+                                      target: spoken.capitalized, cursorAtEnd: false)
+        func isDelete(_ op: ShadowOp) -> Bool { if case .deleteBackward = op { true } else { false } }
+        func isTail(_ op: ShadowOp) -> Bool { if case .insert(let s) = op { s.contains("corrected") } else { false } }
+        let speechAt: Double
         if cleanupAlreadyEditing {
             rig.queue.setSpeaking(false, runID: "r")
             rig.queue.enqueue(cleanup)
             let start = rig.sent.count
-            while !rig.sent.dropFirst(start).contains(where: { $0.op == .deleteBackward(1) }), rig.clockMs < 20_000 { rig.tick() }
-            try #require(rig.sent.dropFirst(start).contains { $0.op == .deleteBackward(1) })
+            while !rig.sent.dropFirst(start).contains(where: { isDelete($0.op) }), rig.clockMs < 20_000 { rig.tick() }
+            try #require(rig.sent.dropFirst(start).contains { isDelete($0.op) })
+            speechAt = rig.clockMs
             rig.queue.enqueue(snap(2, spoken + " corrected.", complete: completeTail))
         } else {
+            speechAt = rig.clockMs
             rig.queue.enqueue(snap(2, spoken + " corrected.", complete: completeTail))
             let start = rig.sent.count
-            while !rig.sent.dropFirst(start).contains(where: { $0.op == .insert("t") }), rig.clockMs < 20_000 { rig.tick() }
-            try #require(rig.sent.dropFirst(start).contains { $0.op == .insert("t") })
+            while !rig.sent.dropFirst(start).contains(where: { isTail($0.op) }), rig.clockMs < 20_000 { rig.tick() }
+            try #require(rig.sent.dropFirst(start).contains { isTail($0.op) })
             rig.queue.setSpeaking(false, runID: "r")
             rig.queue.enqueue(cleanup)
         }
-        let requested = rig.clockMs
-        var firstVisibleAt: Double?, completeVisibleAt: Double?
-        let initiallyVisible = String(rig.field.string.split(separator: " ", omittingEmptySubsequences: false).last ?? "")
-        var observedCount = "corrected.".hasPrefix(initiallyVisible) ? initiallyVisible.count : 0
-        var lastProgress = requested, longestGap = 0.0
-        while rig.clockMs - requested < FieldQueue.responsivenessTargetMs + FieldQueue.confirmLimitMs {
+        // The speech goes in behind the running chunk only: within the input budget, whole.
+        var visibleAt: Double?
+        while rig.clockMs - speechAt < FieldEditCoordinator.inputResponseTargetMs + FieldQueue.checkDeadlineMs {
+            if rig.field.string.hasSuffix(" corrected.") { visibleAt = rig.clockMs; break }
             rig.tick()
-            let visible = String(rig.field.string.split(separator: " ", omittingEmptySubsequences: false).last ?? "")
-            if "corrected.".hasPrefix(visible), visible.count > observedCount {
-                if firstVisibleAt == nil { firstVisibleAt = rig.clockMs }
-                longestGap = max(longestGap, rig.clockMs - lastProgress)
-                lastProgress = rig.clockMs; observedCount = visible.count
-                if visible == "corrected." { completeVisibleAt = rig.clockMs; break }
-            }
         }
-        let tail = rig.sent.first { $0.ms >= requested && $0.op == .insert(".") }
+        let tail = rig.sent.first { $0.ms >= speechAt && isTail($0.op) }
         #expect(tail != nil)
-        #expect((tail?.ms ?? .infinity) - requested < FieldQueue.responsivenessTargetMs)
-        #expect((firstVisibleAt ?? .infinity) - requested < FieldQueue.responsivenessTargetMs)
-        #expect(longestGap < FieldQueue.responsivenessTargetMs)
-        #expect(completeVisibleAt != nil)
-        if !cleanupAlreadyEditing {
-            #expect((completeVisibleAt ?? .infinity) - requested < FieldQueue.responsivenessTargetMs,
-                    "The recorded mid-word ed. suffix must reach actual host truth within the target")
-        }
-        print("quiet-tail active=\(cleanupAlreadyEditing) complete=\(completeTail) first-visible-ms=\((firstVisibleAt ?? .infinity) - requested) longest-gap-ms=\(longestGap) full-tail-ms=\((completeVisibleAt ?? .infinity) - requested)")
+        #expect((tail?.ms ?? .infinity) - speechAt < FieldEditCoordinator.inputResponseTargetMs)
+        #expect((visibleAt ?? .infinity) - speechAt < FieldEditCoordinator.inputResponseTargetMs)
         let finished = rig.drain(); #expect(finished)
         #expect(rig.field.string == prefix + spoken.capitalized + " corrected.")
         #expect(String(zip(rig.field.text, rig.field.origin).filter { $0.1 == .user }.map(\.0)) == " ")
@@ -124,21 +114,22 @@ import Testing
     @Test func newRawWordsPreemptAPartialRevisionWithoutReplayingItsDeletedLetters() throws {
         var field = FakeField(""); field.hostDelays = true
         field.rng = SeededGenerator(seed: 7)
-        var rig = QueueRig(field, config: .init(animated: true, prioritizeSpeech: true))
+        var rig = QueueRig(field, config: .init(prioritizeSpeech: true))
         rig.tickMs = 8
         let old = "the red boat waits at the harbour"
         let revised = "the blue boat waits at the harbour"
         rig.queue.enqueue(snap(1, old)); let initial = rig.drain(); #expect(initial)
         rig.queue.enqueue(snap(2, revised)); rig.queue.setSpeaking(false, runID: "r")
         let edits = rig.sent.count
-        while !rig.sent.dropFirst(edits).contains(where: { $0.op == .deleteBackward(1) }), rig.clockMs < 10_000 { rig.tick() }
-        try #require(rig.sent.dropFirst(edits).contains { $0.op == .deleteBackward(1) })
+        func isDelete(_ op: ShadowOp) -> Bool { if case .deleteBackward = op { true } else { false } }
+        while !rig.sent.dropFirst(edits).contains(where: { isDelete($0.op) }), rig.clockMs < 10_000 { rig.tick() }
+        try #require(rig.sent.dropFirst(edits).contains { isDelete($0.op) })
         let requested = rig.clockMs
         rig.queue.enqueue(snap(3, revised + " now"))
-        rig.run(ms: FieldQueue.responsivenessTargetMs)
-        let word = rig.sent.first { $0.ms >= requested && $0.op == .insert("w") }
+        rig.run(ms: FieldEditCoordinator.inputResponseTargetMs)
+        let word = rig.sent.first { if $0.ms >= requested, case .insert(let s) = $0.op { s.contains("now") } else { false } }
         #expect(word != nil)
-        #expect((word?.ms ?? .infinity) - requested < FieldQueue.responsivenessTargetMs)
+        #expect((word?.ms ?? .infinity) - requested < FieldEditCoordinator.inputResponseTargetMs)
         #expect(rig.field.string.hasSuffix(" now"))
         let finished = rig.drain(); #expect(finished)
         #expect(rig.field.string == revised + " now")
@@ -147,10 +138,10 @@ import Testing
     }
 
     @Test func identicalOpaqueSelectionWindowsNeverTriggerAnAutomaticMove() {
-        var queue = FieldQueue(config: .init(animated: true))
+        var queue = FieldQueue(config: .init())
         let old = FieldQueue.Report(before: "a complete selected draft")
         _ = queue.step(report: old, elapsedMs: 200)
-        queue.externalSelectionChanged(report: old)
+        queue.observe(old, callback: .selection)
         queue.enqueue(FieldQueue.Edit(kind: .magic, before: old.before, target: "A complete selected draft"))
         for _ in 0..<20 { #expect(queue.step(report: old, elapsedMs: 33) == .idle) }
         #expect(queue.hasUnverifiedSelection)
@@ -163,22 +154,24 @@ import Testing
         #expect(!queue.hasUnverifiedSelection)
     }
 
-    @Test func independentlyChangedStableWindowsResolveOpaqueCaretEvidence() {
+    /// A report that differs from the one the hold was set on shows where the caret is: the observer takes it.
+    @Test func anIndependentlyChangedWindowResolvesOpaqueCaretEvidence() {
         var queue = FieldQueue()
         let end = FieldQueue.Report(before: "alpha beta")
         _ = queue.step(report: end, elapsedMs: 200)
-        queue.externalSelectionChanged(report: end)
+        queue.observe(end, callback: .selection)
+        #expect(queue.hasUnverifiedSelection)
+        _ = queue.step(report: end, elapsedMs: 50)
+        #expect(queue.hasUnverifiedSelection)
         let middle = FieldQueue.Report(before: "alpha", after: " beta")
         _ = queue.step(report: middle, elapsedMs: 33)
-        #expect(queue.hasUnverifiedSelection)
-        _ = queue.step(report: middle, elapsedMs: 50)
         #expect(!queue.hasUnverifiedSelection)
     }
     @Test func staleExternalTextRemainsUnknownUntilAnIntentionalKeyHasFreshReadback() {
         var queue = FieldQueue()
         let stale = FieldQueue.Report(before: "Le")
         _ = queue.step(report: stale, elapsedMs: 200)
-        queue.externalContextChanged(report: stale)
+        queue.observe(stale, callback: .text)
         queue.enqueue(FieldQueue.Edit(kind: .magic, before: "Le", target: "LE"))
         for _ in 0..<20 { #expect(queue.step(report: stale, elapsedMs: 100) == .idle) }
         #expect(queue.hasUnverifiedContext && queue.hasUnverifiedInput)
@@ -193,12 +186,12 @@ import Testing
     }
 
     @Test func anAutomaticClearKeepsItsOriginThroughTheHostTransit() {
-        var rig = QueueRig(FakeField("um"), config: .init(animated: true))
-        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: "um", target: "", cursorAtEnd: false, paced: true))
+        var rig = QueueRig(FakeField("um"), config: .init())
+        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: "um", target: "", cursorAtEnd: false))
         while !rig.field.string.isEmpty, rig.clockMs < 5_000 { rig.tick() }
         #expect(rig.field.string.isEmpty)
         #expect(rig.queue.ownsEmptyReport)
-        rig.run(ms: FieldQueue.transitMs + 100)
+        rig.run(ms: FieldQueue.checkDeadlineMs + 100)
         #expect(!rig.queue.ownsEmptyReport)
     }
 
@@ -212,11 +205,11 @@ import Testing
 
     @Test(arguments: [false, true])
     func aConfirmedEmptyNativeFieldAdmitsSpeechWithoutAPrimingKey(selection: Bool) {
-        var rig = QueueRig(FakeField(""), config: .init(animated: true, prioritizeSpeech: true))
+        var rig = QueueRig(FakeField(""), config: .init(prioritizeSpeech: true))
         let empty = FieldQueue.Report(before: "")
         _ = rig.queue.step(report: empty, elapsedMs: 200)
-        if selection { rig.queue.externalSelectionChanged(report: empty, hasText: false) }
-        else { rig.queue.externalContextChanged(report: empty, hasText: false) }
+        if selection { rig.queue.observe(empty, callback: .selection, hasText: false) }
+        else { rig.queue.observe(empty, callback: .text, hasText: false) }
         #expect(!rig.queue.hasUnverifiedInput)
         rig.queue.enqueue(snap(1, "first words", complete: true))
         let drained = rig.drain()
@@ -231,15 +224,15 @@ import Testing
             var queue = FieldQueue()
             let empty = FieldQueue.Report(before: "")
             _ = queue.step(report: empty, elapsedMs: 200)
-            if selection { queue.externalSelectionChanged(report: empty, hasText: hasText) }
-            else { queue.externalContextChanged(report: empty, hasText: hasText) }
+            if selection { queue.observe(empty, callback: .selection, hasText: hasText) }
+            else { queue.observe(empty, callback: .text, hasText: hasText) }
             #expect(queue.hasUnverifiedInput)
         }
         var queue = FieldQueue()
         let nonempty = FieldQueue.Report(before: "a complete selected draft")
         _ = queue.step(report: nonempty, elapsedMs: 200)
-        if selection { queue.externalSelectionChanged(report: nonempty, hasText: false) }
-        else { queue.externalContextChanged(report: nonempty, hasText: false) }
+        if selection { queue.observe(nonempty, callback: .selection, hasText: false) }
+        else { queue.observe(nonempty, callback: .text, hasText: false) }
         #expect(queue.hasUnverifiedInput)
     }
 
@@ -248,10 +241,10 @@ import Testing
         var queue = FieldQueue()
         let empty = FieldQueue.Report(before: "")
         _ = queue.step(report: empty, elapsedMs: 200)
-        queue.externalContextChanged(report: empty)
+        queue.observe(empty, callback: .text)
         queue.enqueue(snap(1, "an older held take", complete: true))
-        if selection { queue.externalSelectionChanged(report: empty, hasText: false) }
-        else { queue.externalContextChanged(report: empty, hasText: false) }
+        if selection { queue.observe(empty, callback: .selection, hasText: false) }
+        else { queue.observe(empty, callback: .text, hasText: false) }
         #expect(queue.hasUnverifiedInput)
         // The take's words still go in at the caret (plain inserts only); a report that never changes lifts nothing.
         var sent: [ShadowOp] = []
@@ -259,7 +252,7 @@ import Testing
             guard case .send(let op) = queue.step(report: empty, elapsedMs: 100) else { continue }
             sent.append(op); queue.operationDispatched()
         }
-        #expect(sent.first == .insert("a"))
+        #expect(sent.first == .insert("an older held take"))
         #expect(sent.allSatisfy { if case .insert = $0 { true } else { false } })
         #expect(queue.hasUnverifiedInput)
     }
@@ -272,7 +265,7 @@ import Testing
         #expect(queue.step(report: start, elapsedMs: 0) == .send(.move(-4)))
         queue.operationDispatched()
         let moved = FieldQueue.Report(before: "alpha ", after: "beta")
-        _ = queue.step(report: moved, elapsedMs: FieldQueue.moveSettleMs)
+        _ = queue.step(report: moved, elapsedMs: 0)
         #expect(!queue.hasOpInFlight)
         #expect(queue.hasRecentOwnOperation)
         return (queue, moved)
@@ -281,22 +274,22 @@ import Testing
     @Test(arguments: [false, true])
     func anIdleWallGapExpiresOwnMoveProvenanceBeforeExternalCallbacks(selection: Bool) {
         var (queue, report) = justConfirmedMove()
-        // No step while idle: the in-queue clock is deliberately still 45 ms old.
+        // No step while idle: the in-queue clock is deliberately still at the move.
         #expect(!queue.hasRecentOwnOperation(elapsedMs: 2_000))
-        if selection { queue.externalSelectionChanged(report: report, elapsedSinceLastStepMs: 2_000) }
-        else { queue.externalContextChanged(report: report, elapsedSinceLastStepMs: 2_000) }
+        if selection { queue.observe(report, callback: .selection, elapsedSinceLastStepMs: 2_000) }
+        else { queue.observe(report, callback: .text, elapsedSinceLastStepMs: 2_000) }
         #expect(queue.hasUnverifiedInput)
         #expect(queue.hasUnverifiedSelection == selection)
         #expect(queue.hasUnverifiedContext == !selection)
     }
 
     @Test(arguments: [false, true])
-    func aCallbackInsideTheTransitWindowStillBelongsToTheOwnOperation(selection: Bool) {
+    func aCallbackInsideTheDeadlineStillBelongsToTheOwnOperation(selection: Bool) {
         var (queue, report) = justConfirmedMove()
-        let withinTransit = FieldQueue.transitMs - FieldQueue.moveSettleMs - 1
+        let withinTransit = FieldQueue.checkDeadlineMs - 1
         #expect(queue.hasRecentOwnOperation(elapsedMs: withinTransit))
-        if selection { queue.externalSelectionChanged(report: report, elapsedSinceLastStepMs: withinTransit) }
-        else { queue.externalContextChanged(report: report, elapsedSinceLastStepMs: withinTransit) }
+        if selection { queue.observe(report, callback: .selection, elapsedSinceLastStepMs: withinTransit) }
+        else { queue.observe(report, callback: .text, elapsedSinceLastStepMs: withinTransit) }
         #expect(!queue.hasUnverifiedInput)
         #expect(queue.hasRecentOwnOperation(elapsedMs: -2_000))
     }
@@ -308,14 +301,14 @@ import Testing
         queue.enqueue(.move(-4))
         #expect(queue.step(report: start, elapsedMs: 0) == .send(.move(-4)))
         #expect(queue.hasRecentOwnOperation(elapsedMs: 2_000))
-        queue.externalSelectionChanged(report: start, elapsedSinceLastStepMs: 2_000)
+        queue.observe(start, callback: .selection, elapsedSinceLastStepMs: 2_000)
         #expect(!queue.hasUnverifiedInput)
         let moved = FieldQueue.Report(before: "alpha ", after: "beta")
-        _ = queue.step(report: moved, elapsedMs: FieldQueue.transitMs)
+        _ = queue.step(report: moved, elapsedMs: 0)
         let acquired = queue.acquireRead()
         #expect(acquired)
         #expect(queue.hasRecentOwnOperation(elapsedMs: 2_000))
-        queue.externalContextChanged(report: moved, elapsedSinceLastStepMs: 2_000)
+        queue.observe(moved, callback: .text, elapsedSinceLastStepMs: 2_000)
         #expect(!queue.hasUnverifiedInput)
     }
 

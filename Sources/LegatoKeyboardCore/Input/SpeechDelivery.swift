@@ -3,14 +3,12 @@ import Foundation
 /// The take's words as delivered at the caret while it runs: only new speech extends them. Each revision is aligned
 /// with what was delivered word by word (the longest common subsequence, earliest where it is ambiguous): the words
 /// after the last delivered word are new. A re-split of delivered words is no new speech, a filler dropped or a word
-/// revised before the end still pins the end, and a last word the revision changed leaves the revision deferred.
+/// revised before the end still pins the end, and the last few words heard again as others stay as typed while the
+/// words after them are new. A revision whose end cannot be found is not delivered (`update` returns nil).
 /// Where repetitive text makes the place ambiguous the earliest one is taken, so words are left out rather than
 /// typed twice (the stop's swap brings them).
 public struct SpeechDelivery: Sendable, Equatable {
-    /// Mac keeps a revised last word deferred; the keyboard must continue after user edits freeze its old words.
-    /// Both policies use the same alignment and frontier ownership.
-    private let allowsRevisedTail: Bool
-    public init(allowsRevisedTail: Bool = true) { self.allowsRevisedTail = allowsRevisedTail }
+    public init() {}
     public private(set) var delivered: [Character] = []
     public private(set) var authoritative: [Character] = []
     /// Delivered words (by their index among the delivered words) heard again as others, and what they stand for now:
@@ -26,7 +24,7 @@ public struct SpeechDelivery: Sendable, Equatable {
         authoritative = text
         var end: Int
         if delivered.isEmpty || text.starts(with: delivered) { end = delivered.count }
-        else if let found = Self.end(of: delivered, in: text, aliases: &aliases, allowsRevisedTail: allowsRevisedTail) { end = found }
+        else if let found = Self.end(of: delivered, in: text, aliases: &aliases) { end = found }
         else { return nil }
         if complete, !delivered.isEmpty {
             guard let word = text[end...].firstIndex(where: { $0.isLetter || $0.isNumber }) else { return nil }
@@ -60,7 +58,7 @@ public struct SpeechDelivery: Sendable, Equatable {
 
     /// Where the delivered text's last word ends in `text`, or nil when that word is not there (or the words before it
     /// do not corroborate it). Last words heard again as others become `aliases`.
-    static func end(of delivered: [Character], in text: [Character], aliases: inout [Int: String], allowsRevisedTail: Bool = true) -> Int? {
+    static func end(of delivered: [Character], in text: [Character], aliases: inout [Int: String]) -> Int? {
         let every = words(delivered), all = words(text)
         let old = Array(every.suffix(alignedWords)), first = every.count - old.count
         guard let last = old.last, delivered[last.end...].allSatisfy({ !($0.isLetter || $0.isNumber) }) else { return nil }
@@ -86,7 +84,7 @@ public struct SpeechDelivery: Sendable, Equatable {
         let anchor = matches[a.count - 1] != nil ? a.count - 1 : (matches.keys.max() ?? -1)
         let revised = a.count - 1 - anchor
         let fromStart = anchor < 0 && first == 0 && new.count == all.count
-        guard anchor >= 0 || fromStart, revised <= (allowsRevisedTail ? Self.revisedWords : 0) else { return nil }
+        guard anchor >= 0 || fromStart, revised <= Self.revisedWords else { return nil }
         let matched = anchor >= 0 ? matches[anchor]! : -1
         guard matched + revised < new.count else { return nil }
         let at = matched + revised

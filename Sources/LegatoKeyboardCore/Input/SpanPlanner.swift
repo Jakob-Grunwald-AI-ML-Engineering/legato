@@ -4,8 +4,8 @@ import Foundation
 ///
 /// - Spans use the shared desktop grapheme diff. Nearby changes share a cursor jump, but unchanged letters,
 ///   whitespace and punctuation always stay in the host. A cost estimate never broadens a replacement.
-/// - Pace: one grapheme per op with a 5 ms minimum gap, matching the Mac trial. The queue separately confirms each
-///   operation and preserves the host's move/edit safety windows. No extra pause between words.
+/// - Pace (the Mac's): one grapheme per op with a 5 ms minimum gap. No extra pause between words. The iPhone sends each
+///   span unpaced, as one chunk (`FieldQueue`).
 public enum SpanPlanner {
     /// A change of `old[start..<end]` into `text` (grapheme offsets into the old text).
     public struct Hunk: Sendable, Equatable {
@@ -61,11 +61,13 @@ public enum SpanPlanner {
     // MARK: Spans
 
     /// The spans that turn `old` into `new`, back to front order is the caller's. `leaveTailAppend`: growth at the very
-    /// end is left out (the typewriter types it). The cost estimate uses `paceMs` per typed grapheme (0: typed in one
-    /// op) and the queue's settles.
-    public static func spans(from old: [Character], to new: [Character], leaveTailAppend: Bool = false,
+    /// end is left out (the typewriter types it). `caret`: the user's caret in `old`; a deletion the diff put in front of
+    /// it goes behind it where the same text follows (`keepingBefore`). The cost estimate uses `paceMs` per typed
+    /// grapheme (0: typed in one op) and the queue's settles.
+    public static func spans(from old: [Character], to new: [Character], leaveTailAppend: Bool = false, caret: Int? = nil,
                              paceMs: Double = calmMs, moveSettleMs: Double, editSettleMs: Double) -> [Span] {
         var hunks = FieldEditCoordinator.changes(from: old, to: new).map { Hunk(start: $0.start, end: $0.end, text: $0.text) }
+        if let caret { hunks = keepingBefore(caret, hunks, old: old) }
         if leaveTailAppend, let last = hunks.last, last.start == old.count, last.end == old.count { hunks.removeLast() }
         // Group nearby changes for a cursor jump, while preserving every unchanged character inside the group.
         return merge(hunks, old: old).map { group in
@@ -73,6 +75,24 @@ public enum SpanPlanner {
             let text = Array(new[map(start, hunks: hunks, side: .start)..<map(end, hunks: hunks, side: .end)])
             return Span(start: start, end: end, text: text, block: false, hunks: group)
         }
+    }
+
+    /// A deletion that ends at the caret (or reaches across it) is made behind the caret instead when the same text
+    /// follows it there, so the result is the same: a doubled period at the caret ("terrace.|. ") loses the one after it.
+    /// The text in front of the caret stays, so the caret stays behind what was typed there and a key pressed meanwhile
+    /// lands where it was pressed (device run 4: "terracez." for "terrace.z").
+    static func keepingBefore(_ caret: Int, _ hunks: [Hunk], old: [Character]) -> [Hunk] {
+        var hunks = hunks
+        for i in hunks.indices {
+            let h = hunks[i]
+            guard h.text.isEmpty, h.start < caret, caret <= h.end else { continue }
+            // Sliding a deletion by one keeps the result where the grapheme it gives back equals the one it takes.
+            let shift = caret - h.start
+            let limit = i + 1 < hunks.count ? hunks[i + 1].start : old.count
+            guard h.end + shift <= limit, (0..<shift).allSatisfy({ old[h.start + $0] == old[h.end + $0] }) else { continue }
+            hunks[i] = Hunk(start: h.start + shift, end: h.end + shift, text: [])
+        }
+        return hunks
     }
 
     /// The minimal grapheme diff with words that change by half or more replaced whole (`FieldMerge`'s changes).

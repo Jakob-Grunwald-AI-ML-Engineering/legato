@@ -109,6 +109,18 @@ import LegatoSoniox
         #expect(sink.begins == 3, "The mic key begins a take")
     }
 
+    /// Device run 4: a replay began while a bridge line's take was still open (no `dictation-debug-stop`). Its speech
+    /// waited behind that take's run until its own stop, which ended the line's run instead. A take the mic key or a
+    /// replay begins ends the bridge's open take first, as its stop would.
+    @Test func aTakeBeganWhileABridgeLinesTakeIsOpenEndsThatTakeFirst() async throws {
+        let (_, keyboard) = try await openOnTyping()
+        try await keyboard.debugDictationLine("and the ink cartridges")
+        #expect(sink.begins == 1 && sink.finishes == 0)
+        #expect(await keyboard.openGate())
+        #expect(sink.begins == 2)
+        try await until { sink.finishes == 1 }
+    }
+
     /// A stop never cancels the end of the take before it (still waiting for its last words): every take is ended.
     @Test func aStopNeverCancelsTheEndOfTheTakeBeforeIt() async throws {
         let (_, keyboard) = try await openOnTyping()

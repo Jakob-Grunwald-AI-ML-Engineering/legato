@@ -66,5 +66,8 @@ public struct LinkStore: Sendable {
 
     public func remove(forKey key: String) { backing.set(nil, forKey: key) }
 
+    /// Something is stored under `key`, decodable or not.
+    public func hasValue(forKey key: String) -> Bool { backing.data(forKey: key) != nil }
+
     public func keys(withPrefix prefix: String) -> [String] { backing.keys(withPrefix: prefix) }
 }

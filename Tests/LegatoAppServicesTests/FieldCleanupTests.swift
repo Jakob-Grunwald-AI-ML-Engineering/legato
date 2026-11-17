@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 import LegatoAgent
 import LegatoCore
@@ -49,7 +50,7 @@ private final class FieldCleaner: SentenceCleaning {
     @Test func identityChunksPreserveEveryCharacterAndOverlapDoesNotDuplicateWords() async {
         let source = "  - " + (0..<137).map { "word\($0)" }.joined(separator: " \n") + "\n"
         var inputs: [String] = []
-        let output = await FieldCleanupChunks.clean(source) { input in inputs.append(input); return input }
+        let output = await FieldCleanupChunks.clean(source) { input, _ in inputs.append(input); return input }
         #expect(output == source)
         #expect(inputs.count == 3)
         #expect(inputs[1].contains("word59"))
@@ -58,7 +59,7 @@ private final class FieldCleaner: SentenceCleaning {
     @Test func overlappingResultReplacesEarlierWordsWithoutDuplicatingThem() async {
         let source = (0..<100).map { "word\($0)" }.joined(separator: " ")
         var call = 0
-        let output = await FieldCleanupChunks.clean(source) { input in
+        let output = await FieldCleanupChunks.clean(source) { input, _ in
             call += 1
             return call == 2 ? input.replacingOccurrences(of: "word55", with: "corrected55") : input
         }
@@ -72,7 +73,7 @@ private final class FieldCleaner: SentenceCleaning {
         let session = FieldCleanupSession()
         session.field = field
         var inputs: [String] = []
-        session.clean = { input, _ in
+        session.clean = { input, _, _, _ in
             inputs.append(input)
             if inputs.count == 1 {
                 field.text = "Heading\n" + first + " " + added
@@ -96,7 +97,7 @@ private final class FieldCleaner: SentenceCleaning {
         let field = CleanupField("teh red boat sails")
         let session = FieldCleanupSession()
         session.field = field
-        session.clean = { text, _ in
+        session.clean = { text, _, _, _ in
             field.text = "teh blue boat sails"; field.cursor = field.text.count
             return "the red boat sails."
         }
@@ -111,7 +112,7 @@ private final class FieldCleaner: SentenceCleaning {
         let session = FieldCleanupSession()
         session.field = field
         var status: CleanupFieldStatus?
-        session.clean = { _, _ in field.text = ""; field.cursor = 0; return "the boat." }
+        session.clean = { _, _, _, _ in field.text = ""; field.cursor = 0; return "the boat." }
         session.onResult = { _, _, result in status = result }
         session.request(final: true)
         await session.settle()
@@ -126,7 +127,7 @@ private final class FieldCleaner: SentenceCleaning {
         field.draftID = "sent-draft"
         let session = FieldCleanupSession()
         session.field = field
-        session.clean = { _, _ in
+        session.clean = { _, _, _, _ in
             // Even identical text may be a new message after Send.
             field.draftID = "next-draft"
             return "the boat."
@@ -143,7 +144,7 @@ private final class FieldCleaner: SentenceCleaning {
         field.draftID = "first"
         let session = FieldCleanupSession()
         session.field = field
-        session.clean = { _, _ in "the boat." }
+        session.clean = { _, _, _, _ in "the boat." }
         field.beforeApply = { field.draftID = "next" }
         session.request(final: true)
         await session.settle()
@@ -157,7 +158,7 @@ private final class FieldCleaner: SentenceCleaning {
         let session = FieldCleanupSession()
         session.field = field
         var results = 0
-        session.clean = { _, _ in session.reset(); return "the boat" }
+        session.clean = { _, _, _, _ in session.reset(); return "the boat" }
         session.onResult = { _, _, _ in results += 1 }
         session.request(final: true)
         await session.settle()
@@ -219,6 +220,206 @@ private final class FieldCleaner: SentenceCleaning {
         #expect(pipeline.fieldCleanupOutcome?.status == .cleaned)
     }
 
+    /// iPhone (#299): a sentence is cleaned when it ends, not only at the stop, and lands in the next gap between words.
+    @Test(arguments: [false, true])
+    func aSentenceIsCleanedWhenItEndsAndLandsInTheNextGap(perSentence: Bool) async {
+        let sentence = "teh boat waits near the harbour today."
+        let field = CleanupField(sentence)
+        let pipeline = DictationPipeline(cleaner: FieldCleaner(), supportsLive: true)
+        pipeline.attachCleanupField(field, duringPauses: true, waitsForLiveDelivery: true, perSentence: perSentence)
+        pipeline.beginTake()
+        await pipeline.receive(.init(sequence: 0, text: sentence, words: [], reason: "endpoint"))
+        if perSentence {
+            // Cleaned while the take runs: the result waits while speech goes on.
+            await awaitCleanupTest { field.reads == 1 }
+            #expect(field.edits.isEmpty)
+            pipeline.boundary("endpoint")
+            await awaitCleanupTest { field.text == "the boat waits near the harbour today." }
+            #expect(field.edits.count == 1)
+        } else {
+            try? await Task.sleep(for: .milliseconds(50))
+            #expect(field.reads == 0, "a short sentence waits for a full passage or the stop")
+        }
+    }
+
+    /// iPhone (#299 device run): the read is the keyboard's shadow (bounded), and speech goes on while the model works.
+    /// The sentence's result still lands in the gap, the words typed meanwhile stay, and the pass is logged.
+    @Test func aSentenceLandsAroundSpeechTypedDuringItsCleanupInABoundedField() async {
+        let field = CleanupField("Earlier text. teh boat waits near the harbour today.")
+        field.complete = false
+        let pipeline = DictationPipeline(cleaner: FieldCleaner(), supportsLive: true)
+        pipeline.attachCleanupField(field, duringPauses: true, waitsForLiveDelivery: true, perSentence: true)
+        var events: [[String: Any]] = []
+        pipeline.diagnostics = { event, fields in if event == "field.cleanup" { events.append(fields) } }
+        pipeline.beginTake()
+        await pipeline.receive(.init(sequence: 0, text: "teh boat waits near the harbour today.", words: [], reason: "endpoint"))
+        await awaitCleanupTest { field.reads == 1 }
+        // The next sentence's words go in while the model works and before the gap.
+        field.text += " And then"; field.cursor = field.text.count
+        pipeline.boundary("endpoint")
+        await awaitCleanupTest { field.text == "Earlier text. the boat waits near the harbour today. And then" }
+        let landed = events.first { $0["status"] as? String == "cleaned" }
+        #expect(landed?["sentence"] as? Bool == true)
+        #expect(landed?["moved"] as? Bool == true)
+        #expect(landed?["modelMs"] is Int)
+    }
+
+    @Test func aCleanupTheModelRefusedIsKeptAsTypedAndSaysWhy() async {
+        let field = CleanupField("teh boat waits near the harbour today.")
+        field.complete = false
+        let session = FieldCleanupSession()
+        session.field = field
+        var events: [[String: Any]] = []
+        var status: CleanupFieldStatus?
+        session.diagnostics = { _, fields in events.append(fields) }
+        session.onResult = { _, _, result in status = result }
+        session.clean = { _, _, _, _ in session.cleanFailure = "rejected"; return nil }
+        session.request(final: true)
+        await session.settle()
+        #expect(status == .keptAsTyped)
+        #expect(events.last?["status"] as? String == "modelFailed")
+        #expect(events.last?["reason"] as? String == "rejected")
+        #expect(field.edits.isEmpty)
+    }
+
+    // MARK: A sentence's pass (#299 recheck: "We meet At the", "and Then walk over")
+
+    /// The pass for a sentence that just ended cleans whole sentences only: its passage starts where the sentence the
+    /// uncovered text begins in starts (never inside a sentence, which a model capitalises) and ends with the last
+    /// finished sentence. The words after it, a sentence still being said, are neither sent nor edited.
+    @Test func aSentencePassEditsNoWordBeyondTheFinishedSentence() async {
+        let field = CleanupField("The review is moved to Wednesday. We meet at the Bahnhof so um sechs Uhr. and then walk")
+        field.complete = false
+        let session = FieldCleanupSession()
+        session.field = field
+        var calls: [(passage: String, before: String)] = []
+        session.clean = { passage, _, before, _ in
+            calls.append((passage, before))
+            // A model that capitalises whatever it is given first, and punctuates.
+            return passage.prefix(1).uppercased() + passage.dropFirst().replacingOccurrences(of: "Bahnhof so", with: "Bahnhof, so")
+        }
+        session.request(sentence: true)
+        await session.settle()
+        #expect(calls.map(\.passage) == ["The review is moved to Wednesday. We meet at the Bahnhof so um sechs Uhr."])
+        #expect(field.text == "The review is moved to Wednesday. We meet at the Bahnhof, so um sechs Uhr. and then walk",
+                "the unfinished sentence after it stays as typed")
+    }
+
+    /// Once part of the field is covered, the next sentence's passage goes back to the start of the sentence its uncovered
+    /// words begin in, with the text before it as context: never from the middle of a sentence.
+    @Test func aLaterSentencePassStartsAtASentenceStartWithTheTextBeforeAsContext() async {
+        let first = "The review is moved to Wednesday and we meet at the station near the old harbour at six in the evening."
+        let field = CleanupField(first)
+        field.complete = false
+        let session = FieldCleanupSession()
+        session.field = field
+        var calls: [(passage: String, before: String)] = []
+        session.clean = { passage, _, before, _ in
+            calls.append((passage, before))
+            return passage.prefix(1).uppercased() + passage.dropFirst()
+        }
+        session.request(sentence: true)
+        await session.settle()
+        field.text = first + " Then we walk over together."
+        field.cursor = field.text.count
+        session.request(sentence: true)
+        await session.settle()
+        #expect(calls.count == 2)
+        // The overlap reaches back into the first sentence: the passage holds that whole sentence.
+        #expect(calls.last?.passage == field.text)
+        #expect(field.text == first + " Then we walk over together.", "nothing in the middle of a sentence was capitalised")
+        // A pass with no finished sentence after what is covered sends nothing and says so.
+        var events: [[String: Any]] = []
+        session.diagnostics = { _, fields in events.append(fields) }
+        field.text += " and then"
+        field.cursor = field.text.count
+        session.request(sentence: true)
+        await session.settle()
+        #expect(calls.count == 2)
+        #expect(events.last?["status"] as? String == "noSentence")
+    }
+
+    /// The stop's pass settles the whole take: after sentence passes covered part of a bounded read, it still sends all of
+    /// it, so a correction spanning two sentences ("Tuesday." … "Uh, no sorry, Wednesday.") can be applied.
+    @Test func theFinalPassCleansTheWholeTakeAfterSentencePasses() async {
+        let field = CleanupField("The review is moved to Tuesday. Uh, no sorry, Wednesday.")
+        field.complete = false
+        let session = FieldCleanupSession()
+        session.field = field
+        var calls: [(passage: String, final: Bool)] = []
+        session.clean = { passage, final, _, _ in
+            calls.append((passage, final))
+            return final ? "The review is moved to Wednesday." : passage
+        }
+        session.request(sentence: true)
+        await session.settle()
+        field.text += " We meet at six."
+        field.cursor = field.text.count
+        session.request(sentence: true)
+        session.request(final: true)
+        await session.settle()
+        #expect(calls.last?.final == true)
+        #expect(calls.last?.passage == "The review is moved to Tuesday. Uh, no sorry, Wednesday. We meet at six.")
+        #expect(field.text == "The review is moved to Wednesday.")
+    }
+
+    /// An Enter the user pressed while speaking stands between dictated words; a cleanup that joined the lines (WhatsApp,
+    /// #299 recheck: "to⏎Anna," became "to Anna,") gets the break back, and its other changes still land.
+    @Test func aLineBreakInTheFieldSurvivesACleanupThatJoinedTheLines() {
+        let passage = "Please send the draft to\nAnna, cc Lina. um and bring the slides."
+        let cleaned = "Please send the draft to Anna, cc Lina. And bring the slides."
+        #expect(FieldCleanupChunks.keepingLineBreaks(of: passage, in: cleaned) == "Please send the draft to\nAnna, cc Lina. And bring the slides.")
+        // A break the result adds stays; no break in the passage, nothing to keep.
+        #expect(FieldCleanupChunks.keepingLineBreaks(of: "a. b.", in: "A.\n\nB.") == "A.\n\nB.")
+    }
+
+    /// A passage cleaned in halves after a rejection gives each half what stands before it, so the second half is never
+    /// read as a text of its own.
+    @Test func aSplitPassagesSecondHalfHasTheFirstAsContext() async {
+        let source = "Um, the review moved to Tuesday. We meet so um sechs Uhr there."
+        var calls: [(String, String)] = []
+        _ = await FieldCleanupChunks.cleanSplitting(source, before: "Hi Anna. ") { text, before in
+            calls.append((text, before))
+            if calls.count == 1 { return .rejected }
+            return .cleaned(text.replacingOccurrences(of: "Um, t", with: "T"))
+        }
+        #expect(calls.count == 3)
+        #expect(calls[1].1 == "Hi Anna. ")
+        #expect(calls[2].1 == "Hi Anna. The review moved to Tuesday.")
+    }
+
+    /// A pass whose edit the field did not take says why (`why`): it could not be placed, it stopped, or was refused.
+    @Test func aPassTheFieldDidNotTakeSaysWhy() async {
+        let field = CleanupField("teh boat waits.")
+        field.beforeApply = { field.draftID = "another" }
+        let session = FieldCleanupSession()
+        session.field = field
+        var events: [[String: Any]] = []
+        session.diagnostics = { _, fields in events.append(fields) }
+        session.clean = { passage, _, _, _ in passage.replacingOccurrences(of: "teh", with: "The") }
+        session.request(final: true)
+        await session.settle()
+        #expect(events.last?["applied"] as? Bool == false)
+        #expect(events.last?["why"] as? String == "refused")
+    }
+
+    @Test func aRejectedTakeKeepsOnlyTheRefusedSentenceRaw() async {
+        let source = "Um, the review moved to Tuesday. We meet so um sechs Uhr there. Uh, bring the slides."
+        var calls: [String] = []
+        let split = await FieldCleanupChunks.cleanSplitting(source) { text, _ in
+            calls.append(text)
+            if text.contains("um sechs") { return .rejected }
+            return .cleaned(text.replacingOccurrences(of: "Um, t", with: "T").replacingOccurrences(of: "Uh, b", with: "B"))
+        }
+        #expect(split.result == .cleaned("The review moved to Tuesday. We meet so um sechs Uhr there. Bring the slides."))
+        #expect(split.keptRaw == 1)
+        #expect(split.calls == calls.count)
+        let failed = await FieldCleanupChunks.cleanSplitting(source) { _, _ in .failed("timeout") }
+        #expect(failed.result == .failed("timeout") && failed.calls == 1, "a timeout is not split")
+        let single = await FieldCleanupChunks.cleanSplitting("We meet so um sechs Uhr.") { _, _ in .rejected }
+        #expect(single.result == .rejected)
+    }
+
     @Test func missingFinalDeliveryTimesOutWithoutReadingOrEditingTheOldScope() async {
         let clock = VirtualClock()
         let field = CleanupField("teh old boat.")
@@ -275,7 +476,7 @@ private final class FieldCleaner: SentenceCleaning {
                                                stats: .init(), delivered: false))
         }
         if afterModel {
-            pipeline.fieldCleanup?.clean = { _, _ in reject(); return "the green boat." }
+            pipeline.fieldCleanup?.clean = { _, _, _, _ in reject(); return "the green boat." }
             pipeline.acknowledgeDelivery(.init(runID: snapshot.runID, version: snapshot.version, complete: true,
                                                stats: .init(), delivered: true))
         } else { reject() }
@@ -300,7 +501,7 @@ private final class FieldCleaner: SentenceCleaning {
         var paused = true
         var answered = false
         session.canApply = { paused }
-        session.clean = { _, _ in paused = false; answered = true; return "the boat" }
+        session.clean = { _, _, _, _ in paused = false; answered = true; return "the boat" }
         session.request(final: true)
         while !answered { await Task.yield() }
         #expect(field.edits.isEmpty)
@@ -368,7 +569,7 @@ private final class FieldCleaner: SentenceCleaning {
     private func session(_ field: UnplaceableField, inputs: @escaping @MainActor (String) -> Void) -> FieldCleanupSession {
         let session = FieldCleanupSession()
         session.field = field
-        session.clean = { text, _ in
+        session.clean = { text, _, _, _ in
             inputs(text)
             return text.replacingOccurrences(of: " read", with: " bread").replacingOccurrences(of: "teh", with: "the")
         }
@@ -422,9 +623,263 @@ private final class FieldCleaner: SentenceCleaning {
         let field = Refusing(), session = FieldCleanupSession()
         session.field = field
         var passes = 0
-        session.clean = { _, _ in passes += 1; return "We bring the bread" }
+        session.clean = { _, _, _, _ in passes += 1; return "We bring the bread" }
         session.request(final: true)
         await session.settle()
         #expect(passes == 1)
+    }
+}
+
+/// #299 round 4: on iPhone a pass starts from the keyboard's shadow of the field (`FieldShadow`), sent with no read, and
+/// its edit goes without a re-read (the keyboard places it through every change since and merges around them).
+@Suite @MainActor struct ShadowCleanupPassTests {
+    private func shadowed(_ field: CleanupField, takeStart: Int? = nil, takeEnd: (@MainActor () -> Int?)? = nil,
+                          asks: @escaping @MainActor () -> Void = {}) -> FieldCleanupSession {
+        let session = FieldCleanupSession()
+        session.field = field
+        session.shadow = { id in
+            asks()
+            return FieldShadow(id: id, runID: "r", above: String(field.text.prefix(field.cursor)), below: String(field.text.dropFirst(field.cursor)),
+                               takeStart: takeStart, takeEnd: takeEnd?(), documentID: "field", draftID: field.draftID)
+        }
+        return session
+    }
+
+    /// Device run 4 (Notes, 2026-11-17): a take dictated mid-word into the user's sentence ("slides and th|e budget sheet
+    /// if you can."). Both passes cleaned across the take's edges: the model joined "th" and "e" and moved the user's
+    /// sentence after the take ("… pretty simple. Slides and the budget sheet if you can."). A pass edits the take's own
+    /// text only; the user's text before it is context, the text after it is neither sent nor edited.
+    @Test func aTakeDictatedMidWordLeavesTheUsersTextAroundIt() async {
+        let before = "Then it is coffee and cake on the terrace.\n slides and th"
+        let take = " So teh plan for the garden this weekend is pretty simple."
+        let after = "e budget sheet if you can. "
+        let field = CleanupField(before + take + after)
+        field.cursor = (before + take).count
+        // The test field puts the caret at the end once an edit lands; the take's end stays where the take ends.
+        let session = shadowed(field, takeStart: before.count, takeEnd: { field.text.count - after.count })
+        session.rawWords = { "so teh plan for the garden this weekend is pretty simple" }
+        var calls: [(passage: String, before: String)] = []
+        session.clean = { passage, _, context, _ in
+            calls.append((passage, context))
+            // The device's model, handed the user's fragments: it mends the word and moves the user's sentence.
+            if passage.contains("slides and th") || passage.contains("budget sheet") {
+                return "Then it is coffee and cake on the terrace.\n\nSo the plan for the garden this weekend is pretty simple. Slides and the budget sheet if you can."
+            }
+            return passage.replacingOccurrences(of: "teh", with: "the")
+        }
+        session.request(sentence: true)
+        await session.settle()
+        session.request(final: true)
+        await session.settle()
+        #expect(calls.count == 2)
+        for call in calls {
+            #expect(call.passage == "So the plan for the garden this weekend is pretty simple." || call.passage == "So teh plan for the garden this weekend is pretty simple.")
+            #expect(call.before == before + " ", "the user's part of the sentence is context")
+        }
+        #expect(field.text == before + " So the plan for the garden this weekend is pretty simple." + after)
+    }
+
+    /// The whole pass at the stop ran to the end of the shadow: the user's text after the take went to the model as part
+    /// of the passage, and came back edited. It is neither sent nor edited: after the caret, and after the take's end
+    /// when the user typed on behind it.
+    @Test func theWholePassLeavesTheUsersTextAfterTheTakeExactlyAsItWas() async {
+        let before = "Notes for Friday. ", take = "We bring teh bread and teh cheese."
+        for (after, caretAtTakeEnd) in [(" also the wine, if you can. thanks", true), (" also the wine, if you can", false)] {
+            let field = CleanupField(before + take + after)
+            if caretAtTakeEnd { field.cursor = (before + take).count }
+            let session = shadowed(field, takeStart: before.count, takeEnd: { caretAtTakeEnd ? nil : field.text.count - after.count })
+            session.rawWords = { "we bring teh bread and teh cheese" }
+            var passages: [String] = []
+            session.clean = { passage, _, _, _ in
+                passages.append(passage)
+                // A model that tidies whatever it is given.
+                return passage.replacingOccurrences(of: "teh", with: "the").replacingOccurrences(of: ". also", with: ". Also")
+                    .replacingOccurrences(of: ", if", with: " if").replacingOccurrences(of: ". thanks", with: ". Thanks.")
+            }
+            session.request(final: true)
+            await session.settle()
+            #expect(passages == [take], "only the take is sent")
+            #expect(field.text == before + "We bring the bread and the cheese." + after)
+        }
+    }
+
+    @Test func aPassFromTheShadowReadsNothingAndAppliesAtOnce() async throws {
+        let field = CleanupField("teh boat sails. we meet at six.")
+        let session = shadowed(field)
+        var lines: [[String: Any]] = []
+        session.diagnostics = { event, fields in if event == "field.cleanup" { lines.append(fields) } }
+        session.clean = { passage, _, _, _ in passage.replacingOccurrences(of: "teh", with: "The").replacingOccurrences(of: "we", with: "We") }
+        session.request(sentence: true)
+        await session.settle()
+        #expect(field.reads == 0, "no read before the model, no re-read after it")
+        #expect(field.edits.count == 1)
+        #expect(field.edits.first?.before == "teh boat sails. we meet at six.")
+        #expect(field.text == "The boat sails. We meet at six.")
+        #expect(session.lastApplied)
+        let line = try #require(lines.last)
+        #expect(line["status"] as? String == "cleaned")
+        for phase in ["shadowSentMs", "shadowMs", "modelStartMs", "modelEndMs", "applySentMs", "confirmedMs"] {
+            #expect(line[phase] is Int, "\(phase) is logged")
+        }
+    }
+
+    /// The keyboard could not place the edit (the field changed in a way no merge explains): it drops, and one fresh pass
+    /// starts from a new shadow.
+    @Test func anEditTheKeyboardCannotPlaceRunsOneFreshPass() async {
+        let field = CleanupField("teh boat sails.")
+        var asks = 0
+        let session = shadowed(field, asks: { asks += 1 })
+        session.clean = { passage, _, _, _ in
+            // The first result comes back to a field that changed meanwhile (the stub field takes only an exact match).
+            if asks == 1 { field.text = "teh boat sails today."; field.cursor = field.text.count }
+            return passage.replacingOccurrences(of: "teh", with: "The")
+        }
+        session.request(final: true)
+        await session.settle()
+        #expect(asks == 2)
+        #expect(field.edits.count == 2)
+        #expect(field.text == "The boat sails today.")
+    }
+
+    /// The pass at stop covers the whole take (from its start in the field, not the text before it) and gets the take's
+    /// raw words: sentence passes tidied "Uh, no sorry," away, the raw words still show the correction.
+    @Test func theWholeTakePassGetsTheRawWordsAndResolvesACorrectionAcrossSentences() async {
+        let field = CleanupField("Hi Anna, see below. The review is moved to Tuesday. Wednesday.")
+        let session = shadowed(field, takeStart: "Hi Anna, see below. ".count)
+        let raw = "the review is moved to tuesday uh no sorry wednesday"
+        session.rawWords = { raw }
+        var calls: [(passage: String, whole: Bool, before: String, raw: String?)] = []
+        session.clean = { passage, whole, before, rawWords in
+            calls.append((passage, whole, before, rawWords))
+            // A stub model: the raw words show the correction the text no longer shows.
+            guard rawWords?.contains("no sorry") == true else { return passage }
+            return passage.replacingOccurrences(of: "Tuesday. Wednesday.", with: "Wednesday.")
+        }
+        session.request(final: true)
+        await session.settle()
+        #expect(calls.count == 1)
+        #expect(calls.first?.whole == true)
+        #expect(calls.first?.passage == "The review is moved to Tuesday. Wednesday.")
+        #expect(calls.first?.before == "Hi Anna, see below. ")
+        #expect(calls.first?.raw == raw)
+        #expect(field.text == "Hi Anna, see below. The review is moved to Wednesday.")
+        // A sentence's pass gets no raw words.
+        field.text += " Bring teh slides."; field.cursor = field.text.count
+        session.request(sentence: true)
+        await session.settle()
+        #expect(calls.last?.whole == false && calls.last?.raw == nil)
+    }
+
+    /// Device run 4 (Notes, 2026-11-17): the whole-take pass ran to the end of the shadow, whose text after the caret was
+    /// the field's ". " in front of the next sentence. The model trims its answer, so the edit took the space out and
+    /// glued that sentence on (". I think" became ".I think"). The passage's own leading and trailing whitespace stays.
+    @Test func theWholePassKeepsThePassagesTrailingSeparator() async {
+        let field = CleanupField("Done by late afternoon. Then it is coffee and cake on the terrace. ")
+        field.cursor = "Done by late afternoon. Then it is coffee and cake on the terrace".count
+        let session = shadowed(field, takeStart: "Done by late afternoon. ".count)
+        session.rawWords = { "then it is coffee and cake on the terrace" }
+        session.clean = { passage, _, _, _ in passage.trimmingCharacters(in: .whitespacesAndNewlines) }
+        var lines: [[String: Any]] = []
+        session.diagnostics = { event, fields in if event == "field.cleanup" { lines.append(fields) } }
+        session.request(final: true)
+        await session.settle()
+        #expect(field.text == "Done by late afternoon. Then it is coffee and cake on the terrace. ")
+        #expect(field.edits.isEmpty, "nothing to change")
+        #expect(lines.last?["why"] as? String == "cleanAsTyped")
+    }
+
+    /// Device run 4: the guard refused the sentence with a German "um" before a time, and every later sentence pass sent it
+    /// again (its overlap reaches back into it), was refused again and split into several calls: 4–6 s a pass. A refused
+    /// sentence that would open a sentence pass stands before it as context instead.
+    @Test func aSentenceTheGuardRefusedIsNotSentAgainAtTheNextPassesStart() async {
+        let refused = "We meet at the Bahnhof so um sechs Uhr and then walk over together."
+        let field = CleanupField("The review moved to Wednesday. " + refused)
+        let session = shadowed(field)
+        var calls: [(passage: String, before: String)] = []
+        session.clean = { [weak session] passage, _, before, _ in
+            calls.append((passage, before))
+            // The guard refuses the "um" sentence: it stays as typed (the pipeline's split reports it).
+            if passage.contains("um sechs") { session?.refusedSentences.insert(refused) }
+            return passage
+        }
+        session.request(sentence: true)
+        await session.settle()
+        field.text += " Please send the draft to Anna, cc Lina. Actually, no, cc Tom."; field.cursor = field.text.count
+        session.request(sentence: true)
+        await session.settle()
+        #expect(calls.count == 2)
+        #expect(calls.last?.passage == "Please send the draft to Anna, cc Lina. Actually, no, cc Tom.")
+        #expect(calls.last?.before == "The review moved to Wednesday. " + refused + " ")
+    }
+
+    /// A long pause runs the whole-take pass too, once per change of the take.
+    @Test func aLongPausesWholePassRunsOncePerChange() async {
+        let field = CleanupField("The review is moved to Tuesday. Wednesday.")
+        let session = shadowed(field, takeStart: 0)
+        session.rawWords = { "the review is moved to tuesday uh no sorry wednesday" }
+        var calls = 0
+        session.clean = { passage, whole, _, raw in
+            calls += 1
+            #expect(whole && raw != nil)
+            return passage
+        }
+        session.request(whole: true)
+        await session.settle()
+        session.request(whole: true)
+        await session.settle()
+        #expect(calls == 1, "the same take is not cleaned whole again")
+    }
+}
+
+private final class RawCapturingCleaner: SentenceCleaning {
+    let inputs = Mutex<[DictationTakeInput]>([])
+    func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence {
+        .init(sentenceID: input.sentenceID, sequence: input.sequence, text: input.text)
+    }
+    func cleanTake(_ input: DictationTakeInput) async throws -> String {
+        inputs.withLock { $0.append(input) }
+        return input.text.replacingOccurrences(of: "teh", with: "the")
+    }
+}
+
+@Suite @MainActor struct ShadowPipelineTests {
+    /// The pipeline asks the keyboard for its shadow with the run's next snapshot and waits for it (no read); a long pause
+    /// runs the whole-take pass with the take's raw words.
+    @Test func aSentencePassAsksTheShadowAndALongPauseCleansTheWholeTake() async throws {
+        let clock = VirtualClock()
+        let field = CleanupField("")
+        let cleaner = RawCapturingCleaner()
+        let pipeline = DictationPipeline(cleaner: cleaner, clock: clock, supportsLive: true)
+        pipeline.attachCleanupField(field, duringPauses: true, waitsForLiveDelivery: true, perSentence: true)
+        var asked: [String] = []
+        // The keyboard: types each snapshot, and answers an ask from its shadow.
+        pipeline.onLiveChange = { snapshot in
+            guard let snapshot else { return }
+            field.text = snapshot.text; field.cursor = field.text.count
+            if let ask = snapshot.shadowAsk, !asked.contains(ask) { asked.append(ask) }
+        }
+        pipeline.takeFieldShadow = { id in
+            asked.contains(id) ? FieldShadow(id: id, runID: "r", above: field.text, documentID: "field") : nil
+        }
+        pipeline.beginTake()
+        await pipeline.receive(.init(sequence: 0, text: "teh green boat sails out today.", words: [], reason: "endpoint"))
+        // The sentence's result waits for a gap between words: the endpoint brings it (and arms the long pause).
+        await awaitCleanupTest { asked.count == 1 }
+        pipeline.boundary("endpoint")
+        await awaitCleanupTest { field.edits.count == 1 }
+        #expect(asked.count >= 1, "the sentence's pass asked for the shadow")
+        #expect(field.reads == 0)
+        #expect(field.edits.last?.target == "the green boat sails out today.")
+        let sentenceInput = try #require(cleaner.inputs.withLock { $0 }.last)
+        #expect(sentenceInput.rawWords == nil)
+        // A pause long enough: the whole take, with its raw words.
+        await pipeline.fieldCleanup?.settle()
+        await awaitCleanupTest { clock.sleeperCount >= 1 }
+        clock.advance(by: DictationPipeline.wholeTakePause)
+        await awaitCleanupTest { cleaner.inputs.withLock { $0 }.contains { $0.rawWords != nil } }
+        await pipeline.fieldCleanup?.settle()
+        let whole = try #require(cleaner.inputs.withLock { $0 }.last { $0.rawWords != nil })
+        #expect(whole.rawWords == "teh green boat sails out today.")
+        #expect(field.reads == 0)
     }
 }

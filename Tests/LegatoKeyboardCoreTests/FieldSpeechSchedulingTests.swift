@@ -12,6 +12,24 @@ import Testing
         #expect(!target.hasDeferredRevision)
     }
 
+    /// A recorded Mac take: a partial last word was heard again as a whole word and every later snapshot stayed
+    /// unplaceable, so 22 s of continuous speech waited for a pause. New speech must reach the field with the next
+    /// snapshot that carries it.
+    @Test(arguments: [
+        // The last word heard again as another: it stays as typed, the words after it go on.
+        ("we sailed past the harbour wall and tied up at the ke", "we sailed past the harbour wall and tied up at the quay", " before noon"),
+        // More than the last few words heard again: no place for the delivered end, the revision goes out at once.
+        ("we sailed past the harbour wall and tied up at the ke", "we sailed past the harbour wall and tide upset a key", " before noon")
+    ])
+    func newSpeechAfterARevisedTailIsNeverHeldForAPause(first: String, revised: String, more: String) {
+        var target = FieldSpeechScheduling.Target()
+        _ = target.update(Array(first), speaking: true)
+        _ = target.update(Array(revised), speaking: true)
+        let delivered = String(target.update(Array(revised + more), speaking: true))
+        #expect(delivered.hasSuffix(more), "the words said after the revision are delivered while speech goes on")
+        #expect(String(target.update(target.authoritative, speaking: false)) == revised + more)
+    }
+
     @Test func contractingSpeculationDoesNotDeleteHeardWordsUntilStop() {
         var target = FieldSpeechScheduling.Target()
         _ = target.update(Array("bring the blue boat"), speaking: true)
@@ -33,7 +51,7 @@ import Testing
     }
 
     @Test func keyboardAppendsWhileSpeakingThenAppliesOnlyTheChangedLetterDuringAPause() {
-        var rig = QueueRig(FakeField(""), config: .init(animated: false, prioritizeSpeech: true))
+        var rig = QueueRig(FakeField(""), config: .init(prioritizeSpeech: true))
         rig.queue.enqueue(snap(1, "we saw a boat"))
         do { let drained = rig.drain(); #expect(drained) }
         let start = rig.sent.count
@@ -51,7 +69,7 @@ import Testing
     }
 
     @Test func keyboardDefersARevisionFarFromTheCaretUntilTheStop() {
-        var rig = QueueRig(FakeField(""), config: .init(animated: false, prioritizeSpeech: true))
+        var rig = QueueRig(FakeField(""), config: .init(prioritizeSpeech: true))
         let rest = " and the wind came up from the west so we reefed the main and ran"
         rig.queue.enqueue(snap(1, "we saw a boat" + rest))
         do { let drained = rig.drain(); #expect(drained) }
@@ -68,7 +86,7 @@ import Testing
     }
 
     @Test func backgroundMagicWaitsWithoutDroppingWhileSpeechHasAPause() {
-        var rig = QueueRig(FakeField("Header old. "), config: .init(animated: false, prioritizeSpeech: true))
+        var rig = QueueRig(FakeField("Header old. "), config: .init(prioritizeSpeech: true))
         rig.queue.enqueue(.init(id: "magic", kind: .magic, before: "Header old. ", target: "Header new. ", cursorAtEnd: false))
         rig.queue.enqueue(snap(1, "fresh words"))
         do { let drained = rig.drain(); #expect(drained) }
@@ -82,7 +100,7 @@ import Testing
     }
 
     @Test func aJoinedCleanupKeepsRawNewSegmentsAndCoalescesToItsFinalTarget() {
-        var rig = QueueRig(FakeField(""), config: .init(animated: false, prioritizeSpeech: true))
+        var rig = QueueRig(FakeField(""), config: .init(prioritizeSpeech: true))
         rig.queue.enqueue(snap(1, "we saw a boat"))
         do { let drained = rig.drain(); #expect(drained) }
         let segments: [LiveSegment] = [

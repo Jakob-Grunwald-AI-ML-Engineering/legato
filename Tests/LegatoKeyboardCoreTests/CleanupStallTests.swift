@@ -7,7 +7,7 @@ import Testing
         var field = FakeField("")
         field.hostDelays = true
         field.rng = SeededGenerator(seed: seed)
-        var rig = QueueRig(field, config: .init(animated: true, deleteConfirmationMs: FieldQueue.transitMs))
+        var rig = QueueRig(field, config: .init())
         rig.queue.enqueue(snap(1, "Check the memo, um, Signal message?"))
         let rawLanded = rig.drain()
         #expect(rawLanded)
@@ -17,8 +17,8 @@ import Testing
         #expect(cleanupLanded)
         #expect(rig.field.string == "Check the memo, Signal message?")
         #expect(rig.field.reorders == 0)
-        // Only the filler changes; the rest of the take is never deleted or reinserted.
-        #expect(rig.sent[before...].map(\.op) == [.move(-15)] + Array(repeating: .deleteBackward(1), count: 4) + [.move(15)])
+        // Only the filler changes, in one chunk: a hop to it, one delete run, the hop back.
+        #expect(rig.sent[before...].map(\.op) == [.move(-15), .deleteBackward(4), .move(15)])
     }
 
     private func interruptedCleanup(seed: UInt64) throws -> QueueRig {
@@ -27,7 +27,7 @@ import Testing
         var field = FakeField(prefix)
         field.hostDelays = true
         field.rng = SeededGenerator(seed: seed)
-        var rig = QueueRig(field, config: .init(animated: true, deleteConfirmationMs: FieldQueue.transitMs))
+        var rig = QueueRig(field, config: .init())
         rig.queue.enqueue(snap(1, raw))
         let rawLanded = rig.drain()
         #expect(rawLanded)
@@ -37,7 +37,7 @@ import Testing
         for _ in 0..<500 {
             let count = rig.sent.count
             rig.tick()
-            if rig.sent.count > count, rig.sent.last?.op == .insert("v") {
+            if rig.sent.dropFirst(count).contains(where: { if case .insert = $0.op { true } else { false } }) {
                 sawIssuedInsert = true
                 break
             }
@@ -77,12 +77,12 @@ import Testing
         rig.run(ms: 3_000)
         let key = rig.sent.first { $0.ms >= requested && $0.op == .insert("Q") }
         #expect(key != nil)
-        #expect((key?.ms ?? .infinity) - requested <= FieldQueue.userBoundMs + FieldQueue.transitMs + rig.tickMs)
+        #expect((key?.ms ?? .infinity) - requested <= FieldQueue.checkDeadlineMs + rig.tickMs)
         #expect(rig.drops.contains { $0.id.hasPrefix("stray:") && $0.reason == .unplaceable })
         #expect(!rig.field.deletions.contains { $0.origin == .initial && $0.by != .outside })
-        // The key and stray failure are already released. The remaining minimal correction has its own bounded
-        // parked-scope wait, starting after recovery yields; it must also terminate without ownership evidence.
-        let finished = rig.drain(limitMs: FieldQueue.parkLimitMs + rig.tickMs)
+        // The key and stray failure are already released. The remaining minimal correction is behind a seam: explored,
+        // found again or dropped; it must also terminate without ownership evidence.
+        let finished = rig.drain(limitMs: 2 * FieldRecovery.budgetMs + FieldQueue.checkDeadlineMs + rig.tickMs)
         #expect(finished)
         let original = zip(rig.field.text, rig.field.origin).filter { $0.1 == .initial || $0.1 == .live }.map(\.0)
         #expect(String(original) == "Keep this note. the meeting starts soon")
@@ -90,7 +90,7 @@ import Testing
     }
 
     private func waitingQueue() -> FieldQueue {
-        var queue = FieldQueue(config: .init(animated: false, canReadAround: true))
+        var queue = FieldQueue(config: .init(canReadAround: true))
         _ = queue.step(report: .init(before: "Another paragraph. "), elapsedMs: 0)
         queue.enqueue(.init(id: "rewrite", kind: .magic, before: "Keep intro. Meet at three pm. Keep closing.",
                             target: "Keep intro. Meet at four pm. Keep closing.", cursorAtEnd: false))
@@ -124,29 +124,5 @@ import Testing
         #expect(queue.recoveryRequest == replacement)
         for _ in 0..<200 { _ = queue.step(report: .init(before: "Another paragraph. "), elapsedMs: 33) }
         #expect(queue.recoveryRequest == nil && queue.isIdle)
-    }
-
-    @Test func anOptimisticAutomaticDeleteDoesNotReleaseTheNextEditBeforeHostSettlement() throws {
-        var queue = FieldQueue(config: .init(animated: false, deleteConfirmationMs: FieldQueue.transitMs))
-        var report = FieldQueue.Report(before: "The red cat sat")
-        _ = queue.step(report: report, elapsedMs: 0)
-        queue.enqueue(.init(kind: .magic, before: report.before, target: "The cat sat", cursorAtEnd: false))
-        var deleted = false
-        for _ in 0..<100 {
-            let action = queue.step(report: report, elapsedMs: 33)
-            if case .send(let op) = action {
-                let result = ShadowEditPlanner.simulate(ops: [op], shadow: report.before + report.after, cursor: report.before.utf16.count)
-                report = .init(before: String(result.text.prefix(result.cursor)), after: String(result.text.dropFirst(result.cursor)))
-                queue.operationDispatched()
-                if case .deleteBackward = op { deleted = true; break }
-            }
-        }
-        #expect(deleted)
-        _ = queue.drainEvents()
-        #expect(queue.step(report: report, elapsedMs: 8) == .wait)
-        #expect(queue.hasOpInFlight)
-        #expect(!queue.drainEvents().contains { if case .confirmed = $0 { true } else { false } })
-        _ = queue.step(report: report, elapsedMs: FieldQueue.transitMs)
-        #expect(queue.drainEvents().contains { if case .confirmed = $0 { true } else { false } })
     }
 }

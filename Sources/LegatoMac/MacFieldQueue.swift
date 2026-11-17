@@ -204,8 +204,10 @@ public final class MacFieldQueue {
         var index = 0
         /// The gap between its typed graphemes that spreads the change over the time budget.
         let paceMs: Double
-        init(desired: [Character], steps: [KeystrokePlanner.Step], paceMs: Double) {
-            self.desired = desired; self.steps = steps; self.paceMs = paceMs
+        /// Only new speech appended at the region's end is typed at a pace; every other change goes out at full speed.
+        let typewriter: Bool
+        init(desired: [Character], steps: [KeystrokePlanner.Step], paceMs: Double, typewriter: Bool) {
+            self.desired = desired; self.steps = steps; self.paceMs = paceMs; self.typewriter = typewriter
         }
         var typedLeft: Int { steps[index...].reduce(0) { if case .type = $1.key { $0 + 1 } else { $0 } } }
     }
@@ -376,7 +378,9 @@ public final class MacFieldQueue {
         runs[index].speaking = speaking && !complete
         let delivery = runs[index].speechTarget.update(Array(text), speaking: runs[index].speaking)
         retarget(&runs[index], to: delivery)
-        note(.live, id: nil, run: runID, text: text, detail: "v\(version)")
+        // `held=`: characters of the snapshot not delivered (a revision held for a pause, or text not placed yet).
+        let held = runs[index].speechTarget.hasDeferredRevision ? " held=\(text.count - delivery.count)" : ""
+        note(.live, id: nil, run: runID, text: text, detail: "v\(version)\(held)")
         historyChanged()
         schedule()
     }
@@ -1285,7 +1289,8 @@ public final class MacFieldQueue {
         if target.inputMark != mark { userActedFlag = true; inputAt = now() }
         note(.verified, id: region.id, run: region.runID, location: region.start, length: region.end - region.start, text: String(region.current),
              selection: wanted)
-        if pacedNow, !insertion.isEmpty {
+        // Only new speech typed at the region's end is paced; a revision or cleanup hunk went out whole.
+        if step.typewriter, !insertion.isEmpty {
             let remaining = plan.remainingInsertions
             let ops = remaining + typedBacklog(besides: region)
             // Nothing more to type: no wait after the last grapheme.
@@ -1314,7 +1319,8 @@ public final class MacFieldQueue {
             }
         }
         let fast = isFast(region)
-        let typedMs = fast ? KeystrokePlanner.floorMs : pacedNow ? KeystrokePlanner.calmMs : KeystrokePlanner.keyMs
+        let typewriter = pacedNow && region.desired.starts(with: region.current)
+        let typedMs = fast ? KeystrokePlanner.floorMs : typewriter ? KeystrokePlanner.calmMs : KeystrokePlanner.keyMs
         let lineStart = doc.context(before: region.start, 1).last?.isNewline ?? true
         let lineEnd = doc.context(after: region.end, 1).first?.isNewline ?? true
         let steps = KeystrokePlanner.steps(from: region.current, to: region.desired, paceMs: typedMs, jumpMs: caretJumps.jumpMs,
@@ -1323,7 +1329,8 @@ public final class MacFieldQueue {
         let typed = steps.reduce(0) { if case .type = $1.key { $0 + 1 } else { $0 } }
         let fixed = Double(steps.count - typed) * KeystrokePlanner.keyMs
         let unit = KeyUnit(desired: region.desired, steps: steps,
-                           paceMs: fast ? KeystrokePlanner.floorMs : KeystrokePlanner.paceMs(ops: typed + typedBacklog(besides: region), fixedMs: fixed))
+                           paceMs: fast ? KeystrokePlanner.floorMs : KeystrokePlanner.paceMs(ops: typed + typedBacklog(besides: region), fixedMs: fixed),
+                           typewriter: typewriter)
         region.keys = unit
         note(.planned, id: region.id, run: region.runID, location: region.start, text: String(region.desired),
              detail: "keys=\(steps.count) typed=\(typed) pace=\(Int(unit.paceMs))")
@@ -1468,7 +1475,7 @@ public final class MacFieldQueue {
                 return await failed(region, after: after, reason: "key")
             }
             land(caretSeen: caretSeen, lastSelection: lastSelection)
-            if case .type = step.key, pacedNow {
+            if case .type = step.key, unit.typewriter {
                 // The faster of the change's own pace and the backlog's, counted from when the key went out.
                 let pace = min(unit.paceMs, KeystrokePlanner.paceMs(ops: unit.typedLeft + typedBacklog(besides: region)))
                 let gap = Duration.milliseconds(pace) - (now() - sentAt)
@@ -1482,7 +1489,7 @@ public final class MacFieldQueue {
     /// Whether the key just sent may be verified by the caret alone, so the next typed grapheme goes straight after it:
     /// both are typed graphemes at one place, the change is still the one planned, and nothing else wants the field.
     private func canPipeline(after step: KeystrokePlanner.Step, unit: KeyUnit, region: Region, mark: Int, target: any TextTarget) -> Bool {
-        guard pacedNow, !exclusive, !userActedFlag, !region.lost, unit.desired == region.desired, target.inputMark == mark,
+        guard unit.typewriter, !exclusive, !userActedFlag, !region.lost, unit.desired == region.desired, target.inputMark == mark,
               case .type = step.key, unit.index + 1 < unit.steps.count else { return false }
         let next = unit.steps[unit.index + 1]
         guard case .type = next.key, next.caret == step.caretAfter, next.before == step.after else { return false }

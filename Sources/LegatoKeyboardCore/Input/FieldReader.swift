@@ -37,6 +37,9 @@ public extension FieldWindowProxy {
 /// The read stops at the nearest structural stop above the cursor (the field's start, a quote header, quoted lines,
 /// a signature delimiter), at `cap` characters, or after one block for `read_more`.
 @MainActor public struct FieldReader {
+    /// How long a walk waits after each of its own moves before it reads (kept, see `docs/field-editing.md`): a walk
+    /// verifies every window by two identical reads, so it reads the host after a move, never the proxy's echo.
+    public nonisolated static let walkSettleMs = 45
     public enum Limit: Sendable, Equatable {
         /// One block (`read_more`): a paragraph group of at most `blockLimit` new characters.
         case block
@@ -359,12 +362,12 @@ public extension FieldWindowProxy {
     }
 
     /// Restoration still reads after cancellation, but cannot hold a user's next key for the
-    /// entire ordinary retry budget. The next native operation retains its existing transit allowance.
+    /// entire ordinary retry budget.
     private func confirmRestoration(_ proxy: any FieldWindowProxy, normalizing: (String) -> String,
                                     matching: ((before: String, after: String)) -> Bool) async -> Bool {
         var previous: (String, String)?
         var cancelledReads = 0
-        let reservedMs = FieldQueue.transitMs + 2 * Double(settleMilliseconds)
+        let reservedMs = 2 * Double(settleMilliseconds)
         let restoreBudget = max(0, FieldEditCoordinator.inputResponseTargetMs - reservedMs)
         let cancelledLimit = max(2, Int(restoreBudget / Double(max(1, settleMilliseconds))))
         for _ in 0...(maxRereads + 1) {

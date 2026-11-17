@@ -209,6 +209,7 @@ import LegatoVocabulary
         switch surface {
         case .dictation:
             // A take of its own: its words never join the previous take's run (which may still be ending).
+            endDebugTake()
             speechRoute.beginTake()
             await dictation.activate()
             if let failure = microphone.takeBufferFailure {
@@ -298,6 +299,18 @@ import LegatoVocabulary
         }
     }
     private func closeDictation() async { await dictation.close() }
+    /// A take the bridge's lines began (`dictation-debug-line`) and no `dictation-debug-stop` ended: it ends now, as its
+    /// stop would, before the mic key or a replay begins a take. Otherwise that take's speech waits behind the line's run
+    /// until a stop, and its own stop ends the line's run instead (device run 4: a whole replay typed only after its end,
+    /// behind a key pressed right after speech).
+    private func endDebugTake() {
+        #if DEBUG || LEGATO_INTERNAL
+        guard debugTakeOpen else { return }
+        dictation.debugTail("")
+        debugTakeOpen = false
+        finishDictationTake(waitingForWords: false)
+        #endif
+    }
     private func sendDictation(_ pcm: Data) async {
         guard gate.route == .dictation else { return }
         if let rate = microphone.routedAudioAt { probe.audioRouted(at: rate) }
@@ -337,8 +350,8 @@ import LegatoVocabulary
     /// take as the mic key's stop does. Returns when the take is written.
     public func debugDictationReplay(_ timeline: DictationReplayTimeline, speed: Double = 1, pcm: DictationReplayPCM? = nil) async throws {
         guard isOpen, gate.surface == .dictation else { throw DebugDictationError.notOnDictationSurface }
+        endDebugTake()
         speechRoute.beginTake()
-        debugTakeOpen = false
         try await dictation.debugReplay(timeline, speed: speed, pcm: pcm)
         try Task.checkCancellation()
         await dictation.waitForFinish(timeout: .seconds(3))

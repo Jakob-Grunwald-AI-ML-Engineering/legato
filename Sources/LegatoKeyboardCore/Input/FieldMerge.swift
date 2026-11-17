@@ -24,12 +24,32 @@ public enum FieldMerge {
         var text = kept
         var dropped = 0
         for h in SpanPlanner.wordHunks(from: base, to: incoming).reversed() {
-            if zones.contains(where: { touches(h, $0) }) { dropped += 1; continue }
+            // Both writers appended the same text at the edge of this change (speech typed at the caret, and a revision
+            // that carries the same words): one change, typed once.
+            if h.start == h.end, keptHunks.contains(where: { sameInsertion(h, $0, in: base) }) { continue }
+            let shared = zones.firstIndex { sharesEdgeInsertion(h, $0) }
+            if zones.indices.contains(where: { $0 != shared && touches(h, zones[$0]) }) { dropped += 1; continue }
             let start = map(h.start, through: keptHunks, after: true)
-            let end = h.start == h.end ? start : max(start, map(h.end, through: keptHunks, after: false))
+            var end = h.start == h.end ? start : max(start, map(h.end, through: keptHunks, after: false))
+            if let shared { end += zones[shared].hunk.text.count }
             text.replaceSubrange(start..<end, with: h.text)
         }
         return Result(text: text, dropped: dropped)
+    }
+
+    /// Two insertions that make the same text, whatever place each diff chose for it ("holds" + ". Yeah" + "." is
+    /// "holds." + " Yeah."): `kept` already has it.
+    private static func sameInsertion(_ h: SpanPlanner.Hunk, _ k: ShadowEditPlanner.Hunk, in base: [Character]) -> Bool {
+        guard k.start == k.end, h.text.count == k.text.count, !k.text.isEmpty, abs(h.start - k.start) <= k.text.count else { return false }
+        let lo = min(h.start, k.start), hi = max(h.start, k.start)
+        return Array(base[lo..<h.start]) + h.text + base[h.start..<hi] == Array(base[lo..<k.start]) + k.text + base[k.start..<hi]
+    }
+
+    /// `kept` inserted text right at the end of incoming change `h`, and `h` ends with that same text.
+    private static func sharesEdgeInsertion(_ h: SpanPlanner.Hunk, _ z: Zone) -> Bool {
+        let k = z.hunk
+        return k.start == k.end && !k.text.isEmpty && k.start == h.end && h.start < h.end
+            && h.text.count > k.text.count && h.text.suffix(k.text.count).elementsEqual(k.text)
     }
 
     /// Follow a grapheme boundary through the same minimal changes used by scope rebasing.

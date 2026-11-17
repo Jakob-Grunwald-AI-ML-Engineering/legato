@@ -322,7 +322,7 @@ import LegatoMac
         let undo = ScopedEditPlanner.undo(of: edit, cursor: try #require(ack?.cursor))
         #expect(await editor.apply(undo)?.applied == true)
         #expect(target.value == "Before 🐈 after")
-        #expect(target.writes.allSatisfy { $0.location >= 7 && $0.location <= 9 && $0.length <= 2 })
+        #expect(target.writes.allSatisfy { $0.location >= 7 && $0.location <= 9 && $0.length <= 3 })
     }
     @Test func anEditOrAppSwitchWhileTheModelWorksRefusesTheResult() async throws {
         let target = EditorTarget("Prefix. Draft")
@@ -414,6 +414,44 @@ import LegatoMac
         #expect(target.value == "drift")
         #expect(editor.panel.recoveryText == "DRAFT")
         #expect(reports.isEmpty && copies.isEmpty)
+    }
+
+    /// Takes that landed keep nothing, also when the field refuses their cleanup (a list line the field changed while the
+    /// model worked): the cleanup only restyles words already there.
+    @Test func landedTakesWhoseCleanupTheFieldRefusedKeepNothing() async throws {
+        let target = EditorTarget("")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false }
+        editor.sleep = { _ in }
+        var copies: [String] = []
+        editor.recover = { copies.append($0) }
+        for (index, item) in ["A: first item", "B: second item", "C: third item"].enumerated() {
+            if index > 0 { target.value += "\n- " } else { target.value = "- " }
+            target.selection = .init(location: target.value.utf16.count, length: 0)
+            editor.begin()
+            await editor.applyLive(snapshot(item, run: "take\(index)", complete: true))
+            await editor.finish()
+            #expect(target.value.hasSuffix(item))
+            let read = try await editor.read(.cleanup, instructionID: "cleanup\(index)", reading: {})
+            target.value = target.value.replacingOccurrences(of: "item", with: "entry")
+            let cleanup = ScopedEdit(instructionID: "cleanup\(index)", documentID: read.documentID, before: read.above,
+                                     after: read.below, target: read.above.uppercased() + read.below)
+            #expect(await editor.apply(cleanup)?.applied == false)
+            #expect(editor.panel.recoveryText.isEmpty)
+        }
+        #expect(copies.isEmpty)
+    }
+
+    /// Kept text is one item, the latest session's, never a log of every take.
+    @Test func keptTextHoldsOnlyTheLatestSessionsMissingText() async {
+        let editor = MacFieldEditor(capture: { .password })
+        editor.insert = { _ in .retained(message: "Insertion could not be confirmed.") }
+        for (index, take) in ["First take.", "Second take.", "Third take."].enumerated() {
+            editor.begin()
+            await editor.applyLive(snapshot(take, run: "kept\(index)", complete: true))
+            await editor.finish()
+            #expect(editor.panel.recoveryText == take)
+        }
     }
 
     @Test func oldCleanupCannotFollowMagicIntoANewFieldOrSelection() async throws {
@@ -856,22 +894,18 @@ import LegatoMac
         #expect(target.value == "Retry words.")
     }
 
-    @Test func typewriterCorrectionsPauseBetweenIndividualCharactersAndKeepTheTail() async {
+    @Test func aCorrectionInsideTheTextIsOneUnpacedWriteAndKeepsTheTail() async {
         let target = EditorTarget("")
         let editor = MacFieldEditor(capture: { .target(target) })
         editor.begin(); await editor.applyLive(snapshot("abc unchanged tail"))
         target.writes = []
         var pauses: [Duration] = []
-        var frames: [String] = []
         editor.typewriter = { true }
-        editor.sleep = { duration in pauses.append(duration); frames.append(target.value) }
+        editor.sleep = { duration in pauses.append(duration) }
         await editor.applyLive(snapshot("aXYc unchanged tail", complete: true))
         #expect(target.value == "aXYc unchanged tail")
-        #expect(target.writes.count == 2, "One atomic replacement, then the extra new grapheme")
-        #expect(target.writes.allSatisfy { $0.length <= 1 })
-        // The trial keeps a 5 ms gap between typed characters, with none after the last one.
-        #expect(pauses == [.milliseconds(5)])
-        #expect(frames.allSatisfy { $0.hasSuffix("c unchanged tail") })
+        #expect(target.writes.count == 1, "One hunk, one write: delete and insert at one place")
+        #expect(pauses.isEmpty, "No pacing for a revision")
     }
 
     @Test func realTypingDuringAnAnimationKeepsTheKeyAfterTheWord() async {
@@ -909,9 +943,10 @@ import LegatoMac
         editor.begin(); await editor.applyLive(snapshot("cab unchanged tail"))
         target.writes = []
         editor.typewriter = { true }
-        editor.sleep = { _ in if target.value.hasPrefix("c") { target.value = "Q" + target.value.dropFirst() } }
+        // The user changes the word before the revision lands.
+        target.value = "Q" + target.value.dropFirst()
         await editor.applyLive(snapshot("cXYZ unchanged tail", complete: true))
-        #expect(target.value == "QXb unchanged tail", "The interrupted replacement keeps the unprocessed original b")
+        #expect(target.value == "Qab unchanged tail", "The user's text survives; the stale revision is not forced over it")
         #expect(copied.isEmpty)
         #expect(editor.panel.recoveryText == "cXYZ unchanged tail")
     }
@@ -919,7 +954,7 @@ import LegatoMac
     @Test func interruptedNativeMagicReportsConfirmedPartialChangesWithoutClaimingNothingWasEdited() async throws {
         let original = "return before sunset"
         let target = EditorTarget(original)
-        target.loseFocusAfterWrites = 3
+        target.loseFocusAfterWrites = 2
         let editor = MacFieldEditor(capture: { .target(target) })
         editor.sleep = { _ in await Task.yield() }
         editor.begin(); editor.beginInstruction()

@@ -89,17 +89,26 @@ import LegatoSoniox
         await engine.close()
     }
 
-    @MainActor @Test(arguments: [false, true]) func onlyOriginalQuietPCMAdmitsTheRecordedEndpoint(includePCM: Bool) async throws {
+    /// With original PCM only quiet audio admits the recorded endpoint as a pause. A token-only replay has no audio:
+    /// its endpoints are the pauses (#299: otherwise no gap ever opens and per-sentence cleanup waits for the stop).
+    enum ReplayAudio: CaseIterable { case none, quiet, loud }
+    @MainActor @Test(arguments: ReplayAudio.allCases) func theRecordedEndpointIsAPauseUnlessOriginalAudioIsLoud(audio: ReplayAudio) async throws {
         let sink = ReplayActivitySink()
         let engine = DictationEngine(sink: sink, sonioxKey: { "test" }, makeSocket: { TestSocket() },
                                      vocabularyURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
         engine.open()
         let timeline = DictationReplayTimeline(frames: [.init(at: 0.2, json: #"{"tokens":[{"text":"<end>","is_final":true}]}"#)])
-        try await engine.debugReplay(timeline, pcm: includePCM ? DictationReplayPCM(Data(count: 6_400)) : nil)
+        let loud = Data((0..<3_200).flatMap { _ in [UInt8(0), UInt8(64)] })
+        let pcm: DictationReplayPCM? = switch audio {
+        case .none: nil
+        case .quiet: try DictationReplayPCM(Data(count: 6_400))
+        case .loud: try DictationReplayPCM(loud)
+        }
+        try await engine.debugReplay(timeline, pcm: pcm)
         let deadline = ContinuousClock.now + .seconds(2)
         while !sink.boundaries.contains("finished"), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
         #expect(sink.boundaries.contains("finished"))
-        #expect(sink.boundaries.contains("endpoint") == includePCM)
+        #expect(sink.boundaries.contains("endpoint") == (audio != .loud))
         await engine.close()
     }
 

@@ -61,7 +61,7 @@ import Testing
 
 @Suite struct ProxyRecoveryIntegrationTests {
     private func waitingQueue() -> FieldQueue {
-        var queue = FieldQueue(config: .init(animated: false, canReadAround: true))
+        var queue = FieldQueue(config: .init(canReadAround: true))
         _ = queue.step(report: .init(before: "At another paragraph. "), elapsedMs: 0)
         queue.enqueue(.init(id: "magic", kind: .magic, before: "Keep intro. Meet at three pm. Keep closing.",
                             target: "Keep intro. Meet at four pm. Keep closing.", cursorAtEnd: false))

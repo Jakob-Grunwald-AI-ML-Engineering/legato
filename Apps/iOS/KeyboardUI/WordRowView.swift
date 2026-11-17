@@ -18,7 +18,9 @@ struct WordRowView: View {
 
     var body: some View {
         Group {
-            if let recovery = controller.liveRecoveryNotice {
+            if controller.keptRowOpen, controller.statusText == nil, let kept = controller.keptText, kept.isShowable {
+                keptRow(kept)
+            } else if let recovery = controller.liveRecoveryNotice {
                 HStack(spacing: 8) {
                     // Plain text (nothing to tap but Dismiss); it fits in two lines, shrinking rather than cutting off.
                     Text(recovery)
@@ -89,11 +91,57 @@ struct WordRowView: View {
         .accessibilityIdentifier(id)
     }
 
+    /// Text the keyboard could not place: its end, then Insert and Copy (Copy needs Full Access), and a small close.
+    private func keptRow(_ kept: KeptText) -> some View {
+        HStack(spacing: 8) {
+            Text(kept.preview(maxCharacters: 120))
+                .font(.system(size: fontSize - 4))
+                .foregroundStyle(Color(uiColor: KeyColors.suggestion))
+                .lineLimit(1)
+                .truncationMode(.head)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("keyboard.kept.text")
+            takeButton("Insert", id: "keyboard.kept.insert") { controller.insertKeptText() }
+            if controller.fullAccess {
+                takeButton("Copy", id: "keyboard.kept.copy") { controller.copyKeptText() }
+            }
+            Button { controller.dismissKeptText() } label: {
+                Image(systemName: "xmark").font(.system(size: fontSize - 6, weight: .semibold))
+                    .foregroundStyle(Color(uiColor: KeyColors.suggestion).opacity(0.7))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Discard kept text")
+            .accessibilityIdentifier("keyboard.kept.dismiss")
+        }
+        .padding(.horizontal, 8)
+        .accessibilityIdentifier("keyboard.kept")
+    }
+
+    /// The chip that stands for kept text while the row shows suggestions.
+    private var keptChip: some View {
+        Button { controller.openKeptText() } label: {
+            Label("Kept", systemImage: "tray.and.arrow.down")
+                .font(.system(size: fontSize - 6, weight: .semibold))
+                .foregroundStyle(Color(uiColor: KeyColors.suggestion))
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(Color(uiColor: KeyColors.suggestion).opacity(0.15), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .padding(.leading, 6).padding(.trailing, 2)
+        .accessibilityLabel("Kept text")
+        .accessibilityHint("Shows the text Legato could not place, to insert or copy.")
+        .accessibilityIdentifier("keyboard.kept.chip")
+    }
+
     private var row: some View {
         let ranks = WordRowLayout.ranks(visibleSlots: slots)
         let words = controller.suggestions
         let highlighted = controller.highlightedSuggestionRank.flatMap { ranks.firstIndex(of: $0) }
         return HStack(spacing: 0) {
+            // Never an empty or stale chip: only an item with text, from a draft.
+            if controller.keptText?.isShowable == true { keptChip }
             ForEach(Array(ranks.enumerated()), id: \.offset) { position, rank in
                 SuggestionSlot(controller: controller, word: rank < words.count ? words[rank] : nil,
                                rank: rank, fontSize: fontSize, highlighted: highlighted == position,

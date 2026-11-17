@@ -77,6 +77,12 @@ final class LinkClient {
         LiveDictationLink(store: store).acknowledge(ack)
     }
 
+    /// The field's text for a cleanup pass that asked with the run's snapshot (`FieldShadow`). The app polls for it.
+    func writeFieldShadow(_ shadow: FieldShadow) {
+        guard let store else { return }
+        LiveDictationLink(store: store).send(shadow)
+    }
+
     #if DEBUG || LEGATO_INTERNAL
     func takeFieldProbe() -> FieldProbeRequest? { store.map { FieldProbeLink(store: $0).takeRequest() } ?? nil }
     func writeFieldProbe(_ reply: FieldProbeReply) { if let store { FieldProbeLink(store: store).reply(reply) } }

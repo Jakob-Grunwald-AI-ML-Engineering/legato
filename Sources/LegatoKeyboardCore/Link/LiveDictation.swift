@@ -57,11 +57,16 @@ public struct LiveDictationSnapshot: Codable, Equatable, Sendable {
     public var stopped: Bool?
     /// Original ASR words, independent of cleanup's segment grouping; retained for correction evidence.
     public var rawText: String?
-    public init(runID: String, version: Int, segments: [LiveSegment], complete: Bool = false, stopped: Bool? = nil, rawText: String? = nil) {
+    /// A cleanup pass asks for the field's text with this id (`FieldShadow`): the keyboard answers from its shadow once
+    /// this version's words are typed, without a field read. Nil: no pass asked.
+    public var shadowAsk: String?
+    public init(runID: String, version: Int, segments: [LiveSegment], complete: Bool = false, stopped: Bool? = nil, rawText: String? = nil,
+                shadowAsk: String? = nil) {
         self.runID = runID; self.version = version; self.segments = segments; self.complete = complete; self.stopped = stopped
         self.rawText = rawText ?? LiveSegment.joined(segments.map { $0.raw ?? $0.text }); self.text = LiveSegment.joined(segments.map(\.text))
+        self.shadowAsk = shadowAsk
     }
-    private enum CodingKeys: String, CodingKey { case runID, version, text, segments, complete, stopped, rawText }
+    private enum CodingKeys: String, CodingKey { case runID, version, text, segments, complete, stopped, rawText, shadowAsk }
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         runID = try values.decode(String.self, forKey: .runID)
@@ -71,6 +76,34 @@ public struct LiveDictationSnapshot: Codable, Equatable, Sendable {
         complete = try values.decode(Bool.self, forKey: .complete)
         stopped = try values.decodeIfPresent(Bool.self, forKey: .stopped)
         rawText = try values.decodeIfPresent(String.self, forKey: .rawText)
+        shadowAsk = try values.decodeIfPresent(String.self, forKey: .shadowAsk)
+    }
+}
+
+/// keyboard -> app (`link.dictation.shadow`): the field as the keyboard's shadow has it, for the cleanup pass that asked
+/// with a run's snapshot (`LiveDictationSnapshot.shadowAsk`), once that snapshot's words are typed. No field read: the
+/// keyboard marks a read under `id` (`FieldQueue.markRead`), so the pass's edit (`ScopedEdit.instructionID == id`) is
+/// placed through every change made since and merged around them (`FieldMerge`). The app removes it once read.
+public struct FieldShadow: Codable, Sendable, Equatable {
+    public var id: String
+    public var runID: String
+    /// The text before the user's caret and after it.
+    public var above: String
+    public var below: String
+    /// Where the run's text starts and ends in `above + below` (characters), when the shadow knows. A pass edits only
+    /// that text: the user's text after it is never sent as part of the passage (#299 device run 4).
+    public var takeStart: Int?
+    public var takeEnd: Int?
+    public var documentID: String?
+    public var draftID: String?
+    /// Why no text was given (an unverified selection, another field); nil when it was.
+    public var refused: String?
+    /// When the keyboard sent it.
+    public var at: Date
+    public init(id: String, runID: String, above: String = "", below: String = "", takeStart: Int? = nil, takeEnd: Int? = nil,
+                documentID: String? = nil, draftID: String? = nil, refused: String? = nil, at: Date = Date()) {
+        self.id = id; self.runID = runID; self.above = above; self.below = below; self.takeStart = takeStart; self.takeEnd = takeEnd
+        self.documentID = documentID; self.draftID = draftID; self.refused = refused; self.at = at
     }
 }
 
@@ -125,6 +158,14 @@ public struct LiveDictationLink: Sendable {
     public func read() -> LiveDictationSnapshot? { store.read(LiveDictationSnapshot.self, forKey: LinkChannel.Key.dictationLive) }
     public func acknowledge(_ ack: LiveDictationAck) { store.write(ack, forKey: LinkChannel.Key.dictationLiveAck) }
     public func acknowledged() -> LiveDictationAck? { store.read(LiveDictationAck.self, forKey: LinkChannel.Key.dictationLiveAck) }
+    public func send(_ shadow: FieldShadow) { store.write(shadow, forKey: LinkChannel.Key.dictationShadow) }
+    /// The shadow for `id` when one is stored, removed as it is taken.
+    public func takeShadow(id: String) -> FieldShadow? {
+        guard let shadow = store.read(FieldShadow.self, forKey: LinkChannel.Key.dictationShadow), shadow.id == id else { return nil }
+        store.remove(forKey: LinkChannel.Key.dictationShadow)
+        return shadow
+    }
+    public func clearShadow() { store.remove(forKey: LinkChannel.Key.dictationShadow) }
 }
 
 /// The app's model of one live run: the finished segments and the speaking head, as the target the keyboard
@@ -174,6 +215,14 @@ public struct LiveDictationRun: Sendable, Equatable {
 
     public init(runID: String = UUID().uuidString) { self.runID = runID }
 
+    /// The cleanup pass waiting for the field's text (`LiveDictationSnapshot.shadowAsk`).
+    public private(set) var shadowAsk: String?
+    /// A cleanup pass asks for the field's text as the keyboard's shadow has it, with the next version.
+    public mutating func askShadow(_ id: String) {
+        shadowAsk = id
+        version += 1
+    }
+
     public var snapshot: LiveDictationSnapshot {
         var segments = finals
         if complete {
@@ -201,7 +250,7 @@ public struct LiveDictationRun: Sendable, Equatable {
         let speaking = LiveSegment.joined(open + [head])
         if !speaking.isEmpty { segments.append(.init(id: finals.count, text: speaking, final: false)) }
         return .init(runID: runID, version: version, segments: segments, complete: complete, stopped: stopped && !complete ? true : nil,
-                     rawText: complete ? LiveSegment.joined(finals.map(\.text)) : nil)
+                     rawText: complete ? LiveSegment.joined(finals.map(\.text)) : nil, shadowAsk: shadowAsk)
     }
     public var isEmpty: Bool { finals.isEmpty && head.isEmpty && open.isEmpty }
     public var finalCount: Int { finals.count }

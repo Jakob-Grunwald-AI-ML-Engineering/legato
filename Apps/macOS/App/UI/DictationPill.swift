@@ -62,8 +62,8 @@ final class DictationPillController {
         return NSSize(width: base.width, height: max(base.height, panelHeight(base: base)))
     }
 
-    /// Room for every word of the panel take at the card's text width, up to half the screen (then the newest words
-    /// show and the oldest scroll out at the top).
+    /// Room for every word of the panel take at the card's text width, up to half the screen. Past that the text scrolls
+    /// inside the card (the newest words in view) and its actions stay on screen.
     private func panelHeight(base: NSSize) -> CGFloat {
         let text = DictationPillView.panelText(session: session, panel: takePanel)
         let width = base.width - 32 - 30 // card padding, then the symbol and its spacing
@@ -234,7 +234,7 @@ struct DictationPillView: View {
 
     private var card: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 10) {
+            HStack(alignment: inPanel ? .top : .center, spacing: 10) {
                 Image(systemName: symbol)
                     .foregroundStyle(tint)
                     .symbolEffect(.pulse, isActive: !compact && listeningNow)
@@ -258,14 +258,24 @@ struct DictationPillView: View {
             if let caption {
                 Text(caption).font(NotchIslandTokens.caption).foregroundStyle(.secondary)
             }
-            Text(line)
-                .font(NotchIslandTokens.body)
-                .foregroundStyle(showsPlaceholder ? .secondary : .primary)
-                .lineLimit(inPanel ? nil : caption == nil ? 2 : 1)
-                .truncationMode(.head)
-                .fixedSize(horizontal: false, vertical: inPanel)
+            if inPanel {
+                // The window's height is bounded (`DictationPillController.panelHeight`): longer text scrolls here, so
+                // it never pushes the actions below the card.
+                ScrollView(.vertical) {
+                    lineText.fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .defaultScrollAnchor(.bottom)
+                .defaultScrollAnchor(.bottom, for: .sizeChanges)
+                .accessibilityIdentifier("dictation.pill.panelText")
+            } else {
+                lineText.lineLimit(caption == nil ? 2 : 1).truncationMode(.head)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var lineText: some View {
+        Text(line).font(NotchIslandTokens.body).foregroundStyle(showsPlaceholder ? .secondary : .primary)
     }
 
     /// Magic starts or stops a spoken instruction (the Magic hotkey); Undo and Redo take Legato's own last change in the

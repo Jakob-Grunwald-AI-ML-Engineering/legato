@@ -930,6 +930,48 @@ private struct SeededRandom {
         #expect(field.keysSent - sent == 1 + 2 + 1)
     }
 
+    @Test func aKeyedRevisionIsNotPacedButStaysVerifiedKeyByKey() async {
+        func elapsed(paced: Bool) async -> (Duration, Int, String) {
+            let field = FakeAXField("", rng: SeededRandom(3))
+            field.keys = true
+            var clock = ContinuousClock.now
+            field.clock = { clock }
+            let queue = MacFieldQueue(target: field)
+            queue.paced = { false }
+            queue.sleep = { clock += $0 }
+            queue.now = { clock }
+            queue.live(runID: "r", version: 1, text: "the cab is here")
+            await queue.whenIdle()
+            field.settle(all: true)
+            queue.paced = { paced }
+            let start = clock, sent = field.keysSent
+            queue.live(runID: "r", version: 2, text: "the cat is here today")
+            await queue.whenIdle()
+            return (start.duration(to: clock), field.keysSent - sent, field.string)
+        }
+        let calm = await elapsed(paced: true), plain = await elapsed(paced: false)
+        #expect(calm.2 == "the cat is here today" && plain.2 == calm.2)
+        #expect(calm.1 > 0 && calm.1 == plain.1, "keys are still sent one at a time and read back")
+        #expect(calm.0 <= plain.0 + .milliseconds(150), "the typewriter pace adds at most the appended tail's pacing")
+    }
+
+    /// A recorded take in a keystroke field: a partial last word was heard again as a whole word, every later snapshot
+    /// held behind that revision, and 22 s of continuous speech typed nothing until the queue let it all out at once.
+    /// Speech at the caret goes on with the next snapshot; the held revision lands at the stop.
+    @Test func speechAfterARevisedPartialWordIsTypedWhileSpeaking() async {
+        let (field, queue, _, _) = keyedField("")
+        queue.live(runID: "r", version: 1, text: "we tied up at the ke", speaking: true)
+        await queue.whenIdle()
+        queue.live(runID: "r", version: 2, text: "we tied up at the quay", speaking: true)
+        await queue.whenIdle()
+        queue.live(runID: "r", version: 3, text: "we tied up at the quay before noon", speaking: true)
+        await queue.whenIdle()
+        #expect(field.string == "we tied up at the ke before noon", "new speech is typed without waiting for a pause\n\(field.trail.joined(separator: "\n"))")
+        queue.takeStopped("r")
+        await queue.whenIdle()
+        #expect(field.string == "we tied up at the quay before noon")
+    }
+
     /// A keystroke field with its own clock, driven by the queue's sleeps.
     private func keyedField(_ text: String, seed: UInt64 = 5, configure: (FakeAXField) -> Void = { _ in })
         -> (FakeAXField, MacFieldQueue, () -> ContinuousClock.Instant, (Duration) -> Void) {

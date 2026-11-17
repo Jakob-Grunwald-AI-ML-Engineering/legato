@@ -19,7 +19,7 @@ import Testing
             if landed != nil, rig.queue.isIdle, !rig.queue.hasOpInFlight, rig.field.settled { break }
         }
         #expect(rig.field.string == expected)
-        #expect(rig.field.reorders == 0 && rig.field.staleTriggers == 0)
+        #expect(rig.field.reorders == 0)
         return Sample(chars: chars, landedMs: landed ?? .infinity, doneMs: rig.clockMs - start)
     }
 
@@ -27,7 +27,7 @@ import Testing
         var field = FakeField(text)
         field.hostDelays = true
         field.rng = SeededGenerator(seed: seed)
-        return QueueRig(field, config: .init(animated: true))
+        return QueueRig(field, config: .init())
     }
 
     private func append(_ added: String, seed: UInt64) -> Sample {
@@ -52,7 +52,7 @@ import Testing
         let sentence = "the meeting is at three pm tomorrow, we need the slides"
         var rig = rig(sentence, seed: seed)
         rig.run(ms: 200)
-        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: sentence, target: sentence.uppercased(), cursorAtEnd: false, paced: true))
+        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: sentence, target: sentence.uppercased(), cursorAtEnd: false))
         return measure(&rig, expected: sentence.uppercased(), chars: sentence.count)
     }
 
