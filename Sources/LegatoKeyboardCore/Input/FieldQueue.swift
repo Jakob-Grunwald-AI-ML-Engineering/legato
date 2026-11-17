@@ -115,8 +115,8 @@ public struct FieldQueue: Sendable {
         public var text: String
         /// What the scope shows now when known (nothing in flight).
         public var partial: String?
-        /// A run's drop: the part of its text that does not stand in the field (`missingText`), all the keyboard keeps.
-        /// Empty when the run's words, raw or cleaned, stand there. Nil for other drops.
+        /// A run's drop: the part of its text the field never got (`missingText`), all the keyboard keeps. Empty when
+        /// every word of it was typed, whatever became of it since. Nil for other drops.
         public var kept: String? = nil
     }
 
@@ -2125,23 +2125,16 @@ public struct FieldQueue: Sendable {
                                     text: whole, partial: nil, kept: missingText(of: run))))
     }
 
-    /// The part of a run's text that does not stand in the field, by the shadow: a piece whose region holds text stands
-    /// (raw, cleaned or edited: text in the field is not lost), an open piece is missing only the words not typed yet,
-    /// a piece behind a seam stands when its text is found in the shadow, and delivered words still to be typed are
-    /// missing. Kept text is only ever this part.
+    /// The part of a run's text the field never got, by the shadow: the open piece's words not typed yet (its region
+    /// shows the start of them, untouched) and delivered words no piece took. Text that was typed is never kept, whatever
+    /// became of it: cleaned (the raw words it replaced are superseded), edited or deleted by the user, or lost behind a
+    /// seam. When in doubt nothing is kept; History holds every take.
     private func missingText(of run: LiveRun) -> String {
         var missing: [String] = []
-        for piece in run.pieces {
-            let desired = desiredText(piece, in: run)
-            guard let span = spans[piece.spanID] else { missing.append(desired); continue }
-            if span.parked {
-                let known = span.lastText.isEmpty ? Array(desired) : span.lastText
-                if known.isEmpty || !String(text).contains(String(known)) { missing.append(desired) }
-                continue
-            }
-            let shown = String(chars(of: span))
-            if shown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { missing.append(desired) }
-            else if piece.tEnd == nil, desired.count > shown.count, desired.hasPrefix(shown) { missing.append(String(desired.dropFirst(shown.count))) }
+        if let piece = run.pieces.last(where: { $0.tEnd == nil }), let span = spans[piece.spanID],
+           !span.parked, !span.userChanged, !span.edited {
+            let desired = desiredText(piece, in: run), shown = String(chars(of: span))
+            if desired.count > shown.count, desired.hasPrefix(shown) { missing.append(String(desired.dropFirst(shown.count))) }
         }
         if let from = untypedRest(of: run) { missing.append(String(run.delivered[from...])) }
         return LiveSegment.joined(missing.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })

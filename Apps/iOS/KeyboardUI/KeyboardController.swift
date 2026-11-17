@@ -97,6 +97,8 @@ final class KeyboardController {
     /// A host can reuse documentIdentifier after Send. This identity belongs to one draft,
     /// and is invalidated by an observed external clear before any late cleanup can apply.
     @ObservationIgnored private var draftID = UUID().uuidString
+    /// A sent or cleared draft is being let go (`observeDraftBoundary`): nothing of it is kept.
+    @ObservationIgnored private var endingDraft = false
     @ObservationIgnored private var draftHadText = false
 
     @ObservationIgnored private var pumping = false
@@ -248,8 +250,9 @@ final class KeyboardController {
     /// Holds `text` the keyboard could not place and opens the row on it; it replaces the plain notice and any older item.
     private func keep(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        keptText = keptStore?.keep(trimmed) ?? KeptText(text: trimmed)
+        // A draft that was just sent or cleared keeps nothing: its message is gone, the take is in History.
+        guard !trimmed.isEmpty, !endingDraft else { return }
+        keptText = keptStore?.keep(trimmed, draftID: draftID) ?? KeptText(text: trimmed, draftID: draftID)
         keptRowOpen = true
         liveRecoveryNotice = nil
         syncRowTakeover()
@@ -657,6 +660,13 @@ final class KeyboardController {
         }
         guard cleared else { return }
         draftHadText = false
+        // The draft was sent or cleared: what was kept from it goes with it, and its runs' drops keep nothing.
+        let ended = draftID
+        endingDraft = true
+        defer {
+            endingDraft = false
+            if keptStore?.draftEnded(ended) ?? (keptText?.draftID == ended) { keptText = nil; keptRowOpen = false; syncRowTakeover() }
+        }
         draftID = UUID().uuidString
         fieldOperationCancelled = true
         if let id = activeInstructionID { link.cancelInstruction(id) }

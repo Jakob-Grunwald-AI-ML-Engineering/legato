@@ -74,4 +74,59 @@ import Testing
         untyped.queue.enqueue(snap(1, "nothing typed yet"))
         #expect(reset(&untyped)?.kept == "nothing typed yet")
     }
+
+    // MARK: #299 recheck: kept text offered words in the field, superseded raw words, and outlived its sent draft
+
+    /// A cleanup that removed a whole piece of the take (its raw "Um." before a line break the user typed) superseded it:
+    /// it is not missing (Safari textarea offered the corrected-away "cc Lina.").
+    @Test func rawWordsACleanupReplacedAreNeverKept() {
+        var rig = QueueRig(FakeField(""))
+        rig.queue.enqueue(snap(1, "Um."))
+        rig.drain()
+        rig.queue.enqueue(.insert("\n"))
+        rig.drain()
+        rig.queue.enqueue(snap(2, "Um. The plan is set."))
+        rig.drain()
+        #expect(rig.field.string == "Um.\nThe plan is set.")
+        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: "Um.\nThe plan is set.", target: "The plan is set.", cursorAtEnd: false))
+        rig.drain()
+        #expect(rig.field.string == "The plan is set.")
+        #expect(reset(&rig)?.kept ?? "" == "")
+    }
+
+    /// Text the shadow lost track of (a seam: the field changed in a way no op explains) was typed: in doubt, nothing is
+    /// kept (WhatsApp offered "…the room is booked until five." while that stood in the field).
+    @Test func typedTextBehindASeamIsNotKept() {
+        var field = FakeField("")
+        field.window = 20
+        var rig = QueueRig(field)
+        rig.queue.enqueue(snap(1, "I think the room is booked until five."))
+        rig.drain()
+        // Another keyboard types on: the take leaves the window and the model starts over from what it shows.
+        rig.field.typeOutside(" And then a long line nobody dictated.")
+        rig.run(ms: 1_000)
+        #expect(rig.field.string.hasPrefix("I think the room is booked until five."))
+        #expect(reset(&rig)?.kept ?? "" == "")
+    }
+
+    /// Words heard but never typed are the only kept text, also next to typed words that a cleanup changed since.
+    @Test func wordsNeverTypedAreKeptBesideCleanedOnes() {
+        var rig = QueueRig(FakeField(""))
+        rig.queue.enqueue(snap(1, "um the boat left"))
+        rig.drain()
+        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: "um the boat left", target: "The boat left", cursorAtEnd: false))
+        rig.drain()
+        rig.queue.enqueue(snap(2, "um the boat left early today"))
+        #expect(reset(&rig)?.kept == "early today")
+    }
+
+    /// The item belongs to its draft: sending or clearing that draft ends it; another draft's end does not.
+    @Test func sendingTheDraftEndsWhatWasKeptFromIt() {
+        let store = KeptTextStore(LinkStore(MemoryLinkStore()))
+        store.keep("five.", draftID: "a")
+        #expect(!store.draftEnded("b"))
+        #expect(store.read()?.text == "five.")
+        #expect(store.draftEnded("a"))
+        #expect(store.read() == nil)
+    }
 }
