@@ -119,6 +119,64 @@ Measured with the raw keyboard probe (`scripts/device/keyboard-probe.md`, write 
 
 Consequences for the edit model: no host needs a wait between a hop and the edit; the check after a chunk is a read prompted by the return move, because the keyboard's own writes produce no callback; a hop stays strictly within the visible window and is corrected by looking, since the unit differs per host and an overshoot can be silently dropped; a new document identity is not proof of a new field. The 65–120 character windows of 2026-11-08 no longer hold in these hosts. The contenteditable's slowest burst settled at 348 ms, inside the 400 ms deadline with little room.
 
+## Measured host behaviour (Mac VM, 2026-11-17)
+
+Measured with `scripts/device/mac-ax-probe.swift` (focused-field AX reads, notifications, writes and key bursts) and the app's own edit journal, in the Tart guest `legato-mac-uat` (macOS 26.6.2 (25G83), 4 CPUs, 6 GiB, idle, Accessibility granted). Hosts: TextEdit 1.20 (rich-text document), Safari 26.6.2 and Microsoft Edge 157.0.4341.60 in synthetic local pages (a `textarea`, a `contenteditable` div, a `contenteditable` holding `<ul><li>`, and a CodeMirror-shaped `contenteditable` with one `div.cm-line` per line, a proxy, not CodeMirror). The app was the current `main` (ceb5070), Debug, ad-hoc guest-only signature, offline stub cleaner. Times are milliseconds on the guest's own clock; VM numbers, not the host's. Raw runs stay private in `~/Library/Application Support/LegatoTestVM/artifacts/mac-probe-2026-11-17/`.
+
+| | TextEdit | Safari textarea | Safari contenteditable | Edge textarea | Edge contenteditable |
+|---|---|---|---|---|---|
+| `AXValue` read, median at 100 / 1k / 10k chars | 0.03 / 0.04 / 0.07 | 0.03 / 0.03 / 0.07 | 0.04 / 0.05 / 0.09 (10k: p90 0.76) | 0.04 / 0.06 / 0.07 | 0.04 / 0.05 / 0.09 |
+| `AXNumberOfCharacters`, `AXSelectedTextRange`, `AXStringForRange` (20 chars), medians at 10k | 0.03–0.04 | 0.03 | 0.05–0.21 (range p90 1.05) | 0.04–0.07 | 0.04–0.06 |
+| `AXStringForRange` of the whole text at 10k, median (p90, max) | 0.08 (0.10, 0.14) | 0.08 (0.12, 0.15) | 0.36 (5.9, **104**) | 0.06 (0.08, 0.11) | 0.09 (0.14, 0.38) |
+| Notifications after a user key (VNC key) | selection, then value (one pair per key, 2.6–14 ms apart) | 2 value, 1 selection, then a second selection ~100 ms later (same offsets) | not run | selection, then value 0.6 ms later; one pair per key | not run |
+| Notifications after a 31-stroke synthetic burst / after 120 strokes | 63 (a value and a selection per stroke, none coalesced) / not run | 72–75 / 254–257 | 103–107 / not run | **4** / **4–6** (coalesced into 2–3 bursts) | 6 / not run |
+| AX hunk write (20 chars mid-text): which setter takes it | `AXSelectedTextRange` then `AXSelectedText` | `AXSelectedTextRange` then `AXTextOperation` (markers) | same as textarea | **none**: `AXSelectedText` returns success, text never changes (6 of 6, 3 s polls); the selection range set does move the selection | same |
+| Hunk write call; value visible to a read after it returns | call 1.9–15 (median 3.3), 8 of 8 landed (1k and 10k); read right after shows it | call 0.9–2.2 (one 54), read right after shows it | same | – | – |
+| Notifications from the hunk write (from the write call's start) | 1 selection + 1 value, 3.8–18 ms, 0.1–0.3 ms apart | 2 value + 1 selection at 2.9–3.4 ms (the first run 59), one more stale selection ~100 ms later | 3 value + 1 selection, then one ~100 ms later | none | none |
+| `AXValue` whole-field replace (1k) | call 1.4, notified 4.3 (1 value + 1 selection) | call 0.1, but **visible only 9–18 ms later**; 3 value + 1 selection notifications | same (visible 7–25 ms later) | works (page text changes): call 0.1–0.4, visible 2–3, 1 value (first time + 1 selection) | works, same numbers |
+| Synthetic burst of 31 strokes (23 chars, 6 backspaces, 2 chars; one `post` call, no waits): posted in / first change visible / end state visible, after posting | 0.25 / 11–70 / 57–76; all landed in order | 0.3 / 6–9 / 98–136; in order | 0.3 / 6–7 / 94–188; in order | 0.3–2.0 / 32–45 / 37–53; in order | 0.3–0.7 / 7–19 / 34–45; in order |
+| Burst of 120 strokes (80 chars, 20 backspaces, 20 chars) | not run | 4–21 / 25–33 / 172–215; in order | not run | 8–26 / 81–85 / 86–102; in order | not run |
+| One live character through the app's queue (sent to verified, offline, 5 ms pace) | median 2.6, max 9 | median 9, max 20 | median 9, max 14 | median 20–26 (keyed), max 37 | median 19 (keyed), max 39; bulleted list 32, max 45 |
+
+### The user's key during a hunk (today's code)
+
+One 19-character delete in the middle of a 1,028-character field, a cleanup from the offline stub cleaner (one hunk, `sent` to `verified` in the app's edit journal; the native input lease's `lastUnitMs` agrees):
+
+| Host | Key hold (native AX path) | Edit to applied |
+|---|---|---|
+| TextEdit | 7.5, 8.0, 8.5 ms; a 4 and a 3 character hunk 5.3 and 5.4 ms | 8.8–9.9 ms |
+| Safari textarea | 12.3, 23.4 ms | 13.6, 25.1 ms |
+| Safari contenteditable | 19.3, 12.3 ms | 21.0, 17.3 ms |
+| Edge (keyed path; textarea, contenteditable, bulleted list) | **no hold**: the lease is not used (its `lastUnitMs` stayed at the last native run); a real key during the edit would refuse the write instead | **449–552 ms** for the caret move plus 19 verified backspaces, 11–35 ms each (median 18–29) |
+
+A hunk on the native path holds user keys for 8–23 ms, far under the 500 ms budget; a keyed field is exposed for about half a second per 19 characters because each key waits for its readback.
+
+### Chromium list editors (Edge)
+
+- The list's `AXValue` carries the bullet markers (`• first item\n• second item\n• \n`) and the AX offsets count them; Safari's value for the same markup has none (`first item\nsecond item\n\n`). A Markdown list typed as text (`- first item`) reads as written.
+- A unicode key for a line break (`\n`) is dropped by Edge (no new line); Safari inserts it.
+- `AXStringForRange` fails (`-25212`, no value) in the list proxies for the whole text and, in the `ul`, for a 20-character range in the middle (it worked for that range in the CodeMirror-shaped one); `AXValue` always worked.
+- The cleanup of a take at the end of the bulleted list landed through caret keys in 505 ms (one run, in my `ul` proxy, where the failure recorded for real lists did not show).
+- The CodeMirror-shaped proxy (an empty last `cm-line` is a placeholder break) reproduced the recorded failure twice out of two: the take's first key lands, the verification after it mismatches (`mismatch` at ~540 ms), recovery refuses (`changedOrAmbiguous`) and the take is dropped (`userChanged`), leaving two typed characters. The journal is `journal-edge-cm-1.jsonl` and `-2.jsonl`.
+- A hunk across list items in Safari (an AX `AXTextOperation` over two items) merged them: the value afterwards no longer equals the expected text (1 of 2 runs, the other hunk sat in one item).
+
+### What this means for the Mac shadow
+
+- AX reads are cheap and flat in length up to 10,000 characters (30–100 µs, one outlier of 104 ms for `AXStringForRange` of everything in Safari contenteditable); a whole-field read per step is not a cost problem in the VM. Polling the value at one read per millisecond is safe; the cost is the number of reads, not their size.
+- Value and selection notifications arrive in all three hosts, for user keys, synthetic keys and AX writes, within 1–15 ms. TextEdit and Safari send one or more per operation (several per write in Safari, with a stale selection ~100 ms late); Edge coalesces a burst into a few. A shadow cannot count notifications; it must read the value after the first notification of an operation and again after a short quiet period.
+- A hunk write on the native path is visible to the next read at once (TextEdit, Safari textarea and contenteditable via `AXTextOperation`) except an `AXValue` replace in Safari, which shows up 7–25 ms later.
+- Chromium ignores `AXSelectedText` and takes `AXValue` and the selection range: the keyed path is needed for hunks; a burst of keys lands in order and the value shows the end state 34–102 ms after posting (up to 120 strokes), so one check per chunk is enough. In a list editor the keys must not include a line-break key event.
+
+### Unmeasured
+
+- A real user key arriving while a hunk is written (the hold above is the app's own lease duration; no key was injected into it).
+- Real CodeMirror, a real list editor (a web app's) and Chrome: only synthetic pages and Edge. No Electron app.
+- Documents past 10,000 characters, long lines, and reads while the host is busy (typing, rendering); the figures are from an idle guest.
+- Whether an `AXValue` write in Chromium fires the page's `input` event or keeps the undo stack (the text did change on screen).
+- Notifications by their app-level registration were collected only for hunk writes (they match the element-level ones; registering both duplicates each).
+- Hunk writes at 10,000 characters in Safari and Edge (TextEdit 1k and 10k, Safari 1k).
+- How long a human key takes from keyboard to notification (VNC keys have an unmeasured transport delay).
+
 ## Limits and verification
 
 A keyboard extension cannot obtain the complete text or absolute caret position in every host. Structural boundaries, missing selection information, stale browser proxy windows and text typed by another keyboard can make an edit unverifiable. Such cases resync or drop with a specific status instead of writing at a guessed position.
