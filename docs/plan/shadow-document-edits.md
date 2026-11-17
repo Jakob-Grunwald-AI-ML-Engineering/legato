@@ -93,3 +93,17 @@ Dictation with cleanup should now feel immediate: a cleaned sentence replaces th
 - Not verified on the device: the aborted-delete recovery path (`c915d7f`), which is covered by tests built from a device journal.
 - Open in #298, lower priority: Safari autocorrect on a dictated word sends that Mac run to the pill; a stale Mac pill stays until dismissed; the Mac gets no automatic re-pass after an unplaceable cleanup; after a real Select All the dictated text starts with a space and a lowercase letter.
 - Jakob chose to land #298 first (2026-11-16). Build this on a new branch from `main`.
+
+## Round 4 (Jakob, 2026-11-17, after three device runs)
+
+Found on the phone:
+- Every hop chunk waited out the 400 ms deadline: the check counted one callback per move, but WhatsApp and Notes answer a burst with one callback (fixed in `a7f228b`).
+- Each sentence cleanup spent 0.3–2.7 s on reads between the app and the keyboard, on top of the model's ~0.7 s.
+- Sentence passes tidied correction cues ("Uh, no sorry, Wednesday"), so the final pass found nothing to correct.
+
+Decided:
+1. **Learn host behaviour per field**, with no host table: the unit of a move, the window size, the callback pattern (one per burst or one per stage) and the latency (a running estimate from op to callback). The deadline adapts per field, within bounds.
+2. **Appends never wait.** Speech at the caret goes out right behind a chunk, because hosts apply ops in order and one check covers both. A chunk with hops still waits for evidence before the next hop chunk, since relative hops compound errors (fully optimistic execution was rejected).
+3. **Cleanup starts from the shadow.** At a sentence end or at stop, the shadow text goes to the model without a read first. The keyboard checks the field against the shadow while the model works. A match applies at once; a difference is merged (`FieldMerge`) or the pass is requested again.
+4. **The pass at stop or in a long pause covers the whole take and gets its raw words**, so corrections across sentences are resolved. This is a deliberate cleanup-prompt change.
+5. Never show an empty or stale "Kept" chip.
