@@ -22,6 +22,11 @@ import LegatoKeyboardCore
     public var rawWords: @MainActor () -> String? = { nil }
     /// Why the last `clean` call gave nil (`timeout`, `failed`, `rejected`): set by the `clean` closure, for diagnostics.
     public var cleanFailure: String?
+    /// Sentences of this take the guard refused, kept as typed (the `clean` closure adds them). A later sentence pass that
+    /// would open with one (its overlap reaches back into it) starts after it, with it as context: sent again it is refused
+    /// again and splits the pass into several calls (device run 4: 4–6 s per pass instead of under 1 s). The pass at the
+    /// stop or in a long pause still covers it.
+    public var refusedSentences: Set<String> = []
     public var onResult: @MainActor (String, String, CleanupFieldStatus) async -> Void = { _, _, _ in }
     public var diagnostics: (@MainActor (String, [String: Any]) -> Void)?
     private var task: Task<Void, Never>?
@@ -46,7 +51,7 @@ import LegatoKeyboardCore
         task?.cancel(); task = nil
         if let requestID { field?.cancel(instructionID: requestID) }
         requestID = nil; requested = false; finalRequested = false; sentenceRequested = false; wholeRequested = false
-        lastRead = ""; lastWholeRead = ""; coverage = .init()
+        lastRead = ""; lastWholeRead = ""; coverage = .init(); refusedSentences = []
         pendingText = ""; repassing = false; lastApplied = false
     }
 
@@ -178,6 +183,7 @@ import LegatoKeyboardCore
                         log("noSentence"); return
                     }
                     end = finished
+                    start = FieldCleanupChunks.skipping(refusedSentences, from: start, before: end, in: source)
                 }
             }
             let passage = String(source[start..<end])

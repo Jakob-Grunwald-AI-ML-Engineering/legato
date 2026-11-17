@@ -729,6 +729,30 @@ private final class FieldCleaner: SentenceCleaning {
         #expect(lines.last?["why"] as? String == "cleanAsTyped")
     }
 
+    /// Device run 4: the guard refused the sentence with a German "um" before a time, and every later sentence pass sent it
+    /// again (its overlap reaches back into it), was refused again and split into several calls: 4–6 s a pass. A refused
+    /// sentence that would open a sentence pass stands before it as context instead.
+    @Test func aSentenceTheGuardRefusedIsNotSentAgainAtTheNextPassesStart() async {
+        let refused = "We meet at the Bahnhof so um sechs Uhr and then walk over together."
+        let field = CleanupField("The review moved to Wednesday. " + refused)
+        let session = shadowed(field)
+        var calls: [(passage: String, before: String)] = []
+        session.clean = { [weak session] passage, _, before, _ in
+            calls.append((passage, before))
+            // The guard refuses the "um" sentence: it stays as typed (the pipeline's split reports it).
+            if passage.contains("um sechs") { session?.refusedSentences.insert(refused) }
+            return passage
+        }
+        session.request(sentence: true)
+        await session.settle()
+        field.text += " Please send the draft to Anna, cc Lina. Actually, no, cc Tom."; field.cursor = field.text.count
+        session.request(sentence: true)
+        await session.settle()
+        #expect(calls.count == 2)
+        #expect(calls.last?.passage == "Please send the draft to Anna, cc Lina. Actually, no, cc Tom.")
+        #expect(calls.last?.before == "The review moved to Wednesday. " + refused + " ")
+    }
+
     /// A long pause runs the whole-take pass too, once per change of the take.
     @Test func aLongPausesWholePassRunsOncePerChange() async {
         let field = CleanupField("The review is moved to Tuesday. Wednesday.")

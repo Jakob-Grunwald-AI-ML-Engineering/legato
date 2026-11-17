@@ -108,12 +108,14 @@ public enum FieldCleanupChunks {
     /// A text whose cleanup the guard rejected is cleaned again in two halves split at a sentence end, each on its own,
     /// down to single sentences; a sentence the guard still rejects stays as it was. So one refused sentence (a German
     /// "um" before a time, say) keeps only itself raw, not the whole take. `.cleaned` when at least one part was
-    /// cleaned; otherwise the first answer's failure. `calls` counts the cleanup calls made. Each call gets the text that
-    /// stands before its part as context (`before`, then the left half as cleaned), so a half never reads as a new text.
+    /// cleaned; otherwise the first answer's failure. `calls` counts the cleanup calls made; `refused` holds the sentences
+    /// kept as they were (trimmed). Each call gets the text that stands before its part as context (`before`, then the
+    /// left half as cleaned), so a half never reads as a new text.
     @MainActor public static func cleanSplitting(_ source: String, before: String = "",
                                                  using clean: (_ text: String, _ before: String) async -> Attempt)
-        async -> (result: Attempt, calls: Int, keptRaw: Int) {
+        async -> (result: Attempt, calls: Int, keptRaw: Int, refused: [String]) {
         var calls = 0, keptRaw = 0
+        var refused: [String] = []
         func halves(_ text: String, before: String, cut: String.Index) async -> (text: String, cleaned: Bool)? {
             let left = String(text[..<cut]), right = String(text[cut...])
             guard let a = await part(left, before: before) else { return nil }
@@ -127,15 +129,32 @@ public enum FieldCleanupChunks {
             case .cleaned(let result): return (result, true)
             case .failed: return nil
             case .rejected:
-                guard !Task.isCancelled, let cut = sentenceCut(in: text) else { keptRaw += 1; return (text, false) }
+                guard !Task.isCancelled, let cut = sentenceCut(in: text) else {
+                    keptRaw += 1; refused.append(text.trimmingCharacters(in: .whitespacesAndNewlines))
+                    return (text, false)
+                }
                 return await halves(text, before: before, cut: cut)
             }
         }
         calls += 1
         let first = await clean(source, before)
-        guard case .rejected = first, let cut = sentenceCut(in: source) else { return (first, calls, 0) }
-        guard let split = await halves(source, before: before, cut: cut), split.cleaned else { return (.rejected, calls, keptRaw) }
-        return (.cleaned(split.text), calls, keptRaw)
+        guard case .rejected = first else { return (first, calls, 0, []) }
+        guard let cut = sentenceCut(in: source) else { return (first, calls, 0, [source.trimmingCharacters(in: .whitespacesAndNewlines)]) }
+        guard let split = await halves(source, before: before, cut: cut), split.cleaned else { return (.rejected, calls, keptRaw, refused) }
+        return (.cleaned(split.text), calls, keptRaw, refused)
+    }
+
+    /// Where a passage starting at `start` begins once the sentences in `skipped` that open it are left out (they stand
+    /// before it as context then). Never past the last letter or digit before `end`: something is left to clean.
+    public static func skipping(_ skipped: Set<String>, from start: String.Index, before end: String.Index, in text: String) -> String.Index {
+        var start = start
+        while let sentence = skipped.first(where: { !$0.isEmpty && text[start..<end].hasPrefix($0) }) {
+            var next = text.index(start, offsetBy: sentence.count)
+            while next < end, text[next].isWhitespace { next = text.index(after: next) }
+            guard text[next..<end].contains(where: { $0.isLetter || $0.isNumber }) else { break }
+            start = next
+        }
+        return start
     }
 
     /// Where the sentence holding `index` starts in `text`: after the last sentence end (".", "!" or "?" and a space) or

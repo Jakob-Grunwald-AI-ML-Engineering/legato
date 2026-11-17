@@ -226,6 +226,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             let clean: @MainActor (String, String) async -> String? = { [weak cleanup] part, context in
                 calls = 0
                 let split = await FieldCleanupChunks.cleanSplitting(part, before: context, using: attempt)
+                cleanup?.refusedSentences.formUnion(split.refused)
                 if split.calls > 1 || split.keptRaw > 0 {
                     self.diagnostics?("field.cleanup.split", ["calls": split.calls, "keptRaw": split.keptRaw,
                                                               "landed": { if case .cleaned = split.result { true } else { false } }()])
