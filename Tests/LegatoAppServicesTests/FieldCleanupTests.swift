@@ -711,6 +711,24 @@ private final class FieldCleaner: SentenceCleaning {
         #expect(calls.last?.whole == false && calls.last?.raw == nil)
     }
 
+    /// Device run 4 (Notes, 2026-11-17): the whole-take pass ran to the end of the shadow, whose text after the caret was
+    /// the field's ". " in front of the next sentence. The model trims its answer, so the edit took the space out and
+    /// glued that sentence on (". I think" became ".I think"). The passage's own leading and trailing whitespace stays.
+    @Test func theWholePassKeepsThePassagesTrailingSeparator() async {
+        let field = CleanupField("Done by late afternoon. Then it is coffee and cake on the terrace. ")
+        field.cursor = "Done by late afternoon. Then it is coffee and cake on the terrace".count
+        let session = shadowed(field, takeStart: "Done by late afternoon. ".count)
+        session.rawWords = { "then it is coffee and cake on the terrace" }
+        session.clean = { passage, _, _, _ in passage.trimmingCharacters(in: .whitespacesAndNewlines) }
+        var lines: [[String: Any]] = []
+        session.diagnostics = { event, fields in if event == "field.cleanup" { lines.append(fields) } }
+        session.request(final: true)
+        await session.settle()
+        #expect(field.text == "Done by late afternoon. Then it is coffee and cake on the terrace. ")
+        #expect(field.edits.isEmpty, "nothing to change")
+        #expect(lines.last?["why"] as? String == "cleanAsTyped")
+    }
+
     /// A long pause runs the whole-take pass too, once per change of the take.
     @Test func aLongPausesWholePassRunsOncePerChange() async {
         let field = CleanupField("The review is moved to Tuesday. Wednesday.")

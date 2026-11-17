@@ -194,7 +194,9 @@ import LegatoKeyboardCore
             guard token == generation, !Task.isCancelled else { return }
             let counts: [String: Any] = ["modelMs": modelMs, "words": words, "sourceChars": source.count, "shadow": shadowed,
                                          "rawWords": raw.map { FieldCleanupChunks.wordStarts(in: $0).count } ?? 0]
-            guard let cleaned = cleaned.map({ FieldCleanupChunks.keepingLineBreaks(of: passage, in: $0) }) else {
+            // A provider trims its answer: the passage's own leading and trailing whitespace stays (a whole pass runs to
+            // the shadow's end, where the space in front of the next sentence would be lost).
+            guard let cleaned = cleaned.map({ FieldCleanupChunks.keepingSeparators(of: passage, around: FieldCleanupChunks.keepingLineBreaks(of: passage, in: $0)) }) else {
                 log("modelFailed", counts.merging(["reason": cleanFailure ?? "failed"]) { _, new in new })
                 await onResult(source, baseline, pending.isEmpty ? .keptAsTyped : .undelivered)
                 return
