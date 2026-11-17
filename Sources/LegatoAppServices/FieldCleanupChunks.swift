@@ -168,6 +168,17 @@ public enum FieldCleanupChunks {
 
     private static func endsSentence(_ c: Character) -> Bool { ".!?".contains(c) }
 
+    /// The line breaks in the field are the user's or the field's (an Enter between dictated words, a list): a result that
+    /// lost one gets it back where it stood, with the rest of its changes (those touching the words at the break drop).
+    /// Breaks the result adds ("new paragraph") stay.
+    public static func keepingLineBreaks(of passage: String, in cleaned: String) -> String {
+        let breaks = passage.filter(\.isNewline).count
+        guard breaks > 0, cleaned.filter(\.isNewline).count < breaks else { return cleaned }
+        // Against the passage with its breaks as spaces, the breaks are the field's own change: it wins.
+        let base = Array(passage.map { $0.isNewline ? " " : $0 })
+        return String(FieldMerge.rebase(base: base, kept: Array(passage), incoming: Array(cleaned)).text)
+    }
+
     /// The sentence end nearest the middle of `text` (after its punctuation and the space that follows), nil for one
     /// sentence. The cut lies at the start of the space, so each half keeps its own separators.
     static func sentenceCut(in text: String) -> String.Index? {

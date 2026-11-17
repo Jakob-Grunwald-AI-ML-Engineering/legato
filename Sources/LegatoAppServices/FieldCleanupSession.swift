@@ -140,7 +140,7 @@ import LegatoKeyboardCore
             let cleaned = await clean(passage, final, String(source[..<start]))
             let modelMs = Self.ms(since: modelStarted)
             guard token == generation, !Task.isCancelled else { return }
-            guard let cleaned else {
+            guard let cleaned = cleaned.map({ FieldCleanupChunks.keepingLineBreaks(of: passage, in: $0) }) else {
                 log("modelFailed", ["reason": cleanFailure ?? "failed", "modelMs": modelMs, "words": words, "sourceChars": source.count])
                 await onResult(source, baseline, pending.isEmpty ? .keptAsTyped : .undelivered)
                 return

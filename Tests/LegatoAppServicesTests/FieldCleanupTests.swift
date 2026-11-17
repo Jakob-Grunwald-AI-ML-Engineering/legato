@@ -362,6 +362,16 @@ private final class FieldCleaner: SentenceCleaning {
         #expect(field.text == "The review is moved to Wednesday.")
     }
 
+    /// An Enter the user pressed while speaking stands between dictated words; a cleanup that joined the lines (WhatsApp,
+    /// #299 recheck: "to⏎Anna," became "to Anna,") gets the break back, and its other changes still land.
+    @Test func aLineBreakInTheFieldSurvivesACleanupThatJoinedTheLines() {
+        let passage = "Please send the draft to\nAnna, cc Lina. um and bring the slides."
+        let cleaned = "Please send the draft to Anna, cc Lina. And bring the slides."
+        #expect(FieldCleanupChunks.keepingLineBreaks(of: passage, in: cleaned) == "Please send the draft to\nAnna, cc Lina. And bring the slides.")
+        // A break the result adds stays; no break in the passage, nothing to keep.
+        #expect(FieldCleanupChunks.keepingLineBreaks(of: "a. b.", in: "A.\n\nB.") == "A.\n\nB.")
+    }
+
     /// A passage cleaned in halves after a rejection gives each half what stands before it, so the second half is never
     /// read as a text of its own.
     @Test func aSplitPassagesSecondHalfHasTheFirstAsContext() async {
