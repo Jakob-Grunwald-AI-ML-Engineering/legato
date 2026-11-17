@@ -62,6 +62,8 @@ public enum EditJournal {
         public var user: Bool?
         public var snapshot: LiveDictationSnapshot?
         public var report: FieldQueue.Report?
+        /// True for a host callback, false for a proxy read. Older journals leave it unset.
+        public var callback: Bool?
         /// `send`, `wait` or `idle` for a step.
         public var action: String?
         public var op: Op?

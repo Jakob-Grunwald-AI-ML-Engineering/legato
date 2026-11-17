@@ -30,6 +30,43 @@ import Testing
         #expect(rig.applied.count == 1 && rig.drops.isEmpty)
     }
 
+    @Test(arguments: [false, true]) func cleanupConfirmsItsDeleteBeforeReturningToTheCaret(callback: Bool) throws {
+        let source = "We should load the crate, you know, after lunch."
+        let target = "We should load the crate, after lunch."
+        let trailer = "after lunch."
+        let changedHead = String(target.dropLast(trailer.count))
+        let oldHead = String(source.dropLast(trailer.count))
+        var rig = QueueRig(FakeField(""), config: .init(prioritizeSpeech: true))
+        rig.queue.enqueue(snap(1, source, complete: true))
+        let delivered = rig.drain()
+        try #require(delivered)
+        rig.queue.markRead("shadow", mergingUser: true)
+        rig.queue.enqueue(.init(kind: .magic, before: source, target: target, cursorAtEnd: false, readID: "shadow"))
+
+        let jump = rig.queue.step(report: .init(before: source), elapsedMs: 0)
+        try #require(jump == .send(.move(-trailer.count)))
+        let oldSite = FieldQueue.Report(before: oldHead, after: trailer)
+        let delete = rig.queue.step(report: oldSite, elapsedMs: 0, callback: false)
+        try #require(delete == .send(.deleteBackward(oldHead.count - changedHead.count)))
+
+        let newSite = FieldQueue.Report(before: changedHead, after: trailer)
+        let optimisticEcho = rig.queue.step(report: newSite, elapsedMs: 0, callback: false)
+        let staleCallback = rig.queue.step(report: oldSite, elapsedMs: 90, callback: true)
+        let confirmed = rig.queue.step(report: newSite,
+                                       elapsedMs: callback ? 40 : FieldEditCoordinator.inputResponseTargetMs - 90,
+                                       callback: callback)
+        #expect(optimisticEcho == .wait)
+        #expect(staleCallback == .wait)
+        try #require(confirmed == .send(.move(trailer.count)))
+
+        rig.field = FakeField(target)
+        let settled = rig.drain()
+        #expect(settled)
+        #expect(rig.field.string == target)
+        #expect(rig.queue.modelText == target)
+        #expect(rig.drops.isEmpty)
+    }
+
     // MARK: #299 recheck (2026-11-17, `uat-299-recheck`, synthetic text)
 
     /// Right after a move the proxy's own view shows nothing on the side the caret moved toward (WhatsApp journal at
