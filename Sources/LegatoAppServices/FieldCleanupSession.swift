@@ -10,7 +10,9 @@ import LegatoKeyboardCore
     public var canApply: @MainActor () -> Bool = { true }
     /// Cross-process speech delivery must settle before either scope read. This wait owns no field lease.
     public var awaitDelivery: @MainActor () async -> Bool = { true }
-    public var clean: @MainActor (String, Bool) async -> String? = { _, _ in nil }
+    /// The passage to clean, whether it is the stop's final pass, and the text that stands before it in the field (context
+    /// only: the cleaner continues it, never repeats or edits it).
+    public var clean: @MainActor (_ passage: String, _ final: Bool, _ before: String) async -> String? = { _, _, _ in nil }
     /// Why the last `clean` call gave nil (`timeout`, `failed`, `rejected`): set by the `clean` closure, for diagnostics.
     public var cleanFailure: String?
     public var onResult: @MainActor (String, String, CleanupFieldStatus) async -> Void = { _, _, _ in }
@@ -52,7 +54,8 @@ import LegatoKeyboardCore
             while requested, !Task.isCancelled, token == generation {
                 // A pause pass starts in a pause; a sentence's pass starts at once (only its result waits for a gap).
                 guard canApply() || sentenceRequested else { break }
-                let final = finalRequested, sentence = sentenceRequested
+                // The stop's pass covers the sentence's too.
+                let final = finalRequested, sentence = sentenceRequested && !finalRequested
                 let pending = self.pendingText
                 self.pendingText = ""
                 let repass = repassing
@@ -114,14 +117,27 @@ import LegatoKeyboardCore
             guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   final || source != lastRead else { log("unchanged"); return }
             let complete = reply.stop == .start && reply.stopBelow == .start
-            let start = final ? source.startIndex : coverage.start(in: source, documentID: reply.documentID, complete: complete)
-            let passage = String(source[start...])
+            let uncovered = final ? source.startIndex : coverage.start(in: source, documentID: reply.documentID, complete: complete)
+            var start = uncovered, end = source.endIndex
+            if sentence {
+                // A sentence's pass cleans whole sentences: from the start of the one the uncovered text begins in (so the
+                // sentence before is in it when the overlap reaches back) to the end of the last finished one. The words
+                // after it are the next sentence, still being said: they are neither sent nor edited.
+                start = FieldCleanupChunks.sentenceStart(of: uncovered, in: source)
+                // Only a sentence that ends past what is cleaned already makes a pass.
+                let cleanedEnd = coverage.end(in: source, documentID: reply.documentID, complete: complete) ?? uncovered
+                guard let finished = FieldCleanupChunks.finishedSentencesEnd(in: source, after: max(uncovered, cleanedEnd)) else {
+                    log("noSentence"); return
+                }
+                end = finished
+            }
+            let passage = String(source[start..<end])
             let words = FieldCleanupChunks.wordStarts(in: passage).count
             guard final || sentence || words >= FieldCleanupChunks.words else { log("short", ["words": words]); return }
             lastRead = source
             cleanFailure = nil
             let modelStarted = ContinuousClock.now
-            let cleaned = await clean(passage, final)
+            let cleaned = await clean(passage, final, String(source[..<start]))
             let modelMs = Self.ms(since: modelStarted)
             guard token == generation, !Task.isCancelled else { return }
             guard let cleaned else {
@@ -129,7 +145,9 @@ import LegatoKeyboardCore
                 await onResult(source, baseline, pending.isEmpty ? .keptAsTyped : .undelivered)
                 return
             }
-            let target = String(source[..<start]) + cleaned
+            // What the passage covers once cleaned (coverage ends there), and the field's text with it.
+            let covered = String(source[..<start]) + cleaned
+            let target = covered + source[end...]
             // A provider may finish after speech resumes. Keep its result until a pause, but never
             // hold up the incoming words or apply against a different read after a reset.
             let waitStarted = ContinuousClock.now
@@ -166,8 +184,10 @@ import LegatoKeyboardCore
             let merged = String(merge.text)
             if current == merged {
                 lastApplied = pending.isEmpty
-                if pending.isEmpty { coverage.confirm(proposed: target, actual: current, documentID: fresh.documentID, complete: whole) }
-                log("noChange", ["modelMs": modelMs, "gapMs": gapMs, "mergeDropped": merge.dropped])
+                if pending.isEmpty { coverage.confirm(proposed: covered, actual: current, documentID: fresh.documentID, complete: whole) }
+                // Nothing to change, or every change touched words changed since the read (the user's, or speech).
+                log("noChange", ["modelMs": modelMs, "gapMs": gapMs, "mergeDropped": merge.dropped,
+                                 "why": target == source ? "cleanAsTyped" : merge.dropped > 0 ? "touchedChangedWords" : "alreadyThere"])
                 await onResult(source, current, pending.isEmpty ? .keptAsTyped : .undelivered)
                 return
             }
@@ -176,7 +196,7 @@ import LegatoKeyboardCore
             let ack = await field.apply(edit)
             guard token == generation else { return }
             lastApplied = ack?.applied == true
-            if ack?.applied == true { coverage.confirm(proposed: target, actual: merged, documentID: fresh.documentID, complete: whole) }
+            if ack?.applied == true { coverage.confirm(proposed: covered, actual: merged, documentID: fresh.documentID, complete: whole) }
             if ack?.unplaceable == true, ack?.applied != true, !repass, pending.isEmpty {
                 // The field may hold part of this edit: the same text read again is still to be cleaned.
                 lastRead = ""; requested = true; finalRequested = finalRequested || final; repassing = true
@@ -184,9 +204,14 @@ import LegatoKeyboardCore
             }
             let status: CleanupFieldStatus = ack?.applied == true ? (target == source ? .keptAsTyped : .cleaned) : ack?.stopped == true || ack == nil ? .undelivered : .keptAsTyped
             await onResult(source, ack?.applied == true ? merged : ack?.partial ?? current, status)
-            log(status.rawValue, ["sourceChars": source.count, "targetChars": target.count, "unplaceable": ack?.unplaceable == true,
-                                  "applied": ack?.applied == true, "modelMs": modelMs, "gapMs": gapMs, "mergeDropped": merge.dropped,
-                                  "moved": current != baseline])
+            var fields: [String: Any] = ["sourceChars": source.count, "targetChars": target.count, "unplaceable": ack?.unplaceable == true,
+                                         "applied": ack?.applied == true, "modelMs": modelMs, "gapMs": gapMs, "mergeDropped": merge.dropped,
+                                         "moved": current != baseline]
+            // Why the field did not take it: no answer, the place was not found again, it stopped partway, or refused.
+            if ack?.applied != true {
+                fields["why"] = ack == nil ? "noAck" : ack?.unplaceable == true ? "unplaceable" : ack?.stopped == true ? "stopped" : "refused"
+            }
+            log(status.rawValue, fields)
         } catch {
             guard token == generation, !Task.isCancelled else { return }
             log("readFailed")

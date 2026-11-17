@@ -189,7 +189,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             guard let self else { return false }
             return self.mode != .live || self.liveRun?.complete == true || (self.cleanupDuringPauses && !self.voiceActive)
         }
-        cleanup.clean = { [weak self] text, final in
+        cleanup.clean = { [weak self] text, final, before in
             guard let self else { return nil }
             var client: any SentenceCleaning = self.cleaner
             #if DEBUG || LEGATO_INTERNAL
@@ -199,9 +199,10 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             let cleaner = DictationTakeCleaner(cleaner: client, timeout: self.takeTimeout ?? { DictationTakeLimits.timeout(characters: $0) })
             let terms = Array(await self.loadTerms().prefix(200))
             var calls = 0
-            let attempt: @MainActor (String) async -> FieldCleanupChunks.Attempt = { part in
+            let attempt: @MainActor (String, String) async -> FieldCleanupChunks.Attempt = { part, context in
                 // The whole text gets the retry; its halves after a rejection one call each.
-                let result = await cleaner.clean(.init(takeID: UUID().uuidString, text: part, vocabulary: terms, fieldDocument: true),
+                let result = await cleaner.clean(.init(takeID: UUID().uuidString, text: part, vocabulary: terms,
+                                                       textBeforeCursor: context, fieldDocument: true),
                                                  attempts: calls == 0 ? 2 : 1)
                 calls += 1
                 switch result {
@@ -211,9 +212,9 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
                 }
             }
             // A guard rejection concerns part of the text: that part stays as typed, the rest is cleaned.
-            let clean: @MainActor (String) async -> String? = { [weak cleanup] part in
+            let clean: @MainActor (String, String) async -> String? = { [weak cleanup] part, context in
                 calls = 0
-                let split = await FieldCleanupChunks.cleanSplitting(part, using: attempt)
+                let split = await FieldCleanupChunks.cleanSplitting(part, before: context, using: attempt)
                 if split.calls > 1 || split.keptRaw > 0 {
                     self.diagnostics?("field.cleanup.split", ["calls": split.calls, "keptRaw": split.keptRaw,
                                                               "landed": { if case .cleaned = split.result { true } else { false } }()])
@@ -224,7 +225,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
                 case .failed(let reason): cleanup?.cleanFailure = reason; return nil
                 }
             }
-            return final ? await clean(text) : await FieldCleanupChunks.clean(text, using: clean)
+            return final ? await clean(text, before) : await FieldCleanupChunks.clean(text, before: before, using: clean)
         }
         cleanup.onResult = { [weak self] source, confirmed, status in
             guard let self else { return }

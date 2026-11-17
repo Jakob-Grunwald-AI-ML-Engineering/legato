@@ -49,7 +49,7 @@ private final class FieldCleaner: SentenceCleaning {
     @Test func identityChunksPreserveEveryCharacterAndOverlapDoesNotDuplicateWords() async {
         let source = "  - " + (0..<137).map { "word\($0)" }.joined(separator: " \n") + "\n"
         var inputs: [String] = []
-        let output = await FieldCleanupChunks.clean(source) { input in inputs.append(input); return input }
+        let output = await FieldCleanupChunks.clean(source) { input, _ in inputs.append(input); return input }
         #expect(output == source)
         #expect(inputs.count == 3)
         #expect(inputs[1].contains("word59"))
@@ -58,7 +58,7 @@ private final class FieldCleaner: SentenceCleaning {
     @Test func overlappingResultReplacesEarlierWordsWithoutDuplicatingThem() async {
         let source = (0..<100).map { "word\($0)" }.joined(separator: " ")
         var call = 0
-        let output = await FieldCleanupChunks.clean(source) { input in
+        let output = await FieldCleanupChunks.clean(source) { input, _ in
             call += 1
             return call == 2 ? input.replacingOccurrences(of: "word55", with: "corrected55") : input
         }
@@ -72,7 +72,7 @@ private final class FieldCleaner: SentenceCleaning {
         let session = FieldCleanupSession()
         session.field = field
         var inputs: [String] = []
-        session.clean = { input, _ in
+        session.clean = { input, _, _ in
             inputs.append(input)
             if inputs.count == 1 {
                 field.text = "Heading\n" + first + " " + added
@@ -96,7 +96,7 @@ private final class FieldCleaner: SentenceCleaning {
         let field = CleanupField("teh red boat sails")
         let session = FieldCleanupSession()
         session.field = field
-        session.clean = { text, _ in
+        session.clean = { text, _, _ in
             field.text = "teh blue boat sails"; field.cursor = field.text.count
             return "the red boat sails."
         }
@@ -111,7 +111,7 @@ private final class FieldCleaner: SentenceCleaning {
         let session = FieldCleanupSession()
         session.field = field
         var status: CleanupFieldStatus?
-        session.clean = { _, _ in field.text = ""; field.cursor = 0; return "the boat." }
+        session.clean = { _, _, _ in field.text = ""; field.cursor = 0; return "the boat." }
         session.onResult = { _, _, result in status = result }
         session.request(final: true)
         await session.settle()
@@ -126,7 +126,7 @@ private final class FieldCleaner: SentenceCleaning {
         field.draftID = "sent-draft"
         let session = FieldCleanupSession()
         session.field = field
-        session.clean = { _, _ in
+        session.clean = { _, _, _ in
             // Even identical text may be a new message after Send.
             field.draftID = "next-draft"
             return "the boat."
@@ -143,7 +143,7 @@ private final class FieldCleaner: SentenceCleaning {
         field.draftID = "first"
         let session = FieldCleanupSession()
         session.field = field
-        session.clean = { _, _ in "the boat." }
+        session.clean = { _, _, _ in "the boat." }
         field.beforeApply = { field.draftID = "next" }
         session.request(final: true)
         await session.settle()
@@ -157,7 +157,7 @@ private final class FieldCleaner: SentenceCleaning {
         let session = FieldCleanupSession()
         session.field = field
         var results = 0
-        session.clean = { _, _ in session.reset(); return "the boat" }
+        session.clean = { _, _, _ in session.reset(); return "the boat" }
         session.onResult = { _, _, _ in results += 1 }
         session.request(final: true)
         await session.settle()
@@ -272,7 +272,7 @@ private final class FieldCleaner: SentenceCleaning {
         var status: CleanupFieldStatus?
         session.diagnostics = { _, fields in events.append(fields) }
         session.onResult = { _, _, result in status = result }
-        session.clean = { _, _ in session.cleanFailure = "rejected"; return nil }
+        session.clean = { _, _, _ in session.cleanFailure = "rejected"; return nil }
         session.request(final: true)
         await session.settle()
         #expect(status == .keptAsTyped)
@@ -281,10 +281,121 @@ private final class FieldCleaner: SentenceCleaning {
         #expect(field.edits.isEmpty)
     }
 
+    // MARK: A sentence's pass (#299 recheck: "We meet At the", "and Then walk over")
+
+    /// The pass for a sentence that just ended cleans whole sentences only: its passage starts where the sentence the
+    /// uncovered text begins in starts (never inside a sentence, which a model capitalises) and ends with the last
+    /// finished sentence. The words after it, a sentence still being said, are neither sent nor edited.
+    @Test func aSentencePassEditsNoWordBeyondTheFinishedSentence() async {
+        let field = CleanupField("The review is moved to Wednesday. We meet at the Bahnhof so um sechs Uhr. and then walk")
+        field.complete = false
+        let session = FieldCleanupSession()
+        session.field = field
+        var calls: [(passage: String, before: String)] = []
+        session.clean = { passage, _, before in
+            calls.append((passage, before))
+            // A model that capitalises whatever it is given first, and punctuates.
+            return passage.prefix(1).uppercased() + passage.dropFirst().replacingOccurrences(of: "Bahnhof so", with: "Bahnhof, so")
+        }
+        session.request(sentence: true)
+        await session.settle()
+        #expect(calls.map(\.passage) == ["The review is moved to Wednesday. We meet at the Bahnhof so um sechs Uhr."])
+        #expect(field.text == "The review is moved to Wednesday. We meet at the Bahnhof, so um sechs Uhr. and then walk",
+                "the unfinished sentence after it stays as typed")
+    }
+
+    /// Once part of the field is covered, the next sentence's passage goes back to the start of the sentence its uncovered
+    /// words begin in, with the text before it as context: never from the middle of a sentence.
+    @Test func aLaterSentencePassStartsAtASentenceStartWithTheTextBeforeAsContext() async {
+        let first = "The review is moved to Wednesday and we meet at the station near the old harbour at six in the evening."
+        let field = CleanupField(first)
+        field.complete = false
+        let session = FieldCleanupSession()
+        session.field = field
+        var calls: [(passage: String, before: String)] = []
+        session.clean = { passage, _, before in
+            calls.append((passage, before))
+            return passage.prefix(1).uppercased() + passage.dropFirst()
+        }
+        session.request(sentence: true)
+        await session.settle()
+        field.text = first + " Then we walk over together."
+        field.cursor = field.text.count
+        session.request(sentence: true)
+        await session.settle()
+        #expect(calls.count == 2)
+        // The overlap reaches back into the first sentence: the passage holds that whole sentence.
+        #expect(calls.last?.passage == field.text)
+        #expect(field.text == first + " Then we walk over together.", "nothing in the middle of a sentence was capitalised")
+        // A pass with no finished sentence after what is covered sends nothing and says so.
+        var events: [[String: Any]] = []
+        session.diagnostics = { _, fields in events.append(fields) }
+        field.text += " and then"
+        field.cursor = field.text.count
+        session.request(sentence: true)
+        await session.settle()
+        #expect(calls.count == 2)
+        #expect(events.last?["status"] as? String == "noSentence")
+    }
+
+    /// The stop's pass settles the whole take: after sentence passes covered part of a bounded read, it still sends all of
+    /// it, so a correction spanning two sentences ("Tuesday." … "Uh, no sorry, Wednesday.") can be applied.
+    @Test func theFinalPassCleansTheWholeTakeAfterSentencePasses() async {
+        let field = CleanupField("The review is moved to Tuesday. Uh, no sorry, Wednesday.")
+        field.complete = false
+        let session = FieldCleanupSession()
+        session.field = field
+        var calls: [(passage: String, final: Bool)] = []
+        session.clean = { passage, final, _ in
+            calls.append((passage, final))
+            return final ? "The review is moved to Wednesday." : passage
+        }
+        session.request(sentence: true)
+        await session.settle()
+        field.text += " We meet at six."
+        field.cursor = field.text.count
+        session.request(sentence: true)
+        session.request(final: true)
+        await session.settle()
+        #expect(calls.last?.final == true)
+        #expect(calls.last?.passage == "The review is moved to Tuesday. Uh, no sorry, Wednesday. We meet at six.")
+        #expect(field.text == "The review is moved to Wednesday.")
+    }
+
+    /// A passage cleaned in halves after a rejection gives each half what stands before it, so the second half is never
+    /// read as a text of its own.
+    @Test func aSplitPassagesSecondHalfHasTheFirstAsContext() async {
+        let source = "Um, the review moved to Tuesday. We meet so um sechs Uhr there."
+        var calls: [(String, String)] = []
+        _ = await FieldCleanupChunks.cleanSplitting(source, before: "Hi Anna. ") { text, before in
+            calls.append((text, before))
+            if calls.count == 1 { return .rejected }
+            return .cleaned(text.replacingOccurrences(of: "Um, t", with: "T"))
+        }
+        #expect(calls.count == 3)
+        #expect(calls[1].1 == "Hi Anna. ")
+        #expect(calls[2].1 == "Hi Anna. The review moved to Tuesday.")
+    }
+
+    /// A pass whose edit the field did not take says why (`why`): it could not be placed, it stopped, or was refused.
+    @Test func aPassTheFieldDidNotTakeSaysWhy() async {
+        let field = CleanupField("teh boat waits.")
+        field.beforeApply = { field.draftID = "another" }
+        let session = FieldCleanupSession()
+        session.field = field
+        var events: [[String: Any]] = []
+        session.diagnostics = { _, fields in events.append(fields) }
+        session.clean = { passage, _, _ in passage.replacingOccurrences(of: "teh", with: "The") }
+        session.request(final: true)
+        await session.settle()
+        #expect(events.last?["applied"] as? Bool == false)
+        #expect(events.last?["why"] as? String == "refused")
+    }
+
     @Test func aRejectedTakeKeepsOnlyTheRefusedSentenceRaw() async {
         let source = "Um, the review moved to Tuesday. We meet so um sechs Uhr there. Uh, bring the slides."
         var calls: [String] = []
-        let split = await FieldCleanupChunks.cleanSplitting(source) { text in
+        let split = await FieldCleanupChunks.cleanSplitting(source) { text, _ in
             calls.append(text)
             if text.contains("um sechs") { return .rejected }
             return .cleaned(text.replacingOccurrences(of: "Um, t", with: "T").replacingOccurrences(of: "Uh, b", with: "B"))
@@ -292,9 +403,9 @@ private final class FieldCleaner: SentenceCleaning {
         #expect(split.result == .cleaned("The review moved to Tuesday. We meet so um sechs Uhr there. Bring the slides."))
         #expect(split.keptRaw == 1)
         #expect(split.calls == calls.count)
-        let failed = await FieldCleanupChunks.cleanSplitting(source) { _ in .failed("timeout") }
+        let failed = await FieldCleanupChunks.cleanSplitting(source) { _, _ in .failed("timeout") }
         #expect(failed.result == .failed("timeout") && failed.calls == 1, "a timeout is not split")
-        let single = await FieldCleanupChunks.cleanSplitting("We meet so um sechs Uhr.") { _ in .rejected }
+        let single = await FieldCleanupChunks.cleanSplitting("We meet so um sechs Uhr.") { _, _ in .rejected }
         #expect(single.result == .rejected)
     }
 
@@ -354,7 +465,7 @@ private final class FieldCleaner: SentenceCleaning {
                                                stats: .init(), delivered: false))
         }
         if afterModel {
-            pipeline.fieldCleanup?.clean = { _, _ in reject(); return "the green boat." }
+            pipeline.fieldCleanup?.clean = { _, _, _ in reject(); return "the green boat." }
             pipeline.acknowledgeDelivery(.init(runID: snapshot.runID, version: snapshot.version, complete: true,
                                                stats: .init(), delivered: true))
         } else { reject() }
@@ -379,7 +490,7 @@ private final class FieldCleaner: SentenceCleaning {
         var paused = true
         var answered = false
         session.canApply = { paused }
-        session.clean = { _, _ in paused = false; answered = true; return "the boat" }
+        session.clean = { _, _, _ in paused = false; answered = true; return "the boat" }
         session.request(final: true)
         while !answered { await Task.yield() }
         #expect(field.edits.isEmpty)
@@ -447,7 +558,7 @@ private final class FieldCleaner: SentenceCleaning {
     private func session(_ field: UnplaceableField, inputs: @escaping @MainActor (String) -> Void) -> FieldCleanupSession {
         let session = FieldCleanupSession()
         session.field = field
-        session.clean = { text, _ in
+        session.clean = { text, _, _ in
             inputs(text)
             return text.replacingOccurrences(of: " read", with: " bread").replacingOccurrences(of: "teh", with: "the")
         }
@@ -501,7 +612,7 @@ private final class FieldCleaner: SentenceCleaning {
         let field = Refusing(), session = FieldCleanupSession()
         session.field = field
         var passes = 0
-        session.clean = { _, _ in passes += 1; return "We bring the bread" }
+        session.clean = { _, _, _ in passes += 1; return "We bring the bread" }
         session.request(final: true)
         await session.settle()
         #expect(passes == 1)

@@ -14,20 +14,30 @@ public enum FieldCleanupChunks {
         private var documentID: String?
         private var snapshot = ""
         private var frontier = 0
+        private var coveredEnd = 0
         private var completeDocument = false
         public init() {}
 
+        /// Where the overlap of the confirmed text starts in `text`: the next passage starts there.
         public func start(in text: String, documentID: String?, complete: Bool) -> String.Index {
-            guard let documentID, documentID == self.documentID, !snapshot.isEmpty else { return text.startIndex }
-            let offset: Int
+            offset(frontier, in: text, documentID: documentID, complete: complete).map { text.index(text.startIndex, offsetBy: $0) }
+                ?? text.startIndex
+        }
+
+        /// Where the confirmed text ends in `text`; nil when nothing of it is known there.
+        public func end(in text: String, documentID: String?, complete: Bool) -> String.Index? {
+            offset(coveredEnd, in: text, documentID: documentID, complete: complete).map { text.index(text.startIndex, offsetBy: $0) }
+        }
+
+        private func offset(_ value: Int, in text: String, documentID: String?, complete: Bool) -> Int? {
+            guard let documentID, documentID == self.documentID, !snapshot.isEmpty else { return nil }
             if complete && completeDocument {
-                offset = FieldMerge.position(frontier, from: Array(snapshot), to: Array(text), afterInsertion: false)
-            } else {
-                let prefix = String(snapshot.prefix(frontier))
-                guard text.hasPrefix(prefix) else { return text.startIndex }
-                offset = frontier
+                return min(text.count, FieldMerge.position(value, from: Array(snapshot), to: Array(text), afterInsertion: false))
             }
-            return text.index(text.startIndex, offsetBy: min(offset, text.count))
+            // A bounded read: the confirmed text up to here must still open it as it was.
+            let prefix = String(snapshot.prefix(max(frontier, value)))
+            guard text.hasPrefix(prefix) else { return nil }
+            return min(value, text.count)
         }
 
         public mutating func confirm(proposed: String, actual: String, documentID: String?, complete: Bool) {
@@ -38,6 +48,7 @@ public enum FieldCleanupChunks {
             let starts = FieldCleanupChunks.wordStarts(in: covered)
             let start = starts.isEmpty ? covered.endIndex : starts[max(0, starts.count - FieldCleanupChunks.overlap)]
             frontier = covered.distance(from: covered.startIndex, to: start)
+            coveredEnd = end
             snapshot = actual; self.documentID = documentID; completeDocument = complete
         }
     }
@@ -55,9 +66,11 @@ public enum FieldCleanupChunks {
 
     /// Every new word is consumed once. A later input includes the previous result's overlap,
     /// and replaces it rather than appending another copy. Identity cleanup is byte-preserving.
-    @MainActor public static func clean(_ source: String, using clean: (String) async -> String?) async -> String? {
+    /// `clean` gets each input and the text that stands before it (`before`, then the output so far), as context.
+    @MainActor public static func clean(_ source: String, before: String = "",
+                                        using clean: (_ text: String, _ before: String) async -> String?) async -> String? {
         let starts = wordStarts(in: source)
-        guard starts.count > words else { return await clean(source) }
+        guard starts.count > words else { return await clean(source, before) }
         var consumed = 0
         var output = ""
         while consumed < starts.count {
@@ -68,7 +81,7 @@ public enum FieldCleanupChunks {
             let oldStarts = wordStarts(in: output)
             let overlapStart = oldStarts.isEmpty ? output.endIndex : oldStarts[max(0, oldStarts.count - overlap)]
             let input = String(output[overlapStart...]) + source[lower..<upper]
-            guard !Task.isCancelled, let result = await clean(input) else { return nil }
+            guard !Task.isCancelled, let result = await clean(input, before + output[..<overlapStart]) else { return nil }
             output = String(output[..<overlapStart]) + keepingSeparators(of: input, around: result)
             consumed = end
         }
@@ -95,30 +108,65 @@ public enum FieldCleanupChunks {
     /// A text whose cleanup the guard rejected is cleaned again in two halves split at a sentence end, each on its own,
     /// down to single sentences; a sentence the guard still rejects stays as it was. So one refused sentence (a German
     /// "um" before a time, say) keeps only itself raw, not the whole take. `.cleaned` when at least one part was
-    /// cleaned; otherwise the first answer's failure. `calls` counts the cleanup calls made.
-    @MainActor public static func cleanSplitting(_ source: String, using clean: (String) async -> Attempt)
+    /// cleaned; otherwise the first answer's failure. `calls` counts the cleanup calls made. Each call gets the text that
+    /// stands before its part as context (`before`, then the left half as cleaned), so a half never reads as a new text.
+    @MainActor public static func cleanSplitting(_ source: String, before: String = "",
+                                                 using clean: (_ text: String, _ before: String) async -> Attempt)
         async -> (result: Attempt, calls: Int, keptRaw: Int) {
         var calls = 0, keptRaw = 0
-        func part(_ text: String) async -> (text: String, cleaned: Bool)? {
+        func halves(_ text: String, before: String, cut: String.Index) async -> (text: String, cleaned: Bool)? {
+            let left = String(text[..<cut]), right = String(text[cut...])
+            guard let a = await part(left, before: before) else { return nil }
+            let leftText = keepingSeparators(of: left, around: a.text)
+            guard let b = await part(right, before: before + leftText) else { return nil }
+            return (leftText + keepingSeparators(of: right, around: b.text), a.cleaned || b.cleaned)
+        }
+        func part(_ text: String, before: String) async -> (text: String, cleaned: Bool)? {
             calls += 1
-            switch await clean(text) {
+            switch await clean(text, before) {
             case .cleaned(let result): return (result, true)
             case .failed: return nil
             case .rejected:
                 guard !Task.isCancelled, let cut = sentenceCut(in: text) else { keptRaw += 1; return (text, false) }
-                let left = String(text[..<cut]), right = String(text[cut...])
-                guard let a = await part(left), let b = await part(right) else { return nil }
-                return (keepingSeparators(of: left, around: a.text) + keepingSeparators(of: right, around: b.text), a.cleaned || b.cleaned)
+                return await halves(text, before: before, cut: cut)
             }
         }
         calls += 1
-        let first = await clean(source)
+        let first = await clean(source, before)
         guard case .rejected = first, let cut = sentenceCut(in: source) else { return (first, calls, 0) }
-        let left = String(source[..<cut]), right = String(source[cut...])
-        guard let a = await part(left), let b = await part(right) else { return (.rejected, calls, keptRaw) }
-        guard a.cleaned || b.cleaned else { return (.rejected, calls, keptRaw) }
-        return (.cleaned(keepingSeparators(of: left, around: a.text) + keepingSeparators(of: right, around: b.text)), calls, keptRaw)
+        guard let split = await halves(source, before: before, cut: cut), split.cleaned else { return (.rejected, calls, keptRaw) }
+        return (.cleaned(split.text), calls, keptRaw)
     }
+
+    /// Where the sentence holding `index` starts in `text`: after the last sentence end (".", "!" or "?" and a space) or
+    /// line break before it, at its first non-space; `text`'s start when there is none.
+    public static func sentenceStart(of index: String.Index, in text: String) -> String.Index {
+        var i = index
+        while i > text.startIndex {
+            let previous = text.index(before: i)
+            let c = text[previous]
+            if c.isNewline { break }
+            if c.isWhitespace, previous > text.startIndex, endsSentence(text[text.index(before: previous)]) { break }
+            i = previous
+        }
+        while i < index, text[i].isWhitespace { i = text.index(after: i) }
+        return i
+    }
+
+    /// The end of the last finished sentence in `text` after `from` (just past its ".", "!" or "?", where a space, a line
+    /// break or the text's end follows): nil when no sentence ends there. Words after it are a sentence still being said.
+    public static func finishedSentencesEnd(in text: String, after from: String.Index) -> String.Index? {
+        var i = text.endIndex
+        while i > from {
+            let previous = text.index(before: i)
+            if endsSentence(text[previous]), i == text.endIndex || text[i].isWhitespace,
+               text[from..<previous].contains(where: { $0.isLetter || $0.isNumber }) { return i }
+            i = previous
+        }
+        return nil
+    }
+
+    private static func endsSentence(_ c: Character) -> Bool { ".!?".contains(c) }
 
     /// The sentence end nearest the middle of `text` (after its punctuation and the space that follows), nil for one
     /// sentence. The cut lies at the start of the space, so each half keeps its own separators.
