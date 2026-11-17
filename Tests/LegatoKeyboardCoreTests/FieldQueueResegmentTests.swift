@@ -74,10 +74,11 @@ import Testing
             == "Fine, the boat left the harbour, uh, early,")
         #expect(String(target.update(Array("Fine. The boat left the harbour early and we sailed"), speaking: true))
             == "Fine, the boat left the harbour, uh, early, and we sailed")
-        // A last word the revision changed stays deferred, never guessed.
+        // A last word the revision changed stays as typed (the pause or the stop brings it); the new words go on.
         var changed = FieldSpeechScheduling.Target()
         _ = changed.update(Array("we left the harbour at dawn"), speaking: true)
-        #expect(String(changed.update(Array("We left the harbor at noon and"), speaking: true)) == "we left the harbour at dawn")
+        #expect(String(changed.update(Array("We left the harbor at noon and"), speaking: true)) == "we left the harbour at dawn and")
+        #expect(changed.hasDeferredRevision)
     }
 }
 

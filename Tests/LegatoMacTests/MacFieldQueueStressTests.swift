@@ -955,6 +955,23 @@ private struct SeededRandom {
         #expect(calm.0 <= plain.0 + .milliseconds(150), "the typewriter pace adds at most the appended tail's pacing")
     }
 
+    /// A recorded take in a keystroke field: a partial last word was heard again as a whole word, every later snapshot
+    /// held behind that revision, and 22 s of continuous speech typed nothing until the queue let it all out at once.
+    /// Speech at the caret goes on with the next snapshot; the held revision lands at the stop.
+    @Test func speechAfterARevisedPartialWordIsTypedWhileSpeaking() async {
+        let (field, queue, _, _) = keyedField("")
+        queue.live(runID: "r", version: 1, text: "we tied up at the ke", speaking: true)
+        await queue.whenIdle()
+        queue.live(runID: "r", version: 2, text: "we tied up at the quay", speaking: true)
+        await queue.whenIdle()
+        queue.live(runID: "r", version: 3, text: "we tied up at the quay before noon", speaking: true)
+        await queue.whenIdle()
+        #expect(field.string == "we tied up at the ke before noon", "new speech is typed without waiting for a pause\n\(field.trail.joined(separator: "\n"))")
+        queue.takeStopped("r")
+        await queue.whenIdle()
+        #expect(field.string == "we tied up at the quay before noon")
+    }
+
     /// A keystroke field with its own clock, driven by the queue's sleeps.
     private func keyedField(_ text: String, seed: UInt64 = 5, configure: (FakeAXField) -> Void = { _ in })
         -> (FakeAXField, MacFieldQueue, () -> ContinuousClock.Instant, (Duration) -> Void) {
