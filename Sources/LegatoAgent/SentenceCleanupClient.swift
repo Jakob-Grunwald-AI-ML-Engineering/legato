@@ -297,7 +297,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
         try Task.checkCancellation()
         guard !input.takeID.isEmpty, input.takeID.utf8.count <= 256,
               !input.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              input.text.utf8.count <= Self.maximumTakeBytes,
+              input.text.utf8.count <= Self.maximumTakeBytes, (input.rawWords?.utf8.count ?? 0) <= Self.maximumTakeBytes,
               input.vocabulary.count <= 200,
               input.vocabulary.reduce(0, { $0 + $1.utf8.count }) <= 16_384 else { throw SentenceCleanupError.invalidInput }
         var trimmer = StreamTrimmer()
@@ -319,9 +319,12 @@ public struct SentenceCleanupClient: SentenceCleaning {
     /// A line's call is forced, so the model cannot decline in words: this field must say what it always has to hold.
     private static let cleanedTextDescription = "The complete cleaned text, every meaningful word of the input in order, however long or unusual. Never a placeholder, stub, summary or note."
     private static func takeRequest(_ input: DictationTakeInput, model: ModelChoice) throws -> Data {
-        let source: JSONValue = .object(["text": .string(input.text), "fieldDocument": .bool(input.fieldDocument),
+        var fields: [String: JSONValue] = ["text": .string(input.text), "fieldDocument": .bool(input.fieldDocument),
             "recentTakes": .array(input.recentTakes.map { .object(["raw": .string($0.raw), "cleaned": .string($0.cleaned)]) }), "textBeforeCursor": .string(String(input.textBeforeCursor.suffix(600))),
-            "vocabulary": .array(input.vocabulary.map(JSONValue.string))])
+            "vocabulary": .array(input.vocabulary.map(JSONValue.string))]
+        // A whole-take pass over field text: the take's words as recognized, reference only (the prompt says how to use them).
+        if let raw = input.rawWords { fields["rawWords"] = .string(raw) }
+        let source: JSONValue = .object(fields)
         let request: JSONValue = .object([
             "model": .string(model.rawValue), "max_tokens": .number(Double(DictationTakeLimits.maxTokens(characters: input.text.count))),
             "stream": .bool(true), "thinking": Self.thinking(model),

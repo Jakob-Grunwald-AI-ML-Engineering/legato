@@ -11,10 +11,14 @@ public struct DictationTakeInput: Sendable, Equatable {
     public var recentTakes: [RecentTake]
     public var textBeforeCursor: String
     public var fieldDocument: Bool
-    public init(takeID: String, text: String, vocabulary: [String] = [], recentTakes: [RecentTake] = [], textBeforeCursor: String = "", fieldDocument: Bool = false) {
+    /// A whole-take pass over field text: the take's words as recognized, before any cleanup. Reference only: they show a
+    /// correction across sentences that earlier passes tidied away; the cleaner edits only `text`.
+    public var rawWords: String?
+    public init(takeID: String, text: String, vocabulary: [String] = [], recentTakes: [RecentTake] = [], textBeforeCursor: String = "",
+                fieldDocument: Bool = false, rawWords: String? = nil) {
         self.takeID = takeID; self.text = text; self.vocabulary = vocabulary
         self.recentTakes = recentTakes; self.textBeforeCursor = textBeforeCursor
-        self.fieldDocument = fieldDocument
+        self.fieldDocument = fieldDocument; self.rawWords = rawWords
     }
 }
 
@@ -52,6 +56,16 @@ public enum DictationTakeGuard {
     private static func tokens(_ text: String) -> [String] {
         text.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
     }
+
+    /// A whole-take pass edits only the field's text: the raw words are reference. Words the result takes from them that
+    /// the text does not hold (a filler or cue sentence passes removed, a dropped phrase) are at most a few, never the raw
+    /// words inserted wholesale.
+    public static func keepsToText(_ text: String, rawWords: String?, cleaned: String) -> Bool {
+        guard let rawWords else { return true }
+        let field = Set(tokens(text)), raw = Set(tokens(rawWords))
+        let taken = tokens(cleaned).filter { !field.contains($0) && raw.contains($0) }.count
+        return taken <= max(2, field.count / 10)
+    }
 }
 
 public enum DictationTakeCleanupResult: Sendable, Equatable {
@@ -77,7 +91,8 @@ public struct DictationTakeCleaner: Sendable {
         for _ in 0..<max(1, attempts) {
             if Task.isCancelled { break }
             switch await attempt(input) {
-            case .cleaned(let text) where DictationTakeGuard.accepts(raw: input.text, cleaned: text): return .cleaned(text)
+            case .cleaned(let text) where DictationTakeGuard.accepts(raw: input.text, cleaned: text)
+                && DictationTakeGuard.keepsToText(input.text, rawWords: input.rawWords, cleaned: text): return .cleaned(text)
             case .cleaned: reason = "rejected"
             case .failed(let why): reason = why
             case .unavailable: return .unavailable
