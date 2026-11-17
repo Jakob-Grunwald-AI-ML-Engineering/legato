@@ -2,6 +2,25 @@ import Testing
 @testable import LegatoKeyboardCore
 
 @Suite struct FieldQueueVerifiedRevisionTests {
+    @Test func partialHeadWordsKeepGrowingAfterAnEarlierRevision() {
+        var rig = QueueRig(FakeField(""), config: .init(prioritizeSpeech: true))
+        rig.queue.enqueue(snap(1, "We found the green boat. Als"))
+        let firstPartialDelivered = rig.drain()
+        #expect(firstPartialDelivered)
+        rig.queue.enqueue(snap(2, "We found the grey boat. Also, som"))
+        let firstWordCompleted = rig.drain()
+        #expect(firstWordCompleted)
+        #expect(rig.field.string == "We found the green boat. Also, som")
+        rig.queue.enqueue(snap(3, "We found the grey boat. Also, sometimes it rains."))
+        let secondWordCompleted = rig.drain()
+        #expect(secondWordCompleted)
+        #expect(rig.field.string == "We found the green boat. Also, sometimes it rains.")
+        rig.queue.enqueue(snap(4, "We found the grey boat. Also, sometimes it rains.", complete: true))
+        let finalTextSettled = rig.drain()
+        #expect(finalTextSettled)
+        #expect(rig.field.string == "We found the grey boat. Also, sometimes it rains.")
+    }
+
     @Test func farRevisionWaitsForTheRoutePauseThenChangesOnlyItsOwnLetters() {
         var rig = QueueRig(FakeField(""), config: .init(prioritizeSpeech: true))
         let tail = " while the rest of the unchanged sentence continues all the way to the harbour"
