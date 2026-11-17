@@ -110,6 +110,67 @@ import Testing
         #expect(rig.field.string == "We should be done by late afternoon. Then it is coffee and cake on the terrace.z I think the room is booked.")
     }
 
+    /// Device run 5 (Notes, `dictation-replay-neutral.json`): the recognizer heard "move too", "move too big", then revised
+    /// it to "move two big pots" while the take went on. The revision was held for a pause the route had not reported
+    /// yet, the sentence pass was answered from the shadow with "too big pots", and the model made it "the too-big pots".
+    /// A pass waits for the revision: the field and the pass's text both say "two big pots". At the sentence end
+    /// (nothing heard after it), and with the next sentence already being spoken.
+    @Test(arguments: [false, true])
+    func aPassIsNeverBuiltOnRevisedWords(speechGoesOn: Bool) {
+        let first = "So the plan for the garden this weekend is pretty simple."
+        func live(_ version: Int, _ head: String, closed: String? = nil, ask: String? = nil) -> LiveDictationSnapshot {
+            var segments = [LiveSegment(id: 0, text: first, final: true)]
+            if let closed { segments.append(.init(id: 1, text: closed, final: true)) }
+            if !head.isEmpty { segments.append(.init(id: segments.count, text: head, final: false)) }
+            return .init(runID: "r", version: version, segments: segments, shadowAsk: ask)
+        }
+        var rig = QueueRig(FakeField.host(.notes), config: .init(prioritizeSpeech: true))
+        rig.run(ms: 100)
+        // The route reports speech throughout: its pause comes later than the pass's ask.
+        rig.queue.enqueue(live(1, "First we need to move too")); rig.drain()
+        rig.queue.enqueue(live(2, "First we need to move too big")); rig.drain()
+        rig.queue.enqueue(live(3, "First we need to move two big pots")); rig.drain()
+        let sentence = "First we need to move two big pots away from the fence, and then we can finally fix the broken gate."
+        rig.queue.enqueue(live(4, sentence)); rig.drain()
+        let next = speechGoesOn ? "I think" : ""
+        rig.queue.enqueue(live(5, next, closed: sentence)); rig.drain()
+        rig.queue.enqueue(live(6, next, closed: sentence, ask: "pass"))
+        var answer = rig.queue.shadow(of: "r", version: 6)
+        for _ in 0..<200 where answer == .notYet { rig.tick(); answer = rig.queue.shadow(of: "r", version: 6) }
+        guard case .ready(let before, let after, _) = answer else { Issue.record("no shadow: \(answer)"); return }
+        #expect(before.contains("move two big pots away"), "the pass's text: \(before)")
+        #expect(rig.field.string.contains("move two big pots away"), "the field: \(rig.field.string)")
+        rig.queue.markRead("pass", mergingUser: true)
+        // The sentence pass: the model's tidy-up of the text it was sent.
+        rig.queue.enqueue(FieldQueue.Edit(id: "pass", kind: .magic, before: before, after: after,
+                                          target: before.replacingOccurrences(of: "fence, and", with: "fence and"),
+                                          cursorAtEnd: false, readID: "pass"))
+        rig.queue.setSpeaking(false, runID: "r")
+        rig.drain()
+        #expect(rig.applied == ["pass"])
+        #expect(rig.field.string.contains("First we need to move two big pots away from the fence and then"), "the field: \(rig.field.string)")
+        #expect(!rig.field.string.contains("too"))
+    }
+
+    /// A piece revised at one pass's ask grows, then is revised again at the next: the words typed in between are the
+    /// keyboard's own, so the second revision lands too (it read them as the user's and kept "old").
+    @Test func aPieceRevisedOnceIsRevisedAgainAfterItGrew() {
+        var rig = QueueRig(FakeField.host(.notes), config: .init(prioritizeSpeech: true))
+        rig.run(ms: 100)
+        func live(_ version: Int, _ text: String, ask: String? = nil) -> LiveDictationSnapshot {
+            .init(runID: "r", version: version, segments: [.init(id: 0, text: text, final: false)], shadowAsk: ask)
+        }
+        rig.queue.enqueue(live(1, "the cat waits")); rig.drain()
+        rig.queue.enqueue(live(2, "the dog waits by", ask: "a")); rig.drain()
+        if case .ready(let before, _, _) = rig.queue.shadow(of: "r", version: 2) { #expect(before == "the dog waits by") }
+        else { Issue.record("no shadow for the first pass") }
+        rig.queue.enqueue(live(3, "the dog waits by the old boat")); rig.drain()
+        rig.queue.enqueue(live(4, "the dog waits by the gold boat", ask: "b")); rig.drain()
+        if case .ready(let before, _, _) = rig.queue.shadow(of: "r", version: 4) { #expect(before == "the dog waits by the gold boat") }
+        else { Issue.record("no shadow for the second pass") }
+        #expect(rig.field.string == "the dog waits by the gold boat")
+    }
+
     /// Speech typed while the model worked stays; the result lands in the text it was for.
     @Test func speechTypedMeanwhileStays() {
         var rig = typed("teh review is moved.")

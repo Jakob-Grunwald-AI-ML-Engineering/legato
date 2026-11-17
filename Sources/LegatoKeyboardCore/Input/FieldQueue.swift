@@ -230,6 +230,15 @@ public struct FieldQueue: Sendable {
         var stopped = false
         /// Acoustic/semantic activity, supplied by the route; an open take need not be speaking.
         var speaking = true
+        /// The cleanup pass that asked for the field's text with the newest snapshot (`shadowAsk`), and the last one
+        /// answered (`shadow(of:version:)`).
+        var shadowAsk: String?
+        var answeredAsk: String?
+        /// A pause: the route says so, or a cleanup pass waits for the field's text (at a sentence end, in a long pause
+        /// or at the stop), whatever the route's activity says or before the keyboard heard of it. Revisions of typed
+        /// words land in it, so no pass is built on words the recognizer has revised since (#299 device run 5: "too big"
+        /// stayed in the field while the recognizer had "two big pots", and a pass cleaned it to "the too-big pots").
+        var paused: Bool { !speaking || (shadowAsk != nil && shadowAsk != answeredAsk) }
         var pending: LiveDictationSnapshot?
         /// The newest snapshot's segments: what each piece's final text is.
         var segments: [LiveSegment] = []
@@ -607,7 +616,7 @@ public struct FieldQueue: Sendable {
 
     // MARK: Inspection
 
-    public var isSpeaking: Bool { runs.contains { !$0.stopped && !$0.complete && $0.speaking } }
+    public var isSpeaking: Bool { runs.contains { !$0.stopped && !$0.complete && !$0.paused } }
     /// Quiet audio permits revisions only after every heard append has reached the field.
     private var prioritizesSpeech: Bool {
         config.prioritizeSpeech && (isSpeaking || runs.contains(where: rawAppendPending))
@@ -1494,6 +1503,7 @@ public struct FieldQueue: Sendable {
             runs[ri].pieces[pi].swapped = chars(of: span)
             runs[ri].pieces[pi].swappedEnd = revision.through
             runs[ri].pieces[pi].proposal = revision.proposal
+            runs[ri].pieces[pi].proposalThrough = revision.through
             runs[ri].pieces[pi].revisedVersion = revision.version
             return
         }
@@ -1543,14 +1553,15 @@ public struct FieldQueue: Sendable {
         var swappedEnd = 0
         /// Latest model proposal remains separate from the user's protected actual text.
         var proposal: [Character]?
+        /// Where the delivered words the proposal stands for end: words typed after them are the keyboard's own.
+        var proposalThrough = 0
         var revisedVersion: Int?
         var failedRevisionVersion: Int?
     }
 
     private func runNeedsWork(_ run: LiveRun) -> Bool {
         if run.pending != nil || swap?.runID == run.runID { return true }
-        if !run.speaking, run.speech.hasDeferredRevision,
-           run.pieces.contains(where: { $0.revisedVersion != run.version && $0.failedRevisionVersion != run.version }) { return true }
+        if run.paused, deferredRevision(run) { return true }
         if run.complete, run.version != nil, run.settledVersion != run.version, !run.pieces.isEmpty { return true }
         if run.complete, run.settledVersion == run.version, run.pieces.last?.spaceAfter == true { return true }
         if let piece = run.pieces.last(where: { $0.tEnd == nil }), let span = spans[piece.spanID] {
@@ -1571,6 +1582,21 @@ public struct FieldQueue: Sendable {
         if let queued = editLane.first(where: { $0.spanID == piece.spanID && $0.revision != nil })?.revision { return queued }
         if case .edit(let state, _)? = unit?.owner, state.spanID == piece.spanID { return state.revision }
         return nil
+    }
+
+    /// The recognizer revised typed words of the run's newest version, and no piece has taken the revision yet.
+    private func deferredRevision(_ run: LiveRun) -> Bool {
+        run.speech.hasDeferredRevision
+            && run.pieces.contains(where: { $0.revisedVersion != run.version && $0.failedRevisionVersion != run.version })
+    }
+
+    /// Revised words of the run not in the field yet: a revision under way, one still to be planned for its newest
+    /// version, or a complete version still to settle.
+    private func revisionDue(_ run: LiveRun) -> Bool {
+        if editLane.contains(where: { $0.revision?.runID == run.runID }) { return true }
+        if case .edit(let state, _)? = unit?.owner, state.revision?.runID == run.runID { return true }
+        if run.complete { return run.settledVersion != run.version && !run.pieces.isEmpty }
+        return deferredRevision(run)
     }
 
     private func rawAppendPending(_ run: LiveRun) -> Bool {
@@ -1709,7 +1735,7 @@ public struct FieldQueue: Sendable {
             if runs[ri].complete, runs[ri].settledVersion == runs[ri].version, let action = separateFollowingText(ri) { return action }
             if let action = typeOpenPiece(ri) { return action }
             if let action = startUntypedRest(ri) { return action }
-            if !runs[ri].speaking, let action = revisePieces(ri) { return action }
+            if runs[ri].paused, let action = revisePieces(ri) { return action }
             ack(ri)
         }
         let newest = runs.last?.runID
@@ -1840,6 +1866,7 @@ public struct FieldQueue: Sendable {
         runs[ri].complete = runs[ri].complete || snapshot.complete
         runs[ri].cleaned = runs[ri].complete && !snapshot.segments.isEmpty && snapshot.segments.allSatisfy { $0.final && $0.cleaned }
         runs[ri].segments = snapshot.segments
+        runs[ri].shadowAsk = snapshot.shadowAsk
         // Its words as spoken (a cleaned unit shows its raw words) extend the delivered text where they go on past it
         // (`SpeechDelivery`): while the take runs and after (the run goes on after a stop; its final words).
         let speech = Self.speech(snapshot.segments)
@@ -1900,14 +1927,23 @@ public struct FieldQueue: Sendable {
         case refused(String)
     }
 
-    public func shadow(of runID: String, version: Int) -> ShadowAnswer {
+    /// Revised words go in first: while the pass waits, the run is in a pause (`LiveRun.paused`) and its revisions land,
+    /// so the text sent never holds a word the recognizer has revised since. An answer given (ready or refused) ends
+    /// that pause.
+    public mutating func shadow(of runID: String, version: Int) -> ShadowAnswer {
+        let answer = shadowAnswer(of: runID, version: version)
+        if answer != .notYet, let ri = runs.firstIndex(where: { $0.runID == runID }) { runs[ri].answeredAsk = runs[ri].shadowAsk }
+        return answer
+    }
+
+    private func shadowAnswer(of runID: String, version: Int) -> ShadowAnswer {
         guard seeded else { return .refused("unseeded") }
         guard !hasUnverifiedInput else { return .refused("unverified") }
         guard selection == 0 else { return .refused("selection") }
         guard inFlight == nil, swap == nil, recoveryRequest == nil, userLost == nil, strayInsertion == nil, tapRace == nil else { return .notYet }
         var take: Range<Int>?
         if let run = runs.first(where: { $0.runID == runID }) {
-            guard run.pending == nil, (run.version ?? -1) >= version, !rawAppendPending(run) else { return .notYet }
+            guard run.pending == nil, (run.version ?? -1) >= version, !rawAppendPending(run), !revisionDue(run) else { return .notYet }
             let placed = run.pieces.compactMap { spans[$0.spanID] }.filter { !$0.parked }
             if let start = placed.map(\.start).min(), let end = placed.map(\.end).max(), start <= end { take = start..<end }
         } else if !retiredRunIDs.contains(runID) {
@@ -2037,6 +2073,17 @@ public struct FieldQueue: Sendable {
         return Array(FieldInsertion.prepare(String(raw), contextBefore: piece.anchor, capitalization: config.capitalization))
     }
 
+    /// What the piece shows by the keyboard's own writes alone: its last proposal and the words typed after it. Without
+    /// those words a second revision of a piece that grew since read them as the user's and lost itself, or typed them twice.
+    private func baseline(of piece: Piece, in run: LiveRun) -> [Character]? {
+        guard let proposal = piece.proposal else { return nil }
+        let end = min(run.delivered.count, piece.tEnd ?? run.delivered.count)
+        guard piece.proposalThrough < end else { return proposal }
+        let typed = FieldInsertion.prepare(String(run.delivered[piece.proposalThrough..<end]), contextBefore: piece.anchor + String(proposal),
+                                           capitalization: config.capitalization)
+        return proposal + Array(typed)
+    }
+
     private func conditionalRevisionTarget(base: [Character], current: [Character], proposal: [Character], span: Span) -> [Character] {
         // Punctuation typed immediately after the dictated scope is still the user's. Include
         // that evidence in the merge so cleanup cannot append a second terminal mark before it.
@@ -2052,7 +2099,7 @@ public struct FieldQueue: Sendable {
     /// replan between confirmed graphemes; each jump still requires the queue's ordinary proof.
     private mutating func revisePieces(_ ri: Int) -> Action? {
         let run = runs[ri]
-        guard run.complete || !run.speaking, let version = run.version,
+        guard run.complete || run.paused, let version = run.version,
               selection == 0, !hasUnverifiedInput, untypedRest(of: run) == nil else { return nil }
         if editLane.contains(where: { $0.revision?.runID == run.runID }) { return .wait }
         if case .edit(let state, _)? = unit?.owner, state.revision?.runID == run.runID { return .wait }
@@ -2067,10 +2114,11 @@ public struct FieldQueue: Sendable {
             // The speaking head must finish its heard append first; revisions never type missing speech twice.
             if piece.tEnd == nil, current.count < expected.count, expected.starts(with: current) { return nil }
             let proposal = revisionProposal(pi, in: run)
-            let baseline = piece.proposal ?? expected
+            let baseline = baseline(of: piece, in: run) ?? expected
             let target = conditionalRevisionTarget(base: baseline, current: current, proposal: proposal, span: span)
             if target == current {
                 runs[ri].pieces[pi].proposal = proposal
+                runs[ri].pieces[pi].proposalThrough = piece.tEnd ?? run.delivered.count
                 runs[ri].pieces[pi].revisedVersion = version
                 continue
             }
