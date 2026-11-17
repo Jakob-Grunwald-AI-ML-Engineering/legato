@@ -29,4 +29,15 @@ import Testing
     @Test func bothInsertingAtOnePlaceKeepsKept() {
         #expect(rebase("send the report", kept: "Sende den Bericht.", incoming: "Send the report.").0 == "Sende den Bericht.")
     }
+
+    /// Both writers appended the same words, each diff placing them its own way ("holds" + ". Yeah" + "." against
+    /// "holds." + " Yeah."; or a revision's word change that ends with the words speech appended): typed once
+    /// (#299 recheck, Safari contenteditable: "Yeah. Yeah.").
+    @Test func theSameAppendFromBothIsTypedOnce() {
+        #expect(rebase("if the whether holds.", kept: "if the whether holds. Yeah.", incoming: "if the weather holds. Yeah.").0
+            == "if the weather holds. Yeah.")
+        #expect(rebase("the whether", kept: "the whether holds.", incoming: "the weather holds.").0 == "the weather holds.")
+        // Different words appended by each still keep kept's.
+        #expect(rebase("the whether", kept: "the whether holds.", incoming: "the weather stays.").0 != "the weather holds. stays.")
+    }
 }
