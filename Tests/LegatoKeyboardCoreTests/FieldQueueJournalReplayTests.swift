@@ -104,6 +104,35 @@ import Testing
         #expect(rig.applied.count == 1 && rig.drops.isEmpty)
     }
 
+    /// WhatsApp, corrections replay with an Enter tapped during speech (journal 18257.6–18275.0 s): words went on after
+    /// the line break, a cleanup chunk far back hopped home across short windows, and the next words came as it landed.
+    /// The half window after its hop back was taken for a seam; the caret was moved into "fi|ve." and " Yeah." went in
+    /// there ("until fi Yeah.ve."). The user's line break and every dictated word stay where they belong.
+    @Test func anEnterDuringSpeechAndACleanupFarBackLeaveTheTextWhole() {
+        var field = FakeField.host(.whatsApp)
+        field.window = 110
+        var rig = QueueRig(field)
+        let head = "The review is moved to Wednesday. We meet At the Bahnhof, so um sechs Uhr, and then walk over together. Please send the draft to"
+        let tail = "Anna, cc Lina. Actually, no, cc Tom. Um, and bring the printed slides and the budget sheet if you can. And, um, I think the room is booked until five."
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 1, segments: [.init(id: 0, text: head, final: true)], complete: false))
+        rig.drain()
+        rig.queue.enqueue(.insert("\n"))
+        rig.drain()
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 2, segments: [.init(id: 0, text: head, final: true),
+                                                                                  .init(id: 1, text: tail, final: true)], complete: false))
+        rig.drain()
+        let typed = head + "\n" + tail
+        #expect(rig.field.string == typed)
+        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: typed, target: typed.replacingOccurrences(of: "meet At", with: "meet at"),
+                                          cursorAtEnd: false))
+        rig.tick(); rig.tick()
+        rig.queue.enqueue(LiveDictationSnapshot(runID: "r", version: 3, segments: [.init(id: 0, text: head, final: true),
+            .init(id: 1, text: tail, final: true), .init(id: 2, text: "Yeah.", final: true)], complete: false))
+        let drained = rig.drain()
+        #expect(drained)
+        #expect(rig.field.string == typed.replacingOccurrences(of: "meet At", with: "meet at") + " Yeah.", "\(rig.queue.debugState)")
+    }
+
     static let journal = #"""
 {"action":"idle","kind":"step","report":{"after":" C é Z","before":"A👩🏽‍🚀 B🇩🇪 Today we're preparing the boat for a short trip along the coast. The weather report says the wind will stay gentle until the evening. Please put the blue notebook beside the chart table and check that the cabin lights are working. We will bring fresh water, bread, fruit, warm jackets, a small repair kit, and enough rope for the next harbor. Before we leave, walk around the deck and close every open hatch. Now I am speaking again while the earlier passage is being corrected."},"t":503354913.9532084}
 {"id":"250DB018-2DD9-413E-8860-18B25434867F","kind":"read","t":503356675.5577917}
