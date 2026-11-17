@@ -52,17 +52,22 @@ struct FakeField {
         return true
     }
     private var staleMove: (caret: Int, armed: Bool)?
+    /// The proxy's own view right after a move (before the host's next callback) shows nothing on the side the caret
+    /// moved toward (WhatsApp, Safari: #299 recheck journals, `uat-299-recheck`).
+    var blindAfterMove = false
+    /// The side the last move went (-1 before, +1 after) while no fresh report came since.
+    private var blindSide: Int?
 
     enum Host { case whatsApp, notes, safari }
     /// A field that behaves like `host` as measured.
     static func host(_ host: Host, _ text: String = "", caret: Int? = nil) -> FakeField {
         var field = FakeField(text, caret: caret)
         switch host {
-        case .whatsApp: field.window = 300; field.cutsAtLineBreaks = true; field.dropsOvershoot = true
+        case .whatsApp: field.window = 300; field.cutsAtLineBreaks = true; field.dropsOvershoot = true; field.blindAfterMove = true
         case .notes: field.window = 300; field.cutsAtLineBreaks = true; field.newIdentityWhenEmpty = true
         case .safari:
             field.window = 100; field.movesByCharacters = true; field.hostDelays = true
-            field.staleFirstMoveReport = true; field.newIdentityWhenEmpty = true
+            field.staleFirstMoveReport = true; field.newIdentityWhenEmpty = true; field.blindAfterMove = true
         }
         return field
     }
@@ -184,6 +189,15 @@ struct FakeField {
     /// turn (a callback), not the keyboard reading the proxy again right after its own op.
     /// `callback`: the read comes with a host callback, which carries the host's state at that moment (no lag).
     mutating func tick(fresh: Bool = true, callback: Bool = false) -> FieldQueue.Report {
+        if fresh { blindSide = nil }
+        let report = turn(fresh: fresh, callback: callback)
+        guard !fresh, let side = blindSide else { return report }
+        var blind = report
+        if side < 0 { blind.before = "" } else { blind.after = "" }
+        return blind
+    }
+
+    private mutating func turn(fresh: Bool, callback: Bool) -> FieldQueue.Report {
         if fresh, let stale = staleMove, stale.armed {
             // Safari's first callback after a move: the old caret, once.
             staleMove = nil
@@ -214,6 +228,7 @@ struct FakeField {
 
     /// The keyboard sends an op.
     mutating func send(_ send: Send) {
+        if blindAfterMove, case .move(let units) = send.op, units != 0 { blindSide = units < 0 ? -1 : 1 }
         guard hostDelays else { carryOut(send); return }
         defer {
             var view = self

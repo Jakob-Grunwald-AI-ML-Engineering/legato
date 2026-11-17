@@ -30,6 +30,58 @@ import Testing
         #expect(rig.applied.count == 1 && rig.drops.isEmpty)
     }
 
+    // MARK: #299 recheck (2026-11-17, `uat-299-recheck`, synthetic text)
+
+    /// Right after a move the proxy's own view shows nothing on the side the caret moved toward (WhatsApp journal at
+    /// 18273.18 s: the hop back of a cleanup chunk landed and reported `after: ""`; Safari textarea and contenteditable
+    /// alike). The chunk took that for a seam, reseeded the model from the half window (the text after the caret gone
+    /// from it) and garbled what came next: a stray move put the caret into "fi|ve." and the next words went in there.
+    /// The hop waits for the report that shows the way instead.
+    @Test(arguments: [FakeField.Host.whatsApp, .safari])
+    func aHopBackAcrossAShortWindowWaitsForTheReportThatShowsTheWay(host: FakeField.Host) {
+        let text = "The review is moved to Wednesday. We meet At the Bahnhof, so um sechs Uhr, and then walk over together. "
+            + "Please send the draft to Anna, cc Lina. Actually, no, cc Tom. Um, and bring the printed slides and the budget "
+            + "sheet if you can. And, um, I think the room is booked until five."
+        let target = text.replacingOccurrences(of: "meet At", with: "meet at")
+        var field = FakeField.host(host, text)
+        // WhatsApp's windows on the device were 110–175 characters (cut at its own lines): the way back takes hops.
+        field.window = 110
+        var rig = QueueRig(field)
+        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: text, target: target, cursorAtEnd: false))
+        let drained = rig.drain()
+        #expect(drained)
+        #expect(rig.field.string == target, "\(rig.queue.debugState)")
+        #expect(rig.field.caret == rig.field.text.count, "the caret is back at the end")
+        #expect(rig.queue.modelText == target, "the model still holds the whole text")
+        let resyncs = rig.events.compactMap { if case .resync(let kind) = $0.event { kind } else { nil } }
+        #expect(!resyncs.contains(.reseeded) && !resyncs.contains(.checkFailed), "\(resyncs)")
+        #expect(rig.applied.count == 1 && rig.drops.isEmpty)
+    }
+
+    /// Safari contenteditable, fragments replay (journal 18835.9–18837.7 s): Soniox revised "whether" to "weather" while
+    /// the take ran; in a pause the revision of the open piece was planned with the next words it carried, and speech typed
+    /// those same words at the caret. Merging the two typed them twice ("holds. Yeah. Yeah."). The take's snapshots as
+    /// recorded, in a pause throughout.
+    @Test func aRevisionInAPauseNeverTypesSpeechTwice() {
+        func snapshot(_ version: Int, _ last: [(String, Bool)]) -> LiveDictationSnapshot {
+            var segments: [LiveSegment] = [.init(id: 0, text: "Um.", final: true), .init(id: 1, text: "so, uh, the plan", final: true),
+                                           .init(id: 2, text: "is to repaint the fence on Saturday", final: true)]
+            for (i, (text, final)) in last.enumerated() { segments.append(.init(id: 3 + i, text: text, final: final)) }
+            return .init(runID: "r", version: version, segments: segments, complete: false)
+        }
+        let versions = [snapshot(16, [("if", false)]), snapshot(17, [("if the", false)]), snapshot(18, [("if the whether", false)]),
+                        snapshot(19, [("if the weather holds.", false)]), snapshot(20, [("if the weather holds.", true)]),
+                        snapshot(21, [("if the weather holds.", true), ("Yeah.", false)])]
+        var rig = QueueRig(FakeField.host(.safari), config: .init(prioritizeSpeech: true))
+        for version in versions {
+            rig.queue.enqueue(version)
+            rig.queue.setSpeaking(false, runID: "r")
+            rig.run(ms: 300)
+        }
+        rig.run(ms: 1_000)
+        #expect(rig.field.string == "Um. so, uh, the plan is to repaint the fence on Saturday if the weather holds. Yeah.", "\(rig.queue.debugState)")
+    }
+
     static let journal = #"""
 {"action":"idle","kind":"step","report":{"after":" C é Z","before":"A👩🏽‍🚀 B🇩🇪 Today we're preparing the boat for a short trip along the coast. The weather report says the wind will stay gentle until the evening. Please put the blue notebook beside the chart table and check that the cabin lights are working. We will bring fresh water, bread, fruit, warm jackets, a small repair kit, and enough rope for the next harbor. Before we leave, walk around the deck and close every open hatch. Now I am speaking again while the earlier passage is being corrected."},"t":503354913.9532084}
 {"id":"250DB018-2DD9-413E-8860-18B25434867F","kind":"read","t":503356675.5577917}

@@ -1383,6 +1383,10 @@ public struct FieldQueue: Sendable {
             let edge = target < cursor ? cursor - 1 : cursor
             if edge >= 0, edge < text.count, text[edge].isNewline { visible = 1 }
         }
+        // Right after a move the proxy's own view shows nothing on the side it moved toward (WhatsApp, Safari: measured in
+        // the #299 recheck journals); the host's callback brings that side. Nothing to see yet is no seam: the hop waits
+        // for a report that shows the way, up to the deadline.
+        if visible == 0, sinceSendMs < Self.checkDeadlineMs { return .wait }
         let distance = abs(target - cursor)
         if let last = current.distance, distance >= last { current.stalls += 1 }
         current.distance = distance
