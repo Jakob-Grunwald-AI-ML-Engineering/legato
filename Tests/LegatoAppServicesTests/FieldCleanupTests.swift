@@ -633,15 +633,74 @@ private final class FieldCleaner: SentenceCleaning {
 /// #299 round 4: on iPhone a pass starts from the keyboard's shadow of the field (`FieldShadow`), sent with no read, and
 /// its edit goes without a re-read (the keyboard places it through every change since and merges around them).
 @Suite @MainActor struct ShadowCleanupPassTests {
-    private func shadowed(_ field: CleanupField, takeStart: Int? = nil, asks: @escaping @MainActor () -> Void = {}) -> FieldCleanupSession {
+    private func shadowed(_ field: CleanupField, takeStart: Int? = nil, takeEnd: (@MainActor () -> Int?)? = nil,
+                          asks: @escaping @MainActor () -> Void = {}) -> FieldCleanupSession {
         let session = FieldCleanupSession()
         session.field = field
         session.shadow = { id in
             asks()
             return FieldShadow(id: id, runID: "r", above: String(field.text.prefix(field.cursor)), below: String(field.text.dropFirst(field.cursor)),
-                               takeStart: takeStart, documentID: "field", draftID: field.draftID)
+                               takeStart: takeStart, takeEnd: takeEnd?(), documentID: "field", draftID: field.draftID)
         }
         return session
+    }
+
+    /// Device run 4 (Notes, 2026-11-17): a take dictated mid-word into the user's sentence ("slides and th|e budget sheet
+    /// if you can."). Both passes cleaned across the take's edges: the model joined "th" and "e" and moved the user's
+    /// sentence after the take ("… pretty simple. Slides and the budget sheet if you can."). A pass edits the take's own
+    /// text only; the user's text before it is context, the text after it is neither sent nor edited.
+    @Test func aTakeDictatedMidWordLeavesTheUsersTextAroundIt() async {
+        let before = "Then it is coffee and cake on the terrace.\n slides and th"
+        let take = " So teh plan for the garden this weekend is pretty simple."
+        let after = "e budget sheet if you can. "
+        let field = CleanupField(before + take + after)
+        field.cursor = (before + take).count
+        // The test field puts the caret at the end once an edit lands; the take's end stays where the take ends.
+        let session = shadowed(field, takeStart: before.count, takeEnd: { field.text.count - after.count })
+        session.rawWords = { "so teh plan for the garden this weekend is pretty simple" }
+        var calls: [(passage: String, before: String)] = []
+        session.clean = { passage, _, context, _ in
+            calls.append((passage, context))
+            // The device's model, handed the user's fragments: it mends the word and moves the user's sentence.
+            if passage.contains("slides and th") || passage.contains("budget sheet") {
+                return "Then it is coffee and cake on the terrace.\n\nSo the plan for the garden this weekend is pretty simple. Slides and the budget sheet if you can."
+            }
+            return passage.replacingOccurrences(of: "teh", with: "the")
+        }
+        session.request(sentence: true)
+        await session.settle()
+        session.request(final: true)
+        await session.settle()
+        #expect(calls.count == 2)
+        for call in calls {
+            #expect(call.passage == "So the plan for the garden this weekend is pretty simple." || call.passage == "So teh plan for the garden this weekend is pretty simple.")
+            #expect(call.before == before + " ", "the user's part of the sentence is context")
+        }
+        #expect(field.text == before + " So the plan for the garden this weekend is pretty simple." + after)
+    }
+
+    /// The whole pass at the stop ran to the end of the shadow: the user's text after the take went to the model as part
+    /// of the passage, and came back edited. It is neither sent nor edited: after the caret, and after the take's end
+    /// when the user typed on behind it.
+    @Test func theWholePassLeavesTheUsersTextAfterTheTakeExactlyAsItWas() async {
+        let before = "Notes for Friday. ", take = "We bring teh bread and teh cheese."
+        for (after, caretAtTakeEnd) in [(" also the wine, if you can. thanks", true), (" also the wine, if you can", false)] {
+            let field = CleanupField(before + take + after)
+            if caretAtTakeEnd { field.cursor = (before + take).count }
+            let session = shadowed(field, takeStart: before.count, takeEnd: { caretAtTakeEnd ? nil : field.text.count - after.count })
+            session.rawWords = { "we bring teh bread and teh cheese" }
+            var passages: [String] = []
+            session.clean = { passage, _, _, _ in
+                passages.append(passage)
+                // A model that tidies whatever it is given.
+                return passage.replacingOccurrences(of: "teh", with: "the").replacingOccurrences(of: ". also", with: ". Also")
+                    .replacingOccurrences(of: ", if", with: " if").replacingOccurrences(of: ". thanks", with: ". Thanks.")
+            }
+            session.request(final: true)
+            await session.settle()
+            #expect(passages == [take], "only the take is sent")
+            #expect(field.text == before + "We bring the bread and the cheese." + after)
+        }
     }
 
     @Test func aPassFromTheShadowReadsNothingAndAppliesAtOnce() async throws {
@@ -669,7 +728,7 @@ private final class FieldCleaner: SentenceCleaning {
     @Test func anEditTheKeyboardCannotPlaceRunsOneFreshPass() async {
         let field = CleanupField("teh boat sails.")
         var asks = 0
-        let session = shadowed(field) { asks += 1 }
+        let session = shadowed(field, asks: { asks += 1 })
         session.clean = { passage, _, _, _ in
             // The first result comes back to a field that changed meanwhile (the stub field takes only an exact match).
             if asks == 1 { field.text = "teh boat sails today."; field.cursor = field.text.count }

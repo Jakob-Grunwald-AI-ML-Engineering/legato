@@ -16,11 +16,11 @@ import Testing
 
     @Test func theShadowIsSentOnceTheSnapshotsWordsAreTyped() {
         var rig = typed("teh review is moved", before: "Hi Anna. ")
-        guard case .ready(let before, let after, let takeStart) = rig.queue.shadow(of: "r", version: 1) else {
+        guard case .ready(let before, let after, let take) = rig.queue.shadow(of: "r", version: 1) else {
             Issue.record("no shadow"); return
         }
         #expect(before == "Hi Anna. teh review is moved" && after == "")
-        #expect(takeStart == "Hi Anna. ".count, "where the take starts")
+        #expect(take == "Hi Anna. ".count..<before.count, "where the take stands")
         // Words of a newer snapshot still on their way: not yet.
         rig.queue.enqueue(snap(2, "teh review is moved to Tuesday"))
         #expect(rig.queue.shadow(of: "r", version: 2) == .notYet)
@@ -31,6 +31,24 @@ import Testing
         rig.field.select(0..<2)
         rig.run(ms: 600)
         if case .refused = rig.queue.shadow(of: "r", version: 2) {} else { Issue.record("a selection refuses") }
+    }
+
+    /// Device run 4 (Notes): a take dictated into the middle of the user's text. The shadow tells where the take's own
+    /// text stands, so a pass edits neither the user's words before it nor the ones after it.
+    @Test func theShadowTellsWhereATakeInsideTheUsersTextStands() {
+        let before = "Bring the slides and ", after = "the budget sheet if you can. "
+        var rig = QueueRig(FakeField.host(.notes, before + after, caret: before.count))
+        rig.run(ms: 100)
+        rig.queue.enqueue(snap(1, "So the plan is pretty simple."))
+        rig.drain()
+        guard case .ready(let above, let below, let take) = rig.queue.shadow(of: "r", version: 1), let take else {
+            Issue.record("no shadow, or no take in it"); return
+        }
+        let text = Array(above + below)
+        #expect(String(text).hasPrefix(before) && String(text).hasSuffix(after))
+        #expect(take.lowerBound == before.count, "the take starts at the caret it began at")
+        #expect(take.upperBound <= text.count - after.count, "the user's text after the take is not the take's")
+        #expect(String(text[take]).trimmingCharacters(in: .whitespaces) == "So the plan is pretty simple.")
     }
 
     @Test func aResultForAFieldThatStillMatchesGoesInAtOnce() {

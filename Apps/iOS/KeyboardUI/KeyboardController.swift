@@ -1122,11 +1122,11 @@ final class KeyboardController {
         case .refused(let why):
             answeredShadowAsk = ask
             link.writeFieldShadow(FieldShadow(id: ask, runID: snapshot.runID, refused: why))
-        case .ready(let before, let after, let takeStart):
+        case .ready(let before, let after, let take):
             answeredShadowAsk = ask
             markRead(ask, mergingUser: true)
-            link.writeFieldShadow(FieldShadow(id: ask, runID: snapshot.runID, above: before, below: after, takeStart: takeStart,
-                                              documentID: documentID, draftID: draftID))
+            link.writeFieldShadow(FieldShadow(id: ask, runID: snapshot.runID, above: before, below: after, takeStart: take?.lowerBound,
+                                              takeEnd: take?.upperBound, documentID: documentID, draftID: draftID))
         }
         trace?("cleanup shadow sent")
     }

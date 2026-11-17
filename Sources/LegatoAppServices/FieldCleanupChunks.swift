@@ -157,6 +157,17 @@ public enum FieldCleanupChunks {
         return start
     }
 
+    /// A take's own text in `text`, from the shadow's `start` and `end` (characters): it starts at its first non-space (the
+    /// separator in front of it stays with the text before) and ends at `end`, or at `caret` when `end` is unknown. Without
+    /// a known start it starts at the text's start.
+    public static func take(start: Int?, end: Int?, caret: Int, in text: String) -> Range<String.Index> {
+        let upper = text.index(text.startIndex, offsetBy: min(text.count, max(0, end ?? caret)))
+        guard let start, start > 0 else { return text.startIndex..<upper }
+        var lower = text.index(text.startIndex, offsetBy: min(start, text.distance(from: text.startIndex, to: upper)))
+        while lower < upper, text[lower].isWhitespace { lower = text.index(after: lower) }
+        return lower..<upper
+    }
+
     /// Where the sentence holding `index` starts in `text`: after the last sentence end (".", "!" or "?" and a space) or
     /// line break before it, at its first non-space; `text`'s start when there is none.
     public static func sentenceStart(of index: String.Index, in text: String) -> String.Index {
@@ -172,13 +183,15 @@ public enum FieldCleanupChunks {
         return i
     }
 
-    /// The end of the last finished sentence in `text` after `from` (just past its ".", "!" or "?", where a space, a line
-    /// break or the text's end follows): nil when no sentence ends there. Words after it are a sentence still being said.
-    public static func finishedSentencesEnd(in text: String, after from: String.Index) -> String.Index? {
-        var i = text.endIndex
+    /// The end of the last finished sentence in `text` after `from` and up to `upper` (just past its ".", "!" or "?", where
+    /// a space, a line break or `upper` follows): nil when no sentence ends there. Words after it are a sentence still
+    /// being said.
+    public static func finishedSentencesEnd(in text: String, after from: String.Index, upTo upper: String.Index? = nil) -> String.Index? {
+        let upper = upper ?? text.endIndex
+        var i = upper
         while i > from {
             let previous = text.index(before: i)
-            if endsSentence(text[previous]), i == text.endIndex || text[i].isWhitespace,
+            if endsSentence(text[previous]), i == upper || text[i].isWhitespace,
                text[from..<previous].contains(where: { $0.isLetter || $0.isNumber }) { return i }
             i = previous
         }

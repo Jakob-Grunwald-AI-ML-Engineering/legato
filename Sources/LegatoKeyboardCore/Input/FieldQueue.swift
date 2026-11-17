@@ -1890,9 +1890,10 @@ public struct FieldQueue: Sendable {
     }
 
     /// What the shadow can tell a cleanup pass about the field (`FieldShadow`) once run `runID`'s words up to `version`
-    /// are typed: the text before and after the user's caret and where the run's text starts in it.
+    /// are typed: the text before and after the user's caret and where the run's text stands in it (from its first piece's
+    /// start to its last piece's end; nil when the shadow does not know). A pass edits only that text.
     public enum ShadowAnswer: Sendable, Equatable {
-        case ready(before: String, after: String, takeStart: Int?)
+        case ready(before: String, after: String, take: Range<Int>?)
         /// Not yet: the version's words are still on their way, or an op's check is open.
         case notYet
         /// No text to give: the field's selection or context is unverified, or nothing is known of it.
@@ -1904,15 +1905,16 @@ public struct FieldQueue: Sendable {
         guard !hasUnverifiedInput else { return .refused("unverified") }
         guard selection == 0 else { return .refused("selection") }
         guard inFlight == nil, swap == nil, recoveryRequest == nil, userLost == nil, strayInsertion == nil, tapRace == nil else { return .notYet }
-        var takeStart: Int?
+        var take: Range<Int>?
         if let run = runs.first(where: { $0.runID == runID }) {
             guard run.pending == nil, (run.version ?? -1) >= version, !rawAppendPending(run) else { return .notYet }
-            takeStart = run.pieces.compactMap { spans[$0.spanID] }.filter { !$0.parked }.map(\.start).min()
+            let placed = run.pieces.compactMap { spans[$0.spanID] }.filter { !$0.parked }
+            if let start = placed.map(\.start).min(), let end = placed.map(\.end).max(), start <= end { take = start..<end }
         } else if !retiredRunIDs.contains(runID) {
             // Not seen yet: its snapshot comes first.
             return .notYet
         }
-        return .ready(before: String(text[..<userCursor]), after: String(text[userCursor...]), takeStart: takeStart)
+        return .ready(before: String(text[..<userCursor]), after: String(text[userCursor...]), take: take)
     }
 
     /// A snapshot's text: its segments, trimmed, joined by a space where a reader expects one.

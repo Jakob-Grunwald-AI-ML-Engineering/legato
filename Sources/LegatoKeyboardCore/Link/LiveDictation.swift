@@ -90,17 +90,19 @@ public struct FieldShadow: Codable, Sendable, Equatable {
     /// The text before the user's caret and after it.
     public var above: String
     public var below: String
-    /// Where the run's text starts in `above + below` (characters), when the shadow knows.
+    /// Where the run's text starts and ends in `above + below` (characters), when the shadow knows. A pass edits only
+    /// that text: the user's text after it is never sent as part of the passage (#299 device run 4).
     public var takeStart: Int?
+    public var takeEnd: Int?
     public var documentID: String?
     public var draftID: String?
     /// Why no text was given (an unverified selection, another field); nil when it was.
     public var refused: String?
     /// When the keyboard sent it.
     public var at: Date
-    public init(id: String, runID: String, above: String = "", below: String = "", takeStart: Int? = nil, documentID: String? = nil,
-                draftID: String? = nil, refused: String? = nil, at: Date = Date()) {
-        self.id = id; self.runID = runID; self.above = above; self.below = below; self.takeStart = takeStart
+    public init(id: String, runID: String, above: String = "", below: String = "", takeStart: Int? = nil, takeEnd: Int? = nil,
+                documentID: String? = nil, draftID: String? = nil, refused: String? = nil, at: Date = Date()) {
+        self.id = id; self.runID = runID; self.above = above; self.below = below; self.takeStart = takeStart; self.takeEnd = takeEnd
         self.documentID = documentID; self.draftID = draftID; self.refused = refused; self.at = at
     }
 }

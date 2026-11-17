@@ -133,7 +133,7 @@ import LegatoKeyboardCore
         do {
             guard await deliveryReady(final: final, source: "", generation: token) else { return }
             let reply: FieldReadReply
-            var takeStart: Int?
+            var takeStart: Int?, takeEnd: Int?
             var shadowed = false
             if pending.isEmpty, let ask = shadow, let answer = await ask(id) {
                 guard token == generation, !Task.isCancelled else { return }
@@ -144,7 +144,7 @@ import LegatoKeyboardCore
                 }
                 reply = FieldReadReply(id: id, state: .done, above: answer.above, below: answer.below,
                                        documentID: answer.documentID, draftID: answer.draftID)
-                takeStart = answer.takeStart
+                takeStart = answer.takeStart; takeEnd = answer.takeEnd
                 shadowed = true
             } else {
                 reply = try await field.read(.cleanup, instructionID: id, reading: {})
@@ -162,33 +162,35 @@ import LegatoKeyboardCore
                 log("unchanged"); return
             }
             let complete = reply.stop == .start && reply.stopBelow == .start
-            var start = source.startIndex, end = source.endIndex
-            if whole {
-                // The whole take: from the start of the sentence it begins in (the field's start when the shadow does not
-                // know where it begins), with its raw words.
-                if let takeStart, takeStart > 0, takeStart < source.count {
-                    start = FieldCleanupChunks.sentenceStart(of: source.index(source.startIndex, offsetBy: takeStart), in: source)
-                }
-            } else {
+            // A pass from the shadow edits the take's own text only (#299 device run 4: a take dictated mid-word into a
+            // note was cleaned across its edges and the user's sentence around it moved). It ends where the take's text
+            // does (the caret when the shadow does not know): the user's text after it is neither sent nor edited. It
+            // starts where the take does: the user's part of the sentence the take begins in is context, never edited (a
+            // take begun mid-word or mid-sentence would otherwise hand the model a fragment to fix). Without a known start
+            // it is the field's start, as before.
+            let take = shadowed ? FieldCleanupChunks.take(start: takeStart, end: takeEnd, caret: reply.above.count, in: source) : nil
+            var start = take?.lowerBound ?? source.startIndex, end = take?.upperBound ?? source.endIndex
+            if !whole {
                 let uncovered = coverage.start(in: source, documentID: reply.documentID, complete: complete)
-                start = uncovered
+                start = max(uncovered, start)
                 if sentence {
                     // A sentence's pass cleans whole sentences: from the start of the one the uncovered text begins in (so
-                    // the sentence before is in it when the overlap reaches back) to the end of the last finished one. The
-                    // words after it are the next sentence, still being said: they are neither sent nor edited.
-                    start = FieldCleanupChunks.sentenceStart(of: uncovered, in: source)
+                    // the sentence before is in it when the overlap reaches back; never before the take) to the end of the
+                    // last finished one. The words after it are the next sentence, still being said: they are neither sent
+                    // nor edited.
+                    start = max(FieldCleanupChunks.sentenceStart(of: uncovered, in: source), take?.lowerBound ?? source.startIndex)
                     // Only a sentence that ends past what is cleaned already makes a pass.
                     let cleanedEnd = coverage.end(in: source, documentID: reply.documentID, complete: complete) ?? uncovered
-                    guard let finished = FieldCleanupChunks.finishedSentencesEnd(in: source, after: max(uncovered, cleanedEnd)) else {
+                    guard let finished = FieldCleanupChunks.finishedSentencesEnd(in: source, after: max(uncovered, cleanedEnd, start), upTo: end) else {
                         log("noSentence"); return
                     }
                     end = finished
                     start = FieldCleanupChunks.skipping(refusedSentences, from: start, before: end, in: source)
                 }
             }
-            let passage = String(source[start..<end])
+            let passage = start < end ? String(source[start..<end]) : ""
             let words = FieldCleanupChunks.wordStarts(in: passage).count
-            guard whole || sentence || words >= FieldCleanupChunks.words else { log("short", ["words": words]); return }
+            guard words > 0, whole || sentence || words >= FieldCleanupChunks.words else { log("short", ["words": words]); return }
             if whole { lastWholeRead = source } else { lastRead = source }
             let raw = whole ? rawWords() : nil
             cleanFailure = nil
@@ -200,8 +202,8 @@ import LegatoKeyboardCore
             guard token == generation, !Task.isCancelled else { return }
             let counts: [String: Any] = ["modelMs": modelMs, "words": words, "sourceChars": source.count, "shadow": shadowed,
                                          "rawWords": raw.map { FieldCleanupChunks.wordStarts(in: $0).count } ?? 0]
-            // A provider trims its answer: the passage's own leading and trailing whitespace stays (a whole pass runs to
-            // the shadow's end, where the space in front of the next sentence would be lost).
+            // A provider trims its answer: the passage's own leading and trailing whitespace stays (a passage can end in
+            // the space in front of the user's next sentence, which would be lost).
             guard let cleaned = cleaned.map({ FieldCleanupChunks.keepingSeparators(of: passage, around: FieldCleanupChunks.keepingLineBreaks(of: passage, in: $0)) }) else {
                 log("modelFailed", counts.merging(["reason": cleanFailure ?? "failed"]) { _, new in new })
                 await onResult(source, baseline, pending.isEmpty ? .keptAsTyped : .undelivered)
