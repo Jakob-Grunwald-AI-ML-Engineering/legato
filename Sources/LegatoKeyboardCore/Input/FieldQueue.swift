@@ -412,6 +412,9 @@ public struct FieldQueue: Sendable {
         guard !hasUnverifiedInput else { return }
         // Dictation never looks around: its pieces are edited only at the caret.
         guard config.canReadAround, recoveryRequest == nil, !prioritizesSpeech else { return }
+        // A key waiting to go wins over a walk (it would change the field under it): the edit behind the seam drops
+        // instead, and a cleanup gets its fresh pass.
+        guard !userLane.contains(where: { if case .input = $0 { true } else { false } }) else { return }
         let pieces = Set(runs.flatMap { $0.pieces.map(\.spanID) })
         let targets = spans.sorted { $0.key < $1.key }.compactMap { id, span -> FieldRecovery.Target? in
             guard span.parked, !span.anchor, !span.userChanged, !span.edited, !span.lastText.isEmpty, !pieces.contains(id) else { return nil }

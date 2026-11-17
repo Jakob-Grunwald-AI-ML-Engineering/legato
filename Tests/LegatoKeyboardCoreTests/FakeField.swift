@@ -53,7 +53,7 @@ struct FakeField {
     }
     private var staleMove: (caret: Int, armed: Bool)?
     /// The proxy's own view right after a move (before the host's next callback) shows nothing on the side the caret
-    /// moved toward (WhatsApp, Safari: #299 recheck journals, `uat-299-recheck`).
+    /// moved toward (WhatsApp, Notes, Safari: #299 recheck journals, `uat-299-recheck`).
     var blindAfterMove = false
     /// The side the last move went (-1 before, +1 after) while no fresh report came since.
     private var blindSide: Int?
@@ -64,7 +64,7 @@ struct FakeField {
         var field = FakeField(text, caret: caret)
         switch host {
         case .whatsApp: field.window = 300; field.cutsAtLineBreaks = true; field.dropsOvershoot = true; field.blindAfterMove = true
-        case .notes: field.window = 300; field.cutsAtLineBreaks = true; field.newIdentityWhenEmpty = true
+        case .notes: field.window = 300; field.cutsAtLineBreaks = true; field.newIdentityWhenEmpty = true; field.blindAfterMove = true
         case .safari:
             field.window = 100; field.movesByCharacters = true; field.hostDelays = true
             field.staleFirstMoveReport = true; field.newIdentityWhenEmpty = true; field.blindAfterMove = true

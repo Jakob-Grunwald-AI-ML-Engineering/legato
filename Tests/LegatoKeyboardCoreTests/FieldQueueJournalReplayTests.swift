@@ -82,6 +82,28 @@ import Testing
         #expect(rig.field.string == "Um. so, uh, the plan is to repaint the fence on Saturday if the weather holds. Yeah.", "\(rig.queue.debugState)")
     }
 
+    /// Notes, fragments replay (journal 18563.8–18567.5 s): the user pressed "Q" right after speech ended, while the stop's
+    /// cleanup was landing in chunks on the line above. The key waited 3.2 s: a chunk's hop back failed on the half window
+    /// and asked for a read across the seam, and the key waited for that walk. The key goes behind the running chunk; the
+    /// cleanup lands whole around it.
+    @Test(arguments: [false, true])
+    func aKeyRightAfterSpeechGoesBehindTheRunningChunk(canReadAround: Bool) {
+        let text = "If the weather Holds, we should be done By late afternoon. Then it is coffee and cake on the terrace. "
+            + "So the plan is to repaint the fence on Saturday if the weather holds. Yeah.\nAnd I think we need two more cans of paint."
+        let target = text.replacingOccurrences(of: "Holds,", with: "holds,").replacingOccurrences(of: "By late", with: "by late")
+        var rig = QueueRig(FakeField.host(.notes, text), config: .init(canReadAround: canReadAround))
+        rig.queue.enqueue(FieldQueue.Edit(kind: .magic, before: text, target: target, cursorAtEnd: false))
+        rig.tick(); rig.tick()
+        let pressed = rig.clockMs
+        rig.queue.enqueue(.insert("Q"))
+        let drained = rig.drain()
+        #expect(drained)
+        #expect(rig.field.string == target + "Q", "\(rig.queue.debugState)")
+        let landed = rig.sent.first { $0.op == .insert("Q") }?.ms
+        #expect(landed.map { $0 - pressed < FieldQueue.checkDeadlineMs } == true, "the key waits for the running chunk only")
+        #expect(rig.applied.count == 1 && rig.drops.isEmpty)
+    }
+
     static let journal = #"""
 {"action":"idle","kind":"step","report":{"after":" C é Z","before":"A👩🏽‍🚀 B🇩🇪 Today we're preparing the boat for a short trip along the coast. The weather report says the wind will stay gentle until the evening. Please put the blue notebook beside the chart table and check that the cabin lights are working. We will bring fresh water, bread, fruit, warm jackets, a small repair kit, and enough rope for the next harbor. Before we leave, walk around the deck and close every open hatch. Now I am speaking again while the earlier passage is being corrected."},"t":503354913.9532084}
 {"id":"250DB018-2DD9-413E-8860-18B25434867F","kind":"read","t":503356675.5577917}
