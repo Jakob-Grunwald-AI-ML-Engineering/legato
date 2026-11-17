@@ -139,19 +139,22 @@ public struct FieldQueue: Sendable {
         public var canReadAround: Bool
         /// Edits (Magic, cleanup) wait while a take is spoken: they go in the gaps between words.
         public var prioritizeSpeech: Bool
+        /// Every chunk's insert enters as a fast character burst (`ChunkEntrance`, #300); off with Reduce Motion.
+        public var chunkEntrance: Bool
         public init(movesByCharacters: Bool = false, capitalization: AutoCapitalizationType = .none,
-                    canReadAround: Bool = false, prioritizeSpeech: Bool = false) {
+                    canReadAround: Bool = false, prioritizeSpeech: Bool = false, chunkEntrance: Bool = false) {
             self.movesByCharacters = movesByCharacters; self.capitalization = capitalization
             self.canReadAround = canReadAround
             self.prioritizeSpeech = prioritizeSpeech
+            self.chunkEntrance = chunkEntrance
         }
     }
 
     // MARK: Tunables
 
-    /// The cold-start deadline (`HostProfile.coldDeadlineMs`): the per-field deadline (`deadlineMs`) before the host's
+    /// The cold-start deadline (`HostLatency.coldDeadlineMs`): the per-field deadline (`deadlineMs`) before the host's
     /// latency is learned, and the bound for anything that does not know the field.
-    public static let checkDeadlineMs = HostProfile.coldDeadlineMs
+    public static let checkDeadlineMs = HostLatency.coldDeadlineMs
     /// The one deadline: how long a chunk's result may be missing from the report (the keyboard's own inserts and
     /// deletes produce no host callback) before the queue re-reads. A report that does not show the chunk inside it is not
     /// a seam. Learned per field (`HostProfile`): the host's latency from a chunk's last op to the callback that shows it,
@@ -314,6 +317,22 @@ public struct FieldQueue: Sendable {
         var stalls = 0
     }
     private var unit: Unit?
+    /// The rest of a chunk's insert while it enters piece by piece (`ChunkEntrance`): the pieces still to go and the gap
+    /// between them. The burst is part of the running chunk: it joins the chunk's flight, the check comes once after its
+    /// last piece (the deadline counts from that piece), and nothing else goes out before it ends, a user's key included.
+    private struct Burst: Sendable, Equatable {
+        var pieces: [String]
+        var gapMs: Double
+        var lane: Lane
+        var owner: Int?
+        /// Live speech: the user's cursor follows the caret.
+        var followsUser: Bool
+        /// Since the burst's first piece (the steps' elapsed time) and the pieces sent after it: piece k is due at
+        /// `k * gapMs`, so a coarse ticker catches up (several pieces in one pump) instead of stretching the burst.
+        var clockMs = 0.0
+        var sent = 0
+    }
+    private var burst: Burst?
 
     private typealias ModelState = ShadowDocument
     /// The chunk on its way: the ops sent since the field last showed the model, and the model before them.
@@ -623,7 +642,7 @@ public struct FieldQueue: Sendable {
     }
 
     public var isIdle: Bool {
-        recoveryRequest == nil && strayInsertion == nil && tapRace == nil && inFlight == nil && unit == nil && swap == nil
+        recoveryRequest == nil && strayInsertion == nil && tapRace == nil && inFlight == nil && unit == nil && burst == nil && swap == nil
             && userLane.isEmpty && (editLane.isEmpty || prioritizesSpeech)
             && !runs.contains(where: { runNeedsWork($0) || ackDue($0) })
     }
@@ -631,7 +650,7 @@ public struct FieldQueue: Sendable {
     /// The keyboard's own writes still to land (a unit, queued edits, dictation): a read for an instruction waits for
     /// them, so its scope already shows them.
     public var hasOwnWork: Bool {
-        unit != nil || swap != nil || (!editLane.isEmpty && !prioritizesSpeech) || runs.contains(where: { runNeedsWork($0) })
+        unit != nil || burst != nil || swap != nil || (!editLane.isEmpty && !prioritizesSpeech) || runs.contains(where: { runNeedsWork($0) })
     }
     public var hasOpInFlight: Bool { inFlight != nil }
     /// Nothing in flight and the caret at the user's cursor: the field is as the user left it, as far as the queue goes.
@@ -818,6 +837,7 @@ public struct FieldQueue: Sendable {
             if stray.elapsedMs >= deadlineMs { refuseStrayInsertion() }
         }
         sinceSendMs += elapsedMs
+        burst?.clockMs += max(0, elapsedMs)
         inFlight?.waitedMs += elapsedMs
         inFlight?.chunkMs += elapsedMs
         if callback { inFlight?.callbacks += 1 }
@@ -919,8 +939,9 @@ public struct FieldQueue: Sendable {
                 if !explainTap(report, flight: flight) { resync(report, pre: flight) }
                 return next()
             }
-            // The chunk goes on: its ops go back to back (the check comes after its last op).
+            // The chunk goes on: its ops go back to back (the check comes after its last op, the last piece of its insert).
             if let current = unit, !current.ops.isEmpty { return next() }
+            if burst != nil { return next() }
             // A report that fits the state before the chunk as well proves nothing (an edit at the caret may still be on its
             // way). A chunk that ends with a move is shown by the report at its end: its edit may be out of the window
             // there (a burst lands whole, measured), and an edit inside the window would not fit.
@@ -1030,6 +1051,11 @@ public struct FieldQueue: Sendable {
     }
 
     private mutating func plannedNext() -> Action {
+        // A chunk's insert still entering goes on first, even before a user's key: it ends within `ChunkEntrance.capMs`.
+        if burst != nil {
+            if inFlight != nil { return nextBurst() }
+            burst = nil
+        }
         if hasUnverifiedInput { return inFlight == nil ? heldSpeechNext() : .wait }
         if inFlight != nil {
             // The running chunk goes on to its end; behind it only the user's input and speech at the caret go before the
@@ -1412,7 +1438,7 @@ public struct FieldQueue: Sendable {
                 return send(.deleteBackward(count), lane: lane(of: current.owner), owner: owner) { q in q.removeRange(q.cursor - count, q.cursor, owner: owner) }
             case .insert(let chars, let owner):
                 current.ops.removeFirst(); unit = current
-                return send(.insert(chars), lane: lane(of: current.owner), owner: owner) { q in q.insertAtCursor(Array(chars), owner: owner) }
+                return sendInsert(chars, lane: lane(of: current.owner), owner: owner)
             }
         }
         return next()
@@ -1631,7 +1657,7 @@ public struct FieldQueue: Sendable {
                   let span = spans[piece.spanID], !span.parked, !span.userChanged, !span.edited, span.end == userCursor else { continue }
             let rest = heldAppend(piece, in: runs[ri], span: span)
             guard !rest.isEmpty else { continue }
-            return append(rest, to: piece)
+            return append(rest, to: piece, entrance: !runs[ri].complete)
         }
         return nil
     }
@@ -1690,7 +1716,7 @@ public struct FieldQueue: Sendable {
             guard liveRevision(for: piece) == nil, let span = spans[piece.spanID] else { continue }
             let rest = heldAppend(piece, in: runs[ri], span: span)
             guard !rest.isEmpty else { continue }
-            let action = append(rest, to: piece)
+            let action = append(rest, to: piece, entrance: false)
             if case .send = action { inFlight?.heldSpeech = HeldSpeech(report: report, spanID: piece.spanID) }
             return action
         }
@@ -1698,12 +1724,9 @@ public struct FieldQueue: Sendable {
     }
 
     /// The open piece's next words at the caret, in one insert (speech is one chunk).
-    private mutating func append(_ rest: [Character], to piece: Piece) -> Action {
-        let spanID = piece.spanID
-        return send(.insert(String(rest)), lane: .live, owner: spanID) { q in
-            q.insertAtCursor(rest, owner: spanID)
-            q.userCursor = q.cursor
-        }
+    /// With `entrance` it enters as a burst (`ChunkEntrance`); a finished take's rest (a flush) and held speech go whole.
+    private mutating func append(_ rest: [Character], to piece: Piece, entrance: Bool = true) -> Action {
+        sendInsert(String(rest), lane: .live, owner: piece.spanID, followsUser: true, entrance: entrance)
     }
 
     /// A new piece of run `ri` at the user's caret, its words from delivered offset `tStart`.
@@ -1789,7 +1812,7 @@ public struct FieldQueue: Sendable {
         if cursor != userCursor { return send(.move(units(to: userCursor)), lane: .live, moveTo: userCursor) }
         if nearRevision(ri, pi) { desired = Array(desiredText(runs[ri].pieces[pi], in: runs[ri])) }
         guard desired != current else { return nil }
-        if desired.starts(with: current) { return append(Array(desired[current.count...]), to: piece) }
+        if desired.starts(with: current) { return append(Array(desired[current.count...]), to: piece, entrance: !runs[ri].complete) }
         // A verified revision of the last words: what differs goes, then is typed again.
         let k = current.count - Self.commonPrefix(current, desired)
         guard !runs[ri].userActed, k <= Self.nearChars, verifiesBefore(k, span: span) else {
@@ -2340,7 +2363,7 @@ public struct FieldQueue: Sendable {
     /// opens its check (the state before it is what a report must not merely show); later ops, and the user's input
     /// behind a chunk, join that check.
     private mutating func send(_ op: ShadowOp, lane: Lane, anywhere: Bool = false, moveTo: Int? = nil, owner: Int? = FieldQueue.unknownOwner,
-                               _ apply: (inout FieldQueue) -> Void = { _ in }) -> Action {
+                               continuing: Bool = false, _ apply: (inout FieldQueue) -> Void = { _ in }) -> Action {
         let joining = inFlight
         if joining == nil {
             let isCursorMove: Bool
@@ -2361,7 +2384,9 @@ public struct FieldQueue: Sendable {
         flight.input = joining?.input
         flight.visited = joining?.visited ?? []
         // Behind a chunk with hops whose own ops are done: its check goes on covering what goes behind it.
-        if let joining, unit?.ops.isEmpty ?? true, !joining.visited.isEmpty {
+        // A later piece of a chunk's own insert is no op behind the chunk, unless the burst itself went behind it.
+        let behindChunk = continuing ? joining?.behind != nil : unit?.ops.isEmpty ?? true
+        if let joining, behindChunk, !joining.visited.isEmpty {
             flight.behind = joining.behind ?? opPre
             flight.behindFrom = joining.behind == nil ? joining.ops.count : joining.behindFrom
             flight.chunkMs = joining.chunkMs; flight.callbacks = joining.callbacks; flight.heard = joining.heard
@@ -2374,6 +2399,33 @@ public struct FieldQueue: Sendable {
         sinceSendMs = 0
         events.append(.sent(op, lane))
         return .send(op)
+    }
+
+    /// An insert at the caret as a chunk's op: one piece, or a burst of pieces (`ChunkEntrance`) of which the first goes now
+    /// and the rest from `nextBurst`, the model taking each piece as it is sent so it always shows what the host was given.
+    private mutating func sendInsert(_ text: String, lane: Lane, owner: Int?, followsUser: Bool = false, entrance: Bool = true) -> Action {
+        var plan = ChunkEntrance.plan(text, enabled: entrance && config.chunkEntrance)
+        guard !plan.pieces.isEmpty else { return .wait }
+        let first = plan.pieces.removeFirst()
+        burst = plan.pieces.isEmpty ? nil : Burst(pieces: plan.pieces, gapMs: plan.gapMs, lane: lane, owner: owner, followsUser: followsUser)
+        return sendPiece(first, lane: lane, owner: owner, followsUser: followsUser, continuing: false)
+    }
+
+    private mutating func sendPiece(_ piece: String, lane: Lane, owner: Int?, followsUser: Bool, continuing: Bool) -> Action {
+        send(.insert(piece), lane: lane, owner: owner, continuing: continuing) { q in
+            q.insertAtCursor(Array(piece), owner: owner)
+            if followsUser { q.userCursor = q.cursor }
+        }
+    }
+
+    /// The next piece of the running burst once it is due (`Burst.clockMs`).
+    private mutating func nextBurst() -> Action {
+        guard var current = burst else { return .wait }
+        guard current.clockMs >= current.gapMs * Double(current.sent + 1) else { return .wait }
+        let piece = current.pieces.removeFirst()
+        current.sent += 1
+        burst = current.pieces.isEmpty ? nil : current
+        return sendPiece(piece, lane: current.lane, owner: current.owner, followsUser: current.followsUser, continuing: true)
     }
 
     /// The field's units from the cursor to `index` (UTF-16, or characters in a field that moves by characters).

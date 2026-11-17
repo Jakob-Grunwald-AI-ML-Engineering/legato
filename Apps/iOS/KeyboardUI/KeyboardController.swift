@@ -711,6 +711,8 @@ final class KeyboardController {
         queue.config.capitalization = autocapitalization
         queue.config.canReadAround = true
         queue.config.prioritizeSpeech = true
+        // Every chunk enters as a fast character burst (`ChunkEntrance`); Reduce Motion writes it whole.
+        queue.config.chunkEntrance = !UIAccessibility.isReduceMotionEnabled
     }
 
     /// Drops everything pending (each edit's owner hears that it was dropped) and forgets the model.

@@ -88,7 +88,7 @@ struct TakeSession {
         field.truncationRng = SeededGenerator(seed: seed ^ 0x7C)
         field.rng = SeededGenerator(seed: seed ^ 0xD1)
         _ = chance(0.7) // was the typewriter setting; drawn so seeds keep their sessions
-        var rig = QueueRig(field, config: .init(prioritizeSpeech: true))
+        var rig = QueueRig(field, config: .init(prioritizeSpeech: true, chunkEntrance: true))
 
         // The user: left alone, acting during the take, after its stop, or both.
         let mode = pick(["alone", "alone", "alone", "during", "during", "after", "both"])
