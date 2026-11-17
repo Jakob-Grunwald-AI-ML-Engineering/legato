@@ -14,22 +14,6 @@ extension DictationAttributes.ContentState {
         }
     }
 
-    var symbol: String {
-        switch phase {
-        case .starting, .listening, .finishing: "mic.fill"
-        case .held: "waveform"
-        case .recovering: "arrow.clockwise"
-        }
-    }
-
-    var tint: Color {
-        switch phase {
-        case .starting, .listening, .finishing: .red
-        case .held: .indigo
-        case .recovering: .orange
-        }
-    }
-
     /// The live text, or a prompt while nothing has been recognized yet.
     var body: String {
         if !tail.isEmpty { return tail }
@@ -48,7 +32,7 @@ struct DictationLiveActivity: Widget {
             if state.phase == .held || state.phase == .recovering { return heldIsland(state: state) }
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Image(systemName: state.symbol).foregroundStyle(state.tint)
+                    LegatoActivityGlyph()
                 }
                 DynamicIslandExpandedRegion(.center) {
                     Text(state.title).font(.headline)
@@ -56,8 +40,6 @@ struct DictationLiveActivity: Widget {
                 DynamicIslandExpandedRegion(.trailing) {
                     if state.phase.isRunning {
                         StopButton()
-                    } else {
-                        Text(state.startedAt, style: .timer).monospacedDigit().hidden()
                     }
                 }
                 DynamicIslandExpandedRegion(.bottom) {
@@ -69,15 +51,11 @@ struct DictationLiveActivity: Widget {
                     }
                 }
             } compactLeading: {
-                Image(systemName: state.symbol).foregroundStyle(state.tint)
+                LegatoActivityGlyph()
             } compactTrailing: {
-                if state.phase.isRunning {
-                    Text(state.startedAt, style: .timer).monospacedDigit().frame(width: 44)
-                } else {
-                    Image(systemName: state.symbol).foregroundStyle(state.tint)
-                }
+                EmptyView()
             } minimal: {
-                Image(systemName: state.symbol).foregroundStyle(state.tint)
+                LegatoActivityGlyph()
             }
         }
     }
@@ -93,11 +71,10 @@ private struct LockScreenView: View {
     private var runBody: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Image(systemName: state.symbol).foregroundStyle(state.tint)
+                LegatoActivityGlyph()
                 Text(state.title).font(.headline)
                 Spacer()
                 if state.phase.isRunning {
-                    Text(state.startedAt, style: .timer).font(.subheadline.monospacedDigit())
                     StopButton()
                 }
             }
@@ -131,11 +108,11 @@ private func heldIsland(state: DictationAttributes.ContentState) -> DynamicIslan
         DynamicIslandExpandedRegion(.center) { HeldTitle(state: state) }
         DynamicIslandExpandedRegion(.trailing) { ReleaseButton() }
     } compactLeading: {
-        HeldGlyph(state: state)
+        LegatoActivityGlyph()
     } compactTrailing: {
         EmptyView()
     } minimal: {
-        HeldGlyph(state: state)
+        LegatoActivityGlyph()
     }
 }
 
@@ -143,7 +120,17 @@ private struct HeldGlyph: View {
     let state: DictationAttributes.ContentState
 
     var body: some View {
-        Image(systemName: state.symbol).foregroundStyle(state.tint)
+        if state.phase == .recovering {
+            Image(systemName: "arrow.clockwise").foregroundStyle(.orange)
+        } else {
+            LegatoActivityGlyph()
+        }
+    }
+}
+
+private struct LegatoActivityGlyph: View {
+    var body: some View {
+        Image(systemName: "waveform").foregroundStyle(.indigo)
     }
 }
 
