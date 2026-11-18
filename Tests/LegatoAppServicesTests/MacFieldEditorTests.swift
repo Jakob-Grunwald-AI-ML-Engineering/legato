@@ -622,11 +622,14 @@ import LegatoMac
         target.ignoreWrites = true
         let editor = MacFieldEditor(capture: { .target(target) })
         editor.typewriter = { false }
-        editor.sleep = { _ in }
+        // A virtual clock: an instant sleep against the real clock busy-waits on the main actor.
+        var clock = ContinuousClock.now
+        editor.sleep = { clock += $0 }
         var inserts: [String] = [], copies: [String] = []
         editor.insert = { inserts.append($0); return .typed }
         editor.recover = { copies.append($0) }
         editor.begin()
+        editor.queue.now = { clock }
         await editor.applyLive(snapshot("second local dictation", run: "second"))
         #expect(editor.panel.active)
         #expect(editor.panel.take.text == "second local dictation")
@@ -644,11 +647,14 @@ import LegatoMac
         target.nativeWriteThrowsWithoutLanding = throwsWithoutLanding
         let editor = MacFieldEditor(capture: { .target(target) })
         editor.typewriter = { false }
-        editor.sleep = { _ in }
+        // A virtual clock: an instant sleep against the real clock busy-waits on the main actor.
+        var clock = ContinuousClock.now
+        editor.sleep = { clock += $0 }
         var inserts: [String] = [], copies: [String] = []
         editor.insert = { inserts.append($0); return .typed }
         editor.recover = { copies.append($0) }
         editor.begin()
+        editor.queue.now = { clock }
         await editor.applyLive(snapshot("second local dictation", run: "second"))
         #expect(target.value == "First take. second local dictation")
         #expect(target.recoveryChecks == 1)
