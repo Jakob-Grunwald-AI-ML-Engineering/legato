@@ -648,6 +648,12 @@ final class KeyboardController {
     // MARK: Field queue
 
     @ObservationIgnored private var draftRecheck: Task<Void, Never>?
+    @ObservationIgnored private var blankProbeTask: Task<Void, Never>?
+    @ObservationIgnored private var blankProbeTaskID: UUID?
+    @ObservationIgnored private var blankProbeLease: UUID?
+    @ObservationIgnored private var blankProbeAttempted = false
+    @ObservationIgnored private var unverifiedBlankProbeOrigin: FieldQueue.BlankLineProbe?
+    @ObservationIgnored private var verifiedBlankProbeReturn: FieldQueue.Report?
 
     /// Animation-only and bounded cursor-read polling retain their existing cadence.
     /// Active field work checks every 5 ms; confirmations and host settlement remain the queue's responsibility.
@@ -660,15 +666,32 @@ final class KeyboardController {
     /// A blank proxy window only ends a draft after it stays empty. A returning window must locate the
     /// same draft before its automation resumes. Run this even during a cursor walk.
     private func observeDraftBoundary() {
-        let report = currentReport
-        let decision = draftEvidence.observe(report, hasText: document.hasText, ownsEmpty: queue.ownsEmptyReport,
-                                             nowMs: Self.uptimeMs, confirmationMs: queue.draftConfirmationMs)
+        guard blankProbeLease == nil else { return }
+        let report = currentReport, hasText = document.hasText, time = Self.uptimeMs
+        let confirmation = queue.draftConfirmationMs
+        let decision = draftEvidence.observe(report, hasText: hasText, ownsEmpty: queue.ownsEmptyReport,
+                                             nowMs: time, confirmationMs: confirmation)
         switch decision {
         case .unchanged:
             draftRecheck?.cancel(); draftRecheck = nil
+            blankProbeAttempted = false
+            unverifiedBlankProbeOrigin = nil
+            verifiedBlankProbeReturn = nil
         case .pending:
-            if draftRecheck == nil,
-               let wait = draftEvidence.recheckAfterMs(nowMs: Self.uptimeMs, confirmationMs: queue.draftConfirmationMs) {
+            if !blankProbeAttempted, cursorReadID != nil || isFieldBusy {
+                // A previous reader can leave the native caret at a position the queue never verified.
+                blankProbeAttempted = true
+            }
+            let unfinishedTake = liveSnapshot.map { $0.complete && $0.version != liveAckedVersion } ?? false
+            let workNeedsEvidence = queue.hasOwnWork || queue.hasOpInFlight || queue.recoveryRequest != nil || unfinishedTake
+            let boundOpaqueHold = hasText && !isFieldBusy && cursorReadID == nil && workNeedsEvidence
+            let wait = draftEvidence.recheckAfterMs(nowMs: time, confirmationMs: confirmation, includingOpaque: boundOpaqueHold)
+            if hasText, unverifiedBlankProbeOrigin != nil || (boundOpaqueHold && wait == 0) {
+                preserveUnverifiedDraft()
+                return
+            }
+            beginBlankLineProbe()
+            if draftRecheck == nil, let wait {
                 draftRecheck = Task { [weak self] in
                     try? await Task.sleep(for: .milliseconds(max(1, Int(wait.rounded(.up)))))
                     guard !Task.isCancelled, let self, !self.isTornDown else { return }
@@ -678,16 +701,108 @@ final class KeyboardController {
             }
         case .resumed:
             draftRecheck?.cancel(); draftRecheck = nil
-            if document.documentID != queueDocumentID || !queue.recognizesDraft(report) {
-                finishDraft(reason: "draft-unverified")
+            let originRestored = unverifiedBlankProbeOrigin?.confirmsOrigin(report) ?? true
+            let verifiedByProbe = verifiedBlankProbeReturn == report
+            blankProbeAttempted = false
+            unverifiedBlankProbeOrigin = nil
+            verifiedBlankProbeReturn = nil
+            if document.documentID != queueDocumentID || !originRestored || (!verifiedByProbe && !queue.recognizesDraft(report)) {
+                preserveUnverifiedDraft()
             }
         case .cleared:
             draftRecheck?.cancel(); draftRecheck = nil
+            if unverifiedBlankProbeOrigin != nil, let snapshot = liveSnapshot { blockLiveRun(snapshot) }
             finishDraft(reason: "draft-cleared")
         }
     }
 
+    private func preserveUnverifiedDraft() {
+        if let snapshot = liveSnapshot { blockLiveRun(snapshot) }
+        finishDraft(reason: "draft-unverified")
+    }
+
+    private func beginBlankLineProbe() {
+        guard !blankProbeAttempted, blankProbeTask == nil, isVisible, !isTornDown, !isFieldBusy,
+              cursorReadID == nil, !queue.paused, queue.hasOwnWork || queue.recoveryRequest != nil,
+              let field = document.documentID, field == queueDocumentID, !document.isSecureTextEntry,
+              document.selectedText?.isEmpty != false, let probe = queue.blankLineProbe() else { return }
+        blankProbeAttempted = true
+        let draft = draftID, taskID = UUID()
+        blankProbeTaskID = taskID
+        blankProbeTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.blankProbeTaskID == taskID {
+                    self.blankProbeTask = nil
+                    self.blankProbeTaskID = nil
+                }
+            }
+            guard self.draftEvidence.isPending, self.draftID == draft, self.document.documentID == field,
+                  self.queue.blankLineProbe() == probe, !self.queue.paused, self.cursorReadID == nil,
+                  let lease = await self.pauseQueue() else { return }
+            defer {
+                if self.blankProbeLease == lease { self.blankProbeLease = nil }
+                self.resumeQueue(lease)
+            }
+            guard self.draftEvidence.isPending, self.draftID == draft, self.document.documentID == field,
+                  self.queue.blankLineProbe() == probe else { return }
+            self.blankProbeLease = lease
+            self.fieldOperationCancelled = false
+
+            func stillOwnsCaret() -> Bool {
+                !Task.isCancelled && self.isVisible && !self.isTornDown && self.draftID == draft
+                    && self.document.documentID == field && !self.document.isSecureTextEntry
+                    && self.document.selectedText?.isEmpty != false && !self.fieldOperationCancelled
+                    && !self.queue.hasUserInput && !self.queue.hasOpInFlight && self.cursorReadID == lease
+                    && self.queue.ownsRead
+            }
+            guard stillOwnsCaret() else { return }
+            // Suppress ordinary draft observation while this lease visits the neighboring line.
+            self.unverifiedBlankProbeOrigin = probe
+            self.journalBlankProbe("attempted", field: field)
+            var outcome = "interrupted"
+            defer { self.journalBlankProbe(outcome, field: field) }
+            self.dispatch(.move(probe.units), reading: true)
+            guard await self.verifyBlankProbeWindow(stillOwnsCaret, matching: probe.confirmsLandmark) else {
+                if stillOwnsCaret() { outcome = "landmark-unconfirmed" }
+                return
+            }
+            guard stillOwnsCaret() else { return }
+            self.dispatch(.move(-probe.units), reading: true)
+            if await self.verifyBlankProbeWindow(stillOwnsCaret, matching: probe.confirmsOrigin) {
+                self.unverifiedBlankProbeOrigin = nil
+                self.verifiedBlankProbeReturn = self.currentReport
+                outcome = "restored"
+            } else if stillOwnsCaret() {
+                outcome = "return-unconfirmed"
+            }
+        }
+    }
+
+    private func journalBlankProbe(_ outcome: String, field: String) {
+        var entry = EditJournal.Entry(t: Self.uptimeMs, kind: .read, field: field)
+        entry.reason = "blank-line-probe"
+        entry.detail = outcome
+        journal.write(entry)
+    }
+
+    private func verifyBlankProbeWindow(_ stillOwnsCaret: () -> Bool, matching: (FieldQueue.Report) -> Bool) async -> Bool {
+        // Divide the response budget between the outward and return moves. Typing can cancel on any sample.
+        let samples = Int(FieldEditCoordinator.inputResponseTargetMs) / (2 * FieldReader.walkSettleMs)
+        var previous: FieldQueue.Report?
+        for _ in 0..<samples {
+            try? await Task.sleep(for: .milliseconds(FieldReader.walkSettleMs))
+            guard stillOwnsCaret() else { return false }
+            let report = currentReport
+            if previous == report { return true }
+            previous = matching(report) ? report : nil
+        }
+        return false
+    }
+
     private func finishDraft(reason: String) {
+        let directInput = document.documentID != nil && document.documentID == queueDocumentID && !document.isSecureTextEntry
+            ? queue.pendingDirectInput : []
         endingDraft = true
         defer { endingDraft = false }
         fieldOperationCancelled = true
@@ -699,6 +814,7 @@ final class KeyboardController {
         draftID = UUID().uuidString
         fieldRead = nil
         sessionSpan.broken()
+        for input in directInput { enqueue(input) }
         trace?("field draft ended reason=\(reason)")
     }
 
@@ -744,6 +860,9 @@ final class KeyboardController {
     private func resetQueue(reason: String) {
         draftRecheck?.cancel(); draftRecheck = nil
         draftEvidence = .init()
+        blankProbeTask?.cancel(); blankProbeTask = nil; blankProbeTaskID = nil
+        blankProbeLease = nil; blankProbeAttempted = false; unverifiedBlankProbeOrigin = nil
+        verifiedBlankProbeReturn = nil
         recoveryTask?.cancel(); recoveryTask = nil; recoveryTaskID = nil
         cursorReadID = nil
         correctionCapture?.reset()
@@ -871,7 +990,8 @@ final class KeyboardController {
     /// coordinator and may only move it. The wrappers used by FieldReader never mutate the document themselves.
     private func dispatch(_ op: ShadowOp, reading: Bool = false) {
         if reading {
-            guard queue.ownsRead, !draftEvidence.isPending, case .move = op else { return }
+            guard queue.ownsRead, !draftEvidence.isPending || (blankProbeLease != nil && blankProbeLease == cursorReadID),
+                  case .move = op else { return }
         } else {
             guard !queue.ownsRead, queue.hasOpInFlight else { return }
         }
@@ -1400,7 +1520,7 @@ final class KeyboardController {
     /// once the walk put the cursor back.
     private(set) var isReadingField = false
     /// The queue is paused and something else moves the cursor (a walk, the read's nudge): no reaction to change notes.
-    private var isFieldBusy: Bool { isReadingField || isNudging }
+    private var isFieldBusy: Bool { isReadingField || isNudging || blankProbeLease != nil }
     @ObservationIgnored private var activeInstructionID: String?
     @ObservationIgnored private var fieldOperationCancelled = false
     private var shouldCancelFieldOperation: Bool {

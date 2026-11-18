@@ -27,6 +27,7 @@ public struct FieldQueue: Sendable {
         public enum Decision: Equatable, Sendable { case unchanged, pending, resumed, cleared }
         private var observedContent = false
         private var firstEmptyMs: Double?
+        private var firstUnavailableMs: Double?
         public private(set) var isPending = false
 
         public init() {}
@@ -36,7 +37,7 @@ public struct FieldQueue: Sendable {
             let hasWindows = !report.before.isEmpty || !report.after.isEmpty || report.selected != nil
             if hasWindows {
                 let resumed = isPending
-                observedContent = true; firstEmptyMs = nil; isPending = false
+                observedContent = true; firstEmptyMs = nil; firstUnavailableMs = nil; isPending = false
                 return resumed ? .resumed : .unchanged
             }
             if ownsEmpty {
@@ -45,20 +46,23 @@ public struct FieldQueue: Sendable {
             }
             if hasText {
                 guard observedContent else { return .unchanged }
+                if firstUnavailableMs == nil { firstUnavailableMs = nowMs }
                 firstEmptyMs = nil
                 isPending = true
                 return .pending
             }
             guard observedContent else { return .unchanged }
             isPending = true
+            if firstUnavailableMs == nil { firstUnavailableMs = nowMs }
             if firstEmptyMs == nil { firstEmptyMs = nowMs }
             if nowMs - (firstEmptyMs ?? nowMs) < confirmationMs { return .pending }
             self = .init()
             return .cleared
         }
 
-        public func recheckAfterMs(nowMs: Double, confirmationMs: Double) -> Double? {
-            firstEmptyMs.map { max(0, confirmationMs - (nowMs - $0)) }
+        public func recheckAfterMs(nowMs: Double, confirmationMs: Double, includingOpaque: Bool = false) -> Double? {
+            let since = firstEmptyMs ?? (includingOpaque ? firstUnavailableMs : nil)
+            return since.map { max(0, confirmationMs - (nowMs - $0)) }
         }
     }
 
@@ -656,6 +660,60 @@ public struct FieldQueue: Sendable {
         return max(Self.checkDeadlineMs, host.deadlineMs(deletes: deletes))
     }
 
+    /// A read-only excursion from the last independently known caret on a structurally blank line.
+    public struct BlankLineProbe: Equatable, Sendable {
+        public let units: Int
+        fileprivate let origin: Int
+        fileprivate let landmark: Int
+        fileprivate let text: [Character]
+
+        public func confirmsLandmark(_ report: Report) -> Bool {
+            !((report.before + report.after).trimmingCharacters(in: .whitespacesAndNewlines)).isEmpty
+                && confirms(report, at: landmark)
+        }
+
+        public func confirmsOrigin(_ report: Report) -> Bool {
+            confirms(report, at: origin)
+        }
+
+        private func confirms(_ report: Report, at position: Int) -> Bool {
+            guard report.selected == nil, !report.before.isEmpty || !report.after.isEmpty else { return false }
+            // Do not infer a caret from a WebKit block echo or windows extending beyond the known draft.
+            let before = Array(report.before), after = Array(report.after)
+            guard before.count <= position, after.count <= text.count - position,
+                  text[(position - before.count)..<position].elementsEqual(before),
+                  text[position..<(position + after.count)].elementsEqual(after) else { return false }
+            let enoughContext = before.count + after.count >= min(FieldQueue.relocateChars, text.count)
+            let exactBreaks = before.contains(where: \.isNewline) && after.contains(where: \.isNewline)
+            return (enoughContext || exactBreaks)
+                && FieldMatch.positions(in: text, reportedBefore: report.before, reportedAfter: report.after) == [position]
+        }
+    }
+
+    /// Plan from known hard line breaks only. An opaque selection, offset uncertainty or an unconfirmed
+    /// move cannot provide an origin for another read. Prefer the preceding line, then the following one.
+    public func blankLineProbe() -> BlankLineProbe? {
+        guard seeded, isHome, selection == 0, !hasUnverifiedInput, !hasUserInput, !draftUserDispatched,
+              !draftUserDispatchPending, userLost == nil, tapRace == nil, strayInsertion == nil,
+              let lastReport, lastReport.selected == nil, doc.hasEvidence(lastReport, chars: Self.relocateChars),
+              doc.positions(of: lastReport) == [cursor] else { return nil }
+        let before = text[..<cursor], after = text[cursor...]
+        let localBefore = before.reversed().prefix { !$0.isNewline }
+        let localAfter = after.prefix { !$0.isNewline }
+        guard localBefore.allSatisfy(\.isWhitespace), localAfter.allSatisfy(\.isWhitespace) else { return nil }
+        let above = before.lastIndex(where: { !$0.isWhitespace }).map { $0 + 1 }
+        let below = after.firstIndex(where: { !$0.isWhitespace }).map { $0 + 1 }
+        for candidate in [above, below].compactMap({ $0 }) {
+            let path = text[min(cursor, candidate)..<max(cursor, candidate)]
+            guard path.contains(where: \.isNewline) else { continue }
+            let units = units(to: candidate)
+            guard abs(units) <= FieldRecovery.lookAroundChars else { continue }
+            let probe = BlankLineProbe(units: units, origin: cursor, landmark: candidate, text: text)
+            if probe.confirmsOrigin(lastReport) { return probe }
+        }
+        return nil
+    }
+
     /// A returning window must independently locate the prior draft in a known result of this
     /// keyboard's operations. Defer reseeding and recovery until we actually have that evidence.
     public func recognizesDraft(_ report: Report) -> Bool {
@@ -758,6 +816,15 @@ public struct FieldQueue: Sendable {
             && !runs.contains(where: { runNeedsWork($0) || ackDue($0) })
     }
     public var hasUserInput: Bool { !userLane.isEmpty }
+
+    /// Explicit keys that have not been sent. The adapter can preserve them when the same native
+    /// field invalidates its draft; scoped user edits still belong to the old draft.
+    public var pendingDirectInput: [Input] {
+        userLane.compactMap { item in
+            if case .input(let input) = item { return input }
+            return nil
+        }
+    }
     /// The keyboard's own writes still to land (a unit, queued edits, dictation): a read for an instruction waits for
     /// them, so its scope already shows them.
     public var hasOwnWork: Bool {

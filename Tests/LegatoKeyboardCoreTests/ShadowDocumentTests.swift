@@ -98,6 +98,47 @@ import Testing
         #expect(rig.field.string.contains("after lunch"))
     }
 
+    @Test func blankLineRecoveryRequiresIndependentEvidenceOfTheOriginalCaret() throws {
+        let upper = "The upper paragraph is uniquely known."
+        let lower = "The lower paragraph is also known."
+        let origin = FieldQueue.Report(before: upper + "\n", after: "\n" + lower)
+        var rig = QueueRig(FakeField(upper + "\n\n" + lower, caret: origin.before.count))
+        rig.run(ms: 100)
+        let probe = try #require(rig.queue.blankLineProbe())
+        #expect(probe.units == -1)
+        rig.queue.enqueue(snap(1, "At noon.", complete: true))
+        let held = rig.queue.step(report: .init(before: ""), elapsedMs: 45, awaitingDraftEvidence: true)
+        #expect(held == .wait)
+
+        rig.field.apply(.move(probe.units))
+        let neighbor = rig.field.current
+        #expect(probe.confirmsLandmark(neighbor))
+        #expect(!probe.confirmsOrigin(neighbor))
+        #expect(!probe.confirmsOrigin(.init(before: "")))
+        #expect(probe.confirmsOrigin(.init(before: "\n", after: "\n")))
+        rig.field.apply(.move(-probe.units))
+        #expect(probe.confirmsOrigin(rig.field.current))
+        rig.drain()
+        #expect(rig.field.string == upper + "\nAt noon.\n" + lower)
+    }
+
+    @Test func blankLineRecoveryUsesTheLowerLineOnlyWhenTheUpperIsUnavailable() throws {
+        let lower = "The lower paragraph is uniquely known."
+        var queue = FieldQueue()
+        _ = queue.step(report: .init(before: "", after: "\n" + lower), elapsedMs: 0)
+        let probe = try #require(queue.blankLineProbe())
+        #expect(probe.units == 2)
+        let neighbor = FieldQueue.Report(before: "\nT", after: String(lower.dropFirst()))
+        #expect(probe.confirmsLandmark(neighbor))
+
+        queue.enqueue(.insert("x"))
+        #expect(queue.blankLineProbe() == nil, "a pending key preempts the automatic excursion")
+
+        var unstructured = FieldQueue()
+        _ = unstructured.step(report: .init(before: "Host context without a hard line break."), elapsedMs: 0)
+        #expect(unstructured.blankLineProbe() == nil)
+    }
+
     @Test func onlySustainedConfirmedEmptinessEndsTheDraft() {
         var evidence = FieldQueue.DraftEvidence()
         let nonempty = FieldQueue.Report(before: "This field was known.")
@@ -106,6 +147,8 @@ import Testing
         #expect(evidence.observe(nonempty, hasText: true, ownsEmpty: false, nowMs: 0, confirmationMs: deadline) == .unchanged)
         #expect(evidence.observe(empty, hasText: false, ownsEmpty: false, nowMs: 100, confirmationMs: deadline) == .pending)
         #expect(evidence.observe(empty, hasText: true, ownsEmpty: false, nowMs: 500, confirmationMs: deadline) == .pending)
+        #expect(evidence.recheckAfterMs(nowMs: 500, confirmationMs: deadline) == nil)
+        #expect(evidence.recheckAfterMs(nowMs: 500, confirmationMs: deadline, includingOpaque: true) == 0)
         #expect(evidence.observe(empty, hasText: false, ownsEmpty: false, nowMs: 550, confirmationMs: deadline) == .pending)
         #expect(evidence.observe(empty, hasText: false, ownsEmpty: false, nowMs: 550 + deadline, confirmationMs: deadline) == .cleared)
         #expect(!evidence.isPending)
