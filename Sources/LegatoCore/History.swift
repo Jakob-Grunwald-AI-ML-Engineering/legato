@@ -6,7 +6,7 @@ public enum CleanupFieldStatus: String, Sendable, Equatable, Codable {
     public var label: String {
         switch self {
         case .cleaned: "Cleaned"
-        case .keptAsTyped: "Kept as typed"
+        case .keptAsTyped: "Cleanup left text unchanged"
         case .undelivered: "Cleanup unconfirmed · check the field"
         }
     }
@@ -14,7 +14,7 @@ public enum CleanupFieldStatus: String, Sendable, Equatable, Codable {
     public var notice: String? {
         switch self {
         case .cleaned: nil
-        case .keptAsTyped: "Kept as typed."
+        case .keptAsTyped: nil
         case .undelivered: "Cleanup couldn't be confirmed. Check the field and Legato's History."
         }
     }
@@ -61,7 +61,9 @@ public struct DictationEntry: Sendable, Equatable, Codable, Identifiable {
     /// Field cleanup compares these snapshots, never the surrounding typed text against raw speech.
     public var cleanupSourceText: String?
     public var cleanupResultText: String?
-    public var displayText: String { cleanupResultText ?? text }
+    /// The accepted cleanup when the host could no longer be safely synchronized.
+    public var cleanupRecoveryText: String?
+    public var displayText: String { cleanupRecoveryText ?? cleanupResultText ?? text }
     /// For Magic entries, `rawText` is the original and `text` is the generated result, even if application failed.
     public var instructionStatus: InstructionHistoryStatus?
 

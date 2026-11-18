@@ -51,6 +51,51 @@ import Testing
         #expect(String(text[take]).trimmingCharacters(in: .whitespaces) == "So the plan is pretty simple.")
     }
 
+    @Test func pendingTypedAndDictatedTextIsVisibleBeforeHostDelivery() {
+        var rig = typed("the boat sails")
+        rig.queue.enqueue(snap(2, "the boat sails tonight"))
+        #expect(rig.queue.projectedBefore == "the boat sails tonight")
+        #expect(rig.field.string == "the boat sails")
+        rig.drain()
+        rig.queue.enqueue(.insert("."))
+        #expect(rig.queue.projectedBefore == "the boat sails tonight.")
+        #expect(rig.field.string == "the boat sails tonight")
+        rig.drain()
+        #expect(rig.field.string == "the boat sails tonight.")
+    }
+
+    @Test func aPartialHostMutationSynchronizesTheCommittedTarget() {
+        var field = FakeField("Please move the review to Thuursday.")
+        var queue = FieldQueue()
+        let original = field.string
+        let target = "Please move the review to Friday."
+        _ = queue.step(report: field.tick(), elapsedMs: 50)
+        queue.markRead("pass", mergingUser: true)
+        queue.enqueue(.init(id: "pass", kind: .magic, before: original, target: target, cursorAtEnd: false, readID: "pass"))
+
+        var droppedPartOfDelete = false
+        var events: [FieldQueue.Event] = []
+        for _ in 0..<200 {
+            let action = queue.step(report: field.tick(), elapsedMs: 50)
+            events += queue.drainEvents()
+            if case .send(let op) = action {
+                if case .deleteBackward(let count) = op, count > 1, !droppedPartOfDelete {
+                    field.apply(.deleteBackward(1))
+                    droppedPartOfDelete = true
+                    #expect(queue.projectedBefore == target)
+                } else {
+                    field.apply(op)
+                }
+                queue.operationDispatched()
+            } else if queue.isIdle { break }
+        }
+
+        #expect(droppedPartOfDelete)
+        #expect(events.contains(.resync(.recoveryReplanned)))
+        #expect(events.contains { if case .applied("pass", _) = $0 { true } else { false } })
+        #expect(field.string == target)
+    }
+
     @Test func aResultForAFieldThatStillMatchesGoesInAtOnce() {
         var rig = typed("teh review is moved to tuesday.")
         guard case .ready(let before, let after, _) = rig.queue.shadow(of: "r", version: 1) else { Issue.record("no shadow"); return }

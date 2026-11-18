@@ -118,6 +118,8 @@ public struct FieldQueue: Sendable {
         /// A run's drop: the part of its text the field never got (`missingText`), all the keyboard keeps. Empty when
         /// every word of it was typed, whatever became of it since. Nil for other drops.
         public var kept: String? = nil
+        /// A resolved shadow edit existed before the host attempted to synchronize it.
+        public var shadowCommitted = false
     }
 
     public enum Event: Sendable, Equatable {
@@ -205,12 +207,25 @@ public struct FieldQueue: Sendable {
 
     private struct EditState: Sendable, Equatable {
         var edit: Edit
+        /// The scope's intended text. Once placed, this survives rollback or partial delivery of host operations.
+        var shadow: ShadowDocument.EditIntent?
+        var isCleanup = false
+
+        var target: String {
+            get { shadow?.target ?? edit.target }
+            set {
+                if shadow != nil { shadow?.target = newValue }
+                else { edit.target = newValue }
+            }
+        }
         var spanID: Int?
         /// Where the user's cursor was when the edit came: a zero-width span that moves with every change.
         var anchorID: Int?
         var unplacedMs = 0.0
         /// Chunks of it whose check failed (the queue re-read and planned it again).
         var failures = 0
+        /// Bounded per target, even when multiple failed checks each appear to make progress.
+        var syncRecoveries = 0
         /// The span's text when its last chunk was planned.
         var plannedFrom: [Character]?
         var revision: LiveRevision?
@@ -374,7 +389,15 @@ public struct FieldQueue: Sendable {
         /// them, is the chunk's; the proxy's view then shows them.
         var behind: ModelState?
         var behindFrom = 0
+        /// Before this edit's current mutation, independently of where its preceding cursor hop started.
+        var checkpoint: SyncCheckpoint?
     }
+    private struct SyncCheckpoint: Sendable, Equatable {
+        var before: ShadowDocument
+        var operation: ShadowOp
+        var owner: Int
+    }
+
     /// The report a held insert of speech was sent on, and the piece's span it went to.
     private struct HeldSpeech: Sendable, Equatable {
         var report: Report
@@ -659,15 +682,53 @@ public struct FieldQueue: Sendable {
     /// A chunk is running: its next op goes out at once (the adapter keeps stepping).
     public var isInChunk: Bool { inFlight != nil && unit.map { !$0.ops.isEmpty } == true }
     public var modelText: String { String(text) }
-    /// The text before the user's cursor once pending at-cursor edits landed: what typed lines and host text plan against.
+    /// Pending, placeable text for producers such as the next agent contribution. The host's cursor and
+    /// readback remain unchanged until the synchronizer dispatches and verifies its operations.
     public var projectedBefore: String {
-        var before = String(text[..<min(userCursor, text.count)])
-        for state in editLane where state.spanID == nil && state.edit.atCursor { before += state.edit.target }
-        for state in editLane {
-            guard let id = state.spanID, let span = spans[id], span.end == userCursor else { continue }
-            before = String(before.dropLast(span.end - span.start)) + state.edit.target
+        var intended = doc
+        intended.cursor = userCursor
+        if cursor != userCursor { intended.selection = 0 }
+        guard !hasUnverifiedInput, tapRace == nil, strayInsertion == nil else {
+            return String(intended.text[..<intended.cursor])
         }
-        return before
+
+        // Use the same recognition and insertion rules as the delivery lane. When a key can split an
+        // open word, its continuation is resolved by nextUser at the caret and held out of this view.
+        var live = self
+        for index in runs.indices { live.applyPending(index) }
+        let effectsOfSpeechAndKeysAreKnown = userLane.isEmpty || live.openPieceWordRest() == nil
+        if effectsOfSpeechAndKeysAreKnown {
+            for item in userLane {
+                switch item {
+                case .input(let input):
+                    guard intended.project(input) else { return String(intended.text[..<intended.cursor]) }
+                case .edit(let state):
+                    if let intent = state.shadow, let scope = state.spanID {
+                        intended.project(intent, in: scope, cursorAtEnd: state.edit.cursorAtEnd)
+                    } else {
+                        return String(intended.text[..<intended.cursor])
+                    }
+                }
+            }
+        }
+        if userLane.isEmpty, intended.selection == 0, swap == nil, let (ri, pi) = live.openPieceIndex() {
+            let run = live.runs[ri], piece = run.pieces[pi]
+            if let span = intended.spans[piece.spanID], span.end == intended.cursor, !span.parked, !span.userChanged,
+               !span.edited, live.liveRevision(for: piece) == nil {
+                let rest = live.heldAppend(piece, in: run, span: span)
+                intended.insertAtCursor(rest, owner: piece.spanID)
+            }
+        }
+        var edits = editLane
+        if case .edit(let active, .edit)? = unit?.owner { edits.insert(active, at: 0) }
+        for state in edits {
+            if let intent = state.shadow, let scope = state.spanID {
+                intended.project(intent, in: scope, cursorAtEnd: state.edit.cursorAtEnd)
+            } else if state.edit.atCursor, intended.selection == 0 {
+                intended.insertAtCursor(Array(state.target), owner: nil)
+            }
+        }
+        return String(intended.text[..<intended.cursor])
     }
     public var expectedBefore: String { String(text[..<cursor]) }
     public var expectedAfter: String { String(text[(cursor + selection)...]) }
@@ -728,6 +789,7 @@ public struct FieldQueue: Sendable {
     public mutating func enqueue(_ edit: Edit, user: Bool = false) {
         if user { recoveryRevision &+= 1; recoveryRequest = nil }
         var state = EditState(edit: edit)
+        state.isCleanup = edit.readID.map { id in readMarks.contains { $0.id == id && $0.mergesUser } } ?? false
         if seeded, !edit.atCursor, edit.selected == nil { state.anchorID = addSpan(Span(start: userCursor, end: userCursor, anchor: true)) }
         if user { userLane.append(.edit(state)) } else { editLane.append(state) }
     }
@@ -946,15 +1008,9 @@ public struct FieldQueue: Sendable {
             let deadline = host.deadlineMs(deletes: deletes)
             // The running insert's entrance pieces go out first; the check comes after the last piece.
             if burst != nil { return next() }
-            // A cleanup's delete can still be on its way when the proxy first echoes the new text. If
-            // the return hop goes out on that echo, a delayed delete can land at the returned caret.
-            if let current = unit, !current.ops.isEmpty {
-                guard deletes > 0, cleanupReturning(current) else { return next() }
-                let limit = min(deadline, FieldEditCoordinator.inputResponseTargetMs)
-                if consistent(report), callback || flight.waitedMs >= limit { return next() }
-                guard flight.waitedMs >= limit else { return .wait }
-                abortUnit()
-            }
+            // A cleanup's mutations settle separately. A delayed delete must never land at a returned
+            // caret, or consume replacement text that already went out after it.
+            if let current = unit, !current.ops.isEmpty, flight.checkpoint == nil { return next() }
             // A report that fits the state before the chunk as well proves nothing (an edit at the caret may still be on its
             // way). A chunk that ends with a move is shown by the report at its end: its edit may be out of the window
             // there (a burst lands whole, measured), and an edit inside the window would not fit.
@@ -979,12 +1035,13 @@ public struct FieldQueue: Sendable {
             // It grows with the chunk's delete run (`HostProfile.deadlineMs(deletes:)`).
             let waited = flight.behind != nil && !chunkHeard ? flight.chunkMs : flight.waitedMs
             let heard = !hops || chunkHeard || waited >= deadline
-            if shows, heard, flight.anywhere || hops || !fits(report, in: flight.pre) {
+            let checkpointSettled = flight.checkpoint == nil || callback || flight.waitedMs >= deadline
+            if shows, heard, checkpointSettled, flight.anywhere || hops || !fits(report, in: flight.pre) {
                 guard confirm(flight, report: report) else { return .wait }
             } else if waited < deadline {
-                // Not shown yet: no seam. The user's input and speech at the caret go behind the chunk all the same
-                // (`plannedNext`).
-                return next()
+                // A destructive checkpoint needs its own independent readback before a later input can issue.
+                // Other lanes still let keys and speech append behind the chunk.
+                return flight.checkpoint == nil ? next() : .wait
             } else {
                 // The check failed: the field does not show the chunk. Re-read; what is left is planned against it.
                 inFlight = nil
@@ -996,6 +1053,7 @@ public struct FieldQueue: Sendable {
                 }
                 events.append(.resync(.checkFailed))
                 if takeBackAppends(report, flight: flight) { return next() }
+                if recoverCheckpoint(report, flight: flight) { return next() }
                 if !explainTap(report, flight: flight) { resync(report, pre: flight) }
             }
         } else if !consistent(report) {
@@ -1159,6 +1217,11 @@ public struct FieldQueue: Sendable {
             for ri in runs.indices { ack(ri) }
             return .idle
         }
+        if editLane.contains(where: { $0.isCleanup }), !editLane.contains(where: { $0.revision != nil }) {
+            for ri in runs.indices where revisionDue(runs[ri]) {
+                if let action = revisePieces(ri) { return action }
+            }
+        }
         if let action = nextEdit() { return action }
         if let action = nextLive() { return action }
         return .idle
@@ -1192,11 +1255,7 @@ public struct FieldQueue: Sendable {
     private mutating func sendUser(_ input: Input) -> Action? {
         switch input {
         case .insert(let key):
-            let action = send(.insert(key), lane: .user) { q in
-                if q.selection > 0 { q.removeRange(q.cursor, q.cursor + q.selection, owner: nil); q.selection = 0 }
-                q.insertAtCursor(Array(key), owner: nil)
-                q.userCursor = q.cursor
-            }
+            let action = send(.insert(key), lane: .user) { q in q.applyKnownUserReplacement(input) }
             inFlight?.input = .insert(key)
             return action
         case .deleteBackward:
@@ -1206,11 +1265,7 @@ public struct FieldQueue: Sendable {
                 inFlight?.input = input
                 return action
             }
-            let action = send(.deleteBackward(1), lane: .user) { q in
-                if q.selection > 0 { q.removeRange(q.cursor, q.cursor + q.selection, owner: nil); q.selection = 0 }
-                else { q.removeRange(q.cursor - 1, q.cursor, owner: nil) }
-                q.userCursor = q.cursor
-            }
+            let action = send(.deleteBackward(1), lane: .user) { q in q.applyKnownUserReplacement(input) }
             inFlight?.input = input
             return action
         case .move(let characters):
@@ -1228,6 +1283,14 @@ public struct FieldQueue: Sendable {
             inFlight?.input = input
             return action
         }
+    }
+
+    private mutating func applyKnownUserReplacement(_ input: Input) {
+        guard let change = doc.replacement(for: input) else { return }
+        removeRange(change.range.lowerBound, change.range.upperBound, owner: nil)
+        selection = 0
+        insertAtCursor(change.text, owner: nil)
+        userCursor = cursor
     }
 
     /// What the open piece still appends at its end (the cursor): its untyped end.
@@ -1317,7 +1380,9 @@ public struct FieldQueue: Sendable {
             }
         }
         guard let id = state.spanID, let span = spans[id] else { drop(state, .changed); return .done }
-        if state.revision == nil, span.userChanged { drop(state, .userEdited); return .done }
+        if state.revision == nil, !state.isCleanup || span.parked, span.userChanged {
+            drop(state, .userEdited); return .done
+        }
         if span.parked {
             // Behind a seam: explored with a read where the adapter can, else found again by the observer within the
             // deadline, or dropped (the app keeps the result in History; a cleanup gets one fresh pass).
@@ -1330,13 +1395,23 @@ public struct FieldQueue: Sendable {
         let current = chars(of: span)
         if var revision = state.revision {
             // Replanning after a key protects changes made since our last confirmed partial text.
-            state.edit.target = String(conditionalRevisionTarget(base: revision.baseline, current: current,
-                                                               proposal: Array(state.edit.target), span: span))
+            state.target = String(conditionalRevisionTarget(base: revision.baseline, current: current,
+                                                           proposal: Array(state.target), span: span))
             revision.baseline = current
             state.revision = revision
             spans[id]?.userChanged = false
         }
-        let target = Array(state.edit.target)
+        if state.shadow == nil {
+            let origin: ShadowDocument.EditIntent.Origin = state.isCleanup ? .cleanup : state.revision != nil ? .recognition : .edit
+            state.shadow = .init(target: state.edit.target, origin: origin, transportBaseline: current)
+        } else if var intent = state.shadow, intent.origin == .cleanup, intent.transportBaseline != current {
+            // An observed change wins over this cleanup. Internal writes update transportBaseline as they
+            // issue (and on recovery), so unfinished sync is never mistaken for a caller's text edit.
+            intent.target = String(intent.target(around: current))
+            intent.transportBaseline = current
+            state.shadow = intent
+        }
+        let target = Array(state.target)
         if current == target {
             if state.edit.cursorAtEnd, userCursor != span.end {
                 state.failures += 1
@@ -1497,14 +1572,60 @@ public struct FieldQueue: Sendable {
         return action
     }
 
-    private func cleanupReturning(_ unit: Unit) -> Bool {
-        guard case .edit(let state, .edit) = unit.owner, let id = state.spanID,
-              let span = spans[id], span.cleanup else { return false }
-        switch unit.ops.first {
-        case .moveToUser: return cursor != userCursor
-        case .moveToSpanEnd: return cursor != span.end
-        default: return false
+    /// Reconcile an unambiguous prefix of the issued mutation at its original position. The shadow
+    /// target stays committed, so the next chunk plans only what is still missing from that target.
+    private mutating func recoverCheckpoint(_ report: Report, flight: InFlight) -> Bool {
+        guard let checkpoint = flight.checkpoint, report.selected == nil,
+              case .edit(var state, let lane)? = unit?.owner else { return false }
+        let before = checkpoint.before, owner = checkpoint.owner
+        let size: Int
+        switch checkpoint.operation {
+        case .insert(let value): size = value.count
+        case .deleteBackward(let count): size = count
+        case .move: return false
         }
+        guard size <= FieldRecovery.lookAroundChars else { return false }
+        var candidate = before
+        var match: ShadowDocument?
+        func matches(_ document: ShadowDocument) -> Bool {
+            document.pins(report) && document.fitsInside(report) && document.hasEvidence(report, chars: Self.relocateChars)
+        }
+        if matches(candidate) { match = candidate }
+        switch checkpoint.operation {
+        case .insert(let value):
+            for character in value {
+                candidate.insertAtCursor([character], owner: owner)
+                if matches(candidate) {
+                    guard match == nil else { return false }
+                    match = candidate
+                }
+            }
+        case .deleteBackward(let count):
+            for _ in 0..<count {
+                guard candidate.cursor > 0 else { return false }
+                candidate.removeRange(candidate.cursor - 1, candidate.cursor, owner: owner)
+                if matches(candidate) {
+                    guard match == nil else { return false }
+                    match = candidate
+                }
+            }
+        case .move: return false
+        }
+        guard let match else { return false }
+        unit = nil
+        coordinator.invalidate()
+        restore(match)
+        merge(report)
+        recentSends = []
+        if let span = spans[owner] { state.shadow?.transportBaseline = chars(of: span) }
+        state.syncRecoveries += 1
+        if state.syncRecoveries > Self.failureLimit {
+            drop(state, .unplaceable)
+        } else {
+            requeue(.edit(state, lane))
+            events.append(.resync(.recoveryReplanned))
+        }
+        return true
     }
 
     private func lane(of owner: UnitOwner) -> Lane {
@@ -1517,7 +1638,7 @@ public struct FieldQueue: Sendable {
     private mutating func finishUnit(_ owner: UnitOwner) {
         guard case .edit(var state, let lane) = owner else { return }
         guard let id = state.spanID, let span = spans[id] else { drop(state, .changed); return }
-        if chars(of: span) == Array(state.edit.target), cursor == userCursor,
+        if chars(of: span) == Array(state.target), cursor == userCursor,
            !state.edit.cursorAtEnd || userCursor == span.end {
             applied(state)
         } else {
@@ -1573,7 +1694,7 @@ public struct FieldQueue: Sendable {
         if let id = state.spanID, let span = spans[id], !span.parked, inFlight == nil { partial = String(chars(of: span)) }
         finishSpan(state.spanID); finishSpan(state.anchorID)
         events.append(.dropped(Drop(id: state.edit.id, runID: nil, kind: state.edit.kind, reason: reason,
-                                    text: state.edit.target, partial: partial)))
+                                    text: state.target, partial: partial, shadowCommitted: state.isCleanup && state.shadow != nil)))
     }
 
     private mutating func finishSpan(_ id: Int?) { if let id { spans[id] = nil } }
@@ -1988,7 +2109,12 @@ public struct FieldQueue: Sendable {
         guard seeded else { return .refused("unseeded") }
         guard !hasUnverifiedInput else { return .refused("unverified") }
         guard selection == 0 else { return .refused("selection") }
-        guard inFlight == nil, swap == nil, recoveryRequest == nil, userLost == nil, strayInsertion == nil, tapRace == nil else { return .notYet }
+        let committedCleanupPending = editLane.contains { $0.isCleanup && $0.shadow != nil }
+        // Future speech takes priority over sync. If it defers the committed cleanup, skip this
+        // request: a later pause can read its settled result without keeping a pass waiting.
+        if committedCleanupPending, prioritizesSpeech { return .refused("syncPending") }
+        guard inFlight == nil, unit == nil, swap == nil, recoveryRequest == nil,
+              userLost == nil, strayInsertion == nil, tapRace == nil, !committedCleanupPending else { return .notYet }
         var take: Range<Int>?
         if let run = runs.first(where: { $0.runID == runID }) {
             guard run.pending == nil, (run.version ?? -1) >= version, !rawAppendPending(run), !revisionDue(run) else { return .notYet }
@@ -2175,7 +2301,8 @@ public struct FieldQueue: Sendable {
             state.spanID = piece.spanID
             state.revision = LiveRevision(runID: run.runID, version: version, proposal: proposal,
                                           through: piece.tEnd ?? run.delivered.count, baseline: current)
-            editLane.append(state)
+            let cleanupIndex = editLane.firstIndex { $0.isCleanup } ?? editLane.endIndex
+            editLane.insert(state, at: cleanupIndex)
             return nextEdit() ?? .wait
         }
         return nil
@@ -2408,6 +2535,20 @@ public struct FieldQueue: Sendable {
         flight.jumpSpan = joining?.jumpSpan
         flight.input = joining?.input
         flight.visited = joining?.visited ?? []
+        if let owner, case .edit(let state, _)? = unit?.owner, state.spanID == owner, state.isCleanup {
+            switch op {
+            case .insert(let piece):
+                if var checkpoint = joining?.checkpoint, case .insert(let sent) = checkpoint.operation {
+                    checkpoint.operation = .insert(sent + piece)
+                    flight.checkpoint = checkpoint
+                } else {
+                    flight.checkpoint = SyncCheckpoint(before: opPre, operation: op, owner: owner)
+                }
+            case .deleteBackward:
+                flight.checkpoint = SyncCheckpoint(before: opPre, operation: op, owner: owner)
+            case .move: break
+            }
+        }
         // Behind a chunk with hops whose own ops are done: its check goes on covering what goes behind it.
         // A later piece of a chunk's own insert is no op behind the chunk, unless the burst itself went behind it.
         let behindChunk = continuing ? joining?.behind != nil : unit?.ops.isEmpty ?? true
@@ -2465,22 +2606,22 @@ public struct FieldQueue: Sendable {
         guard !chars.isEmpty else { return }
         record(.insert(at: cursor, count: chars.count, owner: owner))
         doc.insertAtCursor(chars, owner: owner)
-        updateRevisionBaseline(owner: owner)
+        updateEditBaseline(owner: owner)
     }
 
     private mutating func removeRange(_ a: Int, _ b: Int, owner: Int?) {
         guard a < b, a >= 0, b <= text.count else { return }
         record(.remove(a, b, owner: owner))
         doc.removeRange(a, b, owner: owner)
-        updateRevisionBaseline(owner: owner)
+        updateEditBaseline(owner: owner)
     }
 
-    private mutating func updateRevisionBaseline(owner: Int?) {
+    private mutating func updateEditBaseline(owner: Int?) {
         guard let owner, let span = spans[owner],
-              case .edit(var state, let lane)? = unit?.owner,
-              state.spanID == owner, var revision = state.revision else { return }
-        revision.baseline = chars(of: span)
-        state.revision = revision
+              case .edit(var state, let lane)? = unit?.owner, state.spanID == owner else { return }
+        let current = chars(of: span)
+        state.shadow?.transportBaseline = current
+        state.revision?.baseline = current
         unit?.owner = .edit(state, lane)
     }
 

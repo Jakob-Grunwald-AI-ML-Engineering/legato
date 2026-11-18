@@ -43,6 +43,7 @@ import LegatoKeyboardCore
     /// The next pass is the one automatic pass after an edit the field could not place: it asks for no further one.
     private var repassing = false
     public private(set) var lastApplied = false
+    public private(set) var recoveryTarget: String?
 
     public init() {}
 
@@ -52,7 +53,7 @@ import LegatoKeyboardCore
         if let requestID { field?.cancel(instructionID: requestID) }
         requestID = nil; requested = false; finalRequested = false; sentenceRequested = false; wholeRequested = false
         lastRead = ""; lastWholeRead = ""; coverage = .init(); refusedSentences = []
-        pendingText = ""; repassing = false; lastApplied = false
+        pendingText = ""; repassing = false; lastApplied = false; recoveryTarget = nil
     }
 
     /// Repeated pauses coalesce. A stop always gets a fresh pass, including long takes. An edit the field could not
@@ -61,6 +62,7 @@ import LegatoKeyboardCore
     /// covered yet with the coverage's overlap (about the sentence before) as context. `whole`: a long pause; the pass covers
     /// the whole take with its raw words, as the stop's does.
     public func request(final: Bool = false, pendingText: String = "", sentence: Bool = false, whole: Bool = false) {
+        guard recoveryTarget == nil else { return }
         requested = true; finalRequested = finalRequested || final; sentenceRequested = sentenceRequested || sentence
         wholeRequested = wholeRequested || whole
         if !pendingText.isEmpty { self.pendingText = pendingText }
@@ -68,7 +70,7 @@ import LegatoKeyboardCore
         let token = generation
         task = Task { [weak self] in
             guard let self else { return }
-            while requested, !Task.isCancelled, token == generation {
+            while requested, recoveryTarget == nil, !Task.isCancelled, token == generation {
                 // A pause pass starts in a pause; a sentence's pass starts at once (only its result waits for a gap).
                 guard canApply() || sentenceRequested else { break }
                 // The stop's pass covers the sentence's too, and so does a whole-take pass.
@@ -140,7 +142,9 @@ import LegatoKeyboardCore
                 mark("shadowMs")
                 phases["shadowSentMs"] = max(0, Int(answer.at.timeIntervalSince(startedAt) * 1000))
                 if let why = answer.refused {
-                    log("shadowRefused", ["why": why]); await onResult("", "", .undelivered); return
+                    log("shadowRefused", ["why": why])
+                    if why != "syncPending" { await onResult("", "", .undelivered) }
+                    return
                 }
                 reply = FieldReadReply(id: id, state: .done, above: answer.above, below: answer.below,
                                        documentID: answer.documentID, draftID: answer.draftID)
@@ -245,7 +249,10 @@ import LegatoKeyboardCore
                 lastApplied = applied
                 // The field's text past the passage may have grown meanwhile: coverage ends where the cleaned text does.
                 if applied { coverage.confirm(proposed: covered, actual: target, documentID: reply.documentID, complete: false) }
-                if !applied, ack != nil, ack?.stopped != true, !repass { repassNext(final: final, whole: whole, sentence: sentence) }
+                recoveryTarget = ack?.recoveryTarget ?? (ack == nil ? target : nil)
+                if !applied, ack != nil, ack?.stopped != true, recoveryTarget == nil, !repass {
+                    repassNext(final: final, whole: whole, sentence: sentence)
+                }
                 let status: CleanupFieldStatus = applied ? .cleaned : ack?.stopped == true || ack == nil ? .undelivered : .keptAsTyped
                 await onResult(source, applied ? target : ack?.partial ?? source, status)
                 fields["targetChars"] = target.count; fields["applied"] = applied; fields["unplaceable"] = ack?.unplaceable == true

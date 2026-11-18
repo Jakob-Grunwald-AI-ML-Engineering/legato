@@ -14,6 +14,7 @@ import LegatoKeyboardCore
     var complete = true
     var draftID: String?
     var beforeApply: (() -> Void)?
+    var partialRecovery: String?
     /// Where the take's text stands (characters), told with a read like the Mac's cleanup read.
     var take: Range<Int>?
     init(_ text: String) { self.text = text; cursor = text.count }
@@ -27,6 +28,10 @@ import LegatoKeyboardCore
     func apply(_ edit: ScopedEdit) async -> ScopedEditAck? {
         beforeApply?()
         edits.append(edit)
+        if let partialRecovery {
+            text = partialRecovery; cursor = text.count
+            return .init(id: edit.id, applied: false, partial: text, stopped: true, recoveryTarget: edit.target)
+        }
         guard edit.draftID == draftID, edit.scopeText == text else { return .init(id: edit.id, applied: false) }
         text = edit.target; cursor = text.count
         return .init(id: edit.id, applied: true, cursor: text.utf16.count)
@@ -763,6 +768,22 @@ private final class FieldCleaner: SentenceCleaning {
         #expect(asks == 2)
         #expect(field.edits.count == 2)
         #expect(field.text == "The boat sails today.")
+    }
+
+    @Test func anIncompleteCommittedEditRetainsItsTargetWithoutCleaningThePartialField() async {
+        let field = CleanupField("teh boat sails.")
+        field.partialRecovery = "T boat sails."
+        var asks = 0
+        let session = shadowed(field, asks: { asks += 1 })
+        session.clean = { _, _, _, _ in "The boat sails." }
+        session.request(whole: true)
+        await session.settle()
+        session.request(final: true)
+        await session.settle()
+
+        #expect(asks == 1)
+        #expect(field.edits.count == 1)
+        #expect(session.recoveryTarget == "The boat sails.")
     }
 
     /// The pass at stop covers the whole take (from its start in the field, not the text before it) and gets the take's

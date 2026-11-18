@@ -906,7 +906,7 @@ final class KeyboardController {
                     } else {
                         liveRecoveryNotice = drop.runID == nil
                             ? "Couldn't safely finish the interrupted edit."
-                            : "Kept as typed. The cleaned take is in Legato's History."
+                            : "Dictation edits couldn't finish. Check the field and Legato's History."
                     }
                     syncRowTakeover()
                 } else if drop.reason == .reset, drop.runID != nil, let kept = drop.kept,
@@ -1902,13 +1902,12 @@ final class KeyboardController {
             case .unplaceable: "The text could not be found again, so the edit was not made. The original and rewrite are available in History."
             case .reset: "The text field went away. The original and rewrite are available in History. Check the text."
             }
-            // Partly landed: the scope as it stands now, so an undo can still put the original back.
-            if let partial = drop.partial, partial != edit.scopeText {
-                link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: reason, partial: partial, stopped: true,
-                                                           unplaceable: unplaceable))
-            } else {
-                link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: reason, unplaceable: unplaceable))
-            }
+            // Preserve both the observed partial and the resolved cleanup target for recovery.
+            let partial = drop.partial == edit.scopeText ? nil : drop.partial
+            let recoveryTarget = drop.shadowCommitted ? drop.text : nil
+            link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: reason, partial: partial,
+                                                       stopped: partial != nil || recoveryTarget != nil ? true : nil,
+                                                       unplaceable: unplaceable, recoveryTarget: recoveryTarget))
         default:
             link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The instruction was cancelled. The original and rewrite are available in History."))
         }

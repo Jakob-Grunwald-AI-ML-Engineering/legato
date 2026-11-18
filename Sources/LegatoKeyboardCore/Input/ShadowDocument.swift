@@ -7,6 +7,21 @@ import Foundation
 /// observer (`FieldQueue.observe`, `ShadowObserver`) keeps it current from every report the proxy gives, idle or not.
 /// Pure value; nothing here talks to a proxy.
 public struct ShadowDocument: Sendable, Equatable {
+    /// An accepted scoped write, independent of the projected host text as operations land.
+    struct EditIntent: Sendable, Equatable {
+        enum Origin: Sendable, Equatable { case cleanup, recognition, edit }
+        var target: String
+        var origin: Origin
+        /// What the scope holds after our own issued writes, before any competing change.
+        var transportBaseline: [Character]
+
+        func target(around observed: [Character]) -> [Character] {
+            let desired = Array(target)
+            guard origin == .cleanup, transportBaseline != observed else { return desired }
+            return FieldMerge.rebase(base: transportBaseline, kept: observed, incoming: desired).text
+        }
+    }
+
     /// A tracked region of the text (a dictation piece, an edit's scope, an anchor).
     struct Span: Sendable, Equatable {
         var start: Int
@@ -47,7 +62,50 @@ public struct ShadowDocument: Sendable, Equatable {
 
     public init() {}
 
-    // MARK: Editing (what an executed op does)
+    // MARK: Editing
+
+    /// Resolve a user's key in known text. Opaque selection and read boundaries remain with the host adapter.
+    func replacement(for input: FieldQueue.Input) -> (range: Range<Int>, text: [Character])? {
+        let at = cursor
+        switch input {
+        case .insert(let key): return (at..<(at + selection), Array(key))
+        case .deleteBackward where selection > 0: return (at..<(at + selection), [])
+        case .deleteBackward where at > 0: return ((at - 1)..<at, [])
+        case .deleteBackward, .move: return nil
+        }
+    }
+
+    mutating func project(_ input: FieldQueue.Input) -> Bool {
+        if case .move(let delta) = input {
+            guard selection == 0 else { return false }
+            cursor = min(max(0, cursor + delta), text.count)
+        } else {
+            guard let change = replacement(for: input) else { return false }
+            let range = change.range
+            removeRange(range.lowerBound, range.upperBound, owner: nil)
+            selection = 0
+            insertAtCursor(change.text, owner: nil)
+        }
+        userCursor = cursor
+        return true
+    }
+
+    /// Materialize a placed intent without describing any host cursor moves or transport mutations.
+    mutating func project(_ intent: EditIntent, in id: Int, cursorAtEnd: Bool) {
+        guard let span = spans[id], !span.parked, !span.userChanged || intent.origin == .cleanup else { return }
+        let old = chars(of: span), desired = intent.target(around: old)
+        let caret = userCursor
+        let offset = FieldMerge.position(min(max(0, caret - span.start), old.count), from: old, to: desired, afterInsertion: true)
+        for hunk in ShadowEditPlanner.diff(old, desired).reversed() {
+            let lower = span.start + hunk.start
+            cursor = span.start + hunk.end
+            removeRange(lower, cursor, owner: id)
+            insertAtCursor(hunk.text, owner: id)
+        }
+        if cursorAtEnd { userCursor = span.start + desired.count }
+        else if (span.start...span.end).contains(caret) { userCursor = span.start + offset }
+        cursor = userCursor
+    }
 
     /// `chars` typed at the caret. `owner`: the span whose text it is (nil: the user's).
     mutating func insertAtCursor(_ chars: [Character], owner: Int?) {

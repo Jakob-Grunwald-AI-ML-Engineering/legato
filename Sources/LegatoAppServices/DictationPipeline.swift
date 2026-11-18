@@ -239,7 +239,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             }
             return whole ? await clean(text, before) : await FieldCleanupChunks.clean(text, before: before, using: clean)
         }
-        cleanup.onResult = { [weak self] source, confirmed, status in
+        cleanup.onResult = { [weak self, weak cleanup] source, confirmed, status in
             guard let self else { return }
             let capture = self.fieldEntry ?? self.liveRun.flatMap { run in UUID(uuidString: run.runID).map { (id: $0, raw: run.wholeRaw.text) } }
             guard let capture else { return }
@@ -256,6 +256,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             entry.text = raw
             entry.cleanupSourceText = source.isEmpty ? nil : source
             entry.cleanupResultText = confirmed.isEmpty ? nil : confirmed
+            entry.cleanupRecoveryText = cleanup?.recoveryTarget
             entry.cleanupFieldStatus = status
             self.lastLiveHistory = entry
             try? await history.upsert(entry)
