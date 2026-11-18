@@ -10,8 +10,8 @@ import Foundation
 /// 2. Chunks, not characters: speech, a Soniox revision, a cleanup and a user key are each one chunk, executed whole.
 /// 3. One place per chunk (`chunk`): hops there, one delete run and one insert, the hop back to the user's caret.
 /// 4. Hops stay within what the field showed (`hop`); after each the report is looked at and the rest corrected (`look`).
-/// 5. No fixed waits: ops go back to back on the proxy's immediate view; one check after the chunk (the report with the
-///    return move's callback), and one deadline (`checkDeadlineMs`) for a result that never shows.
+/// 5. Ops use the proxy's immediate view, except a cleanup's return hop after a delete waits for proof at the edit.
+///    The finished chunk is checked at the returned caret. Both waits have a deadline.
 /// 6. A failed check re-reads (`resync`); an edit that cannot be placed again drops, and the app runs a fresh cleanup.
 ///    Nothing is restored blindly. A tap that split a chunk is explained from the report (`explainTap`) or re-read.
 /// 7. User input wins: a key waits only for the chunk that is running.
@@ -263,7 +263,7 @@ public struct FieldQueue: Sendable {
         /// Manual activity prevents whole-block fallback and changes where later speech starts.
         /// Conditional revisions still visit unchanged pieces and preserve protected user words.
         var userActed = false
-        /// Delivered text up to here is never typed again (it went with a swap that did not finish, or landed elsewhere).
+        /// The acknowledged or explicitly handed-off prefix is never eligible for a new live append.
         var settledThrough = 0
     }
     private(set) var runs: [LiveRun] = []
@@ -308,7 +308,7 @@ public struct FieldQueue: Sendable {
     }
     private enum UnitOwner: Sendable, Equatable { case edit(EditState, Lane), space }
     /// One chunk of the keyboard's own: hops within sight, one place's deletes and inserts, the way back. Its ops go out
-    /// back to back; only a hop waits for a look at where it landed. One check follows the last op.
+    /// back to back except for hop and cleanup-delete checks. The last op is confirmed at its destination.
     private struct Unit: Sendable, Equatable {
         var ops: [QOp]
         var owner: UnitOwner
@@ -939,9 +939,22 @@ public struct FieldQueue: Sendable {
                 if !explainTap(report, flight: flight) { resync(report, pre: flight) }
                 return next()
             }
-            // The chunk goes on: its ops go back to back (the check comes after its last op, the last piece of its insert).
-            if let current = unit, !current.ops.isEmpty { return next() }
+            let deletes = flight.ops.reduce(0) { count, op in
+                if case .deleteBackward(let n) = op { return count + n }
+                return count
+            }
+            let deadline = host.deadlineMs(deletes: deletes)
+            // The running insert's entrance pieces go out first; the check comes after the last piece.
             if burst != nil { return next() }
+            // A cleanup's delete can still be on its way when the proxy first echoes the new text. If
+            // the return hop goes out on that echo, a delayed delete can land at the returned caret.
+            if let current = unit, !current.ops.isEmpty {
+                guard deletes > 0, cleanupReturning(current) else { return next() }
+                let limit = min(deadline, FieldEditCoordinator.inputResponseTargetMs)
+                if consistent(report), callback || flight.waitedMs >= limit { return next() }
+                guard flight.waitedMs >= limit else { return .wait }
+                abortUnit()
+            }
             // A report that fits the state before the chunk as well proves nothing (an edit at the caret may still be on its
             // way). A chunk that ends with a move is shown by the report at its end: its edit may be out of the window
             // there (a burst lands whole, measured), and an edit inside the window would not fit.
@@ -965,7 +978,6 @@ public struct FieldQueue: Sendable {
             // The deadline counts from the chunk's last op until a callback showed the chunk, then from the last op behind it.
             // It grows with the chunk's delete run (`HostProfile.deadlineMs(deletes:)`).
             let waited = flight.behind != nil && !chunkHeard ? flight.chunkMs : flight.waitedMs
-            let deadline = host.deadlineMs(deletes: flight.ops.reduce(0) { if case .deleteBackward(let n) = $1 { $0 + n } else { $0 } })
             let heard = !hops || chunkHeard || waited >= deadline
             if shows, heard, flight.anywhere || hops || !fits(report, in: flight.pre) {
                 guard confirm(flight, report: report) else { return .wait }
@@ -1485,6 +1497,16 @@ public struct FieldQueue: Sendable {
         return action
     }
 
+    private func cleanupReturning(_ unit: Unit) -> Bool {
+        guard case .edit(let state, .edit) = unit.owner, let id = state.spanID,
+              let span = spans[id], span.cleanup else { return false }
+        switch unit.ops.first {
+        case .moveToUser: return cursor != userCursor
+        case .moveToSpanEnd: return cursor != span.end
+        default: return false
+        }
+    }
+
     private func lane(of owner: UnitOwner) -> Lane {
         switch owner {
         case .edit(_, let lane): lane
@@ -1869,6 +1891,9 @@ public struct FieldQueue: Sendable {
         let run = runs[ri]
         guard ackDue(run), let version = run.version, inFlight == nil else { return }
         runs[ri].ackedVersion = version
+        // A later cleanup may replace or temporarily obscure this text. Its next host report
+        // cannot make speech which was already delivered eligible to append a second time.
+        runs[ri].settledThrough = run.delivered.count
         events.append(.liveApplied(runID: run.runID, version: version, complete: run.complete))
     }
 

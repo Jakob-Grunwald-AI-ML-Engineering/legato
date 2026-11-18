@@ -25,10 +25,11 @@ enum JournalReplay {
             case .input: if let input = entry.input { queue.enqueue(input) }
             case .edit: if let edit = entry.edit { queue.enqueue(edit, user: entry.user ?? false) }
             case .live: if let snapshot = entry.snapshot { queue.enqueue(snapshot) }
-            case .read: if let id = entry.id { queue.markRead(id) }
+            case .read: if let id = entry.id { queue.markRead(id, mergingUser: entry.reason == "shadow") }
             case .step:
                 guard let report = entry.report else { continue }
-                let action = queue.step(report: report, elapsedMs: lastStep.map { entry.t - $0 } ?? 0)
+                let action = queue.step(report: report, elapsedMs: lastStep.map { entry.t - $0 } ?? 0,
+                                        callback: entry.callback ?? true)
                 lastStep = entry.t
                 result.events += queue.drainEvents()
                 if case .send(let op) = action { result.sent.append(op) }
@@ -41,11 +42,12 @@ enum JournalReplay {
     }
 
     /// The journal's input against a fake field that starts as its first report showed the field.
-    static func simulate(_ entries: [EditJournal.Entry], configure: (inout FakeField) -> Void = { _ in }) -> QueueRig {
+    static func simulate(_ entries: [EditJournal.Entry], config: FieldQueue.Config = .init(),
+                         configure: (inout FakeField) -> Void = { _ in }) -> QueueRig {
         let first = entries.first { $0.report != nil }?.report ?? .init(before: "")
         var field = FakeField(first.before + (first.selected ?? "") + first.after, caret: first.before.count)
         configure(&field)
-        var rig = QueueRig(field, config: .init())
+        var rig = QueueRig(field, config: config)
         let start = entries.first?.t ?? 0
         for entry in entries {
             while rig.clockMs < entry.t - start { rig.tick() }
@@ -53,7 +55,7 @@ enum JournalReplay {
             case .input: if let input = entry.input { rig.queue.enqueue(input) }
             case .edit: if let edit = entry.edit { rig.queue.enqueue(edit, user: entry.user ?? false) }
             case .live: if let snapshot = entry.snapshot { rig.queue.enqueue(snapshot) }
-            case .read: if let id = entry.id { rig.queue.markRead(id) }
+            case .read: if let id = entry.id { rig.queue.markRead(id, mergingUser: entry.reason == "shadow") }
             default: break
             }
         }
@@ -92,6 +94,7 @@ private struct Recorder {
     @Test func aLineRoundTripsWithFullText() {
         var entry = EditJournal.Entry(t: 12.5, kind: .edit, field: "doc")
         entry.edit = FieldQueue.Edit(id: "e", kind: .magic, before: "I saw teh", after: " cat", target: "I saw the cat")
+        entry.callback = false
         entry.report = .init(before: "line\n", after: "👍 next", selected: nil)
         let data = EditJournal.line(entry)
         #expect(data.last == 0x0A)

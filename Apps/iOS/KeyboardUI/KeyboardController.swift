@@ -804,12 +804,14 @@ final class KeyboardController {
         // A chunk's ops go out back to back within one pump: hops, a delete run, an insert, the hop back.
         for iteration in 0..<16 {
             let report = currentReport
-            let action = queue.step(report: report, elapsedMs: elapsed, callback: callback && iteration == 0)
+            let hostCallback = callback && iteration == 0
+            let action = queue.step(report: report, elapsedMs: elapsed, callback: hostCallback)
             elapsed = 0
             let events = queue.drainEvents()
-            if report != lastJournaledReport || !events.isEmpty {
+            if hostCallback || report != lastJournaledReport || !events.isEmpty {
                 var entry = EditJournal.Entry(t: Self.uptimeMs, kind: .step, field: queueDocumentID)
                 entry.report = report
+                entry.callback = hostCallback
                 entry.action = switch action { case .send: "send"; case .wait: "wait"; case .idle: "idle" }
                 journal.write(entry)
                 lastJournaledReport = report
