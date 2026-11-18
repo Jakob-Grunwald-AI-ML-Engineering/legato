@@ -88,21 +88,7 @@ struct WordRowView: View {
     /// top and nothing re-centres or jumps. The row keeps its height; the font is the largest that fits two lines with air
     /// between them and clear of the row's edges (`WordRowHeight`, an estimate to measure on the phone).
     private func previewRow(_ text: String) -> some View {
-        GeometryReader { proxy in
-            let height = Double(proxy.size.height)
-            let size = WordRowHeight.previewFontSize(rowHeight: height)
-            Text(text)
-                .font(.system(size: CGFloat(size)))
-                .lineSpacing(CGFloat(WordRowHeight.previewLineSpacing(size: size)))
-                .foregroundStyle(Color(uiColor: KeyColors.suggestion))
-                .multilineTextAlignment(.leading)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(width: max(proxy.size.width - 2 * CGFloat(WordRowLayout.contentInset), 0), alignment: .leading)
-                .padding(.horizontal, CGFloat(WordRowLayout.contentInset))
-                .padding(.bottom, CGFloat(WordRowHeight.previewPadding(rowHeight: height, size: size)))
-                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .bottomLeading)
-                .clipped()
-        }
+        PreviewRow(text: text)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(text)
         .accessibilityIdentifier("keyboard.hint")
@@ -411,4 +397,44 @@ private struct AutoFillSwitchKey: UIViewRepresentable {
     }
 
     func updateUIView(_ button: UIButton, context: Context) {}
+}
+
+/// The dictation preview text: a clearly readable secondary colour, one line centred vertically, two lines filling the row, and
+/// a soft fade at the first line's leading edge when the head of the text is cut off.
+private struct PreviewRow: View {
+    let text: String
+    @State private var textHeight = 0.0
+
+    var body: some View {
+        GeometryReader { proxy in
+            let height = Double(proxy.size.height)
+            let size = WordRowHeight.previewFontSize(rowHeight: height)
+            let single = WordRowHeight.previewIsSingleLine(textHeight: textHeight, size: size)
+            let truncated = WordRowHeight.previewTruncated(textHeight: textHeight, rowHeight: height, prefixed: text.hasPrefix("…"))
+            Text(text)
+                .font(.system(size: CGFloat(size)))
+                .lineSpacing(CGFloat(WordRowHeight.previewLineSpacing(size: size)))
+                .foregroundStyle(Color(uiColor: .secondaryLabel))
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .onGeometryChange(for: Double.self) { Double($0.size.height) } action: { textHeight = $0 }
+                .frame(width: max(proxy.size.width - 2 * CGFloat(WordRowLayout.contentInset), 0), alignment: .leading)
+                .padding(.horizontal, CGFloat(WordRowLayout.contentInset))
+                .padding(.bottom, single ? 0 : CGFloat(WordRowHeight.previewPadding(rowHeight: height, size: size)))
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: single ? .leading : .bottomLeading)
+                .clipped()
+                .mask {
+                    VStack(spacing: 0) {
+                        // The first line's leading edge; the second line is solid.
+                        HStack(spacing: 0) {
+                            LinearGradient(colors: [truncated ? .clear : .black, .black], startPoint: .leading, endPoint: .trailing)
+                                .frame(width: CGFloat(WordRowHeight.previewFadeWidth))
+                            Color.black
+                        }
+                        .frame(height: proxy.size.height / 2)
+                        Color.black
+                    }
+                }
+        }
+    }
 }
