@@ -309,11 +309,11 @@ final class KeyboardController {
     private(set) var keptInsertNotice: String?
     @ObservationIgnored private var keptNoticeTimeout: Task<Void, Never>?
     private func noteKeptInsertRefused() {
-        keptInsertNotice = "Couldn't insert here. Move the cursor and try again."
+        keptInsertNotice = "Can't insert here — move the cursor"
         syncRowTakeover()
         keptNoticeTimeout?.cancel()
         keptNoticeTimeout = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(3))
+            try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled, let self else { return }
             self.keptInsertNotice = nil
             self.syncRowTakeover()

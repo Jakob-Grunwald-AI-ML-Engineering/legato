@@ -85,18 +85,21 @@ struct WordRowView: View {
 
     /// The dictation preview (#312): the words not in the field yet, left aligned, two lines, anchored on the newest words. The
     /// text keeps its natural wrapping and sits at the row's bottom edge, so a growing text pushes the oldest line out at the
-    /// top and nothing re-centres or jumps. The row keeps its height; the font is the largest that fits two lines in it
-    /// (`WordRowHeight.previewFontSize`, an estimate to measure on the phone).
+    /// top and nothing re-centres or jumps. The row keeps its height; the font is the largest that fits two lines with air
+    /// between them and clear of the row's edges (`WordRowHeight`, an estimate to measure on the phone).
     private func previewRow(_ text: String) -> some View {
         GeometryReader { proxy in
-            let size = WordRowHeight.previewFontSize(rowHeight: Double(proxy.size.height))
+            let height = Double(proxy.size.height)
+            let size = WordRowHeight.previewFontSize(rowHeight: height)
             Text(text)
                 .font(.system(size: CGFloat(size)))
+                .lineSpacing(CGFloat(WordRowHeight.previewLineSpacing(size: size)))
                 .foregroundStyle(Color(uiColor: KeyColors.suggestion))
                 .multilineTextAlignment(.leading)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(width: max(proxy.size.width - 2 * CGFloat(WordRowLayout.contentInset), 0), alignment: .leading)
                 .padding(.horizontal, CGFloat(WordRowLayout.contentInset))
+                .padding(.bottom, CGFloat(WordRowHeight.previewPadding(rowHeight: height, size: size)))
                 .frame(width: proxy.size.width, height: proxy.size.height, alignment: .bottomLeading)
                 .clipped()
         }
@@ -122,14 +125,30 @@ struct WordRowView: View {
     /// Text the keyboard could not place: its end, then Insert and Copy (Copy needs Full Access), and a small close.
     private func keptRow(_ kept: KeptText) -> some View {
         HStack(spacing: 8) {
-            Text(controller.keptInsertNotice ?? kept.preview(maxCharacters: 120))
-                .font(.system(size: fontSize - 4))
-                .foregroundStyle(Color(uiColor: KeyColors.suggestion))
-                .lineLimit(1)
-                .truncationMode(controller.keptInsertNotice == nil ? .head : .tail)
-                .minimumScaleFactor(controller.keptInsertNotice == nil ? 1 : 0.7)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityIdentifier("keyboard.kept.text")
+            if let notice = controller.keptInsertNotice {
+                // Short and readable; it gives the sentence's place back after a moment.
+                Text(notice)
+                    .font(.system(size: fontSize - 4, weight: .medium))
+                    .foregroundStyle(Color(uiColor: KeyColors.suggestion))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("keyboard.kept.notice")
+            } else {
+                // Unsent dictation: a quiet cue, then the start of the sentence so it is recognisable.
+                Image(systemName: "waveform")
+                    .font(.system(size: fontSize - 6, weight: .medium))
+                    .foregroundStyle(Color(uiColor: KeyColors.suggestion).opacity(0.7))
+                    .accessibilityHidden(true)
+                Text(kept.preview(maxCharacters: 120))
+                    .font(.system(size: fontSize - 4))
+                    .foregroundStyle(Color(uiColor: KeyColors.suggestion))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityLabel("Unsent dictation: \(kept.preview(maxCharacters: 120))")
+                    .accessibilityIdentifier("keyboard.kept.text")
+            }
             if kept.offersInsertion, kept.insertion == nil || controller.insertingKeptText {
                 takeButton(controller.insertingKeptText ? "Inserting…" : "Insert", id: "keyboard.kept.insert",
                            enabled: controller.canInsertKeptText) { controller.insertKeptText() }
@@ -138,7 +157,7 @@ struct WordRowView: View {
                 Text("Check the field").font(.system(size: fontSize - 5))
                     .accessibilityLabel("Previous insertion could not be confirmed. You can still copy or dismiss the recovery text.")
             }
-            if controller.fullAccess {
+            if controller.fullAccess, controller.keptInsertNotice == nil {
                 takeButton("Copy", id: "keyboard.kept.copy") { controller.copyKeptText() }
             }
             Button { controller.dismissKeptText() } label: {
@@ -171,7 +190,7 @@ struct WordRowView: View {
                         if position < ranks.count - 1 {
                             Rectangle().fill(Color(uiColor: KeyColors.divider))
                                 .frame(width: 0.67, height: 24)
-                                .opacity(pressed == position || pressed == position + 1
+                                .opacity(words.isEmpty || pressed == position || pressed == position + 1
                                          || highlighted == position || highlighted == position + 1 ? 0 : 1)
                                 .transaction { $0.animation = nil }
                         }

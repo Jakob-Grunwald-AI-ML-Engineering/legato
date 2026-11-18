@@ -13,12 +13,20 @@ public enum WordRowHeight {
     public static func content(landscape: Bool) -> Double { landscape ? visible : portrait }
 
     /// Two lines of the dictation preview (#312) must fit the row as it is: the row never grows or shrinks for a take (the
-    /// compact strip stays reachable, and the native prediction frame is its size). The largest size of these whose two lines
-    /// fit; the line height is an ESTIMATE (1.2 x the size, SF's usual), not measured on a phone.
-    public static let previewSizes: [Double] = [13, 12, 11]
+    /// compact strip stays reachable, and the native prediction frame is its size). The text sits clear of the row's edges
+    /// (`previewMinPadding`) with a little air between its lines (`previewLineSpacing`). The largest size of these whose two
+    /// lines, the air and the padding fit; the line height is an ESTIMATE (1.2 x the size, SF's usual), not measured on a phone.
+    public static let previewSizes: [Double] = [13, 12, 11, 10]
     public static func previewLineHeight(size: Double) -> Double { size * 1.2 }
+    public static func previewLineSpacing(size: Double) -> Double { size * 0.1 }
+    public static let previewMinPadding = 1.0
+    public static func previewContentHeight(size: Double) -> Double { 2 * previewLineHeight(size: size) + previewLineSpacing(size: size) }
     public static func previewFontSize(rowHeight: Double) -> Double {
-        previewSizes.first { 2 * previewLineHeight(size: $0) <= rowHeight } ?? previewSizes[previewSizes.count - 1]
+        previewSizes.first { previewContentHeight(size: $0) + 2 * previewMinPadding <= rowHeight } ?? previewSizes[previewSizes.count - 1]
+    }
+    /// The space above and below the two lines (balanced).
+    public static func previewPadding(rowHeight: Double, size: Double) -> Double {
+        max(0, (rowHeight - previewContentHeight(size: size)) / 2)
     }
 }
 

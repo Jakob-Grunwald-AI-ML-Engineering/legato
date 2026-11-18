@@ -35,11 +35,11 @@ import Testing
         #expect(store.read()?.text == "five.")
     }
 
-    @Test func previewCutsFromTheHead() {
+    @Test func previewShowsTheStartAndCutsTheTail() {
         let item = KeptText(text: "milk and the eggs on Tuesday.")
         #expect(item.preview(maxCharacters: 100) == "milk and the eggs on Tuesday.")
         let cut = item.preview(maxCharacters: 12)
-        #expect(cut.hasPrefix("…") && cut.hasSuffix("Tuesday.") && cut.count == 12)
+        #expect(cut.hasPrefix("milk and th") && cut.hasSuffix("…") && cut.count == 12)
     }
 
     // MARK: What a dropped run keeps (#299 device run: a take whose cleaned text stood in the field was kept raw)

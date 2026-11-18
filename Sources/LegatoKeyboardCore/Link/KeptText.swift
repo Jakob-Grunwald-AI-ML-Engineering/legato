@@ -56,11 +56,11 @@ public struct KeptText: Codable, Sendable, Equatable {
     /// Recovery written before draft identity was available has no valid source.
     public var isShowable: Bool { draftID != nil && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
-    /// The word row's view of it: the end of the text (what was said last), cut from the head.
+    /// The word row's view of it: the start of the text, which is what makes it recognisable, cut from the tail.
     public func preview(maxCharacters: Int) -> String {
         let flat = text.split(whereSeparator: \.isNewline).joined(separator: " ")
         guard flat.count > maxCharacters else { return flat }
-        return "…" + flat.suffix(max(1, maxCharacters - 1))
+        return flat.prefix(max(1, maxCharacters - 1)) + "…"
     }
 }
 

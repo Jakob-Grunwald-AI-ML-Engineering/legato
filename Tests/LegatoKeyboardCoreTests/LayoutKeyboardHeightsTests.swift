@@ -84,8 +84,10 @@ import Testing
 
 @Test func thePreviewFontFitsTwoLinesInTheRowAsItIs() {
     // Portrait: 27 pt holds two lines of 11 pt (2 x 13.2 = 26.4; 12 pt needs 28.8); landscape's 44 pt holds 13 pt (31.2).
-    #expect(WordRowHeight.previewFontSize(rowHeight: WordRowHeight.content(landscape: false)) == 11)
+    #expect(WordRowHeight.previewFontSize(rowHeight: WordRowHeight.content(landscape: false)) == 10, "11 pt left no air above or below two lines in 27 pt")
     #expect(WordRowHeight.previewFontSize(rowHeight: WordRowHeight.content(landscape: true)) == 13)
-    #expect(2 * WordRowHeight.previewLineHeight(size: 11) <= WordRowHeight.portrait)
+    let size = WordRowHeight.previewFontSize(rowHeight: WordRowHeight.portrait)
+    let pad = WordRowHeight.previewPadding(rowHeight: WordRowHeight.portrait, size: size)
+    #expect(WordRowHeight.previewContentHeight(size: size) + 2 * pad <= WordRowHeight.portrait && pad >= WordRowHeight.previewMinPadding)
     #expect(WordRowHeight.portrait == 27, "The preview does not change the row")
 }
