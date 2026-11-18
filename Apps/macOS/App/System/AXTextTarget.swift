@@ -356,6 +356,7 @@ final class AXTextTarget: TextTarget {
         guard AXIsProcessTrusted(), let app = NSWorkspace.shared.frontmostApplication else { return }
         let pid = app.processIdentifier
         requestTree(pid: pid)
+        let began = ContinuousClock.now
         var deadline = warmup.retryDeadline(pid: pid, now: .now)
         var refreshed = false
         while !Task.isCancelled {
@@ -368,7 +369,14 @@ final class AXTextTarget: TextTarget {
                     let extended = ContinuousClock.now + AccessibilityWarmup.budget
                     deadline = max(deadline ?? extended, extended)
                 }
-            case .capture(.none): break
+            case .capture(.none):
+                // Right after an app switch (a click on its Dock icon, Command-Tab) the app has no focused element for a moment,
+                // or one that does not answer yet, whatever its kind: the take would start in the panel with the field in front
+                // of the user (acceptance round 2: Safari, first take after TextEdit). A short grace; the panel stays the answer
+                // when the field never shows.
+                if ["no-focus", "no-selection", "unreadable-text"].contains(lastCaptureNote) {
+                    deadline = max(deadline ?? began + AccessibilityWarmup.focusGrace, began + AccessibilityWarmup.focusGrace)
+                }
             case .capture: return
             }
             guard let deadline, ContinuousClock.now < deadline else { return }
@@ -888,6 +896,20 @@ final class AXTextTarget: TextTarget {
     var axMarkerText: String? {
         guard let range = parameter("AXTextMarkerRangeForUIElement", element) else { return nil }
         return parameter("AXStringForTextMarkerRange", range) as? String
+    }
+    var axMarkerSelection: UTF16Range? {
+        guard let whole = parameter("AXTextMarkerRangeForUIElement", element), CFGetTypeID(whole) == AXTextMarkerRangeGetTypeID(),
+              let value = copy("AXSelectedTextMarkerRange"), CFGetTypeID(value) == AXTextMarkerRangeGetTypeID() else { return nil }
+        let first = AXTextMarkerRangeCopyStartMarker(unsafeDowncast(whole, to: AXTextMarkerRange.self))
+        let selection = unsafeDowncast(value, to: AXTextMarkerRange.self)
+        func offset(_ marker: AXTextMarker) -> Int? {
+            guard let span = parameter("AXTextMarkerRangeForUnorderedTextMarkers", [first, marker] as CFArray),
+                  let text = parameter("AXStringForTextMarkerRange", span) as? String else { return nil }
+            return text.utf16.count
+        }
+        guard let start = offset(AXTextMarkerRangeCopyStartMarker(selection)),
+              let end = offset(AXTextMarkerRangeCopyEndMarker(selection)), end >= start else { return nil }
+        return UTF16Range(location: start, length: end - start)
     }
     func axAfterHiddenBreak(end: Bool) -> Bool? {
         guard let value = copy("AXSelectedTextMarkerRange"), CFGetTypeID(value) == AXTextMarkerRangeGetTypeID() else { return nil }

@@ -134,7 +134,7 @@ import LegatoKeyboardCore
             guard await deliveryReady(final: final, source: "", generation: token) else { return }
             let reply: FieldReadReply
             var takeStart: Int?, takeEnd: Int?
-            var shadowed = false
+            var shadowed = false, bounded = false
             if pending.isEmpty, let ask = shadow, let answer = await ask(id) {
                 guard token == generation, !Task.isCancelled else { return }
                 mark("shadowMs")
@@ -149,6 +149,8 @@ import LegatoKeyboardCore
             } else {
                 reply = try await field.read(.cleanup, instructionID: id, reading: {})
                 mark("readMs")
+                // A host that tells where the take stands bounds the read pass too (buffered words are not in the field yet).
+                if pending.isEmpty { takeStart = reply.takeStart; takeEnd = reply.takeEnd; bounded = reply.takeEnd != nil }
             }
             guard token == generation, !Task.isCancelled else { return }
             guard reply.state == .done, reply.selection?.isEmpty != false else {
@@ -168,7 +170,7 @@ import LegatoKeyboardCore
             // starts where the take does: the user's part of the sentence the take begins in is context, never edited (a
             // take begun mid-word or mid-sentence would otherwise hand the model a fragment to fix). Without a known start
             // it is the field's start, as before.
-            let take = shadowed ? FieldCleanupChunks.take(start: takeStart, end: takeEnd, caret: reply.above.count, in: source) : nil
+            let take = shadowed || bounded ? FieldCleanupChunks.take(start: takeStart, end: takeEnd, caret: reply.above.count, in: source) : nil
             var start = take?.lowerBound ?? source.startIndex, end = take?.upperBound ?? source.endIndex
             if !whole {
                 let uncovered = coverage.start(in: source, documentID: reply.documentID, complete: complete)

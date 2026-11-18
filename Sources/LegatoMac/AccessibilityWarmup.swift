@@ -8,6 +8,9 @@ import Foundation
 public struct AccessibilityWarmup: Sendable {
     /// How long a capture keeps retrying after the tree was requested.
     public static let budget = Duration.milliseconds(500)
+    /// How long a capture keeps looking for a focused text element in an app that just came to the front and shows none yet.
+    /// An estimate, equal to `budget`: not measured on a slow switch.
+    public static let focusGrace = Duration.milliseconds(500)
     /// The pause between attempts.
     public static let interval = Duration.milliseconds(50)
 

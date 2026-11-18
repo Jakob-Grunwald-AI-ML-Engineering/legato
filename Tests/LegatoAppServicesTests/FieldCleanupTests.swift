@@ -14,12 +14,15 @@ import LegatoKeyboardCore
     var complete = true
     var draftID: String?
     var beforeApply: (() -> Void)?
+    /// Where the take's text stands (characters), told with a read like the Mac's cleanup read.
+    var take: Range<Int>?
     init(_ text: String) { self.text = text; cursor = text.count }
     func publish(_ strip: InstructionStrip) {}
     func read(_ kind: FieldReadRequest.Kind, instructionID: String, reading: @escaping @MainActor () -> Void) async throws -> FieldReadReply {
         reads += 1
         return .init(id: instructionID, state: .done, above: String(text.prefix(cursor)), below: String(text.dropFirst(cursor)),
-                     stop: complete ? .start : .unread, stopBelow: complete ? .start : .unread, documentID: "field", draftID: draftID)
+                     stop: complete ? .start : .unread, stopBelow: complete ? .start : .unread, documentID: "field", draftID: draftID,
+                     takeStart: take?.lowerBound, takeEnd: take?.upperBound)
     }
     func apply(_ edit: ScopedEdit) async -> ScopedEditAck? {
         beforeApply?()
@@ -262,6 +265,27 @@ private final class FieldCleaner: SentenceCleaning {
         #expect(landed?["sentence"] as? Bool == true)
         #expect(landed?["moved"] as? Bool == true)
         #expect(landed?["modelMs"] is Int)
+    }
+
+    /// Acceptance round 2 (Mac): a pass that reads the field (no shadow) is bounded to the take the read tells, so what stood
+    /// in the field before the take is context only and never edited, whole-take passes included.
+    @Test(arguments: [false, true]) func aReadPassEditsOnlyTheTakeTheReadTells(final: Bool) async {
+        let before = "Notes from before. "
+        let field = CleanupField(before + "teh boat waits near the harbour today.")
+        field.take = before.count..<field.text.count
+        let session = FieldCleanupSession()
+        session.field = field
+        var passages: [(passage: String, before: String)] = []
+        session.clean = { passage, _, context, _ in
+            passages.append((passage, context))
+            return passage.capitalized
+        }
+        field.complete = final
+        session.request(final: final, sentence: !final)
+        await session.settle()
+        #expect(passages.map(\.passage) == ["teh boat waits near the harbour today."])
+        #expect(passages.first?.before == before)
+        #expect(field.text == before + "Teh Boat Waits Near The Harbour Today.")
     }
 
     @Test func aCleanupTheModelRefusedIsKeptAsTypedAndSaysWhy() async {

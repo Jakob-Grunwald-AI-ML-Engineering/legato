@@ -66,12 +66,21 @@ public struct TextSpaces: Sendable, Equatable {
     func axString(in range: UTF16Range) -> String?
     /// The whole text in the selection's space: the string of the element's text-marker range.
     var axMarkerText: String? { get }
+    /// The selection in the same space as `axMarkerText`, counted from the text markers: the text from the element's first
+    /// marker up to the selection's start (and to its end) has that many characters. Chromium's `AXSelectedTextRange` answers
+    /// `0+0` for a caret in an empty last list item (a placeholder break) while the markers say where it really is; nil when
+    /// the host has no markers.
+    var axMarkerSelection: UTF16Range? { get }
     /// Whether the selection's start (`end` false) or end sits after a line break the selection's space leaves out: the
     /// text from the text marker before it up to it is empty. Nil when unknown.
     func axAfterHiddenBreak(end: Bool) -> Bool?
     /// The editable elements around this one that may expose the text it does not, nearest first (Chromium:
     /// `AXEditableAncestor`, then `AXHighestEditableAncestor`), never the element itself.
     var axEditableRoots: [any AXTextElement] { get }
+}
+
+extension AXTextElement {
+    public var axMarkerSelection: UTF16Range? { nil }
 }
 
 /// Reads a field's text and selection in one space through its bound element, or through its editable root when the
@@ -117,10 +126,13 @@ public struct TextSpaces: Sendable, Equatable {
     /// The selection in the text's space.
     public func selectedRange() throws -> UTF16Range {
         try read { element in
-            guard let raw = element.axSelection, let layout = Self.layout(element) else { return nil }
+            guard let reported = element.axSelection, let layout = Self.layout(element) else { return nil }
             switch layout {
-            case .direct: return raw
+            case .direct: return reported
             case .mapped(_, let spaces):
+                // The markers place the caret where the host really has it; the reported range can be stale or wrong in a list
+                // (a caret in an empty last item reads as the field's start). They count in the same space as the text.
+                let raw = element.axMarkerSelection.flatMap { $0.end <= spaces.rangeLength ? $0 : nil } ?? reported
                 @MainActor func map(_ offset: Int, end: Bool) -> Int? {
                     let after = spaces.isAmbiguous(offset) ? element.axAfterHiddenBreak(end: end) ?? false : false
                     return spaces.value(at: offset, afterBreak: after)

@@ -392,6 +392,10 @@ private struct SeededRandom {
     unowned let field: FakeAXField
     let readable: () -> Bool
     var roots: [SplitView] = []
+    /// Edge's bulleted list (Mac VM, 2026-11-18): an empty last item (the value ends in its marker) reads with a placeholder
+    /// break after it, and `AXSelectedTextRange` answers `0+0` for a caret in it, while the text markers have it right.
+    var edgeList = false
+    private var staleCaret = false
     init(_ field: FakeAXField, readable: @escaping () -> Bool) { self.field = field; self.readable = readable }
 
     /// The field's text as this element exposes it: the value, the selection's space without the hidden line breaks, and
@@ -417,7 +421,12 @@ private struct SeededRandom {
     private var memo: View?
     /// The text and selection as the field shows them now.
     private var view: View? {
-        guard readable(), let text = try? field.wholeText(), let selection = try? field.selectedRange() else { return nil }
+        guard readable(), var text = try? field.wholeText(), let selection = try? field.selectedRange() else { return nil }
+        staleCaret = false
+        if edgeList, text.hasSuffix("\u{2022} ") {
+            staleCaret = selection.length == 0 && selection.location == text.utf16.count
+            text += "\n"
+        }
         if let memo, memo.value == text, memo.selection == selection { return memo }
         memo = View(text, selection: selection)
         return memo
@@ -428,9 +437,14 @@ private struct SeededRandom {
     var axCharacterCount: Int? { view?.value.utf16.count }
     var axSelection: UTF16Range? {
         guard let view else { return nil }
+        if edgeList, staleCaret { return UTF16Range(location: 0, length: 0) }
+        return markerSelection(view)
+    }
+    private func markerSelection(_ view: View) -> UTF16Range {
         let start = view.ranged(view.selection.location)
         return UTF16Range(location: start, length: view.ranged(view.selection.end) - start)
     }
+    var axMarkerSelection: UTF16Range? { edgeList ? view.map(markerSelection) : nil }
     func axString(in range: UTF16Range) -> String? {
         guard let view, range.location >= 0, range.length >= 0, range.end <= view.ranged.count else { return nil }
         return Self.string(Array(view.ranged[range.location..<range.end]))
@@ -451,6 +465,7 @@ private struct SeededRandom {
     let field: FakeAXField
     var nestedBroken = false
     var unreadable = false
+    var edgeList = false { didSet { rebuild() } }
     /// Reads answered by the editable root.
     var rootReads = 0
     private var reader: AXFieldReader!
@@ -464,6 +479,7 @@ private struct SeededRandom {
             return !unreadable
         }
         let element = SplitView(field) { [unowned self] in !unreadable && !nestedBroken }
+        root.edgeList = edgeList; element.edgeList = edgeList
         element.roots = [root]
         reader = AXFieldReader(element: element)
     }
@@ -1433,6 +1449,49 @@ private struct SeededRandom {
         let expected = "- first item\n- second item " + take + "\n"
         #expect(field.string.replacingOccurrences(of: "\u{00A0}", with: " ") == expected, "\(trail.suffix(25).joined(separator: "\n"))")
         #expect(drops.isEmpty, "\(drops)")
+    }
+
+    /// Edge, `<ul>` with two items and an empty third (Mac VM, 2026-11-18, acceptance round 2): the caret in the empty item
+    /// reads `0+0`, so the queue planned from the field's start, typed a burst at the real caret and never saw it land, then
+    /// failed caret moves for seconds and handed the take to the panel. The markers give the caret; the take lands in the
+    /// item, once, and a second sentence after a Return-less continuation follows it.
+    @Test(arguments: [false, true]) func aTakeInAnEdgeBulletListTypesIntoTheEmptyItemWhereTheCaretIs(verifiedKeys: Bool) async {
+        let head = "\u{2022} first item\n\u{2022} second item\n\u{2022} "
+        let field = FakeAXField(head, rng: SeededRandom(61))
+        field.keys = true
+        let reader = ReaderField(field)
+        reader.edgeList = true
+        let queue = MacFieldQueue(target: reader)
+        queue.paced = { true }
+        queue.verifiedKeysOnly = verifiedKeys
+        var drops: [MacFieldQueue.Drop] = [], handovers: [MacFieldQueue.Handover] = []
+        queue.onDrop = { drops.append($0) }
+        queue.onUnreadable = { handovers += $0 }
+        var trail: [String] = []
+        queue.journal = { trail.append("\($0.kind.rawValue) \($0.text ?? "") \($0.detail ?? "") \($0.reason ?? "")") }
+        await replay(queue, field: field, script: [(ms: 0, text: "buy oat"), (ms: 400, text: "buy oat milk.")])
+        #expect(field.string == head + "buy oat milk.", "\(trail.suffix(20).joined(separator: "\n"))")
+        #expect(drops.isEmpty && handovers.isEmpty, "\(drops) \(handovers)")
+    }
+
+    /// Acceptance round 2 (Edge list, Mac VM): caret moves that never read back were retried four times, about five seconds
+    /// with the field's keys held. They give up within the move budget, and the edit drops once.
+    @Test func caretMovesThatNeverReadBackGiveUpWithinTheMoveBudget() async {
+        let field = FakeAXField("abc def", rng: SeededRandom(62))
+        field.keys = true
+        field.dropChance = 1
+        var clock = ContinuousClock.now
+        let start = clock
+        field.clock = { clock }
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.now = { clock }
+        queue.sleep = { clock += $0 }
+        let result = await queue.edit(.init(range: .init(location: 0, length: 3), scope: "abc", target: "ABC"))
+        guard case .dropped = result else { Issue.record("expected a drop, got \(result)"); return }
+        let elapsed = clock - start
+        #expect(elapsed < .milliseconds(2_100), "\(elapsed)")
+        #expect(field.string == "abc def")
     }
 
     /// Pinned: neither the focused element nor its editable root reads. The take is never dropped: what was typed stays,

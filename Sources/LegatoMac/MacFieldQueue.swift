@@ -96,6 +96,10 @@ public final class MacFieldQueue {
     public static let placeGrace = Duration.milliseconds(400)
     /// Ops of one region that failed to verify in a row before its work is dropped.
     public static let retryLimit = 4
+    /// Caret moves that do not read back, with a caret that never changed, give up (from the second failure) once this long
+    /// has passed since the first of them: the field's keys are held while they run, so the 1 s input-lock budget bounds them
+    /// (a field whose arrows do nothing is not retried for seconds).
+    public static let moveBudget = Duration.seconds(1)
     /// The pause between attempts while the field cannot take an op.
     public static let waitTick = Duration.milliseconds(50)
     /// Fields up to this long are read whole; longer ones around the work.
@@ -191,6 +195,8 @@ public final class MacFieldQueue {
         var burst: Burst?
         var verifiedWrites = 0
         var uncertainWrite = false
+        /// An edit region: runs once the edit is applied (the take spans move through it).
+        var onApplied: (@MainActor () -> Void)?
         init(id: String, runID: String?, start: Int, current: [Character], desired: [Character], open: Bool) {
             self.id = id; self.runID = runID; self.start = start; self.current = current; self.desired = desired; self.open = open
         }
@@ -235,6 +241,9 @@ public final class MacFieldQueue {
         var fast = false
         var speaking = false
         var speechTarget = FieldSpeechScheduling.Target()
+        /// Where the take's text stood when a cleanup edit last took its regions (they are given up under an edit's scope):
+        /// the range and its text then, moved through the edit. Checked against the field before it is used (`takeSpan`).
+        var kept: (range: UTF16Range, text: String)?
         /// Words past the last region wait for a region of their own (whitespace alone waits for more words).
         var needsRegion: Bool {
             !retracted && !abandoned && remainder.contains { !$0.isWhitespace || $0.isNewline }
@@ -296,7 +305,11 @@ public final class MacFieldQueue {
     /// Keystroke fields: the caret is away from where the user expects it (a jump that still has to come back).
     private var caretOwed = false
     /// Keystroke fields: arrows that did not read back in a row.
-    private var moveFailures = 0
+    private var moveFailures = 0 { didSet { if moveFailures == 0 { moveSeriesStart = nil } } }
+    /// When the first move of the current series of failed ones went out, and the caret the field showed then (`moveBudget`);
+    /// a caret that changed since restarts the series (late keys are landing, the field is not deaf).
+    private var moveSeriesStart: ContinuousClock.Instant?
+    private var moveSeriesCaret: UTF16Range?
     /// A modifier is held: the queue waits without counting toward `parkLimit` (a held push-to-talk key).
     private var holding = false
     /// Keystroke fields: a key that did not read back in time (or whose caret lags), the selection it would leave, and
@@ -354,14 +367,40 @@ public final class MacFieldQueue {
     /// the first read, or while the shadow does not hold the whole field.
     public var shadowSnapshot: (text: String, selection: UTF16Range)? { shadow.map { ($0.text, $0.selection) } }
 
-    /// Where the newest run's text stands in the field now (first region's start to last region's end), for a cleanup pass
-    /// bounded to the take. Nil when the run has nothing in the field.
-    public var latestRunSpan: UTF16Range? {
+    /// Where the newest run's text stands in the field now (its first region's start to its last region's end, together with
+    /// the span kept across a cleanup edit that took its regions), for a cleanup pass bounded to the take. `text` is the field
+    /// the range is checked against: the kept span counts only while the field still shows its text there (or once, elsewhere).
+    /// Nil when the run has nothing in the field that can be told.
+    public func latestRunSpan(inField text: String?) -> UTF16Range? {
         guard let run = runs.last(where: { !$0.abandoned }) else { return nil }
-        let regions = run.regions.filter { !$0.lost && !$0.current.isEmpty }
-        guard let first = regions.first, let last = regions.last else { return nil }
-        return UTF16Range(location: first.start, length: last.end - first.start)
+        return takeSpan(of: run, in: text.map { $0 as NSString })
     }
+    public var latestRunSpan: UTF16Range? { latestRunSpan(inField: shadow?.text) }
+
+    private func takeSpan(of run: Run, in text: NSString?) -> UTF16Range? {
+        let regions = run.regions.filter { !$0.lost && !$0.current.isEmpty }
+        var low: Int?, high: Int?
+        if let first = regions.first, let last = regions.last { low = first.start; high = last.end }
+        if let kept = run.kept, let text {
+            var range: UTF16Range?
+            if kept.range.location >= 0, kept.range.end <= text.length,
+               text.substring(with: NSRange(location: kept.range.location, length: kept.range.length)) == kept.text {
+                range = kept.range
+            } else if kept.text.utf16.count >= Self.relocateMinimum {
+                let first = text.range(of: kept.text, options: .literal)
+                if first.location != NSNotFound {
+                    let rest = NSRange(location: first.location + 1, length: text.length - first.location - 1)
+                    if text.range(of: kept.text, options: .literal, range: rest).location == NSNotFound {
+                        range = UTF16Range(location: first.location, length: first.length)
+                    }
+                }
+            }
+            if let range { low = min(low ?? range.location, range.location); high = max(high ?? range.end, range.end) }
+        }
+        guard let low, let high else { return nil }
+        return UTF16Range(location: low, length: high - low)
+    }
+
     /// Nothing of dictation is waiting to be typed: the shadow shows every word the field is going to get.
     public var shadowSettled: Bool { shadow != nil && !runs.contains { !$0.abandoned && ($0.needsRegion || $0.regions.contains(where: \.pending)) } }
 
@@ -1232,6 +1271,7 @@ public final class MacFieldQueue {
                 // Dictation under the edit's scope is the edit's now: its regions are given up (a pending revision of
                 // them is dropped like one the user overwrote).
                 let end = region.end
+                keepTakeSpans(through: region, in: doc)
                 for other in runs.flatMap(\.regions) where !other.lost {
                     let overlaps = other.current.isEmpty ? (start < other.start && other.start < end) : (other.start < end && start < other.end)
                     guard overlaps else { continue }
@@ -1251,6 +1291,39 @@ public final class MacFieldQueue {
         edits = waiting
     }
 
+    /// The edit takes the dictation under its scope (its regions are given up): each run keeps where its text stood, moved
+    /// through the edit once it applies, so a later cleanup pass is still bounded to the take. Offsets map through the
+    /// edit's changed middle (what its scope and target do not share at either end): a point before it stays, one after it
+    /// moves by the length change, the span's start inside it goes to its start and its end to its new end.
+    private func keepTakeSpans(through region: Region, in doc: Document) {
+        guard doc.base == 0, doc.text.length == doc.length else { return }
+        let old = Array(String(region.current).utf16), new = Array(String(region.desired).utf16)
+        var prefix = 0
+        while prefix < old.count, prefix < new.count, old[prefix] == new[prefix] { prefix += 1 }
+        var suffix = 0
+        while suffix < old.count - prefix, suffix < new.count - prefix, old[old.count - 1 - suffix] == new[new.count - 1 - suffix] { suffix += 1 }
+        let changedStart = region.start + prefix, oldChangedEnd = region.start + old.count - suffix
+        let delta = new.count - old.count
+        let after = doc.text.replacingCharacters(in: NSRange(location: region.start, length: old.count), with: String(region.desired)) as NSString
+        for index in runs.indices where !runs[index].abandoned {
+            guard let range = takeSpan(of: runs[index], in: doc.text), range.length > 0 else { continue }
+            func mapped(_ point: Int, isEnd: Bool) -> Int {
+                if point <= changedStart { return point }
+                if point >= oldChangedEnd { return point + delta }
+                return isEnd ? oldChangedEnd + delta : changedStart
+            }
+            let start = mapped(range.location, isEnd: false), end = mapped(range.end, isEnd: true)
+            guard end >= start, end <= after.length else { runs[index].kept = nil; continue }
+            let id = runs[index].id
+            region.onApplied = { [weak self, previous = region.onApplied] in
+                previous?()
+                guard let self, let at = self.runs.firstIndex(where: { $0.id == id }) else { return }
+                self.runs[at].kept = (UTF16Range(location: start, length: end - start),
+                                      after.substring(with: NSRange(location: start, length: end - start)))
+            }
+        }
+    }
+
     private func stoppedResult(_ region: Region, reason: Reason) -> EditResult {
         if region.verifiedWrites > 0 { return .stopped(reason) }
         // An unconfirmed write is uncertain, even if focus loss is what finally stopped the work.
@@ -1262,6 +1335,7 @@ public final class MacFieldQueue {
         editRegions.removeAll { entry in
             if entry.region.lost { entry.done.resume(returning: stoppedResult(entry.region, reason: entry.region.dropReason)); return true }
             guard !entry.region.pending else { return false }
+            entry.region.onApplied?(); entry.region.onApplied = nil
             let range = UTF16Range(location: entry.region.start, length: entry.region.end - entry.region.start)
             note(.applied, id: entry.region.id, location: range.location, length: range.length)
             entry.done.resume(returning: .applied(range))
@@ -2122,9 +2196,11 @@ public final class MacFieldQueue {
                 return nil
             }
             lateKey = (sentAt, exact, Self.keyLateLimit, false)
+            let caretNow = try? target.selectedRange()
+            if moveFailures == 0 || (caretNow != nil && caretNow != moveSeriesCaret) { moveSeriesStart = sentAt; moveSeriesCaret = caretNow }
             moveFailures += 1
             note(.mismatch, id: region?.id, run: region?.runID, reason: "move", detail: "failures=\(moveFailures)")
-            if moveFailures >= Self.retryLimit {
+            if moveFailures >= Self.retryLimit || (moveFailures >= 2 && now() - (moveSeriesStart ?? sentAt) >= Self.moveBudget) {
                 moveFailures = 0
                 if let region { region.lost = true; drop(region, .failed) } else { caretOwed = false }
             }

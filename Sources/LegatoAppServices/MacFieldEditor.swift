@@ -547,10 +547,20 @@ import LegatoMac
         if let span = queue.lastRegionAtCaret, span.range.end == selection.location, selection.length == 0 {
             sessionLength = min(span.text.count, above.count)
         }
+        // A cleanup read tells where the take's own text stands: the pass edits only that, never what stood in the field before.
+        var takeStart: Int?, takeEnd: Int?
+        if kind == .cleanup {
+            let whole = captured as NSString
+            if let span = queue.latestRunSpan(inField: snapshot), span.end <= whole.length {
+                takeStart = whole.substring(to: span.location).count; takeEnd = whole.substring(to: span.end).count
+            } else {
+                takeStart = above.count; takeEnd = above.count
+            }
+        }
         return FieldReadReply(id: instructionID, state: .done, above: above, below: below, selection: selected,
                               sessionLength: sessionLength, stop: aboveStop,
                               stopBelow: belowStop, moreAbove: aboveStop == .cap,
-                              moreBelow: belowStop == .cap, documentID: documentID)
+                              moreBelow: belowStop == .cap, documentID: documentID, takeStart: takeStart, takeEnd: takeEnd)
     }
 
     /// The field as the queue's shadow has it, for a cleanup pass (no flush, no read): the text above and below the caret and
@@ -563,10 +573,15 @@ import LegatoMac
         let text = snapshot.text as NSString
         guard selection.location >= 0, selection.end <= text.length else { return nil }
         let above = text.substring(to: selection.location), below = text.substring(from: selection.end)
+        // The take's own text bounds every pass: what stands before it is context, never edited. A take that cannot be told in
+        // the field (nothing of it left, or the field no longer shows it) is not cleaned from the shadow.
         var start: Int?, end: Int?
-        if let span = queue.latestRunSpan, span.end <= text.length {
+        var refusal: String? = selection.length > 0 ? "selection" : nil
+        if let span = queue.latestRunSpan(inField: snapshot.text), span.end <= text.length {
             start = text.substring(to: span.location).count
             end = text.substring(to: span.end).count
+        } else if refusal == nil {
+            refusal = "noTake"
         }
         activeInstructionID = id; activeReadIsCleanup = true
         shadowReads.append((id, snapshot.text))
@@ -574,7 +589,7 @@ import LegatoMac
         readSelection = selection; readText = snapshot.text; readRange = UTF16Range(location: 0, length: text.length)
         instructionCursor = selection
         return FieldShadow(id: id, runID: streamedRunID ?? "", above: above, below: below, takeStart: start, takeEnd: end,
-                           documentID: documentID, refused: selection.length > 0 ? "selection" : nil)
+                           documentID: documentID, refused: refusal)
     }
 
     /// Magic's result (or its undo) goes to the queue as one edit of the text it read; the user's typing or clicks

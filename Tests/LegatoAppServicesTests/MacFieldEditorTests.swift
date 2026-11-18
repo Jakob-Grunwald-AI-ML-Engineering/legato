@@ -1004,5 +1004,31 @@ import LegatoMac
         #expect(target.value.lowercased() == original)
     }
 
+    /// Acceptance round 2 (Mac VM, TextEdit, Safari): after a cleanup edit landed, the next pass (stop, pause) had no take span
+    /// (the edit takes the run's regions), so it started at the field's start and title-cased "Notes from before." that was
+    /// in the field before the take. The take's span survives the edit, the user's typing around it and a second edit.
+    @Test func theTakeSpanSurvivesCleanupEditsAndTheUsersTypingAroundIt() async throws {
+        let target = EditorTarget("Notes from before. ")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false }
+        editor.sleep = { _ in }
+        editor.begin()
+        await editor.applyLive(snapshot("um so the meeting", run: "take", complete: true))
+        let first = try #require(editor.shadow(id: "first"))
+        #expect(first.takeStart == 19 && first.takeEnd == 36)
+        let ack = await editor.apply(ScopedEdit(instructionID: "first", documentID: first.documentID, before: first.above, after: first.below,
+                                                target: "Notes from before. Um so the meeting."))
+        #expect(ack?.applied == true)
+        // The edit took the run's regions; the take is still where it was, one character longer.
+        let second = try #require(editor.shadow(id: "second"))
+        #expect(second.takeStart == 19 && second.takeEnd == 37, "\(String(describing: second.takeStart)) \(String(describing: second.takeEnd))")
+        // The user types in front of the take and after it; the pass still covers the take alone.
+        target.value = "ok " + target.value + " hi"; target.selection = .init(location: target.value.utf16.count, length: 0)
+        // A cleanup read (no shadow) finds it again where it moved to.
+        target.selection = .init(location: 0, length: 0)
+        let read = try await editor.read(.cleanup, instructionID: "read", reading: {})
+        #expect(read.takeStart == 22 && read.takeEnd == 40, "\(String(describing: read.takeStart)) \(String(describing: read.takeEnd))")
+    }
+
 }
 #endif

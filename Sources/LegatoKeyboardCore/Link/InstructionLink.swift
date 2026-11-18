@@ -157,9 +157,14 @@ public struct FieldReadReply: Codable, Sendable, Equatable {
     public var documentID: String?
     /// Adapter-observed draft lifetime; a host may reuse its document ID after Send.
     public var draftID: String?
+    /// A cleanup read that knows where the take's own text stands in `above + below` (characters): a pass edits only that.
+    /// Both nil: the host does not tell (the pass reads as before); equal: the take has no text in the field.
+    public var takeStart: Int?
+    public var takeEnd: Int?
     public init(id: String, state: State, above: String = "", below: String = "", selection: String? = nil, sessionLength: Int = 0,
                 stop: FieldStop = .unread, stopBelow: FieldStop? = nil, moreAbove: Bool = false, moreBelow: Bool = false, error: String? = nil,
-                documentID: String? = nil, draftID: String? = nil) {
+                documentID: String? = nil, draftID: String? = nil, takeStart: Int? = nil, takeEnd: Int? = nil) {
+        self.takeStart = takeStart; self.takeEnd = takeEnd
         self.id = id; self.state = state; self.above = above; self.below = below; self.selection = selection
         self.sessionLength = sessionLength; self.stop = stop; self.stopBelow = stopBelow; self.moreAbove = moreAbove; self.moreBelow = moreBelow
         self.error = error; self.documentID = documentID; self.draftID = draftID
