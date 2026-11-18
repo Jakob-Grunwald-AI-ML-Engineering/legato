@@ -69,9 +69,24 @@ private func snapshot(_ version: Int, _ segments: [LiveSegment], head: String = 
         #expect(take.receive(snapshot(2, [unit(0, "One.")])) == nil, "An older snapshot changes nothing")
     }
 
+    @Test func aStagedUnitIsTypedAsSpeechWhileInputIsUnverified() {
+        // The phone: a refocus leaves the queue's input unverified (a text callback with an unchanged report). The unit is
+        // dictated words, so it goes in at the caret as speech does: one burst, one check, one undo step.
+        var rig = QueueRig(FakeField("If the weather holds."), config: .init())
+        rig.tick()
+        rig.queue.observe(FieldQueue.Report(before: "If the weather holds."), callback: .text)
+        #expect(rig.queue.hasUnverifiedInput)
+        let edit = FieldQueue.Edit(kind: .typist, target: " The plan.", atCursor: true, requiresVerifiedInsertion: true, isSpeech: true)
+        rig.queue.enqueue(edit, user: false)
+        while rig.field.string != "If the weather holds. The plan.", rig.clockMs < 5_000 { rig.tick() }
+        #expect(rig.field.string == "If the weather holds. The plan.")
+        for _ in 0..<30 { rig.tick() }
+        let applied = rig.events.contains { if case .applied(let id, _, _) = $0.event { id == edit.id } else { false } }
+        #expect(applied, "Confirmed, so the take records it as delivered")
+    }
+
     @Test func aUnitTheQueueHoldsOnUnverifiedInputIsKeptAfterABoundAndTheNextTakeIsNotBlocked() {
-        // The phone: the keyboard came back, the host's text callback left the field unverified, and the queue never started
-        // the unit. It stayed in flight for good, and the next take waited for it.
+        // A unit that is not speech (or any unit the queue cannot place) stays queued under unverified input: the bound keeps it.
         var queue = FieldQueue()
         let report = FieldQueue.Report(before: "If the weather holds.")
         _ = queue.step(report: report, elapsedMs: 200)
@@ -87,13 +102,11 @@ private func snapshot(_ version: Int, _ segments: [LiveSegment], head: String = 
         #expect(!take.isStalled(inFlightMs: 1_900, unverifiedInput: true))
         #expect(take.isStalled(inFlightMs: 2_000, unverifiedInput: true))
         #expect(!take.isStalled(inFlightMs: 9_000, unverifiedInput: false) && take.isStalled(inFlightMs: 10_000, unverifiedInput: false))
-        // The bound passed: the unit leaves the queue (dropped, not applied) and the take is kept whole.
         queue.cancelEdit(edit.id)
         let dropped = queue.drainEvents().contains { if case .dropped(let drop) = $0 { drop.id == edit.id } else { false } }
         #expect(dropped)
         #expect(take.hold() == "The plan. Then coffee.")
         #expect(!take.hasUndelivered && take.nextReady == nil && !take.isStalled(inFlightMs: 60_000, unverifiedInput: true))
-        // The next take starts clean.
         take.receive(snapshot(1, [unit(0, "Fresh start.")], complete: true, run: "next"))
         #expect(!take.held && take.nextReady?.text == "Fresh start.")
     }

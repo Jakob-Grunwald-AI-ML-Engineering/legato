@@ -107,14 +107,18 @@ public struct FieldQueue: Sendable {
         public var requiresShadowRead: Bool?
         /// Recovery is consumed only after the original, collapsed insertion scope verifies.
         public var requiresVerifiedInsertion: Bool?
+        /// Dictated words typed at the caret (a staged unit): under unverified input they go in as speech does
+        /// (`heldSpeechNext`), still as one burst with one check.
+        public var isSpeech: Bool?
         public init(id: String = UUID().uuidString, kind: Kind, before: String = "", after: String = "", selected: String? = nil,
                     target: String, atCursor: Bool = false, cursorAtEnd: Bool = true, readID: String? = nil,
-                    requiresShadowRead: Bool? = nil, requiresVerifiedInsertion: Bool? = nil) {
+                    requiresShadowRead: Bool? = nil, requiresVerifiedInsertion: Bool? = nil, isSpeech: Bool? = nil) {
             self.id = id; self.kind = kind; self.before = before; self.after = after
             self.selected = selected?.isEmpty == true ? nil : selected
             self.target = target; self.atCursor = atCursor; self.cursorAtEnd = cursorAtEnd; self.readID = readID
             self.requiresShadowRead = requiresShadowRead
             self.requiresVerifiedInsertion = requiresVerifiedInsertion
+            self.isSpeech = isSpeech
         }
     }
 
@@ -1555,7 +1559,7 @@ public struct FieldQueue: Sendable {
                 return .sent(send(.move(0), lane: lane, anywhere: true) { q in q.selection = 0 })
             }
             if state.edit.atCursor {
-                if state.edit.requiresVerifiedInsertion == true, selection > 0 || hasUnverifiedInput {
+                if state.edit.requiresVerifiedInsertion == true, selection > 0 || (hasUnverifiedInput && state.edit.isSpeech != true) {
                     drop(state, .selectionChanged); return .done
                 }
                 state.spanID = addSpan(Span(start: userCursor, end: userCursor))
@@ -2060,6 +2064,18 @@ public struct FieldQueue: Sendable {
     /// replaces a selection no report showed is accepted, as for a key; its report then becomes the model (`step`).
     private mutating func heldSpeechNext() -> Action {
         if case .space? = unit?.owner { return nextInUnit() }
+        if case .edit(let state, _)? = unit?.owner, state.edit.isSpeech == true { return nextInUnit() }
+        if unit == nil, !paused, swap == nil, strayInsertion == nil, tapRace == nil, userLost == nil, userLane.isEmpty,
+           selection == 0, cursor == userCursor, let index = editLane.firstIndex(where: { $0.edit.isSpeech == true && $0.edit.atCursor }) {
+            // A staged unit is speech: a plain insert at the caret.
+            var state = editLane.remove(at: index)
+            switch start(&state, lane: .edit) {
+            case .started: return nextInUnit()
+            case .sent(let action): return action
+            case .wait: editLane.insert(state, at: index)
+            case .done: break
+            }
+        }
         guard !paused, unit == nil, swap == nil, strayInsertion == nil, tapRace == nil, userLost == nil, userLane.isEmpty,
               selection == 0, cursor == userCursor, let report = lastReport else { return .idle }
         for ri in runs.indices { applyPending(ri) }

@@ -1298,7 +1298,7 @@ final class KeyboardController {
         stagedTake.begin(unit.id, typed: target)
         liveTypedRunIDs.insert(runID)
         let origin = draftID
-        let edit = FieldQueue.Edit(kind: .typist, target: target, atCursor: true, requiresVerifiedInsertion: true)
+        let edit = FieldQueue.Edit(kind: .typist, target: target, atCursor: true, requiresVerifiedInsertion: true, isSpeech: true)
         stagedBegan = (edit.id, origin, ContinuousClock.now)
         enqueue(edit) { [weak self] event in self?.stagedUnitFinished(runID: runID, unit: unit.id, target: target, origin: origin, event: event) }
         pump()
