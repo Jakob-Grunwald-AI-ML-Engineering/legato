@@ -763,15 +763,14 @@ final class KeyboardController {
             var outcome = "interrupted"
             defer { self.journalBlankProbe(outcome, field: field) }
             self.dispatch(.move(probe.units), reading: true)
-            guard await self.verifyBlankProbeWindow(stillOwnsCaret, matching: probe.confirmsLandmark) else {
+            guard await self.verifyBlankProbeWindow(stillOwnsCaret, matching: probe.confirmsLandmark) != nil else {
                 if stillOwnsCaret() { outcome = "landmark-unconfirmed" }
                 return
             }
             guard stillOwnsCaret() else { return }
             self.dispatch(.move(-probe.units), reading: true)
-            if await self.verifyBlankProbeWindow(stillOwnsCaret, matching: probe.confirmsOrigin) {
-                self.unverifiedBlankProbeOrigin = nil
-                self.verifiedBlankProbeReturn = self.currentReport
+            if let returned = await self.verifyBlankProbeWindow(stillOwnsCaret, matching: probe.confirmsOrigin) {
+                self.verifiedBlankProbeReturn = returned
                 outcome = "restored"
             } else if stillOwnsCaret() {
                 outcome = "return-unconfirmed"
@@ -786,18 +785,18 @@ final class KeyboardController {
         journal.write(entry)
     }
 
-    private func verifyBlankProbeWindow(_ stillOwnsCaret: @MainActor () -> Bool, matching: (FieldQueue.Report) -> Bool) async -> Bool {
+    private func verifyBlankProbeWindow(_ stillOwnsCaret: @MainActor () -> Bool, matching: (FieldQueue.Report) -> Bool) async -> FieldQueue.Report? {
         // Divide the response budget between the outward and return moves. Typing can cancel on any sample.
         let samples = Int(FieldEditCoordinator.inputResponseTargetMs) / (2 * FieldReader.walkSettleMs)
         var previous: FieldQueue.Report?
         for _ in 0..<samples {
             try? await Task.sleep(for: .milliseconds(FieldReader.walkSettleMs))
-            guard stillOwnsCaret() else { return false }
+            guard stillOwnsCaret() else { return nil }
             let report = currentReport
-            if previous == report { return true }
+            if previous == report { return report }
             previous = matching(report) ? report : nil
         }
-        return false
+        return nil
     }
 
     private func finishDraft(reason: String) {
