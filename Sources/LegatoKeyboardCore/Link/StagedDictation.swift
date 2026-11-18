@@ -94,6 +94,22 @@ public struct StagedDictation: Sendable, Equatable {
 
     // MARK: Delivery
 
+    /// The last unit that is dealt with: typed, or (once held) handed to the kept-text row. The receipt carries it, so a later
+    /// keyboard appearance knows which units of the take are still unhandled.
+    public var handledThrough: Int? {
+        guard held, let keptThrough else { return deliveredThrough }
+        return max(keptThrough, deliveredThrough ?? -1)
+    }
+
+    /// A take this keyboard did not see start (the keyboard was gone while it ran): everything after `handledThrough` goes to
+    /// recovery at once, cleaned where available (raw otherwise), and units that become ready later join it (`receive`).
+    @discardableResult
+    public mutating func adopt(_ snapshot: LiveDictationSnapshot, handledThrough: Int?) -> String? {
+        receive(snapshot)
+        if let handledThrough { deliveredThrough = max(deliveredThrough ?? -1, handledThrough) }
+        return hold()
+    }
+
     /// `unit` is being typed as `typed`.
     public mutating func begin(_ unit: Int, typed: String) {
         inFlight = unit

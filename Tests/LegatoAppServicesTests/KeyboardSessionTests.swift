@@ -216,6 +216,20 @@ import LegatoSoniox
         #expect(!(await socket.sent.contains(.text(#"{"type":"finalize"}"#))))
     }
 
+    @Test func disappearingMidTakeStillEndsTheTakeSoItsFinalWordsAreRecorded() async throws {
+        let (_, keyboard) = try await openOnTyping()
+        let socket = try #require(sockets.last)
+        #expect(await keyboard.openGate())
+        await mic.emit()
+        await socket.feed(#"{"tokens":[{"text":"Erster Satz.","is_final":true},{"text":" gesp","is_final":false}]}"#)
+        try await until { !sink.lines.isEmpty }
+        #expect(sink.finishes == 0)
+        keyboard.update(visible: false, surface: .dictation)
+        await keyboard.settle()
+        try await until { sink.finishes == 1 }
+        #expect(sink.lines.map(\.text) == ["Erster Satz."], "Only the half-spoken words are dropped")
+    }
+
     @Test func closingAndReopeningKeyboardReusesTheHeldMicrophone() async throws {
         let (composer, keyboard) = try await openOnTyping()
         keyboard.update(visible: false, surface: .dictation)

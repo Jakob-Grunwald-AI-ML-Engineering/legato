@@ -2,6 +2,9 @@ import Foundation
 
 /// How many word slots fit the room given to them, and which ranked suggestion each one shows.
 public enum WordRowLayout {
+    /// The horizontal inset of the word row's content (status, kept text, preview), in points.
+    public static let contentInset = 8.0
+
     /// The narrowest a slot may be and still show a word.
     public static let minSlotWidth = 70.0
 

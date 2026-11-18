@@ -36,7 +36,7 @@ struct WordRowView: View {
                         .accessibilityAddTraits(.isStaticText)
                     takeButton("Dismiss", id: "keyboard.liveRecovery.dismiss") { controller.dismissLiveRecovery() }
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, CGFloat(WordRowLayout.contentInset))
                 .accessibilityIdentifier("keyboard.liveRecovery")
             } else if controller.offersAutoFillSwitch, let target = controller.inputModeTarget {
                 AutoFillSwitchKey(target: target)
@@ -65,7 +65,7 @@ struct WordRowView: View {
                         takeButton("Insert as-is", id: "keyboard.take.insertRaw") { controller.insertTakeRaw() }
                     }
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, CGFloat(WordRowLayout.contentInset))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.black.opacity(0.001))
                 .contentShape(Rectangle())
@@ -95,7 +95,8 @@ struct WordRowView: View {
                 .foregroundStyle(Color(uiColor: KeyColors.suggestion))
                 .multilineTextAlignment(.leading)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(width: max(proxy.size.width - 16, 0), alignment: .leading)
+                .frame(width: max(proxy.size.width - 2 * CGFloat(WordRowLayout.contentInset), 0), alignment: .leading)
+                .padding(.horizontal, CGFloat(WordRowLayout.contentInset))
                 .frame(width: proxy.size.width, height: proxy.size.height, alignment: .bottomLeading)
                 .clipped()
         }
@@ -121,11 +122,12 @@ struct WordRowView: View {
     /// Text the keyboard could not place: its end, then Insert and Copy (Copy needs Full Access), and a small close.
     private func keptRow(_ kept: KeptText) -> some View {
         HStack(spacing: 8) {
-            Text(kept.preview(maxCharacters: 120))
+            Text(controller.keptInsertNotice ?? kept.preview(maxCharacters: 120))
                 .font(.system(size: fontSize - 4))
                 .foregroundStyle(Color(uiColor: KeyColors.suggestion))
                 .lineLimit(1)
-                .truncationMode(.head)
+                .truncationMode(controller.keptInsertNotice == nil ? .head : .tail)
+                .minimumScaleFactor(controller.keptInsertNotice == nil ? 1 : 0.7)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityIdentifier("keyboard.kept.text")
             if kept.offersInsertion, kept.insertion == nil || controller.insertingKeptText {
@@ -149,7 +151,7 @@ struct WordRowView: View {
             .accessibilityLabel("Discard kept text")
             .accessibilityIdentifier("keyboard.kept.dismiss")
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, CGFloat(WordRowLayout.contentInset))
         .accessibilityIdentifier("keyboard.kept")
     }
 

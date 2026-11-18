@@ -268,15 +268,22 @@ final class KeyboardController {
     }
 
     func insertKeptText() {
-        guard let original = keptText, isVisible, !document.isSecureTextEntry,
-              document.selectedText?.isEmpty != false, !queue.hasUnverifiedInput, !draftEvidence.isPending else { return }
+        guard let original = keptText, isVisible, !document.isSecureTextEntry else { return }
+        guard document.selectedText?.isEmpty != false, !queue.hasUnverifiedInput, !draftEvidence.isPending else {
+            return noteKeptInsertRefused()
+        }
         var pending = original
         guard pending.beginInsertion(), let id = pending.insertion else { return }
         if let keptStore, !keptStore.replace(original, with: pending) { keptText = keptStore.read(); return }
         keptText = pending
         insertingKeptText = true
         userPreemptsFieldRead()
-        let edit = FieldQueue.Edit(id: id.uuidString, kind: .typist, target: pending.text, atCursor: true,
+        // The same word boundary and capital rules as a staged unit (`FieldInsertion`), from the field's context at the caret.
+        syncQueueField()
+        let report = currentReport
+        let typed = FieldInsertion.prepare(pending.text, contextBefore: report.before, capitalization: autocapitalization)
+        let target = typed + FieldInsertion.trailingSeparator(after: typed, before: report.after.first)
+        let edit = FieldQueue.Edit(id: id.uuidString, kind: .typist, target: target.isEmpty ? pending.text : target, atCursor: true,
                                    requiresVerifiedInsertion: true)
         enqueue(edit, user: true) { [weak self] event in
             guard let self else { return }
@@ -287,12 +294,28 @@ final class KeyboardController {
             case .dropped(let drop)? where !drop.issuedMutation: .refusedBeforeWrite
             default: .uncertain
             }
+            if result == .refusedBeforeWrite { self.noteKeptInsertRefused() }
             let item = pending.resolvingInsertion(result)
             if let store = self.keptStore, !store.replace(pending, with: item) { self.keptText = store.read() }
             else { self.keptText = item }
             self.syncRowTakeover()
         }
         pump()
+    }
+
+    /// A refused Insert says so in the kept-text row for a moment; the text stays.
+    private(set) var keptInsertNotice: String?
+    @ObservationIgnored private var keptNoticeTimeout: Task<Void, Never>?
+    private func noteKeptInsertRefused() {
+        keptInsertNotice = "Couldn't insert here. Move the cursor and try again."
+        syncRowTakeover()
+        keptNoticeTimeout?.cancel()
+        keptNoticeTimeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled, let self else { return }
+            self.keptInsertNotice = nil
+            self.syncRowTakeover()
+        }
     }
 
     func copyKeptText() {
@@ -444,7 +467,12 @@ final class KeyboardController {
             }
         }
         // A live run that began before this appearance is not this keyboard's to type.
-        ignoredLiveRunID = link.readLiveDictation()?.runID
+        let earlier = link.readLiveDictation()
+        if let earlier, earlier.staged == true, earlier.runID != stagedTake.runID, earlier.runID != blockedLiveRunID {
+            adoptStagedTake(earlier)
+        } else {
+            ignoredLiveRunID = earlier?.runID
+        }
         // A return from the app is a new attempt, even before the previous tap's URL-settle timer.
         openAppRequestID = UUID().uuidString
         refreshPreferences()
@@ -1195,7 +1223,7 @@ final class KeyboardController {
                 if snapshot.complete, !blockedLiveCompleted {
                     blockedLiveCompleted = true
                     link.writeLiveDictationAck(.init(runID: snapshot.runID, version: snapshot.version, complete: true, stats: liveStats,
-                                                     delivered: false, deliveredThrough: stagedTake.deliveredThrough))
+                                                     delivered: false, deliveredThrough: stagedTake.handledThrough))
                 }
                 return
             }
@@ -1345,7 +1373,22 @@ final class KeyboardController {
         let finished = stagedTake.isFinished || stagedTake.held
         if stagedTake.isFinished { liveAckedVersion = snapshot.version }
         link.writeLiveDictationAck(.init(runID: snapshot.runID, version: snapshot.version, complete: snapshot.complete && finished, stats: liveStats,
-                                         delivered: !stagedTake.held, deliveredThrough: stagedTake.deliveredThrough))
+                                         delivered: !stagedTake.held, deliveredThrough: stagedTake.handledThrough))
+    }
+
+    /// A staged take that ran while no keyboard saw it (the keyboard was hidden or released): what it typed stays, the rest of
+    /// it (what its units hold now, and what becomes ready later) goes to the kept-text row. Never typed into this field.
+    private func adoptStagedTake(_ snapshot: LiveDictationSnapshot) {
+        let ack = link.readLiveDictationAck()
+        let handled = ack?.runID == snapshot.runID ? ack?.deliveredThrough : nil
+        blockedLiveRunID = snapshot.runID
+        blockedLiveCompleted = snapshot.complete
+        liveSeen = snapshot
+        keepStaged(stagedTake.adopt(snapshot, handledThrough: handled))
+        link.writeLiveDictationAck(.init(runID: snapshot.runID, version: snapshot.version, complete: snapshot.complete, stats: liveStats,
+                                         delivered: false, deliveredThrough: stagedTake.handledThrough))
+        liveRecoveryDismissed = false
+        syncRowTakeover()
     }
 
     /// The run stops here: what it typed stays, nothing more of it is typed, and the take is recovered from History.

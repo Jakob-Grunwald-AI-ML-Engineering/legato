@@ -111,6 +111,27 @@ private func snapshot(_ version: Int, _ segments: [LiveSegment], head: String = 
         #expect(!take.held && take.nextReady?.text == "Fresh start.")
     }
 
+    @Test func aTakeThatRanWhileNoKeyboardSawItGoesToKeptTextFromWhereTheLastReceiptLeftOff() {
+        // A fresh keyboard appears: unit 0 was typed before (receipt: handled through 0); 1 is cleaned, 2 is still raw.
+        var take = StagedDictation()
+        let kept = take.adopt(snapshot(4, [unit(0, "One."), unit(1, "Two."), unit(2, "three", ready: false)], head: "and"), handledThrough: 0)
+        #expect(kept == "Two. three", "Cleaned where it landed, raw otherwise; the typed unit is not kept again")
+        #expect(take.held && take.handledThrough == 2)
+        // Units that become ready after the appearance join the kept text; none is typed here.
+        let more = take.receive(snapshot(5, [unit(0, "One."), unit(1, "Two."), unit(2, "Three."), unit(3, "Four.")], complete: true))
+        #expect(more == "Two. three Four.")
+        #expect(take.nextReady == nil)
+        // Nothing unhandled: nothing kept.
+        var done = StagedDictation()
+        #expect(done.adopt(snapshot(2, [unit(0, "One.")], complete: true), handledThrough: 0) == nil)
+    }
+
+    @Test func keptTextInsertsWithTheSeparatorOfTheFieldAtTheCaret() {
+        // The field says "...simple." with the caret right after it: the space comes from the shared rule.
+        #expect(FieldInsertion.prepare("I think so.", contextBefore: "It is simple.", capitalization: .none) == " I think so.")
+        #expect(FieldInsertion.prepare("I think so.", contextBefore: "It is simple. ", capitalization: .none) == "I think so.")
+    }
+
     @Test func aNewRunStartsTheTakeOver() {
         var take = StagedDictation()
         take.receive(snapshot(1, [unit(0, "Old.")]))

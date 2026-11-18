@@ -153,8 +153,12 @@ import LegatoVocabulary
     private func close() async {
         if let action = gate.abandon() { await perform(action) }
         isOpen = false; probe.cancel()
-        // The take is the keyboard appearance's: closing mid-take drops what was not sent.
-        takeFinish?.cancel(); takeFinish = nil; takeGeneration += 1
+        // The take is the keyboard appearance's: words still being spoken are dropped, but the take ends as a stop would, in the
+        // background, so its final words are cleaned, written to History and offered to the keyboard's kept-text row. Closing
+        // used to cancel the end and leave the run open for good, and nothing of it was recorded past its first words.
+        let earlierFinish = takeFinish; takeFinish = nil; takeGeneration += 1
+        let sink = self.sink
+        Task { await earlierFinish?.value; await sink.finishTake() }
         #if DEBUG || LEGATO_INTERNAL
         debugTakeOpen = false
         #endif
