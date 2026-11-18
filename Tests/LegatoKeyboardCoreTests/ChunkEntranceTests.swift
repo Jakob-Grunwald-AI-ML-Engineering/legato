@@ -25,6 +25,23 @@ import Testing
         for piece in grouped.pieces { #expect(Array(piece) == Array(clusters[index..<(index + Array(piece).count)])); index += Array(piece).count }
     }
 
+    @Test func aBurstThatFallsBehindWritesWhatIsLeftInFewerPiecesAndNeverPastTheCap() {
+        let pieces = Array(repeating: "ab", count: 20)
+        // On time: the pieces and a gap go on as planned.
+        let onTime = ChunkEntrance.fit(pieces, elapsedMs: 0, writeMs: 1, gapMs: 8, capMs: 250)
+        #expect(onTime.pieces == pieces && onTime.waitMs == 8)
+        // Slow writes (10 ms each): not all 19 more fit in what is left; the text is regrouped, never lost or split in a cluster.
+        let slow = ChunkEntrance.fit(pieces, elapsedMs: 40, writeMs: 10, gapMs: 8, capMs: 250)
+        #expect(slow.pieces.joined() == pieces.joined() && slow.pieces.count < pieces.count)
+        #expect(Double(slow.pieces.count) * 18 <= 250 - 40 + 1e-9)
+        // Out of budget: everything left in one piece, at once.
+        let out = ChunkEntrance.fit(pieces, elapsedMs: 250, writeMs: 10, gapMs: 8, capMs: 250)
+        #expect(out.pieces == [pieces.joined()] && out.waitMs == 0)
+        let family = "👨‍👩‍👧‍👦"
+        let marks = ChunkEntrance.fit([family, "e", "\u{301}x", family], elapsedMs: 240, writeMs: 5, gapMs: 8, capMs: 250)
+        #expect(marks.pieces == [family + "e\u{301}x" + family])
+    }
+
     @Test func theBurstNeverExceedsTheCap() {
         for count in [1, 2, 31, 32, 33, 40, 62, 63, 64, 100, 500, 5_000] {
             let text = String(repeating: "x", count: count)

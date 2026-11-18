@@ -1318,6 +1318,16 @@ public final class MacFieldQueue {
 
     private var pacedNow: Bool { flushing == 0 && paced() }
 
+    /// A chunk's burst never runs longer than this in wall-clock. A native unit's work budget is half the 500 ms input
+    /// response target (`NativeInputHandoff.prepare` fails every AX call after it); the burst takes the share that leaves
+    /// room for the unit's first write, its one check and the caret's way home. An estimate, to be tuned on the Mac.
+    public static let entranceCapMs = FieldEditCoordinator.inputResponseTargetMs * 0.3
+
+    private static func milliseconds(_ duration: Duration) -> Double {
+        let parts = duration.components
+        return Double(parts.seconds) * 1000 + Double(parts.attoseconds) / 1e15
+    }
+
     /// Diagnostic count: verified character advances reuse a plan; only a changed target or field rebuilds the diff.
     private(set) var nativePlanBuilds = 0
 
@@ -1340,6 +1350,12 @@ public final class MacFieldQueue {
         var nativeHome = userCaret
         func endNativeUnit() -> Bool {
             target.prepareNativeInputHome()
+            // Whatever ended the unit (a failed write, a check that ran out), the caret goes home first: a caret left at the
+            // temporary selection blocks native edits for the whole run ("the cursor could not be restored"), and the work
+            // then drops as focus lost. Never over the user's own input.
+            if let home = nativeHome, target.inputMark == mark, !userActedFlag, (try? target.selectedRange()) != home {
+                try? target.setSelectedRange(home)
+            }
             let confirmed = nativeHome.map { (try? target.selectedRange()) == $0 } ?? false
             nativeUnitOpen = false
             return target.endNativeInputUnit(homeVerified: confirmed)
@@ -1353,6 +1369,17 @@ public final class MacFieldQueue {
         }
         let lower = step.range.lowerBound, upper = step.range.upperBound
         let insertion = step.replacement
+        // Where the caret goes when the unit ends without a verified result (a failed write or check): the user's caret when
+        // it lies before the edit (no outcome of the op moves it), else the caret the field has (ours or the host's; the
+        // next read places it through `expectedSelections`). Never a stale caret from before the op, which would put the
+        // caret away from where the write left it, read as the user's move, and, unconfirmed, block native edits.
+        func failureHome() -> UTF16Range? {
+            target.prepareNativeInputHome()
+            let caret = try? target.selectedRange()
+            if let user = userCaret, user.location + user.length <= region.start + String(region.current[..<lower]).utf16.count,
+               !(region.open && user == UTF16Range(location: region.end, length: 0)) { return user }
+            return caret
+        }
         let location = region.start + String(region.current[..<lower]).utf16.count
         let removed = String(region.current[lower..<upper])
         let range = UTF16Range(location: location, length: removed.utf16.count)
@@ -1361,35 +1388,58 @@ public final class MacFieldQueue {
         let follows = region.open && userCaret == UTF16Range(location: region.end, length: 0)
         // The chunk's insert enters as a very fast burst of AX inserts at the caret (`ChunkEntrance`); the delete run and the
         // first piece are the hunk's one replace. One chunk, one check.
-        let entrance = ChunkEntrance.plan(text, enabled: pacedNow)
+        let entrance = ChunkEntrance.plan(text, enabled: pacedNow, capMs: Self.entranceCapMs)
         let pieces = entrance.pieces.isEmpty ? [""] : entrance.pieces
         note(.sent, id: region.id, run: region.runID, location: range.location, length: range.length, text: text,
              read: doc.context(before: range.location, 40) + "|" + doc.context(after: range.location, 40),
              detail: pieces.count > 1 ? "entrance pieces=\(pieces.count) \(host.latency.summary)" : nil)
         opsSent += 1
         region.uncertainWrite = true
-        var written = 0, aborted = false
+        var written = 0, aborted = false, brokeOff = false
         var insertedText = ""
-        for (index, piece) in pieces.enumerated() {
+        // The burst is wall-clock bound (`entranceCapMs`, inside the native unit's work budget): writes cost time here, so a
+        // burst that falls behind writes what is left in fewer pieces. Its one check comes after the last piece, and nothing
+        // the field shows meanwhile is read as the user's (the queue reads nothing until `perform` returns).
+        var rest = pieces
+        let burstStart = now()
+        var writeMs = 0.0
+        var index = 0
+        while !rest.isEmpty {
             if index > 0 {
-                if entrance.gapMs > 0 { await sleep(.milliseconds(entrance.gapMs)) }
+                let fitted = ChunkEntrance.fit(rest, elapsedMs: Self.milliseconds(now() - burstStart), writeMs: writeMs,
+                                               gapMs: entrance.gapMs, capMs: Self.entranceCapMs)
+                rest = fitted.pieces
+                if fitted.waitMs > 0, entrance.gapMs > 0 { await sleep(.milliseconds(fitted.waitMs)) }
                 // A key of the user's ends the burst: what is in stays, the rest is planned again from the next read.
                 guard target.inputMark == mark, !userActedFlag else { aborted = true; userActedFlag = true; inputAt = now(); break }
             }
+            let piece = rest.removeFirst()
+            let writeStart = now()
             do {
                 if index == 0 { try target.replace(range, with: piece) }
                 else { try target.replace(UTF16Range(location: range.location + written, length: 0), with: piece) }
                 if index == 0 { operationDispatched() }
             } catch {
+                expectedSelections.append(UTF16Range(location: range.location + written, length: 0))
                 expectedSelections.append(UTF16Range(location: range.location + written + piece.utf16.count, length: 0))
+                if index > 0 {
+                    // The pieces before it are in, and are ours: the check reads them and the region takes them as landed;
+                    // the rest is planned again from there. Never a field state left for the observer to call the user's.
+                    note(.mismatch, id: region.id, run: region.runID, reason: "write", detail: "midBurst \(index)/\(pieces.count)")
+                    brokeOff = true
+                    break
+                }
+                nativeHome = failureHome()
                 return await failed(region, after: after, reason: "write",
-                                    unchanged: index == 0 && nativeWriteUnchanged(region, doc: doc, target: target), waited: true)
+                                    unchanged: nativeWriteUnchanged(region, doc: doc, target: target), waited: true)
             }
+            writeMs = Self.milliseconds(now() - writeStart)
             written += piece.utf16.count
             insertedText += piece
+            index += 1
         }
         var expectedAfter = after
-        if aborted {
+        if aborted || brokeOff {
             var partial = region.current
             partial.replaceSubrange(lower..<upper, with: Array(insertedText))
             expectedAfter = partial
@@ -1410,13 +1460,16 @@ public final class MacFieldQueue {
         guard showed else {
             // The op may still land: the caret it leaves is ours too.
             expectedSelections.append(UTF16Range(location: range.location + written, length: 0))
+            nativeHome = failureHome()
             return await failed(region, after: expectedAfter, reason: "readback", unchanged: nativeWriteUnchanged(region, doc: doc, target: target), waited: true)
         }
-        if aborted { region.nativePlan = nil; plan = NativeEditPlan(current: expectedAfter, desired: expectedAfter) }
-        guard confirmOperation(true), aborted || plan.confirm(after) else { region.nativePlan = nil; return false }
+        let partial = aborted || brokeOff
+        if partial { region.nativePlan = nil; plan = NativeEditPlan(current: expectedAfter, desired: expectedAfter) }
+        guard confirmOperation(true), partial || plan.confirm(after) else { region.nativePlan = nil; return false }
         region.nativePlan = plan
         let delta = written - range.length
         apply(region, landed: expectedAfter, at: range, delta: delta, inserted: written)
+        shadow?.wrote(range: range, with: insertedText, selection: UTF16Range(location: range.location + written, length: 0))
         revision += 1
         let natural = UTF16Range(location: range.location + written, length: 0)
         let done = region.current == region.desired
@@ -1449,6 +1502,7 @@ public final class MacFieldQueue {
             expectedSelections = [wanted]
         }
         nativeHome = wanted
+        shadow?.moved(to: (try? target.selectedRange()) ?? wanted)
         guard endNativeUnit() else {
             region.lost = true; drop(region, .failed); return true
         }
@@ -1564,12 +1618,15 @@ public final class MacFieldQueue {
              text: String(typed), read: doc.context(before: items[0].range.location, 40) + "|" + doc.context(after: items[0].range.location, 40),
              detail: "burst keys=\(run.count) pieces=\(plan.pieces.count) \(host.latency.summary)")
         var sent = 0, piece = 0, inPiece = 0
-        var sentAt = now()
+        let burstStart = now()
+        var sentAt = burstStart
         for (index, step) in run.enumerated() {
             if case .type = step.key {
                 if piece < sizes.count, inPiece == sizes[piece] {
                     piece += 1; inPiece = 0
-                    if plan.gapMs > 0 { await sleep(.milliseconds(plan.gapMs)) }
+                    // Piece k is due at k gaps from the burst's start: a burst that fell behind goes on at once, never stretched.
+                    let wait = min(plan.gapMs, Double(piece) * plan.gapMs - Self.milliseconds(now() - burstStart))
+                    if plan.gapMs > 0, wait > 0 { await sleep(.milliseconds(wait)) }
                 }
                 inPiece += 1
             }
@@ -1621,6 +1678,8 @@ public final class MacFieldQueue {
         learned.burstFailures = 0
         host = learned
         _ = confirmOperation(true)
+        // The shadow takes the burst's end state as the queue's own write: the next read matches it.
+        shadow?.wrote(range: UTF16Range(location: region.start, length: String(region.current).utf16.count), with: String(last.after), selection: expected)
         for item in items { apply(region, landed: item.after, at: item.range, delta: item.delta, inserted: item.inserted) }
         unit.index += sent
         revision += 1

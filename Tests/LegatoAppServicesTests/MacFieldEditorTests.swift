@@ -903,7 +903,12 @@ import LegatoMac
     @Test func rapidBrowserHypothesesCoalesceAndFinishFlushesTheLatestWords() async {
         let target = EditorTarget("")
         let editor = MacFieldEditor(capture: { .target(target) })
+        // A virtual clock: the entrance's wall-clock cap (a burst that falls behind writes in fewer pieces) must not make the
+        // piece count depend on how late a real timer wakes up under load.
+        var clock = ContinuousClock.now
+        editor.sleep = { clock += $0 }
         editor.begin()
+        editor.queue.now = { clock }
         editor.enqueueLive(snapshot("one"))
         editor.enqueueLive(snapshot("one two"))
         editor.enqueueLive(snapshot("One two three.", complete: true))

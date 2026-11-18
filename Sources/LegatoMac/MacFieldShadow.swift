@@ -27,6 +27,18 @@ public struct MacFieldShadow: Sendable, Equatable {
 
     public mutating func notified() { dirty = true }
 
+    /// The queue's own confirmed write: `range` of the picture became `inserted`, the caret `selection`. The next read of the
+    /// field then matches the picture, and is never taken for a change of the user's.
+    public mutating func wrote(range: UTF16Range, with inserted: String, selection newSelection: UTF16Range) {
+        let ns = text as NSString
+        guard range.location >= 0, range.length >= 0, range.location + range.length <= ns.length else { return }
+        text = ns.replacingCharacters(in: NSRange(location: range.location, length: range.length), with: inserted)
+        selection = newSelection
+    }
+
+    /// The caret the queue left after its own write.
+    public mutating func moved(to newSelection: UTF16Range) { selection = newSelection }
+
     /// Classifies a fresh read against the shadow and the texts the queue's own chunks in flight would leave, then takes
     /// the read as the new picture. `userInput`: the user's real key or click counter moved since the last read.
     @discardableResult

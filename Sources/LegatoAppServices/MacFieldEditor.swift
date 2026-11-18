@@ -648,6 +648,11 @@ import LegatoMac
                          reason: "The app did not confirm the edit. The original and suggestion are saved; check the field before retrying.",
                          stopped: true)
         case .dropped:
+            // Native edits are stopped for this run (the caret could not be restored): another pass would only park and drop
+            // again, so the cleanup session is told the field stopped (no repass), and the notice says why.
+            if let notice = target.nativeInputNotice {
+                return .init(id: edit.id, applied: false, reason: notice, stopped: true)
+            }
             return refused("The field changed. Nothing was edited.")
         }
     }

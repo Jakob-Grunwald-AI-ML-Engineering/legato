@@ -32,7 +32,13 @@ public enum ChunkEntrance {
         // The gap that fits every grapheme in the cap, within [minGapMs, gapMs].
         let gap = min(gapMs, max(min(minGapMs, gapMs), capMs / Double(n - 1)))
         let count = min(n, max(2, Int(capMs / gap) + 1))
-        // Even groups: the first `n % count` pieces carry one grapheme more.
+        let pieces = group(graphemes, into: count)
+        return Plan(pieces: pieces, gapMs: gap)
+    }
+
+    /// `graphemes` in `count` even groups (the first `n % count` carry one more), in order, never inside a cluster.
+    private static func group(_ graphemes: [Character], into count: Int) -> [String] {
+        let n = graphemes.count
         var pieces: [String] = []
         pieces.reserveCapacity(count)
         var start = 0
@@ -41,6 +47,21 @@ public enum ChunkEntrance {
             pieces.append(String(graphemes[start..<(start + size)]))
             start += size
         }
-        return Plan(pieces: pieces, gapMs: gap)
+        return pieces
+    }
+
+    /// The wall-clock guard of a burst whose writes cost time (the Mac's Accessibility writes take milliseconds each, an
+    /// iPhone proxy's insert almost none): the burst never runs past `capMs` counted from its start. `elapsedMs` is the
+    /// time since the burst began, `writeMs` what one write costs (the last one measured). When the pieces still to go no
+    /// longer fit (each costs a gap and a write), they are written in fewer, fatter pieces rather than stretched, down to
+    /// all of them in one. `waitMs` is the pause before the next piece: a gap, or none when no budget is left.
+    public static func fit(_ remaining: [String], elapsedMs: Double, writeMs: Double, gapMs: Double,
+                           capMs: Double = capMs) -> (pieces: [String], waitMs: Double) {
+        guard remaining.count > 1 else { return (remaining, elapsedMs + gapMs + writeMs <= capMs ? gapMs : 0) }
+        let cost = max(0.001, gapMs + writeMs)
+        let affordable = max(1, Int(max(0, capMs - elapsedMs) / cost))
+        let waitMs = elapsedMs + cost <= capMs ? gapMs : 0
+        guard affordable < remaining.count else { return (remaining, waitMs) }
+        return (group(Array(remaining.joined()), into: affordable), waitMs)
     }
 }

@@ -69,8 +69,29 @@ import LegatoKeyboardCore
     var nativeCanAdmit = true
     var nativeInputProtected = false
     var onNativeEnd: (() -> Void)?
-    func beginNativeInputUnit() -> Bool { nativeCanAdmit }
+    /// Time passing inside the field (`nativeWriteCost`: an AX write is a few milliseconds, not free) and the native unit's
+    /// lease like `NativeInputHandoff`: with `nativeWorkBudget`, every AX call after that long since the unit began throws
+    /// until `prepareNativeInputHome` (then the full budget), and a unit that ends away from its home blocks the lease.
+    var spend: (Duration) -> Void = { _ in }
+    var nativeWriteCost = Duration.zero
+    var nativeWorkBudget: Duration?
+    var nativeFullBudget = Duration.milliseconds(500)
+    private var unitStart: ContinuousClock.Instant?
+    private var homing = false
+    var unitsBlocked = 0, expiredCalls = 0
+    private func budget() throws {
+        guard let limit = nativeWorkBudget, let start = unitStart else { return }
+        if clock() - start >= (homing ? nativeFullBudget : limit) { expiredCalls += 1; throw TextTargetReadError.unsupported }
+    }
+    func beginNativeInputUnit() -> Bool {
+        guard nativeCanAdmit else { return false }
+        unitStart = clock(); homing = false
+        return true
+    }
+    func prepareNativeInputHome() { homing = true }
     func endNativeInputUnit(homeVerified: Bool) -> Bool {
+        unitStart = nil
+        if nativeWorkBudget != nil, !homeVerified { nativeCanAdmit = false; unitsBlocked += 1 }
         if homeVerified { onNativeEnd?() }
         return homeVerified
     }
@@ -281,9 +302,10 @@ import LegatoKeyboardCore
         other = (Array(text), UTF16Range(location: text.utf16.count, length: 0))
         focusedElement += 1; focusedBase = 0; mark += 1
     }
-    func selectedRange() throws -> UTF16Range { settle(); return shownCaret.shifted(-base) }
-    func textLength() throws -> Int { settle(); return shown.utf16.count - base }
+    func selectedRange() throws -> UTF16Range { try budget(); settle(); return shownCaret.shifted(-base) }
+    func textLength() throws -> Int { try budget(); settle(); return shown.utf16.count - base }
     func text(in range: UTF16Range) throws -> String {
+        try budget()
         settle()
         let shown = (lagging ?? self.shown) as NSString
         lagging = nil
@@ -300,11 +322,13 @@ import LegatoKeyboardCore
         return shown.substring(from: base)
     }
     func setSelectedRange(_ range: UTF16Range) throws {
+        try budget()
         let range = range.shifted(base)
         guard range.location >= base, range.end <= string.utf16.count else { throw TextTargetReadError.unsupported }
         selection = range
     }
     func replace(_ range: UTF16Range, with text: String) throws {
+        try budget()
         let range = range.shifted(base)
         // A Chromium field reports success for an Accessibility write and changes nothing.
         guard !keys else { writes += 1; return }
@@ -317,6 +341,7 @@ import LegatoKeyboardCore
         if rng.chance(lagChance) { lagging = before }
         onNativeReplace?()
         emit()
+        spend(nativeWriteCost)
     }
 
     /// The user types `character` at their caret (replacing a selection).
@@ -1071,6 +1096,71 @@ private struct SeededRandom {
         await queue.flush()
         #expect(field.string == "Log: the harbor is calm today and quiet")
         #expect(field.writes == before + 1)
+    }
+
+    /// Acceptance in the Mac VM (9bca5ca): TextEdit and Safari took ~16 characters of a 21-piece burst, then every AX call threw
+    /// (the native unit's work budget is 250 ms and a write costs milliseconds), the queue read its own half-written burst as
+    /// the user's, the caret stayed away from home, the lease blocked, and the take dropped. The earlier rigs wrote for free.
+    private func slowNativeField(writeMs: Int, budgetMs: Int? = 250, seed: UInt64 = 21)
+        -> (field: FakeAXField, queue: MacFieldQueue, entries: () -> [MacEditJournal.Entry], elapsed: () -> Duration) {
+        let field = FakeAXField("", rng: SeededRandom(seed))
+        var clock = ContinuousClock.now
+        let start = clock
+        field.clock = { clock }
+        field.spend = { clock += $0 }
+        field.nativeWriteCost = .milliseconds(writeMs)
+        field.nativeWorkBudget = budgetMs.map { .milliseconds($0) }
+        let queue = MacFieldQueue(target: field)
+        queue.now = { clock }
+        queue.sleep = { clock += $0 }
+        var entries: [MacEditJournal.Entry] = []
+        queue.journal = { entries.append($0) }
+        return (field, queue, { entries }, { clock - start })
+    }
+
+    @Test(arguments: [2, 6, 10, 25, 60]) func aBurstOnAFieldWhoseWritesTakeTimeLandsWholeWithOneCheckAndNothingTheUsers(writeMs: Int) async {
+        let (field, queue, entries, elapsed) = slowNativeField(writeMs: writeMs)
+        queue.live(runID: "take", version: 1, text: "um so I wanted to say")
+        await queue.whenIdle()
+        let kinds = entries().map(\.kind)
+        #expect(field.string == "um so I wanted to say", "\(field.string)")
+        #expect(entries().filter { $0.kind == .sent }.count == 1 && kinds.filter { $0 == .verified }.count == 1, "one chunk, one check: \(kinds)")
+        #expect(!kinds.contains(.mismatch) && !kinds.contains(.regionClosed) && !kinds.contains(.user) && !kinds.contains(.dropped), "\(kinds)")
+        #expect(!entries().contains { $0.kind == .observed && $0.detail == "userChange" })
+        #expect(field.expiredCalls == 0 && field.unitsBlocked == 0, "the unit's budget held: \(field.expiredCalls)")
+        // Wall-clock: the burst (and its check) end inside the unit's work budget however slow the writes are.
+        #expect(elapsed() <= .milliseconds(250), "\(elapsed())")
+        if writeMs >= 25 { #expect(field.writes < 21, "slow writes catch up in fewer pieces: \(field.writes)") }
+    }
+
+    @Test func aWriteThatFailsMidBurstLeavesItsPiecesAsTheQueuesOwnAndTheRestLandsLater() async {
+        // A budget the burst's own cap does not know about (a slower host): the 6th write throws.
+        let (field, queue, entries, _) = slowNativeField(writeMs: 20, budgetMs: 100)
+        queue.live(runID: "take", version: 1, text: "um so I wanted to say")
+        await queue.whenIdle()
+        let kinds = entries().map(\.kind)
+        #expect(field.string == "um so I wanted to say", "\(field.string) \(kinds)")
+        let trail = entries().map { "\($0.kind.rawValue) \($0.reason ?? "") \($0.detail ?? "")" }.joined(separator: "\n")
+        #expect(!kinds.contains(.regionClosed) && !kinds.contains(.user) && !kinds.contains(.dropped), "\(trail)")
+        #expect(!entries().contains { $0.kind == .observed && $0.detail == "userChange" })
+        #expect(field.unitsBlocked == 0, "the caret went home after the failed write: native edits stay available")
+        #expect(field.expiredCalls > 0, "the rig did model the budget running out")
+        // A cleanup edit afterwards lands once: no drop, no loop.
+        let result = await queue.edit(.init(range: .init(location: 0, length: 21), scope: "um so I wanted to say", target: "Um so I wanted to say"))
+        #expect(result == .applied(.init(location: 0, length: 21)))
+        #expect(field.string == "Um so I wanted to say")
+        #expect(field.unitsBlocked == 0)
+    }
+
+    @Test func aBlockedNativeLeaseDropsAnEditOnceAndNeverReplansItInALoop() async {
+        let (field, queue, entries, _) = slowNativeField(writeMs: 2)
+        field.value = Array("um so I wanted t"); field.selection = .init(location: 16, length: 0)
+        field.nativeCanAdmit = false
+        let result = await queue.edit(.init(range: .init(location: 0, length: 16), scope: "um so I wanted t", target: "Um So I Wanted T"))
+        #expect(result == .dropped(.focusLost))
+        await queue.whenIdle()
+        #expect(entries().filter { $0.kind == .edit }.count == 1 && entries().filter { $0.kind == .dropped }.count == 1)
+        #expect(field.writes == 0 && !queue.hasWork)
     }
 
     @Test(arguments: [false, true]) func theShadowFollowsTheFieldWithOrWithoutNotifications(notifies: Bool) async {
