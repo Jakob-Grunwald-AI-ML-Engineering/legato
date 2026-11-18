@@ -141,16 +141,12 @@ public struct FieldQueue: Sendable {
         public var prioritizeSpeech: Bool
         /// Every chunk's insert enters as a fast character burst (`ChunkEntrance`, #300); off with Reduce Motion.
         public var chunkEntrance: Bool
-        /// The display's frame: the entrance writes one piece per frame (`ChunkEntrance.frameMs(fps:)`).
-        public var frameMs: Double
         public init(movesByCharacters: Bool = false, capitalization: AutoCapitalizationType = .none,
-                    canReadAround: Bool = false, prioritizeSpeech: Bool = false, chunkEntrance: Bool = false,
-                    frameMs: Double = ChunkEntrance.gapMs) {
+                    canReadAround: Bool = false, prioritizeSpeech: Bool = false, chunkEntrance: Bool = false) {
             self.movesByCharacters = movesByCharacters; self.capitalization = capitalization
             self.canReadAround = canReadAround
             self.prioritizeSpeech = prioritizeSpeech
             self.chunkEntrance = chunkEntrance
-            self.frameMs = frameMs
         }
     }
 
@@ -2433,7 +2429,7 @@ public struct FieldQueue: Sendable {
     /// An insert at the caret as a chunk's op: one piece, or a burst of pieces (`ChunkEntrance`) of which the first goes now
     /// and the rest from `nextBurst`, the model taking each piece as it is sent so it always shows what the host was given.
     private mutating func sendInsert(_ text: String, lane: Lane, owner: Int?, followsUser: Bool = false, entrance: Bool = true) -> Action {
-        var plan = ChunkEntrance.plan(text, enabled: entrance && config.chunkEntrance, gapMs: config.frameMs)
+        var plan = ChunkEntrance.plan(text, enabled: entrance && config.chunkEntrance)
         guard !plan.pieces.isEmpty else { return .wait }
         let first = plan.pieces.removeFirst()
         burst = plan.pieces.isEmpty ? nil : Burst(pieces: plan.pieces, gapMs: plan.gapMs, lane: lane, owner: owner, followsUser: followsUser)

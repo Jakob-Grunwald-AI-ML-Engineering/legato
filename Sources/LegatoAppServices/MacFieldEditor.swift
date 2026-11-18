@@ -44,8 +44,6 @@ import LegatoMac
     private let capture: @MainActor () -> FocusedField
     /// Typewriter pacing of the queue (false with Reduce Motion).
     public var typewriter: @MainActor () -> Bool = { true }
-    /// The display's frame for the typewriter entrance (`ChunkEntrance.frameMs(fps:)`).
-    public var frameMs: @MainActor () -> Double = { ChunkEntrance.gapMs }
     public var sleep: @MainActor (Duration) async -> Void = { try? await Task.sleep(for: $0) }
     public var report: @MainActor (String) -> Void = { _ in }
     public var recover: @MainActor (String) -> Void = { _ in }
@@ -167,7 +165,6 @@ import LegatoMac
         panelCopiesOnly = field == .readOnly
         queue = MacFieldQueue(target: target, documentID: documentID)
         queue.paced = { [weak self] in self?.typewriter() ?? true }
-        queue.frameMs = { [weak self] in self?.frameMs() ?? ChunkEntrance.gapMs }
         queue.sleep = { [weak self] in await self?.sleep($0) }
         queue.journal = { [weak self] entry in
             guard let self else { return }

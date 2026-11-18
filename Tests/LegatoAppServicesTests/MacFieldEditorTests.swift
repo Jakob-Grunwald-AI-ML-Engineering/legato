@@ -920,7 +920,8 @@ import LegatoMac
         editor.enqueueLive(snapshot("One two three.", complete: true))
         await editor.finish()
         #expect(target.value == "One two three.")
-        #expect(target.writes.count == "One two three.".count)
+        // Coalesced: every write is an insert (nothing written is rewritten), at most one per grapheme.
+        #expect(target.writes.allSatisfy { $0.length == 0 } && target.writes.count <= "One two three.".count, "\(target.writes)")
     }
 
     @Test func retractedRunCleanupCannotFollowTheRetryIntoItsText() async {
