@@ -686,11 +686,11 @@ final class KeyboardController {
             let workNeedsEvidence = queue.hasOwnWork || queue.hasOpInFlight || queue.recoveryRequest != nil || unfinishedTake
             let boundOpaqueHold = hasText && !isFieldBusy && cursorReadID == nil && workNeedsEvidence
             let wait = draftEvidence.recheckAfterMs(nowMs: time, confirmationMs: confirmation, includingOpaque: boundOpaqueHold)
-            if hasText, unverifiedBlankProbeOrigin != nil || (boundOpaqueHold && wait == 0) {
+            beginBlankLineProbe()
+            if hasText, blankProbeTask == nil, unverifiedBlankProbeOrigin != nil || (boundOpaqueHold && wait == 0) {
                 preserveUnverifiedDraft()
                 return
             }
-            beginBlankLineProbe()
             if draftRecheck == nil, let wait {
                 draftRecheck = Task { [weak self] in
                     try? await Task.sleep(for: .milliseconds(max(1, Int(wait.rounded(.up)))))
@@ -1166,8 +1166,11 @@ final class KeyboardController {
             return
         }
         guard snapshot != liveSeen else { return }
-        // An existing take retains its pending speech. A new take waits to bind until the field has evidence again.
-        if draftEvidence.isPending, snapshot.runID != liveSnapshot?.runID { return }
+        // A new take on the same field can supply pending speech to a blank-line recovery. The draft gate
+        // still holds all its automatic writes until the old field is recognized or the take is preserved.
+        if draftEvidence.isPending, snapshot.runID != liveSnapshot?.runID {
+            guard liveSnapshot?.complete != false, let field = document.documentID, field == queueDocumentID else { return }
+        }
         if snapshot.runID == blockedLiveRunID {
             liveSeen = snapshot
             if snapshot.complete, !blockedLiveCompleted {
