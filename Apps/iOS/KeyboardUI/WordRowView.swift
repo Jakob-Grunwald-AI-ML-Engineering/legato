@@ -18,7 +18,7 @@ struct WordRowView: View {
 
     var body: some View {
         Group {
-            if controller.keptRowOpen, controller.statusText == nil, let kept = controller.keptText, kept.isShowable {
+            if let kept = controller.keptText, kept.isShowable {
                 keptRow(kept)
             } else if let recovery = controller.liveRecoveryNotice {
                 HStack(spacing: 8) {
@@ -80,7 +80,7 @@ struct WordRowView: View {
         .animation(.easeOut(duration: 0.12), value: controller.statusText)
     }
 
-    private func takeButton(_ title: String, id: String, action: @escaping () -> Void) -> some View {
+    private func takeButton(_ title: String, id: String, enabled: Bool = true, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title).font(.system(size: fontSize - 4, weight: .semibold))
                 .foregroundStyle(Color(uiColor: KeyColors.suggestion))
@@ -88,6 +88,8 @@ struct WordRowView: View {
                 .background(Color(uiColor: KeyColors.suggestion).opacity(0.15), in: Capsule())
         }
         .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.5)
         .accessibilityIdentifier(id)
     }
 
@@ -101,7 +103,14 @@ struct WordRowView: View {
                 .truncationMode(.head)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityIdentifier("keyboard.kept.text")
-            takeButton("Insert", id: "keyboard.kept.insert") { controller.insertKeptText() }
+            if kept.offersInsertion, kept.insertion == nil || controller.insertingKeptText {
+                takeButton(controller.insertingKeptText ? "Inserting…" : "Insert", id: "keyboard.kept.insert",
+                           enabled: controller.canInsertKeptText) { controller.insertKeptText() }
+                    .accessibilityLabel("Insert at cursor")
+            } else if kept.offersInsertion {
+                Text("Check the field").font(.system(size: fontSize - 5))
+                    .accessibilityLabel("Previous insertion could not be confirmed. You can still copy or dismiss the recovery text.")
+            }
             if controller.fullAccess {
                 takeButton("Copy", id: "keyboard.kept.copy") { controller.copyKeptText() }
             }
@@ -119,29 +128,11 @@ struct WordRowView: View {
         .accessibilityIdentifier("keyboard.kept")
     }
 
-    /// The chip that stands for kept text while the row shows suggestions.
-    private var keptChip: some View {
-        Button { controller.openKeptText() } label: {
-            Label("Kept", systemImage: "tray.and.arrow.down")
-                .font(.system(size: fontSize - 6, weight: .semibold))
-                .foregroundStyle(Color(uiColor: KeyColors.suggestion))
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(Color(uiColor: KeyColors.suggestion).opacity(0.15), in: Capsule())
-        }
-        .buttonStyle(.plain)
-        .padding(.leading, 6).padding(.trailing, 2)
-        .accessibilityLabel("Kept text")
-        .accessibilityHint("Shows the text Legato could not place, to insert or copy.")
-        .accessibilityIdentifier("keyboard.kept.chip")
-    }
-
     private var row: some View {
         let ranks = WordRowLayout.ranks(visibleSlots: slots)
         let words = controller.suggestions
         let highlighted = controller.highlightedSuggestionRank.flatMap { ranks.firstIndex(of: $0) }
         return HStack(spacing: 0) {
-            // Never an empty or stale chip: only an item with text, from a draft.
-            if controller.keptText?.isShowable == true { keptChip }
             ForEach(Array(ranks.enumerated()), id: \.offset) { position, rank in
                 SuggestionSlot(controller: controller, word: rank < words.count ? words[rank] : nil,
                                rank: rank, fontSize: fontSize, highlighted: highlighted == position,

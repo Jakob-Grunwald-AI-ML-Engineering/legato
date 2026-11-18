@@ -36,7 +36,7 @@ enum JournalReplay {
             case .step:
                 guard let report = entry.report else { continue }
                 let action = queue.step(report: report, elapsedMs: lastStep.map { entry.t - $0 } ?? 0,
-                                        callback: entry.callback ?? true)
+                                        callback: entry.callback ?? true, awaitingDraftEvidence: entry.awaitingDraftEvidence ?? false)
                 lastStep = entry.t
                 result.events += queue.drainEvents()
                 if case .send(let op) = action { result.sent.append(op) }

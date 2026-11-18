@@ -21,6 +21,47 @@ import Foundation
 /// as it is then. Live dictation types at its open piece's end, the user's caret, and pieces close on the user's input;
 /// cleanup may change hand-typed text only when it was in the cleanup's input (`placeThroughRead`, `FieldMerge`).
 public struct FieldQueue: Sendable {
+    /// Empty proxy windows during cursor movement can briefly coincide with hasText=false.
+    /// Confirm sustained emptiness from the first such observation, independently of an operation's acknowledgement.
+    public struct DraftEvidence: Sendable {
+        public enum Decision: Equatable, Sendable { case unchanged, pending, resumed, cleared }
+        private var observedContent = false
+        private var firstEmptyMs: Double?
+        public private(set) var isPending = false
+
+        public init() {}
+
+        public mutating func observe(_ report: Report, hasText: Bool, ownsEmpty: Bool,
+                                     nowMs: Double, confirmationMs: Double) -> Decision {
+            let hasWindows = !report.before.isEmpty || !report.after.isEmpty || report.selected != nil
+            if hasWindows {
+                let resumed = isPending
+                observedContent = true; firstEmptyMs = nil; isPending = false
+                return resumed ? .resumed : .unchanged
+            }
+            if ownsEmpty {
+                self = .init()
+                return .unchanged
+            }
+            if hasText {
+                guard observedContent else { return .unchanged }
+                firstEmptyMs = nil
+                isPending = true
+                return .pending
+            }
+            guard observedContent else { return .unchanged }
+            isPending = true
+            if firstEmptyMs == nil { firstEmptyMs = nowMs }
+            if nowMs - (firstEmptyMs ?? nowMs) < confirmationMs { return .pending }
+            self = .init()
+            return .cleared
+        }
+
+        public func recheckAfterMs(nowMs: Double, confirmationMs: Double) -> Double? {
+            firstEmptyMs.map { max(0, confirmationMs - (nowMs - $0)) }
+        }
+    }
+
     // MARK: Public types
 
     /// The field's report around the cursor: `selected` is the selection (nil or empty: none).
@@ -60,13 +101,16 @@ public struct FieldQueue: Sendable {
         public var readID: String?
         /// A logical cleanup read may never fall back to a coincidental matching substring.
         public var requiresShadowRead: Bool?
+        /// Recovery is consumed only after the original, collapsed insertion scope verifies.
+        public var requiresVerifiedInsertion: Bool?
         public init(id: String = UUID().uuidString, kind: Kind, before: String = "", after: String = "", selected: String? = nil,
                     target: String, atCursor: Bool = false, cursorAtEnd: Bool = true, readID: String? = nil,
-                    requiresShadowRead: Bool? = nil) {
+                    requiresShadowRead: Bool? = nil, requiresVerifiedInsertion: Bool? = nil) {
             self.id = id; self.kind = kind; self.before = before; self.after = after
             self.selected = selected?.isEmpty == true ? nil : selected
             self.target = target; self.atCursor = atCursor; self.cursorAtEnd = cursorAtEnd; self.readID = readID
             self.requiresShadowRead = requiresShadowRead
+            self.requiresVerifiedInsertion = requiresVerifiedInsertion
         }
     }
 
@@ -124,6 +168,8 @@ public struct FieldQueue: Sendable {
         public var kept: String? = nil
         /// A resolved shadow edit existed before the host attempted to synchronize it.
         public var shadowCommitted = false
+        /// At least one text mutation was issued. A missing receipt cannot safely repeat it.
+        public var issuedMutation = false
     }
 
     public struct AppliedText: Sendable, Equatable {
@@ -235,6 +281,7 @@ public struct FieldQueue: Sendable {
         var failures = 0
         /// Bounded per target, even when multiple failed checks each appear to make progress.
         var syncRecoveries = 0
+        var issuedMutation = false
         /// The span's text when its last chunk was planned.
         var plannedFrom: [Character]?
         var revision: LiveRevision?
@@ -600,13 +647,28 @@ public struct FieldQueue: Sendable {
         return observation
     }
 
-    /// The draft was cleared outside the keyboard (Send): the field reads empty and says it has no text, while the shadow
-    /// held text, and no op of the keyboard's own explains it (an own op within the deadline, or a clear of its own).
-    /// A clear observed in the same instant as the keyboard's own move is not believed (#299, task 9): it is looked at
-    /// again once the deadline passed.
-    public func observesClearedDraft(_ report: Report, hasText: Bool, elapsedSinceLastStepMs: Double = 0) -> Bool? {
-        guard !hasText, report.before.isEmpty, report.after.isEmpty, report.selected == nil, !ownsEmptyReport else { return false }
-        return hasRecentOwnOperation(elapsedMs: elapsedSinceLastStepMs) ? nil : true
+    /// Never declare the field cleared on a learned short deadline or while a large issued deletion can still land.
+    public var draftConfirmationMs: Double {
+        let deletes = inFlight?.ops.reduce(0) { count, op in
+            if case .deleteBackward(let n) = op { return count + n }
+            return count
+        } ?? 0
+        return max(Self.checkDeadlineMs, host.deadlineMs(deletes: deletes))
+    }
+
+    /// A returning window must independently locate the prior draft in a known result of this
+    /// keyboard's operations. Defer reseeding and recovery until we actually have that evidence.
+    public func recognizesDraft(_ report: Report) -> Bool {
+        guard seeded else { return true }
+        let possible = [doc] + (inFlight.map { [$0.pre] } ?? []) + recentSends.map(\.pre)
+        if possible.contains(where: { state in
+            state.hasEvidence(report, chars: Self.relocateChars) && state.positions(of: report).count == 1
+        }) { return true }
+        if draftUserDispatched {
+            var observed = self
+            return observed.absorbOutsideInsert(report)
+        }
+        return false
     }
 
     /// Empty proxy windows can be stale; the native field's independent hasText=false
@@ -630,6 +692,11 @@ public struct FieldQueue: Sendable {
     public mutating func releaseRead() { coordinator.finishRead() }
     /// The adapter calls this after the OS send, never before planning or dispatch.
     public mutating func operationDispatched() {
+        if draftUserDispatchPending {
+            draftUserDispatchPending = false
+            draftUserDispatched = true
+            return
+        }
         coordinator.dispatched(); sinceSendMs = 0; inFlight?.waitedMs = 0
         // An op behind a chunk is no op of the chunk: the chunk's latency still counts from its own last op.
         if inFlight?.behind == nil { inFlight?.chunkMs = 0; inFlight?.callbacks = 0 }
@@ -696,7 +763,9 @@ public struct FieldQueue: Sendable {
     public var hasOwnWork: Bool {
         unit != nil || burst != nil || swap != nil || (!editLane.isEmpty && !prioritizesSpeech) || runs.contains(where: { runNeedsWork($0) })
     }
-    public var hasOpInFlight: Bool { inFlight != nil }
+    private var draftUserDispatchPending = false
+    private var draftUserDispatched = false
+    public var hasOpInFlight: Bool { inFlight != nil || draftUserDispatchPending }
     /// Nothing in flight and the caret at the user's cursor: the field is as the user left it, as far as the queue goes.
     public var isHome: Bool { inFlight == nil && cursor == userCursor && swap == nil }
     public var isInUnit: Bool { unit != nil }
@@ -863,13 +932,25 @@ public struct FieldQueue: Sendable {
 
     public mutating func forgetRead(_ id: String) { readMarks.removeAll { $0.id == id } }
 
-    /// Cancels an edit not yet landed.
+    /// Cancel without losing a committed edit's outcome, including whether a write already went out.
     public mutating func cancelEdit(_ id: String) {
-        if case .edit(let s, _)? = unit?.owner, s.edit.id == id { unit = nil; finishSpan(s.spanID) }
-        var spanIDs: [Int?] = []
-        userLane.removeAll { if case .edit(let s) = $0, s.edit.id == id { spanIDs += [s.spanID, s.anchorID]; return true }; return false }
-        editLane.removeAll { if $0.edit.id == id { spanIDs += [$0.spanID, $0.anchorID]; return true }; return false }
-        for spanID in spanIDs { finishSpan(spanID) }
+        var cancelled: [EditState] = []
+        if case .edit(let state, _)? = unit?.owner, state.edit.id == id {
+            unit = nil
+            burst = nil
+            cancelled.append(state)
+        }
+        userLane.removeAll { item in
+            guard case .edit(let state) = item, state.edit.id == id else { return false }
+            cancelled.append(state)
+            return true
+        }
+        editLane.removeAll { state in
+            guard state.edit.id == id else { return false }
+            cancelled.append(state)
+            return true
+        }
+        for state in cancelled { drop(state, .reset) }
     }
 
     /// The field went away or changed: everything pending is dropped with events, and the model starts over. What was
@@ -897,8 +978,11 @@ public struct FieldQueue: Sendable {
     ///
     /// `callback`: the report came with a host callback (`textDidChange`, `selectionDidChange`), not from reading the proxy
     /// again right after an op of the keyboard's own (its echo). Only moves make callbacks (measured).
-    public mutating func step(report: Report, elapsedMs: Double, callback: Bool = true) -> Action {
+    public mutating func step(report: Report, elapsedMs: Double, callback: Bool = true,
+                              awaitingDraftEvidence: Bool = false) -> Action {
         guard !ownsRead else { return .wait }
+        if awaitingDraftEvidence { return nextInputWhileDraftIsUnverified() }
+        draftUserDispatched = false
         if config.prioritizeSpeech {
             // Delivery metadata is independent of the OS operation in flight. See the newest heard tail before
             // admitting more background work, even when the route already reports quiet audio.
@@ -1085,6 +1169,21 @@ public struct FieldQueue: Sendable {
             merge(report)
         }
         return next()
+    }
+
+    /// Only direct user input can go to the native caret during a blank interval. It must neither
+    /// adopt the blank window into the old shadow nor confirm or relocate an outstanding automated edit.
+    private mutating func nextInputWhileDraftIsUnverified() -> Action {
+        guard let index = userLane.firstIndex(where: { if case .input = $0 { true } else { false } }),
+              case .input(let input) = userLane.remove(at: index) else { return .wait }
+        let op: ShadowOp = switch input {
+        case .insert(let text): .insert(text)
+        case .deleteBackward: .deleteBackward(1)
+        case .move(let amount): .move(amount)
+        }
+        draftUserDispatchPending = true
+        events.append(.sent(op, .user))
+        return .send(op)
     }
 
     /// After a hop: the report shows the caret at the hop's target (the chunk goes on), or exactly where the same move
@@ -1389,6 +1488,9 @@ public struct FieldQueue: Sendable {
                 return .sent(send(.move(0), lane: lane, anywhere: true) { q in q.selection = 0 })
             }
             if state.edit.atCursor {
+                if state.edit.requiresVerifiedInsertion == true, selection > 0 || hasUnverifiedInput {
+                    drop(state, .selectionChanged); return .done
+                }
                 state.spanID = addSpan(Span(start: userCursor, end: userCursor))
             } else if let found = placeThroughRead(state.edit) {
                 // Through the changes since the read: the user's cancel it, the keyboard's own merge into the target.
@@ -1736,7 +1838,8 @@ public struct FieldQueue: Sendable {
         if let id = state.spanID, let span = spans[id], !span.parked, inFlight == nil { partial = String(chars(of: span)) }
         finishSpan(state.spanID); finishSpan(state.anchorID)
         events.append(.dropped(Drop(id: state.edit.id, runID: nil, kind: state.edit.kind, reason: reason,
-                                    text: state.target, partial: partial, shadowCommitted: state.isCleanup && state.shadow != nil)))
+                                    text: state.target, partial: partial, shadowCommitted: state.isCleanup && state.shadow != nil,
+                                    issuedMutation: state.issuedMutation)))
     }
 
     private mutating func finishSpan(_ id: Int?) { if let id { spans[id] = nil } }
@@ -2632,7 +2735,12 @@ public struct FieldQueue: Sendable {
         flight.jumpSpan = joining?.jumpSpan
         flight.input = joining?.input
         flight.visited = joining?.visited ?? []
-        if let owner, case .edit(let state, _)? = unit?.owner, state.spanID == owner, state.isCleanup {
+        if let owner, case .edit(var state, let editLane)? = unit?.owner, state.spanID == owner,
+           state.isCleanup || state.edit.requiresVerifiedInsertion == true {
+            if case .move = op { } else {
+                state.issuedMutation = true
+                unit?.owner = .edit(state, editLane)
+            }
             switch op {
             case .insert(let piece):
                 if var checkpoint = joining?.checkpoint, case .insert(let sent) = checkpoint.operation {

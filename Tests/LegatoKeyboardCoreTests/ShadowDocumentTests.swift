@@ -72,15 +72,43 @@ import Testing
         #expect(empty.observe(.init(before: ""), callback: .identity) == .match)
     }
 
-    /// A clear in the same instant as the keyboard's own move is looked at again after the deadline (task 9).
-    @Test func aClearRightAfterAnOwnMoveIsNotBelievedYet() {
-        var rig = QueueRig(FakeField("alpha beta"))
+    @Test func transientBlankAfterAConfirmedMoveDoesNotEndTheDraftOrConsumeItsSpeech() {
+        var rig = QueueRig(FakeField("Please move the review to Thursday."))
         rig.queue.enqueue(.move(-5))
         rig.drain()
+        let known = rig.field.current
         let empty = FieldQueue.Report(before: "")
-        #expect(rig.queue.observesClearedDraft(empty, hasText: false) == nil, "the move went out a moment ago")
-        #expect(rig.queue.observesClearedDraft(empty, hasText: false, elapsedSinceLastStepMs: FieldQueue.checkDeadlineMs) == true)
-        #expect(rig.queue.observesClearedDraft(empty, hasText: true, elapsedSinceLastStepMs: FieldQueue.checkDeadlineMs) == false)
+        #expect(!rig.queue.hasOpInFlight)
+        var evidence = FieldQueue.DraftEvidence()
+        let deadline = rig.queue.draftConfirmationMs
+        #expect(evidence.observe(known, hasText: true, ownsEmpty: false, nowMs: 0, confirmationMs: deadline) == .unchanged)
+        #expect(evidence.observe(empty, hasText: false, ownsEmpty: false, nowMs: 10, confirmationMs: deadline) == .pending)
+
+        rig.queue.enqueue(snap(1, "after lunch"))
+        #expect(rig.queue.step(report: empty, elapsedMs: 100, awaitingDraftEvidence: evidence.isPending) == .wait)
+        rig.queue.enqueue(.insert("x"))
+        #expect(rig.queue.step(report: empty, elapsedMs: 30, awaitingDraftEvidence: evidence.isPending) == .send(.insert("x")))
+        rig.queue.operationDispatched()
+        rig.field.apply(.insert("x"))
+        let returning = rig.field.current
+        #expect(rig.queue.recognizesDraft(returning))
+        #expect(evidence.observe(returning, hasText: true, ownsEmpty: false, nowMs: 165, confirmationMs: deadline) == .resumed)
+        rig.drain()
+        #expect(rig.field.string.contains("x"))
+        #expect(rig.field.string.contains("after lunch"))
+    }
+
+    @Test func onlySustainedConfirmedEmptinessEndsTheDraft() {
+        var evidence = FieldQueue.DraftEvidence()
+        let nonempty = FieldQueue.Report(before: "This field was known.")
+        let empty = FieldQueue.Report(before: "")
+        let deadline = FieldQueue.checkDeadlineMs
+        #expect(evidence.observe(nonempty, hasText: true, ownsEmpty: false, nowMs: 0, confirmationMs: deadline) == .unchanged)
+        #expect(evidence.observe(empty, hasText: false, ownsEmpty: false, nowMs: 100, confirmationMs: deadline) == .pending)
+        #expect(evidence.observe(empty, hasText: true, ownsEmpty: false, nowMs: 500, confirmationMs: deadline) == .pending)
+        #expect(evidence.observe(empty, hasText: false, ownsEmpty: false, nowMs: 550, confirmationMs: deadline) == .pending)
+        #expect(evidence.observe(empty, hasText: false, ownsEmpty: false, nowMs: 550 + deadline, confirmationMs: deadline) == .cleared)
+        #expect(!evidence.isPending)
     }
 }
 
