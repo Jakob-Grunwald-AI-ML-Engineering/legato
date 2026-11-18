@@ -40,6 +40,8 @@ struct WordRowView: View {
             } else if controller.hint == nil, let presentation = controller.instructionPresentation {
                 InstructionRowView(controller: controller, presentation: presentation, fontSize: fontSize)
                     .transition(.opacity)
+            } else if controller.isShowingPreview, let preview = controller.statusText {
+                previewRow(preview)
             } else if let status = controller.statusText {
                 HStack(spacing: 8) {
                     if controller.isCleaningUp {
@@ -77,7 +79,29 @@ struct WordRowView: View {
             }
         }
         // The status (or a hint) takes the row over and gives it back with a plain short fade.
-        .animation(.easeOut(duration: 0.12), value: controller.statusText)
+        .animation(controller.isShowingPreview ? nil : .easeOut(duration: 0.12), value: controller.statusText)
+    }
+
+    /// The dictation preview (#312): the words not in the field yet, left aligned, two lines, anchored on the newest words. The
+    /// text keeps its natural wrapping and sits at the row's bottom edge, so a growing text pushes the oldest line out at the
+    /// top and nothing re-centres or jumps. The row keeps its height; the font is the largest that fits two lines in it
+    /// (`WordRowHeight.previewFontSize`, an estimate to measure on the phone).
+    private func previewRow(_ text: String) -> some View {
+        GeometryReader { proxy in
+            let size = WordRowHeight.previewFontSize(rowHeight: Double(proxy.size.height))
+            Text(text)
+                .font(.system(size: CGFloat(size)))
+                .foregroundStyle(Color(uiColor: KeyColors.suggestion))
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: max(proxy.size.width - 16, 0), alignment: .leading)
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .bottomLeading)
+                .clipped()
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(text)
+        .accessibilityIdentifier("keyboard.hint")
+        .transition(.identity)
     }
 
     private func takeButton(_ title: String, id: String, enabled: Bool = true, action: @escaping () -> Void) -> some View {

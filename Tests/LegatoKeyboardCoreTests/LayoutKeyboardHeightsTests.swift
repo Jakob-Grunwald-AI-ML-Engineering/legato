@@ -81,3 +81,11 @@ import Testing
         #expect(StripHeight.requested(row: 1) == 1)
     }
 }
+
+@Test func thePreviewFontFitsTwoLinesInTheRowAsItIs() {
+    // Portrait: 27 pt holds two lines of 11 pt (2 x 13.2 = 26.4; 12 pt needs 28.8); landscape's 44 pt holds 13 pt (31.2).
+    #expect(WordRowHeight.previewFontSize(rowHeight: WordRowHeight.content(landscape: false)) == 11)
+    #expect(WordRowHeight.previewFontSize(rowHeight: WordRowHeight.content(landscape: true)) == 13)
+    #expect(2 * WordRowHeight.previewLineHeight(size: 11) <= WordRowHeight.portrait)
+    #expect(WordRowHeight.portrait == 27, "The preview does not change the row")
+}
