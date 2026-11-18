@@ -128,6 +128,8 @@ import Observation
         }
         // Every change is typed a grapheme at a time; Reduce Motion (or the Typewriter setting off) sends it whole.
         fieldEditor.typewriter = { [settings] in settings.typewriter && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+        // One piece per frame of the main display: the fastest pace that still visibly types.
+        fieldEditor.frameMs = { ChunkEntrance.frameMs(fps: NSScreen.main?.maximumFramesPerSecond ?? 60) }
         #if DEBUG || LEGATO_INTERNAL
         let journalFile = EditJournalFile()
         fieldEditor.journal = { journalFile.write($0) }

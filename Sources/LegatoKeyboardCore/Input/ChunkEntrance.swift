@@ -5,15 +5,22 @@ import Foundation
 /// insert is written piece by piece. Platform-neutral and pure: the iPhone queue (`FieldQueue`) and the Mac queue time
 /// the pieces themselves.
 ///
-/// A piece is one grapheme (an extended grapheme cluster: an emoji sequence, a letter with combining marks and CRLF are
-/// never split) until the burst would run past `capMs`; then the gap between pieces shrinks, down to `minGapMs`, and
-/// beyond that graphemes group into pieces, so the whole burst (the gaps between its pieces) never exceeds `capMs`.
-/// Disabled (Reduce Motion, a flush, text a whole write must carry), the insert is one piece with no gap.
+/// The pace is the display's: one piece per frame, the fastest that still visibly types (pieces written within one
+/// frame show as a block, and accuracy sets no lower bound: hosts apply a whole burst in order, measured). A piece is one
+/// grapheme (an extended grapheme cluster: an emoji sequence, a letter with combining marks and CRLF are never split)
+/// until the burst would run past `capMs`; beyond that graphemes group into pieces, still one per frame, so the whole
+/// burst (the gaps between its pieces) never exceeds `capMs`. Disabled (Reduce Motion, a flush, text a whole write must
+/// carry), the insert is one piece with no gap.
 public enum ChunkEntrance {
-    /// Estimates to be tuned on the phone and the Mac; the key-wait budget is 500 ms, so a key waits at most `capMs`.
-    public static let gapMs = 8.0
-    public static let minGapMs = 4.0
+    /// One frame at 120 Hz, for callers that do not know their display.
+    public static let gapMs = frameMs(fps: 120)
+    /// No gap below a frame: faster pieces land in the same frame.
+    public static let minGapMs = gapMs
+    /// The key-wait budget is 500 ms; a key waits at most `capMs` behind a burst.
     public static let capMs = 250.0
+
+    /// One frame of a display refreshing `fps` times a second (bounded to 30–240 Hz).
+    public static func frameMs(fps: Int) -> Double { 1000 / Double(min(240, max(30, fps))) }
 
     public struct Plan: Sendable, Equatable {
         /// The insert's pieces in order; joined they are exactly the text.
@@ -24,8 +31,10 @@ public enum ChunkEntrance {
         public var durationMs: Double { Double(max(0, pieces.count - 1)) * gapMs }
     }
 
-    public static func plan(_ text: String, enabled: Bool = true, gapMs: Double = gapMs, minGapMs: Double = minGapMs,
+    /// `gapMs` is the display's frame (`frameMs(fps:)`); `minGapMs` defaults to it.
+    public static func plan(_ text: String, enabled: Bool = true, gapMs: Double = gapMs, minGapMs: Double? = nil,
                             capMs: Double = capMs) -> Plan {
+        let minGapMs = minGapMs ?? gapMs
         let graphemes = Array(text)
         guard enabled, graphemes.count > 1, gapMs > 0 else { return Plan(pieces: text.isEmpty ? [] : [text], gapMs: 0) }
         let n = graphemes.count

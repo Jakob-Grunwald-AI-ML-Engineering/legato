@@ -3,7 +3,7 @@
 Status: **implemented 2026-11-18 on `feat/mac-shadow-chunks`; Mac agent UAT passed in the VM (round 4, build 1f98490) in TextEdit, Safari (textarea, rich text) and Edge (textarea, bulleted list, Markdown list).**
 
 - Accepted behaviour: hand-typed text inside a take's span may be tidied by the whole-take pass (decided contract: cleanup may change text that was in its input); text before the take is never touched.
-- Unverified: the iPhone entrance on a device (gap 8 ms and cap 250 ms are estimates, to tune on the phone); the Mac entrance cap of 150 ms (inside the native unit's 250 ms work budget) is from VM runs only; real CodeMirror, Chrome and Electron apps; per-sentence cleanup timing with real audio (the bridge fixture sends no endpoints).
+- Unverified: the iPhone entrance on a device (paced at one piece per display frame since #300's follow-up; the 250 ms cap is the input budget's share); the Mac entrance cap of 150 ms (inside the native unit's 250 ms work budget) is from VM runs only; real CodeMirror, Chrome and Electron apps; per-sentence cleanup timing with real audio (the bridge fixture sends no endpoints).
 - Known limit: a real key landing between one of Legato's Backspaces and its retyped letter in a keyed field can leave that dictated word a letter short; the user's own text is not affected.
 
 ## Goal and scope

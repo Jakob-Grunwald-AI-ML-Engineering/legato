@@ -713,6 +713,10 @@ final class KeyboardController {
         queue.config.prioritizeSpeech = true
         // Every chunk enters as a fast character burst (`ChunkEntrance`); Reduce Motion writes it whole.
         queue.config.chunkEntrance = !UIAccessibility.isReduceMotionEnabled
+        // One piece per display frame: the fastest pace that still visibly types.
+        if let fps = inputModeTarget?.view.window?.windowScene?.screen.maximumFramesPerSecond {
+            queue.config.frameMs = ChunkEntrance.frameMs(fps: fps)
+        }
     }
 
     /// Drops everything pending (each edit's owner hears that it was dropped) and forgets the model.
