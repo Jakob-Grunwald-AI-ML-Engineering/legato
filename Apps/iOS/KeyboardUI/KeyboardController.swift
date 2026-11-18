@@ -1408,7 +1408,13 @@ final class KeyboardController {
             // What is not in the field goes to the kept-text row; the units already typed stay where they are.
             blockedLiveRunID = snapshot.runID
             blockedLiveCompleted = snapshot.complete
-            if stagedTake.runID == snapshot.runID { holdStaged() }
+            if stagedTake.runID == snapshot.runID {
+                // A unit mid-burst (typewriter entrance) when the keyboard hid: the queue is reset next and cannot finish it. The
+                // whole unit goes to kept text (never trimmed by a guessed prefix: the caret may have moved); the burst's first
+                // pieces, if typed, stay in the field as a short fragment. Noted here, since nothing else sees it.
+                if let unit = stagedTake.inFlight { trace?("staged unit interrupted by hide unit=\(unit): typed fragment may remain, whole unit kept") }
+                holdStaged()
+            }
             liveSnapshot = nil
             setLiveRunning(false)
             return
