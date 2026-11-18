@@ -269,7 +269,10 @@ final class KeyboardController {
 
     func insertKeptText() {
         guard let original = keptText, isVisible, !document.isSecureTextEntry else { return }
-        guard document.selectedText?.isEmpty != false, !queue.hasUnverifiedInput, !draftEvidence.isPending else {
+        // A tap that leaves the caret where it was (the end of a note) leaves the queue's input unverified: the host called back
+        // with a report that did not change. The proxy shows no selection, so the text goes in at the caret as a key would
+        // (`isSpeech`, below); only a selection the proxy shows, or a draft whose boundary is unknown, refuses.
+        guard document.selectedText?.isEmpty != false, !draftEvidence.isPending else {
             return noteKeptInsertRefused()
         }
         var pending = original
@@ -278,14 +281,13 @@ final class KeyboardController {
         keptText = pending
         insertingKeptText = true
         userPreemptsFieldRead()
-        // The same word boundary and capital rules as a staged unit (`FieldInsertion`), from the field's context at the caret.
+        // The same word boundary and capital rules as a staged unit (`FieldInsertion`, applied by the queue when it starts).
         syncQueueField()
-        let report = currentReport
-        let typed = FieldInsertion.prepare(pending.text, contextBefore: report.before, capitalization: autocapitalization)
-        let target = typed + FieldInsertion.trailingSeparator(after: typed, before: report.after.first)
-        let edit = FieldQueue.Edit(id: id.uuidString, kind: .typist, target: target.isEmpty ? pending.text : target, atCursor: true,
-                                   requiresVerifiedInsertion: true)
-        enqueue(edit, user: true) { [weak self] event in
+        let unverified = queue.hasUnverifiedInput
+        var edit = FieldQueue.Edit(id: id.uuidString, kind: .typist, target: pending.text, atCursor: true,
+                                   requiresVerifiedInsertion: true, isSpeech: unverified ? true : nil)
+        edit.unit = .init(text: pending.text, capitalization: autocapitalization, contextFallback: currentReport.before)
+        enqueue(edit, user: !unverified) { [weak self] event in
             guard let self else { return }
             self.insertingKeptText = false
             guard self.keptText == pending else { return }
@@ -1320,32 +1322,41 @@ final class KeyboardController {
             liveDocumentID = documentID
         }
         syncQueueField()
-        let report = currentReport
-        let target = stagedTake.prepared(unit.text, proxyBefore: report.before, after: report.after.first, capitalization: autocapitalization)
-        guard !target.isEmpty else { return }
-        stagedTake.begin(unit.id, typed: target)
+        // The queue puts the separator and capital on the words when the unit starts, from the field it then shows: keys the
+        // person types before it goes are in that text (the proxy's view now may not be, or may be blind after a move).
+        let fallback = stagedTake.context(proxyBefore: currentReport.before)
+        stagedTake.begin(unit.id, typed: unit.text)
         liveTypedRunIDs.insert(runID)
         let origin = draftID
-        let edit = FieldQueue.Edit(kind: .typist, target: target, atCursor: true, requiresVerifiedInsertion: true, isSpeech: true)
+        var edit = FieldQueue.Edit(kind: .typist, target: unit.text, atCursor: true, requiresVerifiedInsertion: true, isSpeech: true)
+        edit.unit = .init(text: unit.text, capitalization: autocapitalization, contextFallback: fallback)
         stagedBegan = (edit.id, origin, ContinuousClock.now)
-        enqueue(edit) { [weak self] event in self?.stagedUnitFinished(runID: runID, unit: unit.id, target: target, origin: origin, event: event) }
+        enqueue(edit) { [weak self] event in self?.stagedUnitFinished(runID: runID, unit: unit.id, origin: origin, event: event) }
         pump()
     }
 
-    private func stagedUnitFinished(runID: String, unit: Int, target: String, origin: String, event: FieldQueue.Event?) {
+    private func stagedUnitFinished(runID: String, unit: Int, origin: String, event: FieldQueue.Event?) {
         guard stagedTake.runID == runID, stagedTake.inFlight == unit else { return }
         stagedBegan = nil
-        guard case .applied? = event else {
+        let typed: String
+        switch event {
+        case .applied(_, _, let text)?:
+            typed = text.result
+        case .dropped(let drop)? where StagedDictation.landed(drop, report: currentReport):
+            // The check failed (a key or tap in between) but the words are in the field: delivered, never typed or kept again.
+            trace?("staged unit landed despite a failed check")
+            typed = drop.text
+        default:
             // The insert did not stand (the field changed, a selection, the draft or the keyboard went away, no verified
             // check): this unit and the rest are kept, not inserted blind. A repeat is the person's choice (Insert).
             trace?("staged unit dropped")
             return holdStaged(from: origin)
         }
         let expected = currentReport.before
-        stagedTake.delivered(unit)
+        stagedTake.delivered(unit, typed: typed)
         liveStats.applies += 1
         // One undo step per unit; the guard is the context after it when the proxy shows it.
-        queue.history.record(removed: "", inserted: target, at: Date(), contextBefore: expected)
+        queue.history.record(removed: "", inserted: typed, at: Date(), contextBefore: expected)
         syncHistory()
         typing.ownEdit(contextBefore: expected)
         syncRowTakeover()

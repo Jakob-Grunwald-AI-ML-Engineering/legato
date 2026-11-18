@@ -110,6 +110,19 @@ public struct FieldQueue: Sendable {
         /// Dictated words typed at the caret (a staged unit): under unverified input they go in as speech does
         /// (`heldSpeechNext`), still as one burst with one check.
         public var isSpeech: Bool?
+        /// A staged unit's words, still unprepared: the queue puts the separator and capital on them when the unit starts,
+        /// from the text its model shows before the caret then (what the user typed meanwhile included), because `target`
+        /// would be prepared before keys that go first. `target` is then the prepared text.
+        public var unit: SpeechUnit?
+        public struct SpeechUnit: Sendable, Equatable, Codable {
+            public var text: String
+            public var capitalization: Int
+            /// The context when the model knows nothing before the caret (the take's own record).
+            public var contextFallback: String
+            public init(text: String, capitalization: AutoCapitalizationType, contextFallback: String) {
+                self.text = text; self.capitalization = capitalization.rawValue; self.contextFallback = contextFallback
+            }
+        }
         public init(id: String = UUID().uuidString, kind: Kind, before: String = "", after: String = "", selected: String? = nil,
                     target: String, atCursor: Bool = false, cursorAtEnd: Bool = true, readID: String? = nil,
                     requiresShadowRead: Bool? = nil, requiresVerifiedInsertion: Bool? = nil, isSpeech: Bool? = nil) {
@@ -1368,6 +1381,7 @@ public struct FieldQueue: Sendable {
             }
         }
         if !userLane.isEmpty {
+            finishCaretTail()
             abortUnit()
             if cursor != userCursor, selection == 0 { return send(.move(units(to: userCursor)), lane: .user, moveTo: userCursor) }
             if let action = nextUser() { return action }
@@ -1559,6 +1573,14 @@ public struct FieldQueue: Sendable {
                 return .sent(send(.move(0), lane: lane, anywhere: true) { q in q.selection = 0 })
             }
             if state.edit.atCursor {
+                if let unit = state.edit.unit, state.shadow == nil {
+                    let known = String(text[max(0, userCursor - Self.unitContextCharacters)..<userCursor])
+                    let prepared = FieldInsertion.prepare(unit.text, contextBefore: known.isEmpty ? unit.contextFallback : known,
+                                                          capitalization: AutoCapitalizationType(rawValue: unit.capitalization) ?? .none)
+                    guard !prepared.isEmpty else { drop(state, .changed); return .done }
+                    state.edit.target = prepared + FieldInsertion.trailingSeparator(after: prepared, before: userCursor < text.count ? text[userCursor] : nil)
+                    state.edit.unit = nil
+                }
                 if state.edit.requiresVerifiedInsertion == true, selection > 0 || (hasUnverifiedInput && state.edit.isSpeech != true) {
                     drop(state, .selectionChanged); return .done
                 }
@@ -1650,6 +1672,8 @@ public struct FieldQueue: Sendable {
 
     /// Chunks of an edit whose check failed, or that changed nothing, in a row before it drops.
     static let failureLimit = 4
+    /// How much of the model before the caret a staged unit's separator and capital read.
+    static let unitContextCharacters = 200
 
     /// The next chunk of a change of span `spanID` from `current` to `target`: its last group of nearby changes
     /// (`SpanPlanner`, back to front so earlier offsets stay valid), as hops to its place and that place's deletes and
@@ -1864,6 +1888,23 @@ public struct FieldQueue: Sendable {
     }
 
     /// The unit stops where it is; its item is planned again from the model later.
+    /// A confirmed chunk whose remaining ops only put the caret where it already is (the way back to its own end) is finished
+    /// before a key goes: a key then lands at that caret, and the chunk is not planned again behind the key, which would
+    /// hop the caret back over what the key typed and take the user's caret with it.
+    private mutating func finishCaretTail() {
+        guard var current = unit, case .edit = current.owner, inFlight == nil, burst == nil else { return }
+        while let op = current.ops.first {
+            switch op {
+            case .moveToSpanEnd(let id) where spans[id]?.end == cursor: current.ops.removeFirst()
+            case .moveToUser where userCursor == cursor: current.ops.removeFirst()
+            case .setUserCursorToCursor: current.ops.removeFirst(); userCursor = cursor
+            default: unit = current; return
+            }
+        }
+        unit = nil
+        finishUnit(current.owner)
+    }
+
     private mutating func abortUnit() {
         guard let current = unit else { return }
         unit = nil

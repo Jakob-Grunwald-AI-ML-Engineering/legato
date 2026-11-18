@@ -9,6 +9,12 @@ private func snapshot(_ version: Int, _ segments: [LiveSegment], head: String = 
     .init(runID: run, version: version, segments: segments + (head.isEmpty ? [] : [.init(id: 99, text: head, final: false)]), complete: complete, staged: true)
 }
 
+/// What the queue types for a unit: `FieldInsertion` on the model's text, else the take's context (`StagedDictation.context`).
+private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: String, after: Character?, capitalization: AutoCapitalizationType) -> String {
+    let typed = FieldInsertion.prepare(text, contextBefore: take.context(proxyBefore: proxyBefore), capitalization: capitalization)
+    return typed.isEmpty ? "" : typed + FieldInsertion.trailingSeparator(after: typed, before: after)
+}
+
 @Suite struct StagedDictationTests {
     @Test func aSnapshotSplitsIntoThePreviewAndTheUnitsReadyToType() {
         var take = StagedDictation()
@@ -143,28 +149,28 @@ private func snapshot(_ version: Int, _ segments: [LiveSegment], head: String = 
     @Test func theSeparatorFollowsTheProxyWhileItShowsTheTakeAndTheTakesRecordWhenItDoesNot() {
         var take = StagedDictation()
         // Nothing typed yet: the proxy's context decides.
-        #expect(take.prepared("hello", proxyBefore: "Dear", after: nil, capitalization: .none) == " hello")
-        #expect(take.prepared("hello", proxyBefore: "Dear ", after: nil, capitalization: .none) == "hello")
+        #expect(prepared(take, "hello", proxyBefore: "Dear", after: nil, capitalization: .none) == " hello")
+        #expect(prepared(take, "hello", proxyBefore: "Dear ", after: nil, capitalization: .none) == "hello")
         take.receive(snapshot(1, [unit(0, "First sentence.")]))
         take.begin(0, typed: "First sentence."); take.delivered(0)
         // The proxy shows what the take typed: its own context stands.
-        #expect(take.prepared("Next.", proxyBefore: "Note: First sentence.", after: nil, capitalization: .none) == " Next.")
+        #expect(prepared(take, "Next.", proxyBefore: "Note: First sentence.", after: nil, capitalization: .none) == " Next.")
         // Stale: the proxy has not caught up (empty, or older text): the record decides, never "no space".
-        #expect(take.prepared("Next.", proxyBefore: "", after: nil, capitalization: .none) == " Next.")
-        #expect(take.prepared("Next.", proxyBefore: "Note:", after: nil, capitalization: .none) == " Next.")
+        #expect(prepared(take, "Next.", proxyBefore: "", after: nil, capitalization: .none) == " Next.")
+        #expect(prepared(take, "Next.", proxyBefore: "Note:", after: nil, capitalization: .none) == " Next.")
         // Punctuation that closes joins without a space, with either source.
-        #expect(take.prepared(", and more", proxyBefore: "", after: nil, capitalization: .none) == ", and more")
+        #expect(prepared(take, ", and more", proxyBefore: "", after: nil, capitalization: .none) == ", and more")
     }
 
     @Test func withNeitherSourceKnownNoSeparatorIsGuessed() {
         let take = StagedDictation()
-        #expect(take.prepared("hello", proxyBefore: "", after: nil, capitalization: .none) == "hello")
+        #expect(prepared(take, "hello", proxyBefore: "", after: nil, capitalization: .none) == "hello")
     }
 
     @Test func aWordAfterTheCaretGetsASpaceBetween() {
         let take = StagedDictation()
-        #expect(take.prepared("hello", proxyBefore: "Dear ", after: "J", capitalization: .none) == "hello ")
-        #expect(take.prepared("hello", proxyBefore: "Dear ", after: ".", capitalization: .none) == "hello")
+        #expect(prepared(take, "hello", proxyBefore: "Dear ", after: "J", capitalization: .none) == "hello ")
+        #expect(prepared(take, "hello", proxyBefore: "Dear ", after: ".", capitalization: .none) == "hello")
     }
 
     @Test func theStagedFlagAndUnitReadinessCrossTheLink() throws {

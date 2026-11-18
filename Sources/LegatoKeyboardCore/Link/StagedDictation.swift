@@ -4,7 +4,7 @@ import Foundation
 /// units in speaking order and the speaking head. This type holds what the keyboard knows of them:
 /// - the preview (`preview`): the units not typed yet, then the head, as one text;
 /// - the next unit to type (`nextReady`): the first undelivered unit, once its text is final, one at a time;
-/// - the take's own record of what it typed (`record`): the source of the separator when the proxy's context cannot be trusted;
+/// - the take's own record of what it typed (`record`): the context for the separator when the proxy's cannot be trusted;
 /// - recovery (`hold`): what goes to the kept-text row when delivery stops.
 /// It never edits typed text and it never types anything itself: the controller types each unit through the field queue.
 public struct StagedDictation: Sendable, Equatable {
@@ -117,11 +117,12 @@ public struct StagedDictation: Sendable, Equatable {
     }
 
     /// The unit is in the field (the queue confirmed it).
-    public mutating func delivered(_ unit: Int) {
+    /// `typed` is what went in when the queue prepared it (separator and capital); else what `begin` said.
+    public mutating func delivered(_ unit: Int, typed: String? = nil) {
         guard inFlight == unit else { return }
         inFlight = nil
         deliveredThrough = unit
-        record += inFlightText
+        record += typed ?? inFlightText
         if record.count > Self.recordCharacters { record = String(record.suffix(Self.recordCharacters)) }
         inFlightText = ""
         skipEmpty()
@@ -156,6 +157,17 @@ public struct StagedDictation: Sendable, Equatable {
         return kept
     }
 
+    /// A unit the queue dropped may still be in the field (a key, a tap or a late report spoiled its check after the text went
+    /// out). Typing it again, or keeping it for Insert, would put it there twice: it counts as delivered when a mutation was
+    /// issued and the scope shows all of it, or the field's window shows its words. Anything less certain is kept, never retyped.
+    public static func landed(_ drop: FieldQueue.Drop, report: FieldQueue.Report) -> Bool {
+        guard drop.issuedMutation else { return false }
+        if let partial = drop.partial, partial == drop.text { return true }
+        let words = drop.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty else { return false }
+        return FieldReader.trusted(before: report.before).contains(words) || report.after.contains(words)
+    }
+
     // MARK: Separator and capital
 
     /// The text before the caret that a unit's separator and capital follow. The proxy's context while it shows what this take
@@ -165,12 +177,5 @@ public struct StagedDictation: Sendable, Equatable {
         guard !record.isEmpty else { return proxyBefore }
         let tail = String(record.suffix(Self.agreeCharacters))
         return proxyBefore.hasSuffix(tail) ? proxyBefore : record
-    }
-
-    /// What the field gets for `text`: its separator, capitalized where the field's own rules would, and a space when it ends
-    /// up against the word after the caret. One insert; the queue types it with the entrance.
-    public func prepared(_ text: String, proxyBefore: String, after: Character?, capitalization: AutoCapitalizationType) -> String {
-        let typed = FieldInsertion.prepare(text, contextBefore: context(proxyBefore: proxyBefore), capitalization: capitalization)
-        return typed.isEmpty ? "" : typed + FieldInsertion.trailingSeparator(after: typed, before: after)
     }
 }
