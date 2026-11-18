@@ -85,10 +85,8 @@ public struct LiveDictationSnapshot: Codable, Equatable, Sendable {
     }
 }
 
-/// keyboard -> app (`link.dictation.shadow`): the field as the keyboard's shadow has it, for the cleanup pass that asked
-/// with a run's snapshot (`LiveDictationSnapshot.shadowAsk`), once that snapshot's words are typed. No field read: the
-/// keyboard marks a read under `id` (`FieldQueue.markRead`), so the pass's edit (`ScopedEdit.instructionID == id`) is
-/// placed through every change made since and merged around them (`FieldMerge`). The app removes it once read.
+/// The field as a cleanup pass sees it (`LiveDictationSnapshot.shadowAsk`): the Mac's field editor answers the ask with it.
+/// The iPhone keyboard no longer answers (staged delivery, #312).
 public struct FieldShadow: Codable, Sendable, Equatable {
     public var id: String
     public var runID: String
@@ -168,14 +166,6 @@ public struct LiveDictationLink: Sendable {
     public func read() -> LiveDictationSnapshot? { store.read(LiveDictationSnapshot.self, forKey: LinkChannel.Key.dictationLive) }
     public func acknowledge(_ ack: LiveDictationAck) { store.write(ack, forKey: LinkChannel.Key.dictationLiveAck) }
     public func acknowledged() -> LiveDictationAck? { store.read(LiveDictationAck.self, forKey: LinkChannel.Key.dictationLiveAck) }
-    public func send(_ shadow: FieldShadow) { store.write(shadow, forKey: LinkChannel.Key.dictationShadow) }
-    /// The shadow for `id` when one is stored, removed as it is taken.
-    public func takeShadow(id: String) -> FieldShadow? {
-        guard let shadow = store.read(FieldShadow.self, forKey: LinkChannel.Key.dictationShadow), shadow.id == id else { return nil }
-        store.remove(forKey: LinkChannel.Key.dictationShadow)
-        return shadow
-    }
-    public func clearShadow() { store.remove(forKey: LinkChannel.Key.dictationShadow) }
 }
 
 /// The app's model of one live run: the finished segments and the speaking head, as the target the keyboard

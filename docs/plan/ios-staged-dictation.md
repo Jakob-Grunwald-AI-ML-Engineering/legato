@@ -1,6 +1,6 @@
 # iPhone staged dictation (#312, with #300, #293, #278 on iPhone)
 
-Status: **planned 2026-11-18 on `feat/ios-staged-dictation`. The branch is cut from #311 (`0afc884`), so #311's work lands with this one.**
+Status: **implemented 2026-11-18 on `feat/ios-staged-dictation` (cut from #311, `0afc884`, so #311's work lands with this one); not yet run on the phone.** Package tests and the iOS build passed locally; agent UAT on the iPhone and the device numbers below are open. See "Implementation notes".
 
 ## Goal and scope
 
@@ -88,3 +88,18 @@ Excluded:
 - Ask Jakob before taking the phone, and hand it back visibly (CLAUDE.md).
 - Live Soniox and Claude calls are approved at test size.
 - Check the installed build timestamp before trusting a round.
+
+## Implementation notes (2026-11-18)
+
+Built as planned, with these choices where the plan left room:
+
+- **Owners.** `LiveDictationRun(staged:)` (producer units, `LiveSegment.ready`, `setRaw`), `StagedDictation` (keyboard-side preview, next unit, record, recovery; `LegatoKeyboardCore/Link`), `KeyboardController.dictationPreview` (the single preview/status derivation; replaces `dictatingStatus`). Delivery is `FieldQueue.Edit(atCursor:, requiresVerifiedInsertion:)`; no new insert path.
+- **Spacing owner.** `FieldInsertion.separator` is the one rule; `LiveSegment.spaced` delegates to it. The em dash joined `FieldInsertion`'s closing marks, so the Mac panel no longer puts a space before a leading em dash either.
+- **Pause-close rule.** `DictationPipeline.boundary("endpoint")` (already the admitted pause: endpoint plus 200 ms at -55 dBFS or below) closes the open unit with `LiveDictationRun.flush()` and cleans it at once. Stop does the same in `endLive`. Forced-split words are not closed by a pause (they wait in the head). No new pause constant.
+- **Raw fallback.** `liveTimeout` (6 s) bounds a unit's cleanup; the existing line pipeline returns raw on failure or timeout and `landLive` marks the unit ready as raw (`setRaw`). Delivery is in order, so one slow unit holds the later ones up to that bound.
+- **Hold rule.** Any dropped segment insert, a cleared draft, a hidden keyboard or a field change after typing stops delivery; the in-flight unit (it may not have landed) and the rest go to the kept-text row from the draft they came from; later-ready units join it. A take that typed nothing yet follows the user into another field.
+- **Stale context (#278).** The proxy's context is used while it ends with the last 12 characters this take typed (or nothing was typed yet); otherwise the take's record. Nothing known: no separator.
+- **Preview height (ESTIMATE, not measured).** The row keeps 27 pt portrait / 44 pt landscape: it must not grow (it matches the native prediction frame) and the compact strip must not shrink. The preview font is the largest of 13, 12, 11 pt whose two lines at 1.2 x size fit: 11 pt portrait (26.4 pt of 27), 13 pt landscape. A real 11 pt line may be 13.1 pt; to measure on the phone: whether two lines clip, legibility, and whether the bottom-anchored text shows partial top lines.
+- **Removed.** The iPhone keyboard's shadow answer (`answerShadowAsk`, `LinkClient.writeFieldShadow`, `link.dictation.shadow`, `LiveDictationLink.send/takeShadow/clearShadow`), the iPhone's `attachCleanupField` call, `dictatingStatus`.
+- **Not removed (open).** The queue's in-place cleanup internals (`FieldQueue.shadow(of:)`, `ShadowDocument.EditIntent`/`CleanupReplacement`, `FieldMerge.restrictingCleanup`, scoped `requiresShadowRead` edits) and the pipeline's `waitsForLiveDelivery`: they are tangled with the run machinery, Magic's scoped edits, the recorded-journal replays and `FieldCleanupTests`; the buffered send modes still use the raw `Piece` path. Removing them means re-recording the journal fixtures; do it as its own change.
+- **Device numbers still to take** (`ui:device-measure`): the longest keyboard lock during a take, entrance feel per unit, pause-flush latency (#293), preview legibility at 11 pt.
