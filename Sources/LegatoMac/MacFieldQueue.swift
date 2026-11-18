@@ -1505,9 +1505,6 @@ public final class MacFieldQueue {
     /// response target (`NativeInputHandoff.prepare` fails every AX call after it); the burst takes the share that leaves
     /// room for the unit's first write, its one check and the caret's way home. An estimate, to be tuned on the Mac.
     public static let entranceCapMs = FieldEditCoordinator.inputResponseTargetMs * 0.3
-    /// The display's frame: the entrance writes one piece per frame (`ChunkEntrance.frameMs(fps:)`), asked per chunk so
-    /// a field on another display gets its own pace.
-    public var frameMs: @MainActor () -> Double = { ChunkEntrance.gapMs }
 
     private static func milliseconds(_ duration: Duration) -> Double {
         let parts = duration.components
@@ -1574,7 +1571,7 @@ public final class MacFieldQueue {
         let follows = region.open && userCaret == UTF16Range(location: region.end, length: 0)
         // The chunk's insert enters as a very fast burst of AX inserts at the caret (`ChunkEntrance`); the delete run and the
         // first piece are the hunk's one replace. One chunk, one check.
-        let entrance = ChunkEntrance.plan(text, enabled: pacedNow, gapMs: frameMs(), capMs: Self.entranceCapMs)
+        let entrance = ChunkEntrance.plan(text, enabled: pacedNow, capMs: Self.entranceCapMs)
         let pieces = entrance.pieces.isEmpty ? [""] : entrance.pieces
         note(.sent, id: region.id, run: region.runID, location: range.location, length: range.length, text: text,
              read: doc.context(before: range.location, 40) + "|" + doc.context(after: range.location, 40),
@@ -1838,7 +1835,7 @@ public final class MacFieldQueue {
                 typed.append(character)
             }
         }
-        let plan = ChunkEntrance.plan(String(typed), enabled: pacedNow, gapMs: frameMs())
+        let plan = ChunkEntrance.plan(String(typed), enabled: pacedNow)
         let sizes = plan.pieces.map(\.count)
         let oldTail = doc.context(after: region.end, Self.contextChars)
         let oldAtEnd = region.end + oldTail.utf16.count == doc.length

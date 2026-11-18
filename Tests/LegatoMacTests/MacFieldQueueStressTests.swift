@@ -1088,7 +1088,8 @@ private struct SeededRandom {
         #expect(sent.count == 1 && sent[0].detail?.hasPrefix("burst keys=18") == true, "\(sent.map { $0.detail ?? "" })")
         #expect(verified.count == 1, "one check for the chunk")
         #expect(field.keysSent == 18)
-        let entrance = gaps.filter { $0 < .milliseconds(20) }.reduce(Duration.zero, +)
+        // Entrance gaps are about one 60 Hz frame; the queue's own polls are shorter.
+        let entrance = gaps.filter { $0 >= .milliseconds(10) && $0 < .milliseconds(20) }.reduce(Duration.zero, +)
         #expect(entrance > .zero && entrance <= .milliseconds(Int(ChunkEntrance.capMs) + 10), "typewriter gaps stay inside the cap: \(entrance)")
         #expect(queue.host.latency.samples == 1)
     }
