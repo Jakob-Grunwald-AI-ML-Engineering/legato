@@ -11,6 +11,15 @@ public enum WordRowHeight {
     public static let strip = portrait
 
     public static func content(landscape: Bool) -> Double { landscape ? visible : portrait }
+
+    /// Two lines of the dictation preview (#312) must fit the row as it is: the row never grows or shrinks for a take (the
+    /// compact strip stays reachable, and the native prediction frame is its size). The largest size of these whose two lines
+    /// fit; the line height is an ESTIMATE (1.2 x the size, SF's usual), not measured on a phone.
+    public static let previewSizes: [Double] = [13, 12, 11]
+    public static func previewLineHeight(size: Double) -> Double { size * 1.2 }
+    public static func previewFontSize(rowHeight: Double) -> Double {
+        previewSizes.first { 2 * previewLineHeight(size: $0) <= rowHeight } ?? previewSizes[previewSizes.count - 1]
+    }
 }
 
 /// Predictions, one tool key row, then the unchanged native typing grid.

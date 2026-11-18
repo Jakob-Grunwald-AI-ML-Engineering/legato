@@ -1,9 +1,10 @@
 import Foundation
 
-/// Word boundaries shared by direct dictation and panel insertion. Platform adapters supply field context.
+/// Word boundaries shared by direct dictation, panel insertion and the join between a take's segments
+/// (`LiveSegment.joined`). Platform adapters supply field context.
 public enum FieldInsertion {
     public static func separator(before text: String, after previous: Character?) -> String {
-        guard let next = text.first, !next.isWhitespace, !",.;:!?)]}%…’”".contains(next),
+        guard let next = text.first, !next.isWhitespace, !",.;:!?)]}%…’”\u{2014}".contains(next),
               let previous, !previous.isWhitespace, !"([{\"'“‘„‚«¿¡".contains(previous) else { return "" }
         return " "
     }
