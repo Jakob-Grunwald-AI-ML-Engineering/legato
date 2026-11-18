@@ -18,7 +18,10 @@ struct WordRowView: View {
 
     var body: some View {
         Group {
-            if let kept = controller.keptText, kept.isShowable {
+            if controller.isShowingPreview, let preview = controller.statusText {
+                // A take in progress owns the row; kept text (an earlier one or this take's own) returns when it ends.
+                previewRow(preview)
+            } else if let kept = controller.keptText, kept.isShowable {
                 keptRow(kept)
             } else if let recovery = controller.liveRecoveryNotice {
                 HStack(spacing: 8) {
@@ -40,8 +43,6 @@ struct WordRowView: View {
             } else if controller.hint == nil, let presentation = controller.instructionPresentation {
                 InstructionRowView(controller: controller, presentation: presentation, fontSize: fontSize)
                     .transition(.opacity)
-            } else if controller.isShowingPreview, let preview = controller.statusText {
-                previewRow(preview)
             } else if let status = controller.statusText {
                 HStack(spacing: 8) {
                     if controller.isCleaningUp {

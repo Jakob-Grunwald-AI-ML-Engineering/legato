@@ -69,6 +69,35 @@ private func snapshot(_ version: Int, _ segments: [LiveSegment], head: String = 
         #expect(take.receive(snapshot(2, [unit(0, "One.")])) == nil, "An older snapshot changes nothing")
     }
 
+    @Test func aUnitTheQueueHoldsOnUnverifiedInputIsKeptAfterABoundAndTheNextTakeIsNotBlocked() {
+        // The phone: the keyboard came back, the host's text callback left the field unverified, and the queue never started
+        // the unit. It stayed in flight for good, and the next take waited for it.
+        var queue = FieldQueue()
+        let report = FieldQueue.Report(before: "If the weather holds.")
+        _ = queue.step(report: report, elapsedMs: 200)
+        queue.observe(report, callback: .text)
+        #expect(queue.hasUnverifiedInput)
+        var take = StagedDictation()
+        take.receive(snapshot(1, [unit(0, "The plan."), unit(1, "Then coffee.")], complete: true))
+        take.begin(0, typed: " The plan.")
+        let edit = FieldQueue.Edit(kind: .typist, target: " The plan.", atCursor: true, requiresVerifiedInsertion: true)
+        queue.enqueue(edit, user: false)
+        for _ in 0..<40 { #expect(queue.step(report: report, elapsedMs: 100) == .idle) }
+        #expect(take.inFlight == 0 && take.hasUndelivered, "Held, not typed")
+        #expect(!take.isStalled(inFlightMs: 1_900, unverifiedInput: true))
+        #expect(take.isStalled(inFlightMs: 2_000, unverifiedInput: true))
+        #expect(!take.isStalled(inFlightMs: 9_000, unverifiedInput: false) && take.isStalled(inFlightMs: 10_000, unverifiedInput: false))
+        // The bound passed: the unit leaves the queue (dropped, not applied) and the take is kept whole.
+        queue.cancelEdit(edit.id)
+        let dropped = queue.drainEvents().contains { if case .dropped(let drop) = $0 { drop.id == edit.id } else { false } }
+        #expect(dropped)
+        #expect(take.hold() == "The plan. Then coffee.")
+        #expect(!take.hasUndelivered && take.nextReady == nil && !take.isStalled(inFlightMs: 60_000, unverifiedInput: true))
+        // The next take starts clean.
+        take.receive(snapshot(1, [unit(0, "Fresh start.")], complete: true, run: "next"))
+        #expect(!take.held && take.nextReady?.text == "Fresh start.")
+    }
+
     @Test func aNewRunStartsTheTakeOver() {
         var take = StagedDictation()
         take.receive(snapshot(1, [unit(0, "Old.")]))

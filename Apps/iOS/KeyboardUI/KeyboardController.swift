@@ -1223,9 +1223,14 @@ final class KeyboardController {
         if snapshot.staged == true, let current = stagedTake.runID, current != snapshot.runID, !stagedTake.held, stagedTake.hasUndelivered {
             // The take before still has units to type. A finished one is typed first (the next poll takes this snapshot); one
             // whose end was never seen cannot be waited for: what is left of it is kept.
-            if stagedTake.complete { return driveStaged() }
+            if stagedTake.complete {
+                let since = stagedWaitingSince ?? ContinuousClock.now
+                stagedWaitingSince = since
+                if Self.milliseconds(ContinuousClock.now - since) < StagedDictation.stallMs { return driveStaged() }
+            }
             holdStaged()
         }
+        stagedWaitingSince = nil
         liveSeen = snapshot
         blockedLiveRunID = nil; blockedLiveCompleted = false
         if snapshot.runID != liveSnapshot?.runID {
@@ -1258,12 +1263,27 @@ final class KeyboardController {
     /// The staged take: its preview, the unit to type next and what recovery holds (`StagedDictation`). Observed: the word row
     /// shows `dictationPreview`.
     private(set) var stagedTake = StagedDictation()
+    /// The unit in the queue now, for the stall bound (`StagedDictation.isStalled`).
+    @ObservationIgnored private var stagedBegan: (editID: String, origin: String, at: ContinuousClock.Instant)?
+    /// Since when a finished take has waited for the one before it to be typed (bounded the same way).
+    @ObservationIgnored private var stagedWaitingSince: ContinuousClock.Instant?
 
     /// Types the next ready unit into the field, once, at the caret, through the queue: one entrance burst, one check, one
     /// undo step. One unit at a time, in order; it never edits typed text. Called from each snapshot and the 100 ms poll.
     private func driveStaged() {
         guard let runID = stagedTake.runID, runID == liveSnapshot?.runID else { return }
         if stagedTake.isFinished { return acknowledgeStaged() }
+        if let began = stagedBegan, stagedTake.isStalled(inFlightMs: Self.milliseconds(ContinuousClock.now - began.at),
+                                                         unverifiedInput: queue.hasUnverifiedInput) {
+            // The queue holds the unit (it cannot verify the field) or never confirmed it: the unit leaves the queue and it and
+            // the rest of the take go to the kept-text row, so the next take is not blocked behind it.
+            trace?("staged unit stalled")
+            stagedBegan = nil
+            queue.cancelEdit(began.editID)
+            handle(queue.drainEvents())
+            editCompletions[began.editID] = nil
+            return holdStaged(from: began.origin)
+        }
         guard !stagedTake.held, let unit = stagedTake.nextReady else { return }
         guard isVisible, !isTornDown, !document.isSecureTextEntry, let documentID = document.documentID, !draftEvidence.isPending else { return }
         if documentID != liveDocumentID {
@@ -1279,12 +1299,14 @@ final class KeyboardController {
         liveTypedRunIDs.insert(runID)
         let origin = draftID
         let edit = FieldQueue.Edit(kind: .typist, target: target, atCursor: true, requiresVerifiedInsertion: true)
+        stagedBegan = (edit.id, origin, ContinuousClock.now)
         enqueue(edit) { [weak self] event in self?.stagedUnitFinished(runID: runID, unit: unit.id, target: target, origin: origin, event: event) }
         pump()
     }
 
     private func stagedUnitFinished(runID: String, unit: Int, target: String, origin: String, event: FieldQueue.Event?) {
         guard stagedTake.runID == runID, stagedTake.inFlight == unit else { return }
+        stagedBegan = nil
         guard case .applied? = event else {
             // The insert did not stand (the field changed, a selection, the draft or the keyboard went away, no verified
             // check): this unit and the rest are kept, not inserted blind. A repeat is the person's choice (Insert).

@@ -34,6 +34,18 @@ public struct StagedDictation: Sendable, Equatable {
     /// The record keeps only what a separator or a capital can need.
     static let recordCharacters = 400
 
+    /// A unit never stays held: it is typed and confirmed within a few hundred milliseconds. While the queue cannot verify the
+    /// field (`hasUnverifiedInput`: after the keyboard came back or the host reported text the proxy had not caught up with)
+    /// it will not start it, and nothing in the field may lift that: past this the unit and the rest go to the kept-text row.
+    static let unverifiedStallMs = 2_000.0
+    /// Whatever else keeps a unit from being confirmed (a busy host) is bounded too.
+    static let stallMs = 10_000.0
+
+    /// The unit being typed has waited `inFlightMs` without the queue confirming or dropping it.
+    public func isStalled(inFlightMs: Double, unverifiedInput: Bool) -> Bool {
+        inFlight != nil && inFlightMs >= (unverifiedInput ? Self.unverifiedStallMs : Self.stallMs)
+    }
+
     // MARK: Snapshots
 
     /// A snapshot of the run. Returns `kept` when delivery is held and units that became ready after the hold were added to
