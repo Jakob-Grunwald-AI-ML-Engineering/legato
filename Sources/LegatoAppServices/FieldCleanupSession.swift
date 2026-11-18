@@ -133,7 +133,6 @@ import LegatoKeyboardCore
         }
         defer { field.cancel(instructionID: id); if requestID == id { requestID = nil } }
         do {
-            guard await deliveryReady(final: final, source: "", generation: token) else { return }
             let reply: FieldReadReply
             var takeStart: Int?, takeEnd: Int?
             var shadowed = false, bounded = false
@@ -151,6 +150,7 @@ import LegatoKeyboardCore
                 takeStart = answer.takeStart; takeEnd = answer.takeEnd
                 shadowed = true
             } else {
+                guard await deliveryReady(final: final, source: "", generation: token) else { return }
                 reply = try await field.read(.cleanup, instructionID: id, reading: {})
                 mark("readMs")
                 // A host that tells where the take stands bounds the read pass too (buffered words are not in the field yet).
@@ -240,21 +240,24 @@ import LegatoKeyboardCore
                     return
                 }
                 let edit = ScopedEdit(instructionID: id, documentID: reply.documentID, before: reply.above, after: reply.below,
-                                      target: target, draftID: reply.draftID)
+                                      target: target, draftID: reply.draftID, requiresShadowRead: true)
                 mark("applySentMs")
                 let ack = await field.apply(edit)
                 mark("confirmedMs")
                 guard token == generation else { return }
                 let applied = ack?.applied == true
                 lastApplied = applied
+                let actual = ack?.confirmedText ?? target
                 // The field's text past the passage may have grown meanwhile: coverage ends where the cleaned text does.
-                if applied { coverage.confirm(proposed: covered, actual: target, documentID: reply.documentID, complete: false) }
+                if applied { coverage.confirm(proposed: covered, actual: actual, documentID: reply.documentID, complete: false) }
                 recoveryTarget = ack?.recoveryTarget ?? (ack == nil ? target : nil)
                 if !applied, ack != nil, ack?.stopped != true, recoveryTarget == nil, !repass {
                     repassNext(final: final, whole: whole, sentence: sentence)
                 }
-                let status: CleanupFieldStatus = applied ? .cleaned : ack?.stopped == true || ack == nil ? .undelivered : .keptAsTyped
-                await onResult(source, applied ? target : ack?.partial ?? source, status)
+                let status: CleanupFieldStatus = applied
+                    ? (actual == source ? .keptAsTyped : .cleaned)
+                    : (ack?.stopped == true || ack == nil ? .undelivered : .keptAsTyped)
+                await onResult(source, applied ? actual : ack?.partial ?? source, status)
                 fields["targetChars"] = target.count; fields["applied"] = applied; fields["unplaceable"] = ack?.unplaceable == true
                 if !applied { fields["why"] = Self.why(ack) }
                 log(status.rawValue, fields)

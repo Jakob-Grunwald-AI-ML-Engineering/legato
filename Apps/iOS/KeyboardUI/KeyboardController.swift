@@ -885,7 +885,7 @@ final class KeyboardController {
                 if kind == .reseeded { liveStats.drifts += 1; liveStats.lastDrift = kind.rawValue }
                 trace?("queue resync=\(kind.rawValue)")
                 if kind == .recoveryRequested { beginQueueRecovery() }
-            case .applied(let id, _):
+            case .applied(let id, _, _):
                 if let completion = editCompletions.removeValue(forKey: id) { completion(event) }
             case .dropped(let drop):
                 trace?("queue dropped reason=\(drop.reason.rawValue) kind=\(drop.kind?.rawValue ?? "live")")
@@ -1121,14 +1121,17 @@ final class KeyboardController {
             answeredShadowAsk = ask
             return link.writeFieldShadow(FieldShadow(id: ask, runID: snapshot.runID, refused: "secure"))
         }
-        switch queue.shadow(of: snapshot.runID, version: snapshot.version) {
+        switch queue.shadow(of: snapshot.runID, version: snapshot.version, markID: ask) {
         case .notYet: return
         case .refused(let why):
             answeredShadowAsk = ask
             link.writeFieldShadow(FieldShadow(id: ask, runID: snapshot.runID, refused: why))
         case .ready(let before, let after, let take):
             answeredShadowAsk = ask
-            markRead(ask, mergingUser: true)
+            var entry = EditJournal.Entry(t: Self.uptimeMs, kind: .read, field: queueDocumentID)
+            entry.id = ask; entry.reason = "shadow"
+            entry.run = snapshot.runID; entry.version = snapshot.version
+            journal.write(entry)
             link.writeFieldShadow(FieldShadow(id: ask, runID: snapshot.runID, above: before, below: after, takeStart: take?.lowerBound,
                                               takeEnd: take?.upperBound, documentID: documentID, draftID: draftID))
         }
@@ -1861,7 +1864,8 @@ final class KeyboardController {
             return link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: false, reason: "The instruction was cancelled before editing."))
         }
         let queued = FieldQueue.Edit(id: edit.id, kind: .magic, before: edit.before, after: edit.after, selected: edit.selected,
-                                     target: edit.target, cursorAtEnd: edit.cursorAtEnd, readID: edit.instructionID)
+                                     target: edit.target, cursorAtEnd: edit.cursorAtEnd, readID: edit.instructionID,
+                                     requiresShadowRead: edit.requiresShadowRead)
         let started = Date()
         let outcome: FieldQueue.Event? = await withCheckedContinuation { continuation in
             magicEditIDs[edit.id] = edit.instructionID
@@ -1876,22 +1880,24 @@ final class KeyboardController {
         typing.hostEdited()
         fieldRead = nil
         switch outcome {
-        case .applied(_, let cursor)?:
-            let newBefore = String(decoding: Array(edit.target.utf16.prefix(cursor)), as: UTF16.self)
+        case .applied(_, let cursor, let text)?:
+            let newBefore = String(decoding: Array(text.result.utf16.prefix(cursor)), as: UTF16.self)
             if edit.selected == nil { sessionSpan.edited(before: edit.before, newBefore: newBefore) } else { sessionSpan.broken() }
             var forward = queued
             forward.readID = nil
+            forward.requiresShadowRead = nil
+            forward.target = text.result
             if edit.selected != nil {
                 forward.before = edit.scopeText; forward.after = ""; forward.selected = nil
             }
             let inverse = FieldQueue.Edit(kind: .undo, before: newBefore,
-                after: String(decoding: Array(edit.target.utf16.dropFirst(cursor)), as: UTF16.self),
-                target: edit.scopeText, cursorAtEnd: false)
+                after: String(decoding: Array(text.result.utf16.dropFirst(cursor)), as: UTF16.self),
+                target: text.original, cursorAtEnd: false)
             queue.history.recordScoped(forward: forward, inverse: inverse)
             syncHistory()
 
             trace?("instruction edit applied ms=\(ms) chars=\(edit.scopeText.count)->\(edit.target.count)")
-            link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: true, cursor: cursor))
+            link.writeInstructionEditAck(ScopedEditAck(id: edit.id, applied: true, cursor: cursor, confirmedText: text.result))
         case .dropped(let drop)?:
             sessionSpan.broken()
             trace?("instruction edit dropped reason=\(drop.reason.rawValue) ms=\(ms)")

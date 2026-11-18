@@ -58,11 +58,15 @@ public struct FieldQueue: Sendable {
         /// The read (`markRead`) `before` and `after` came from: the scope is found through every change since, and
         /// the keyboard's own changes to it are merged into `target` (only the user's cancel the edit).
         public var readID: String?
+        /// A logical cleanup read may never fall back to a coincidental matching substring.
+        public var requiresShadowRead: Bool?
         public init(id: String = UUID().uuidString, kind: Kind, before: String = "", after: String = "", selected: String? = nil,
-                    target: String, atCursor: Bool = false, cursorAtEnd: Bool = true, readID: String? = nil) {
+                    target: String, atCursor: Bool = false, cursorAtEnd: Bool = true, readID: String? = nil,
+                    requiresShadowRead: Bool? = nil) {
             self.id = id; self.kind = kind; self.before = before; self.after = after
             self.selected = selected?.isEmpty == true ? nil : selected
             self.target = target; self.atCursor = atCursor; self.cursorAtEnd = cursorAtEnd; self.readID = readID
+            self.requiresShadowRead = requiresShadowRead
         }
     }
 
@@ -122,12 +126,17 @@ public struct FieldQueue: Sendable {
         public var shadowCommitted = false
     }
 
+    public struct AppliedText: Sendable, Equatable {
+        public var original: String
+        public var result: String
+    }
+
     public enum Event: Sendable, Equatable {
         case sent(ShadowOp, Lane)
         case confirmed(waitedMs: Double)
         case resync(Resync)
         /// An edit landed; `cursor`: UTF-16 offset into its target where the user's cursor ended.
-        case applied(id: String, cursor: Int)
+        case applied(id: String, cursor: Int, text: AppliedText)
         case dropped(Drop)
         case liveApplied(runID: String, version: Int, complete: Bool)
         case regionStarted(runID: String, anchorChars: Int)
@@ -305,6 +314,17 @@ public struct FieldQueue: Sendable {
         /// A cleanup's read (`FieldShadow`): the user's changes since do not cancel its edit, the edit is merged around
         /// them (the field's text wins, `FieldMerge`). An instruction's read is cancelled by them.
         var mergesUser = false
+        /// The cleanup source was accepted logically. The other fields in this mark locate its
+        /// host scope through transport echoes; they never replace this source.
+        var intended: IntendedRead?
+    }
+
+    private struct IntendedRead: Sendable, Equatable {
+        var runID: String
+        var text: [Character]
+        var cursor: Int
+        var editable: [Range<Int>]
+        var protected: [Range<Int>]
     }
     private var readMarks: [ReadMark] = []
     static let readMarkCount = 4
@@ -485,7 +505,8 @@ public struct FieldQueue: Sendable {
         guard !userLane.contains(where: { if case .input = $0 { true } else { false } }) else { return }
         let pieces = Set(runs.flatMap { $0.pieces.map(\.spanID) })
         let targets = spans.sorted { $0.key < $1.key }.compactMap { id, span -> FieldRecovery.Target? in
-            guard span.parked, !span.anchor, !span.userChanged, !span.edited, !span.lastText.isEmpty, !pieces.contains(id) else { return nil }
+            guard span.parked, !span.anchor, !span.protected, !span.userChanged, !span.edited,
+                  !span.lastText.isEmpty, !pieces.contains(id) else { return nil }
             return .init(id: String(id), expected: String(span.lastText), landed: nil,
                          before: String(span.lastBefore), after: String(span.lastAfter))
         }
@@ -711,13 +732,8 @@ public struct FieldQueue: Sendable {
                 }
             }
         }
-        if userLane.isEmpty, intended.selection == 0, swap == nil, let (ri, pi) = live.openPieceIndex() {
-            let run = live.runs[ri], piece = run.pieces[pi]
-            if let span = intended.spans[piece.spanID], span.end == intended.cursor, !span.parked, !span.userChanged,
-               !span.edited, live.liveRevision(for: piece) == nil {
-                let rest = live.heldAppend(piece, in: run, span: span)
-                intended.insertAtCursor(rest, owner: piece.spanID)
-            }
+        if userLane.isEmpty, let append = live.projectableOpenSpeech {
+            intended.insertAtCursor(append.text, owner: append.spanID)
         }
         var edits = editLane
         if case .edit(let active, .edit)? = unit?.owner { edits.insert(active, at: 0) }
@@ -789,7 +805,8 @@ public struct FieldQueue: Sendable {
     public mutating func enqueue(_ edit: Edit, user: Bool = false) {
         if user { recoveryRevision &+= 1; recoveryRequest = nil }
         var state = EditState(edit: edit)
-        state.isCleanup = edit.readID.map { id in readMarks.contains { $0.id == id && $0.mergesUser } } ?? false
+        state.isCleanup = edit.requiresShadowRead == true
+            || (edit.readID.map { id in readMarks.contains { $0.id == id && $0.mergesUser } } ?? false)
         if seeded, !edit.atCursor, edit.selected == nil { state.anchorID = addSpan(Span(start: userCursor, end: userCursor, anchor: true)) }
         if user { userLane.append(.edit(state)) } else { editLane.append(state) }
     }
@@ -833,9 +850,13 @@ public struct FieldQueue: Sendable {
     /// changes since, not cancelled by them.
     public mutating func markRead(_ id: String, mergingUser: Bool = false) {
         guard seeded else { return }
-        readMarks.removeAll { $0.id == id }
         var mark = ReadMark(id: id, text: text, cursor: userCursor, spanIDs: Set(spans.keys))
         mark.mergesUser = mergingUser
+        storeReadMark(mark)
+    }
+
+    private mutating func storeReadMark(_ mark: ReadMark) {
+        readMarks.removeAll { $0.id == mark.id }
         readMarks.append(mark)
         if readMarks.count > Self.readMarkCount { readMarks.removeFirst() }
     }
@@ -1299,6 +1320,16 @@ public struct FieldQueue: Sendable {
         return desired.starts(with: current) ? Array(desired[current.count...]) : []
     }
 
+    private var projectableOpenSpeech: (spanID: Int, runID: String, text: [Character])? {
+        guard selection == 0, swap == nil, let (ri, pi) = openPieceIndex() else { return nil }
+        let run = runs[ri], piece = run.pieces[pi]
+        guard let span = spans[piece.spanID], span.end == userCursor, !span.parked, !span.userChanged,
+              !span.edited, liveRevision(for: piece) == nil else { return nil }
+        let desired = Array(desiredText(piece, in: run)), observed = chars(of: span)
+        guard desired.starts(with: observed) else { return nil }
+        return (piece.spanID, run.runID, Array(desired.dropFirst(observed.count)))
+    }
+
     /// A key at the open piece's end while it shows only part of a word: the word's rest goes in
     /// with the key, in one insert (with a space when the key starts a word), so the key lands after the word.
     private mutating func finishWordBeforeKey(_ key: String) -> Action? {
@@ -1337,6 +1368,13 @@ public struct FieldQueue: Sendable {
     /// Places an edit (if not yet), plans its jump unit against the model now, or drops it.
     private mutating func start(_ state: inout EditState, lane: Lane) -> StartResult {
         if state.spanID == nil {
+            if state.edit.requiresShadowRead == true, let id = state.edit.readID,
+               let intended = readMarks.last(where: { $0.id == id })?.intended,
+               let run = runs.first(where: { $0.runID == intended.runID }),
+               rawAppendPending(run) || revisionDue(run) {
+                // The model can work early. Synchronization still lets higher-priority dictation arrive first.
+                return .wait
+            }
             if let selected = state.edit.selected {
                 guard selection > 0, String(text[cursor..<(cursor + selection)]) == selected else {
                     drop(state, .selectionChanged); return .done
@@ -1359,6 +1397,7 @@ public struct FieldQueue: Sendable {
                 finishSpan(state.anchorID); state.anchorID = nil
                 if state.edit.kind == .magic { closeOpenPieces(.edit) }
             } else {
+                guard state.edit.requiresShadowRead != true else { drop(state, .unplaceable); return .done }
                 let placement = place(state.edit, anchor: state.anchorID)
                 switch placement {
                 case .placed(let id): state.spanID = id; finishSpan(state.anchorID); state.anchorID = nil
@@ -1380,6 +1419,7 @@ public struct FieldQueue: Sendable {
             }
         }
         guard let id = state.spanID, let span = spans[id] else { drop(state, .changed); return .done }
+        if lane == .user { spans[id]?.userEdit = true }
         if state.revision == nil, !state.isCleanup || span.parked, span.userChanged {
             drop(state, .userEdited); return .done
         }
@@ -1403,11 +1443,12 @@ public struct FieldQueue: Sendable {
         }
         if state.shadow == nil {
             let origin: ShadowDocument.EditIntent.Origin = state.isCleanup ? .cleanup : state.revision != nil ? .recognition : .edit
-            state.shadow = .init(target: state.edit.target, origin: origin, transportBaseline: current)
+            state.shadow = .init(target: state.edit.target, origin: origin, original: current, transportBaseline: current)
         } else if var intent = state.shadow, intent.origin == .cleanup, intent.transportBaseline != current {
             // An observed change wins over this cleanup. Internal writes update transportBaseline as they
             // issue (and on recovery), so unfinished sync is never mistaken for a caller's text edit.
             intent.target = String(intent.target(around: current))
+            intent.original = FieldMerge.rebase(base: intent.transportBaseline, kept: current, incoming: intent.original).text
             intent.transportBaseline = current
             state.shadow = intent
         }
@@ -1677,7 +1718,8 @@ public struct FieldQueue: Sendable {
             return
         }
         spans[id] = nil; finishSpan(state.anchorID)
-        events.append(.applied(id: state.edit.id, cursor: cursorUnits))
+        let original = state.shadow.map { String($0.original) } ?? (state.edit.selected ?? (state.edit.before + state.edit.after))
+        events.append(.applied(id: state.edit.id, cursor: cursorUnits, text: .init(original: original, result: state.target)))
     }
 
     private mutating func drop(_ state: EditState, _ reason: DropReason) {
@@ -2099,10 +2141,65 @@ public struct FieldQueue: Sendable {
     /// Revised words go in first: while the pass waits, the run is in a pause (`LiveRun.paused`) and its revisions land,
     /// so the text sent never holds a word the recognizer has revised since. An answer given (ready or refused) ends
     /// that pause.
-    public mutating func shadow(of runID: String, version: Int) -> ShadowAnswer {
-        let answer = shadowAnswer(of: runID, version: version)
+    public mutating func shadow(of runID: String, version: Int, markID: String? = nil) -> ShadowAnswer {
+        var intention: ShadowDocument?
+        if markID != nil, let ri = runs.firstIndex(where: { $0.runID == runID }) {
+            applyPending(ri)
+            intention = projectedCleanupDocument(run: runs[ri], version: version)
+        }
+        let answer: ShadowAnswer
+        if let intention {
+            answer = cleanupAnswer(doc: intention, runID: runID)
+        } else {
+            answer = shadowAnswer(of: runID, version: version)
+        }
+        if case .ready(let before, let after, _) = answer, let markID {
+            let desired = intention ?? doc
+            let editRanges = cleanupPieces(in: desired, runID: runID)
+            let intended = IntendedRead(runID: runID, text: Array(before + after), cursor: before.count,
+                                        editable: editRanges, protected: desired.protectedRanges)
+            let mark = ReadMark(id: markID, text: text, cursor: userCursor, spanIDs: Set(spans.keys),
+                                mergesUser: true, intended: intended)
+            storeReadMark(mark)
+        }
         if answer != .notYet, let ri = runs.firstIndex(where: { $0.runID == runID }) { runs[ri].answeredAsk = runs[ri].shadowAsk }
         return answer
+    }
+
+    private func projectedCleanupDocument(run: LiveRun, version: Int) -> ShadowDocument? {
+        guard seeded, !hasUnverifiedInput, selection == 0, cursor == userCursor, userLane.isEmpty,
+              unit == nil, recoveryRequest == nil, userLost == nil, strayInsertion == nil, tapRace == nil,
+              !editLane.contains(where: { $0.shadow != nil }), (run.version ?? -1) >= version, !revisionDue(run),
+              let append = projectableOpenSpeech, append.runID == run.runID else { return nil }
+        if let flight = inFlight {
+            guard flight.lane == .live, flight.owners.allSatisfy({ $0 == append.spanID }),
+                  flight.ops.allSatisfy({ if case .insert = $0 { true } else { false } }) else { return nil }
+        }
+        var intended = doc
+        intended.insertAtCursor(append.text, owner: append.spanID)
+        return intended
+    }
+
+    private func cleanupPieces(in document: ShadowDocument, runID: String) -> [Range<Int>] {
+        guard let run = runs.first(where: { $0.runID == runID }) else { return [] }
+        let protected = document.protectedRanges
+        return run.pieces.compactMap { piece -> Range<Int>? in
+            guard let span = document.spans[piece.spanID], !span.parked, span.start < span.end else { return nil }
+            // A seam can hide the precise manual edit. Keep the whole affected piece until it is known.
+            if span.userChanged, !protected.contains(where: { span.start <= $0.lowerBound && $0.upperBound <= span.end }) { return nil }
+            return span.start..<span.end
+        }.sorted { $0.lowerBound < $1.lowerBound }.reduce(into: [Range<Int>]()) { joined, piece in
+            if let last = joined.last, piece.lowerBound <= last.upperBound {
+                joined[joined.count - 1] = last.lowerBound..<max(last.upperBound, piece.upperBound)
+            } else { joined.append(piece) }
+        }
+    }
+
+    private func cleanupAnswer(doc document: ShadowDocument, runID: String) -> ShadowAnswer {
+        let placed = runs.first(where: { $0.runID == runID })?.pieces.compactMap { document.spans[$0.spanID] }.filter { !$0.parked } ?? []
+        let take = placed.map(\.start).min().flatMap { start in placed.map(\.end).max().map { start..<$0 } }
+        return .ready(before: String(document.text[..<document.userCursor]),
+                      after: String(document.text[document.userCursor...]), take: take)
     }
 
     private func shadowAnswer(of runID: String, version: Int) -> ShadowAnswer {
@@ -2115,16 +2212,13 @@ public struct FieldQueue: Sendable {
         if committedCleanupPending, prioritizesSpeech { return .refused("syncPending") }
         guard inFlight == nil, unit == nil, swap == nil, recoveryRequest == nil,
               userLost == nil, strayInsertion == nil, tapRace == nil, !committedCleanupPending else { return .notYet }
-        var take: Range<Int>?
         if let run = runs.first(where: { $0.runID == runID }) {
             guard run.pending == nil, (run.version ?? -1) >= version, !rawAppendPending(run), !revisionDue(run) else { return .notYet }
-            let placed = run.pieces.compactMap { spans[$0.spanID] }.filter { !$0.parked }
-            if let start = placed.map(\.start).min(), let end = placed.map(\.end).max(), start <= end { take = start..<end }
         } else if !retiredRunIDs.contains(runID) {
             // Not seen yet: its snapshot comes first.
             return .notYet
         }
-        return .ready(before: String(text[..<userCursor]), after: String(text[userCursor...]), take: take)
+        return cleanupAnswer(doc: doc, runID: runID)
     }
 
     /// A snapshot's text: its segments, trimmed, joined by a space where a reader expects one.
@@ -2264,6 +2358,9 @@ public struct FieldQueue: Sendable {
         let adjacent = Array(text[span.end...].prefix { character in
             character.unicodeScalars.allSatisfy { CharacterSet.punctuationCharacters.contains($0) }
         })
+        if span.cleaned, !span.userChanged, adjacent.isEmpty {
+            return FieldMerge.rebase(base: base, kept: proposal, incoming: current).text
+        }
         let merged = FieldMerge.rebase(base: base, kept: current + adjacent, incoming: proposal).text
         guard adjacent.isEmpty || merged.suffix(adjacent.count).elementsEqual(adjacent) else { return current }
         return Array(merged.dropLast(adjacent.count))
@@ -2436,8 +2533,8 @@ public struct FieldQueue: Sendable {
         runs[ri].pieces[pi].spaceAfter = false
         guard let span = spans[runs[ri].pieces[pi].spanID], !span.parked, span.end == cursor, cursor == userCursor, selection == 0,
               cursor < text.count, !FieldInsertion.trailingSeparator(after: String(text.prefix(cursor)), before: text[cursor]).isEmpty else { return nil }
-        return send(.insert(" "), lane: .live) { q in
-            q.insertAtCursor([" "], owner: nil)
+        return send(.insert(" "), lane: .live, owner: -1) { q in
+            q.insertAtCursor([" "], owner: -1)
             q.userCursor = q.cursor
         }
     }
@@ -3228,11 +3325,49 @@ public struct FieldQueue: Sendable {
         guard edit.selected == nil, let readID = edit.readID, let mark = readMarks.last(where: { $0.id == readID }) else { return nil }
         let before = Array(edit.before), after = Array(edit.after)
         let c = mark.cursor, old = mark.text
+        if let intended = mark.intended {
+            guard edit.requiresShadowRead == true, before.count == intended.cursor,
+                  intended.text.elementsEqual(before + after) else { return nil }
+            return placeIntendedEdit(edit, read: mark, intended: intended)
+        }
+        guard edit.requiresShadowRead != true else { return nil }
         let kb = min(c, before.count), ka = min(old.count - c, after.count)
         // The scope as the read saw it; what the model did not know then lies past its ends.
         guard old[(c - kb)..<c].elementsEqual(before.suffix(kb)), old[c..<(c + ka)].elementsEqual(after.prefix(ka)),
               kb == before.count || kb == c, ka == after.count || c + ka == old.count else { return nil }
-        var s = c - kb, e = c + ka, userTouched = false
+        let bounds = locateRead(mark, start: c - kb, end: c + ka)
+        var s = bounds.start, e = bounds.end
+        if bounds.userTouched, !mark.mergesUser { return .userEdited }
+        guard s >= 0, s <= e, e <= text.count else { return nil }
+        // The parts the read knew beyond the model: they must agree with what the model shows there now, or grow it.
+        let front = Array(before.prefix(before.count - kb)), back = Array(after.suffix(after.count - ka))
+        let k = min(s, front.count), m = min(text.count - e, back.count)
+        guard text[(s - k)..<s].elementsEqual(front.suffix(k)), k == front.count || s - k == 0,
+              text[e..<(e + m)].elementsEqual(back.prefix(m)), m == back.count || e + m == text.count else { return nil }
+        if k < front.count { prepend(Array(front.prefix(front.count - k))); s += front.count - k; e += front.count - k }
+        if m < back.count { text += back.suffix(back.count - m) }
+        s -= front.count; e += back.count
+        let now = Array(text[s..<e])
+        let target = mark.mergesUser ? FieldMerge.rebase(base: before + after, kept: now, incoming: Array(edit.target)).text
+            : FieldMerge.rebase(base: before + after, kept: Array(edit.target), incoming: now).text
+        return .placed(addSpan(Span(start: s, end: e, cleanup: mark.mergesUser)), target: String(target))
+    }
+
+    private mutating func placeIntendedEdit(_ edit: Edit, read: ReadMark, intended: IntendedRead) -> ReadPlacement? {
+        let bounds = locateRead(read, start: 0, end: read.text.count)
+        guard bounds.start >= 0, bounds.start <= bounds.end, bounds.end <= text.count else { return nil }
+        let current = Array(text[bounds.start..<bounds.end])
+        let desired = FieldMerge.restrictingCleanup(base: intended.text, incoming: Array(edit.target),
+                                                    editable: intended.editable, protected: intended.protected)
+        // A confirmed transport echo simply brings current toward intended. New recognition or
+        // user/host edits are the remaining difference and win over any overlapping cleanup.
+        let target = FieldMerge.rebase(base: intended.text, kept: current, incoming: desired).text
+        let scope = addSpan(Span(start: bounds.start, end: bounds.end, cleanup: true))
+        return .placed(scope, target: String(target))
+    }
+
+    private func locateRead(_ mark: ReadMark, start: Int, end: Int) -> (start: Int, end: Int, userTouched: Bool) {
+        var s = start, e = end, userTouched = false
         for change in mark.changes {
             switch change {
             case .grow(let n): s += n; e += n
@@ -3249,22 +3384,7 @@ public struct FieldQueue: Sendable {
                 s = shift(s); e = shift(e)
             }
         }
-        if userTouched, !mark.mergesUser { return .userEdited }
-        guard s >= 0, s <= e, e <= text.count else { return nil }
-        // The parts the read knew beyond the model: they must agree with what the model shows there now, or grow it.
-        let front = Array(before.prefix(before.count - kb)), back = Array(after.suffix(after.count - ka))
-        let k = min(s, front.count), m = min(text.count - e, back.count)
-        guard text[(s - k)..<s].elementsEqual(front.suffix(k)), k == front.count || s - k == 0,
-              text[e..<(e + m)].elementsEqual(back.prefix(m)), m == back.count || e + m == text.count else { return nil }
-        if k < front.count { prepend(Array(front.prefix(front.count - k))); s += front.count - k; e += front.count - k }
-        if m < back.count { text += back.suffix(back.count - m) }
-        s -= front.count; e += back.count
-        let now = Array(text[s..<e])
-        // An instruction's result wins over the keyboard's own changes since; a cleanup's changes give way to every
-        // change since (the user's, speech typed meanwhile) and land only in untouched words.
-        let target = mark.mergesUser ? FieldMerge.rebase(base: before + after, kept: now, incoming: Array(edit.target)).text
-            : FieldMerge.rebase(base: before + after, kept: Array(edit.target), incoming: now).text
-        return .placed(addSpan(Span(start: s, end: e, cleanup: mark.mergesUser)), target: String(target))
+        return (s, e, userTouched)
     }
 
     private enum Placement: Equatable { case placed(Int), ambiguous, absent }

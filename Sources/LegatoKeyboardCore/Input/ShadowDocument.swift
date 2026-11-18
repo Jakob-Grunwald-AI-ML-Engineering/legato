@@ -12,6 +12,8 @@ public struct ShadowDocument: Sendable, Equatable {
         enum Origin: Sendable, Equatable { case cleanup, recognition, edit }
         var target: String
         var origin: Origin
+        /// The host's original scope carried around any higher-priority edits made during synchronization.
+        var original: [Character]
         /// What the scope holds after our own issued writes, before any competing change.
         var transportBaseline: [Character]
 
@@ -22,6 +24,12 @@ public struct ShadowDocument: Sendable, Equatable {
         }
     }
 
+    struct CleanupReplacement: Sendable, Equatable {
+        var at: Int
+        var pieces: Set<Int>
+        var leavesCaretBefore: Bool
+    }
+
     /// A tracked region of the text (a dictation piece, an edit's scope, an anchor).
     struct Span: Sendable, Equatable {
         var start: Int
@@ -29,12 +37,20 @@ public struct ShadowDocument: Sendable, Equatable {
         var userChanged = false
         /// Another edit (Magic) rewrote part of it: a dictation region there is left as it is.
         var edited = false
+        /// Cleanup can style a piece, but recognition of that speech can still revise it.
+        var cleaned = false
         /// A dictation piece: a cleanup's text at its edges is its own (`cleanup`).
         var dictated = false
         /// A cleanup's scope (a pass from the shadow): what it types at a dictation piece's edge belongs to the piece, so
         /// the take keeps it and a later pass sends it again instead of adding it twice (#299 device run 6: "Um. so" made
         /// "So" left the take starting after the "S", and every later pass typed another; a period after the last word).
         var cleanup = false
+        /// Dictation pieces whose characters this exact cleanup operation removed.
+        var replacement: CleanupReplacement?
+        /// Identifies a direct user rewrite while its host operations are in flight.
+        var userEdit = false
+        /// A surviving user-authored range or deletion boundary.
+        var protected = false
         /// Behind a seam: its bounds mean nothing until the observer finds its text again (`lastText`).
         var parked = false
         /// An edit's anchor: text inserted right at it goes after it.
@@ -61,6 +77,21 @@ public struct ShadowDocument: Sendable, Equatable {
     private(set) var nextSpanID = 0
 
     public init() {}
+
+    var protectedRanges: [Range<Int>] {
+        spans.values.filter { $0.protected && !$0.parked }.map { $0.start..<$0.end }
+    }
+
+    private mutating func protect(_ range: Range<Int>) {
+        var start = range.lowerBound, end = range.upperBound
+        for (id, span) in spans where span.protected && !span.parked && span.start <= end && start <= span.end {
+            start = min(start, span.start); end = max(end, span.end)
+            spans[id] = nil
+        }
+        var span = Span(start: start, end: end)
+        span.protected = true
+        _ = addSpan(span)
+    }
 
     // MARK: Editing
 
@@ -112,33 +143,57 @@ public struct ShadowDocument: Sendable, Equatable {
         guard !chars.isEmpty else { return }
         let i = cursor, n = chars.count
         let cleanup = owner.flatMap { spans[$0] }?.cleanup == true
+        let replacement = owner.flatMap { spans[$0]?.replacement }.flatMap { $0.at == i ? $0 : nil }
+        let endsHere = cleanup && spans.values.contains { $0.dictated && !$0.parked && $0.start < i && $0.end == i }
+        let startsHere = cleanup && spans.values.contains { $0.dictated && !$0.parked && $0.start == i && i < $0.end }
+        let punctuation = chars.first.map { !$0.isLetter && !$0.isNumber && !$0.isWhitespace } ?? false
+        let leavesCaretBefore = replacement?.leavesCaretBefore ?? (endsHere && startsHere && !punctuation)
+        if let owner { spans[owner]?.replacement = nil }
         text.insert(contentsOf: chars, at: i)
         for (id, var span) in spans {
-            if id != owner, span.start < i, i < span.end { if owner == nil { span.userChanged = true } else { span.edited = true } }
-            // The span's own place: its owner types at its end; a cleanup at a piece's edges, inside.
-            let edge = span.dictated && cleanup
+            if id != owner, span.start < i, i < span.end { noteChange(to: &span, owner: owner, cleanup: cleanup) }
+            // A replacement belongs to the piece it removed from. At a shared edge, pure terminal
+            // punctuation belongs to the preceding piece and a new word to the following piece.
+            let edge = span.dictated && cleanup && (replacement.map { $0.pieces.contains(id) } ??
+                (!endsHere || !startsHere || (punctuation ? span.end == i : span.start == i)))
             if span.start > i || (span.start == i && id != owner && !span.anchor && !edge) { span.start += n }
             if span.end > i || (span.end == i && (id == owner || edge)) { span.end += n }
+            if edge && (span.start == i || span.end == i + n) { span.cleaned = true }
             span.end = max(span.end, span.start)
             spans[id] = span
         }
-        if userCursor >= i { userCursor += n }
+        if userCursor > i || (userCursor == i && !leavesCaretBefore) { userCursor += n }
         cursor = i + n
+        if owner == nil || owner.flatMap({ spans[$0] })?.userEdit == true { protect(i..<(i + n)) }
     }
 
     /// `text[a..<b]` deleted; the caret ends at `a`.
     mutating func removeRange(_ a: Int, _ b: Int, owner: Int?) {
         guard a < b, a >= 0, b <= text.count else { return }
         let n = b - a
+        let cleanup = owner.flatMap { spans[$0] }?.cleanup == true
+        if let owner, cleanup {
+            let pieces = spans.compactMap { id, span in
+                span.dictated && !span.parked && span.start < b && a < span.end ? id : nil
+            }
+            spans[owner]?.replacement = CleanupReplacement(at: a, pieces: Set(pieces), leavesCaretBefore: userCursor == a)
+        }
         text.removeSubrange(a..<b)
         func shift(_ p: Int) -> Int { p >= b ? p - n : (p > a ? a : p) }
         for (id, var span) in spans {
-            if id != owner, span.start < b, a < span.end { if owner == nil { span.userChanged = true } else { span.edited = true } }
+            if id != owner, span.start < b, a < span.end { noteChange(to: &span, owner: owner, cleanup: cleanup) }
             span.start = shift(span.start); span.end = shift(span.end)
             spans[id] = span
         }
         userCursor = shift(userCursor)
         cursor = a
+        if owner == nil || owner.flatMap({ spans[$0] })?.userEdit == true { protect(a..<a) }
+    }
+
+    private func noteChange(to span: inout Span, owner: Int?, cleanup: Bool) {
+        if owner == nil || owner.flatMap({ spans[$0] })?.userEdit == true { span.userChanged = true }
+        else if cleanup && span.dictated { span.cleaned = true }
+        else { span.edited = true }
     }
 
     /// Text learned in front of what was known.

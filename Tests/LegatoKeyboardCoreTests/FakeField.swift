@@ -482,7 +482,7 @@ struct QueueRig {
     }
 
     var drops: [FieldQueue.Drop] { events.compactMap { if case .dropped(let d) = $0.event { d } else { nil } } }
-    var applied: [String] { events.compactMap { if case .applied(let id, _) = $0.event { id } else { nil } } }
+    var applied: [String] { events.compactMap { if case .applied(let id, _, _) = $0.event { id } else { nil } } }
 }
 
 func snap(_ version: Int, _ text: String, run: String = "r", complete: Bool = false) -> LiveDictationSnapshot {

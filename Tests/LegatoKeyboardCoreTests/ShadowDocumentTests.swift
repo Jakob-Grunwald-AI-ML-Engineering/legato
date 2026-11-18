@@ -4,6 +4,27 @@ import Testing
 /// The shadow-document model's contracts (#299): the observer's classification, chunk planning, hops that look and
 /// correct, and a failed check that re-reads.
 @Suite struct ShadowObserverTests {
+    @Test func cleanupReplacingTheNextPiecesFirstLetterKeepsTheSharedBoundary() {
+        var document = shadow("x water it gently tomorrow.", "plant basil.")
+        let at = document.cursor
+        var preceding = ShadowDocument.Span(start: 1, end: at)
+        preceding.dictated = true
+        var following = ShadowDocument.Span(start: at, end: document.text.count)
+        following.dictated = true
+        var scope = ShadowDocument.Span(start: 0, end: document.text.count)
+        scope.cleanup = true
+        let earlier = document.addSpan(preceding)
+        let later = document.addSpan(following)
+        let edit = document.addSpan(scope)
+
+        document.removeRange(at, at + 1, owner: edit)
+        document.insertAtCursor(["P"], owner: edit)
+        #expect(document.userCursor == at)
+        #expect(document.spans[earlier]?.end == at)
+        #expect(document.spans[later]?.start == at)
+        #expect(String(document.text) == "x water it gently tomorrow.Plant basil.")
+    }
+
     private func shadow(_ before: String, _ after: String = "") -> ShadowDocument {
         var doc = ShadowDocument()
         doc.seed(.init(before: before, after: after))

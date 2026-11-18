@@ -92,8 +92,72 @@ import Testing
 
         #expect(droppedPartOfDelete)
         #expect(events.contains(.resync(.recoveryReplanned)))
-        #expect(events.contains { if case .applied("pass", _) = $0 { true } else { false } })
+        #expect(events.contains { if case .applied("pass", _, _) = $0 { true } else { false } })
         #expect(field.string == target)
+    }
+
+    @Test func aLogicalCleanupReadIncludesPendingSpeechBeforeHostDelivery() {
+        var rig = typed("teh boat sails")
+        rig.queue.enqueue(snap(2, "teh boat sails tonight"))
+        guard case .ready(let before, let after, _) = rig.queue.shadow(of: "r", version: 2, markID: "pass") else {
+            Issue.record("pending speech has a known anchor"); return
+        }
+        #expect(before + after == "teh boat sails tonight")
+        #expect(rig.field.string == "teh boat sails")
+        rig.queue.enqueue(.init(id: "pass", kind: .magic, before: before, after: after, target: "The boat sails tonight.",
+                                cursorAtEnd: false, readID: "pass", requiresShadowRead: true))
+        rig.drain()
+        #expect(rig.field.string == "The boat sails tonight.")
+        #expect(rig.applied == ["pass"])
+    }
+
+    @Test func aLogicalCleanupPreservesManualTextAlreadyInItsSource() {
+        var rig = typed("teh red boat sails")
+        rig.queue.enqueue(.move(-11))
+        for _ in 0..<3 { rig.queue.enqueue(.deleteBackward) }
+        rig.queue.enqueue(.insert("blue"))
+        rig.drain()
+        guard case .ready(let before, let after, _) = rig.queue.shadow(of: "r", version: 1, markID: "pass") else {
+            Issue.record("unavailable shadow"); return
+        }
+        #expect(before + after == "teh blue boat sails")
+        rig.queue.enqueue(.init(id: "pass", kind: .magic, before: before, after: after, target: "The green boat sails.",
+                                cursorAtEnd: false, readID: "pass", requiresShadowRead: true))
+        rig.drain()
+        #expect(rig.field.string == "The blue boat sails.")
+    }
+
+    @Test func anExpiredLogicalMarkDoesNotFindAnotherMatchingScope() {
+        var rig = typed("teh boat sails")
+        guard case .ready(let before, let after, _) = rig.queue.shadow(of: "r", version: 1, markID: "pass") else {
+            Issue.record("unavailable shadow"); return
+        }
+        rig.queue.forgetRead("pass")
+        rig.queue.enqueue(.init(id: "pass", kind: .magic, before: before, after: after, target: "The boat sails.",
+                                cursorAtEnd: false, readID: "pass", requiresShadowRead: true))
+        rig.drain()
+        #expect(rig.field.string == "teh boat sails")
+        #expect(rig.drops.contains { $0.id == "pass" })
+    }
+
+    @Test func capitalizationDoesNotMoveTheSeparatorInsideAnEarlierDictatedWord() {
+        let first = "plant basil near the sunny window.", second = "water it gently tomorrow."
+        var rig = typed(first, before: "Plan: ")
+        rig.queue.enqueue(.move(-first.count))
+        rig.queue.enqueue(.insert("x"))
+        rig.drain()
+        rig.queue.enqueue(snap(2, first + " " + second))
+        rig.drain()
+        guard case .ready(let before, let after, _) = rig.queue.shadow(of: "r", version: 2, markID: "pass") else {
+            Issue.record("unavailable shadow"); return
+        }
+        let target = (before + after).replacingOccurrences(of: "plant", with: "Plant")
+        rig.queue.enqueue(.init(id: "pass", kind: .magic, before: before, after: after, target: target,
+                                cursorAtEnd: false, readID: "pass", requiresShadowRead: true))
+        rig.drain()
+        rig.queue.enqueue(snap(3, first + " " + second, complete: true))
+        rig.drain()
+        #expect(rig.field.string == "Plan: x water it gently tomorrow. Plant basil near the sunny window.")
     }
 
     @Test func aResultForAFieldThatStillMatchesGoesInAtOnce() {

@@ -52,6 +52,26 @@ public enum FieldMerge {
             && h.text.count > k.text.count && h.text.suffix(k.text.count).elementsEqual(k.text)
     }
 
+    /// Limit a cleanup result to dictation-owned ranges and preserve manual text already in its read.
+    static func restrictingCleanup(base: [Character], incoming: [Character],
+                                   editable: [Range<Int>], protected: [Range<Int>]) -> [Character] {
+        var result = base
+        for hunk in SpanPlanner.wordHunks(from: base, to: incoming).reversed() {
+            guard editable.contains(where: { $0.lowerBound <= hunk.start && hunk.end <= $0.upperBound }) else { continue }
+            let touchesProtected = protected.contains { range in
+                if hunk.start == hunk.end {
+                    if range.isEmpty { return hunk.start == range.lowerBound }
+                    return range.contains(hunk.start)
+                }
+                return range.isEmpty
+                    ? hunk.start < range.lowerBound && range.lowerBound < hunk.end
+                    : hunk.start < range.upperBound && range.lowerBound < hunk.end
+            }
+            if !touchesProtected { result.replaceSubrange(hunk.start..<hunk.end, with: hunk.text) }
+        }
+        return result
+    }
+
     /// Follow a grapheme boundary through the same minimal changes used by scope rebasing.
     /// `afterInsertion: false` leaves newly appended words outside a completed coverage range.
     public static func position(_ offset: Int, from old: [Character], to new: [Character], afterInsertion: Bool) -> Int {
