@@ -88,6 +88,9 @@ public final class MacFieldQueue {
     /// An edit's scope found away from where it was read must be at least this long when its context is gone.
     public static let relocateChars = 16
     public static let contextChars = 16
+    /// A real key within this many characters of the caret a keyed unit of ours left (and a length change of no more) is typed
+    /// at that caret, not a caret of the user's own placing (an estimate: a few keys between two reads).
+    static let interruptReach = 8
     /// How long work waits for an unfocused field before it is dropped (or, without `onUnreadable`, an unreadable one).
     public static let parkLimit = Duration.seconds(3)
     /// How long dictation waits for a focused field that does not read before it goes on in the panel (`onUnreadable`).
@@ -195,6 +198,13 @@ public final class MacFieldQueue {
         var burst: Burst?
         var verifiedWrites = 0
         var uncertainWrite = false
+        /// The input mark and the field's length when the region's last op went out: a rewrite of the text by the host
+        /// (autocapitalisation, autocorrect) is told from the user's change by no real input since and the length it leaves.
+        var sentMark: Int?
+        var writeLength: Int?
+        /// Words the host rewrote in the text the region typed (raw word to the host's word). The region keeps the host's
+        /// version: its desired text carries them, so the queue never types the raw word over the host's again.
+        var rewrites: [String: String] = [:]
         /// An edit region: runs once the edit is applied (the take spans move through it).
         var onApplied: (@MainActor () -> Void)?
         init(id: String, runID: String?, start: Int, current: [Character], desired: [Character], open: Bool) {
@@ -292,6 +302,12 @@ public final class MacFieldQueue {
     }
 
     private var userActedFlag = false
+    /// The user's real input showed at the latest read (their key or click, or a caret that moved on its own).
+    private var userSeen = false
+    /// A keyed edit of ours left the caret mid-text and the user's key landed there: where the run's next words go (the
+    /// caret the user had before our edit, mapped through the key), never the caret our edit left behind. Ends with the
+    /// next input of theirs that is not that key.
+    private var runHome: UTF16Range?
     /// The caret the user expects (nil until first read).
     private var userCaret: UTF16Range?
     /// The selection the queue last left or saw; a different one on the next read is the user's.
@@ -505,6 +521,7 @@ public final class MacFieldQueue {
     public func live(runID: String, version: Int, text: String, fast: Bool = false, complete: Bool = false, speaking: Bool = false) {
         let index = runs.firstIndex { $0.id == runID } ?? {
             runs.append(Run(id: runID))
+            runHome = nil
             // New dictation is a new change: whatever was undone can no longer be redone.
             if !redoing { undone = [] }
             ledger.append(.run(runID))
@@ -857,10 +874,12 @@ public final class MacFieldQueue {
             rebindPending = nil
             adoptRebind(doc, selection: selection, caret: caret)
         }
+        let lengthBefore = lastLength
         lastLength = doc.length
         let keyed = !target.editsInPlace && target.typesKeys
         // A caret that moved with no real input while a key of ours may still land is that key's, not the user's.
-        noteUser(selection: selection, doc: doc, ownKey: keyed && lateKey != nil && (lastMark == nil || mark == lastMark))
+        noteUser(selection: selection, doc: doc, ownKey: keyed && lateKey != nil && (lastMark == nil || mark == lastMark),
+                 keyed: keyed, lengthBefore: lengthBefore)
         locateAll(doc)
         // Recovery acquired a new observation; no write is planned against the document read before it.
         if recoveredRead { recoveredRead = false; return true }
@@ -892,6 +911,8 @@ public final class MacFieldQueue {
             else if late.edit, lateKeyLanded { staleCaret = (selection, late.selection) }
             lateKey = nil
         }
+        // A burst that is not settled yet may still land (or be found by what the user's keys left): no key goes out meanwhile.
+        if keyed, allRegions.contains(where: { $0.burst != nil && !$0.lost }) { return false }
         if let stale = staleCaret, stale.reported != selection { staleCaret = nil }
         if let probe = probeAt, selection != UTF16Range(location: probe, length: 0) { probeAt = nil }
         if let region = nextRegion() {
@@ -1053,17 +1074,33 @@ public final class MacFieldQueue {
         probeAt = probeAt.map { $0 + shift }
     }
 
-    private func noteUser(selection: UTF16Range, doc: Document, ownKey: Bool = false) {
+    private func noteUser(selection: UTF16Range, doc: Document, ownKey: Bool = false, keyed: Bool = false, lengthBefore: Int? = nil) {
         let moved = !ownKey && !expectedSelections.isEmpty && !expectedSelections.contains(selection)
+        userSeen = userActedFlag || moved
         if userActedFlag || moved {
             userActedFlag = false
             probeAt = nil; staleCaret = nil
+            // The user's key landed at the caret an edit of ours left mid-text (a keyed unit's jump): their caret before our
+            // edit is where the run's next words go, whatever the text there became; they keep the caret they typed at.
+            let previous = userCaret
+            runHome = nil
+            if keyed, caretOwed, let home = previous, selection.length == 0, let lengthBefore {
+                // Near the caret our unit left (a few keys), with the field's length changed by about as little: a key of
+                // theirs typed there. A click elsewhere is their own caret and ends this.
+                let growth = doc.length - lengthBefore
+                if abs(growth) <= Self.interruptReach,
+                   let own = expectedSelections.first(where: { $0.length == 0 && abs(selection.location - $0.location) <= Self.interruptReach }) {
+                    let shifted = home.location >= own.location ? home.location + growth : home.location
+                    runHome = UTF16Range(location: max(0, min(shifted, doc.length)), length: home.length)
+                    note(.user, selection: selection, detail: "typedAtOwnCaret home=\(runHome!.location)")
+                }
+            }
             userCaret = selection
             caretOwed = false
             revision += 1
             for index in runs.indices { close(&runs[index], cause: moved ? "cursor" : "input") }
             for region in allRegions { region.nativePlan = nil }
-            note(.user, selection: selection, detail: moved ? "moved" : "acted")
+            if runHome == nil { note(.user, selection: selection, detail: moved ? "moved" : "acted") }
         }
         // A caret past the text (work that did not land after all) is the field's own caret again.
         if userCaret == nil || (userCaret.map { $0.location + $0.length > doc.length } ?? false) { userCaret = selection }
@@ -1109,12 +1146,15 @@ public final class MacFieldQueue {
                 refreshContext(region, doc)
                 return
             }
+            // The host rewrote what the write typed (autocapitalisation, autocorrect): the host's version is the region's.
+            if adoptHostRewrite(region, expected: landing, doc: doc) { return }
             // A late key keeps its landing until it shows or its window passes.
             if lateKey != nil { region.landing = landing }
         }
         if doc.string(region.start, length) == String(region.current), contextHolds(region, doc) {
             refreshContext(region, doc); return
         }
+        if adoptHostRewrite(region, expected: region.current, doc: doc) { return }
         if let found = relocate(region, doc) {
             note(.relocated, id: region.id, run: region.runID, location: found, detail: "from \(region.start)")
             region.start = found
@@ -1226,6 +1266,73 @@ public final class MacFieldQueue {
         region.before = doc.context(before: region.start, Self.contextChars)
         region.after = doc.context(after: region.end, Self.contextChars)
         region.afterAtEnd = region.end + region.after.utf16.count == doc.length
+    }
+
+    /// Whether `shown` is the host's own rewrite of `expected`, the text just typed: the same letters in another case
+    /// (autocapitalisation), or the same words but one (autocorrect). Anything else is not told from the user's change.
+    /// `completedWord`: the index of the word the write completed (the last word of what stood before it): autocorrect
+    /// replaces that one, so a replaced word elsewhere, or with no write to tell by, is not taken for it.
+    static func isHostRewrite(of expected: String, shown: String, completedWord: Int?) -> Bool {
+        guard expected != shown else { return false }
+        if expected.count == shown.count, expected.lowercased() == shown.lowercased() { return true }
+        guard let completedWord else { return false }
+        let a = expected.split(separator: " ", omittingEmptySubsequences: false)
+        let b = shown.split(separator: " ", omittingEmptySubsequences: false)
+        guard a.count == b.count, a.count > 1 else { return false }
+        let differing = zip(a, b).enumerated().filter { $0.element.0 != $0.element.1 }.map(\.offset)
+        return differing == [completedWord]
+    }
+
+    /// The region's text as the host rewrote it, `desired` carrying the host's words (`rewrites`).
+    private func carryRewrites(_ region: Region, in text: [Character]) -> [Character] {
+        guard !region.rewrites.isEmpty else { return text }
+        return Array(String(text).split(separator: " ", omittingEmptySubsequences: false)
+            .map { region.rewrites[String($0)] ?? String($0) }.joined(separator: " "))
+    }
+
+    /// A region's text (or what its last write would leave, `expected`) that the field shows rewritten by the host, with no
+    /// real key or click since the write: the host's version is taken as landed and kept in the region's desired text, so
+    /// the take goes on and never types the raw word over the host's again. Where the rewrite changes the length, the
+    /// field's length at the write tells the window.
+    private func adoptHostRewrite(_ region: Region, expected: [Character], doc: Document) -> Bool {
+        guard !region.lost, !userSeen, let target, let sentMark = region.sentMark, sentMark == target.inputMark else { return false }
+        let expectedLength = String(expected).utf16.count
+        // A write completed the last word of what stood before it: that is the one word a host may correct.
+        let completedWord: Int? = expected != region.current && !region.current.isEmpty
+            ? String(region.current).split(separator: " ", omittingEmptySubsequences: false).count - 1 : nil
+        var lengths = [expectedLength]
+        if expected != region.current, let base = region.writeLength {
+            let drift = doc.length - (base + expectedLength - String(region.current).utf16.count)
+            if drift != 0, expectedLength + drift >= 0 { lengths.insert(expectedLength + drift, at: 0) }
+        }
+        for length in lengths {
+            guard doc.context(before: region.start, region.before.utf16.count) == region.before,
+                  let shown = doc.string(region.start, length), shown != String(region.current) else { continue }
+            let tail = region.start + length
+            let context = doc.context(after: tail, Self.contextChars)
+            guard Self.tailMatches(old: region.after, oldAtEnd: region.afterAtEnd, new: context,
+                                   newAtEnd: tail + context.utf16.count == doc.length) else { continue }
+            // What the write meant to leave, or, when the host took more or less of it than the queue counted (a write that
+            // failed midway), the same length of what the region is meant to say: the same letters in other cases.
+            var reference = String(expected)
+            if !Self.isHostRewrite(of: reference, shown: shown, completedWord: completedWord) {
+                let intended = String(region.desired.prefix(shown.count))
+                guard intended != shown, intended.count == shown.count, intended.lowercased() == shown.lowercased() else { continue }
+                reference = intended
+            }
+            let was = reference.split(separator: " ", omittingEmptySubsequences: false)
+            let now = shown.split(separator: " ", omittingEmptySubsequences: false)
+            if was.count == now.count { for (raw, host) in zip(was, now) where raw != host { region.rewrites[String(raw)] = String(host) } }
+            let follows = region.open && userCaret == UTF16Range(location: region.end, length: 0)
+            note(.mismatch, id: region.id, run: region.runID, reason: "hostRewrite", detail: "\(expected.count) -> \(shown.count) chars")
+            apply(region, landed: Array(shown))
+            region.desired = carryRewrites(region, in: region.desired)
+            region.landing = nil; region.keys = nil; region.nativePlan = nil; region.burst = nil
+            if follows { userCaret = UTF16Range(location: region.end, length: 0) }
+            refreshContext(region, doc)
+            return true
+        }
+        return false
     }
 
     /// Whether the text after an edit is still what followed it before. A rich editor shows an empty last line as a
@@ -1360,7 +1467,9 @@ public final class MacFieldQueue {
 
     /// Words of a run with no open region start one at the user's caret.
     private func openRemainderRegion(_ doc: Document) -> Bool {
-        guard let index = runs.firstIndex(where: \.needsRegion), let caret = userCaret else { return false }
+        guard let index = runs.firstIndex(where: \.needsRegion), let caret = runHome.flatMap({ $0.end <= doc.length ? $0 : nil }) ?? userCaret
+        else { return false }
+        runHome = nil
         let first = runs[index].regions.isEmpty
         // The run's first words replace the user's selection; later regions never eat one.
         let replaced = first ? (doc.string(caret.location, caret.length) ?? "") : ""
@@ -1469,6 +1578,7 @@ public final class MacFieldQueue {
              detail: pieces.count > 1 ? "entrance pieces=\(pieces.count) \(host.latency.summary)" : nil)
         opsSent += 1
         region.uncertainWrite = true
+        region.sentMark = mark; region.writeLength = doc.length
         var written = 0, aborted = false, brokeOff = false
         var insertedText = ""
         // The burst is wall-clock bound (`entranceCapMs`, inside the native unit's work budget): writes cost time here, so a
@@ -1594,11 +1704,10 @@ public final class MacFieldQueue {
     /// a key). True: the region is dealt with for this read.
     private func settleBurst(_ region: Region, _ doc: Document) -> Bool {
         guard var burst = region.burst else { return false }
-        if let target, target.inputMark != burst.mark {
-            region.burst = nil; region.landing = nil
-            note(.mismatch, id: region.id, run: region.runID, reason: "burstGaveUp", detail: "input")
-            return false
-        }
+        // A real key or click came in since the burst went out: its keys land in order, so once the host's learned deadline
+        // has passed the field shows all it will; until then the burst waits (nothing else goes out), after it the fragment
+        // that landed is found and taken as ours (`adoptFragment`).
+        let interrupted = target.map { $0.inputMark != burst.mark } ?? false
         // The user's caret at the end of an open region follows the region as it grows.
         let follows = followsRegion(region)
         func tailHolds(_ location: Int) -> Bool {
@@ -1632,9 +1741,16 @@ public final class MacFieldQueue {
             } else { region.burst = burst }
             return true
         }
-        if now() - burst.sentAt < Self.keyLateLimit { return true }
+        let settleLimit = interrupted ? Duration.milliseconds(host.latency.deadlineMs(deletes: 0) + 50) : Self.keyLateLimit
+        if now() - burst.sentAt < settleLimit { return true }
         region.burst = nil; region.landing = nil
+        if interrupted {
+            if adoptFragment(region, doc, burst: burst, follows: follows, detail: "input") { return true }
+            note(.mismatch, id: region.id, run: region.runID, reason: "burstGaveUp", detail: "input")
+            return false
+        }
         guard doc.context(before: region.start, region.before.utf16.count) == region.before else {
+            if adoptFragment(region, doc, burst: burst, follows: follows, detail: "before") { return true }
             note(.mismatch, id: region.id, run: region.runID, reason: "burstGaveUp", detail: "before")
             return false
         }
@@ -1652,7 +1768,43 @@ public final class MacFieldQueue {
             caretOwed = true
             return true
         }
+        if adoptFragment(region, doc, burst: burst, follows: follows, detail: "shape") { return true }
         note(.mismatch, id: region.id, run: region.runID, reason: "burstGaveUp", detail: "shape len=\(base)")
+        return false
+    }
+
+    /// A burst whose keys were met by the user's (or whose text around it changed) leaves a fragment of the region's text
+    /// in the field. The furthest of the burst's states that the field shows once, anywhere, is the region's own text now
+    /// (our write, found again): the region takes it as landed and goes on from its end, so no half-typed word of ours is
+    /// left behind the user's keys and the rest of the take goes at the region's end. Nothing of the user's is touched: the
+    /// region only ever owns the text its keys typed. False when no state can be told from the user's text.
+    private func adoptFragment(_ region: Region, _ doc: Document, burst: Burst, follows: Bool, detail: String) -> Bool {
+        for k in stride(from: burst.items.count - 1, through: burst.applied, by: -1) {
+            let landed = burst.items[k].after, text = String(landed)
+            var found: Int?
+            let hits = doc.find(text)
+            if landed.count >= Self.relocateMinimum, hits.count == 1 { found = hits[0] }
+            else if !region.after.isEmpty, (text + region.after).count >= Self.relocateMinimum {
+                let withAfter = doc.find(text + region.after)
+                if withAfter.count == 1 { found = withAfter[0] }
+            }
+            // A short fragment is told by the text before the region, where the user's keys did not come in.
+            if found == nil, !region.before.isEmpty, (region.before + text).count >= Self.relocateMinimum {
+                let withBefore = doc.find(region.before + text)
+                if withBefore.count == 1 { found = withBefore[0] + region.before.utf16.count }
+            }
+            guard let start = found else { continue }
+            let was = region.start
+            region.start = start
+            note(.mismatch, id: region.id, run: region.runID, reason: "burst", detail: "fragment \(k + 1)/\(burst.items.count) at \(start) from \(was) \(detail)")
+            apply(region, landed: landed)
+            if follows { userCaret = UTF16Range(location: region.end, length: 0) }
+            region.keys = nil; region.nativePlan = nil
+            refreshContext(region, doc)
+            revision += 1
+            caretOwed = true
+            return true
+        }
         return false
     }
 
@@ -2438,7 +2590,7 @@ public final class MacFieldQueue {
             if !region.lost {
                 let body = region.trimsLead ? Array(slice.drop { $0.isWhitespace && !$0.isNewline }) : slice
                 region.suffix = Array(FieldInsertion.trailingSeparator(after: String(body), before: region.following))
-                region.desired = region.separator + body + region.suffix
+                region.desired = carryRewrites(region, in: region.separator + body + region.suffix)
             }
             lower = upper
         }

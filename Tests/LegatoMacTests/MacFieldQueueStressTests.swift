@@ -59,6 +59,10 @@ import LegatoKeyboardCore
     var trail: [String] = []
     var mark = 0
     var keysSent = 0, keysDropped = 0, keysLate = 0, refusals = 0, caretSets = 0, hops = 0, lazyCarets = 0
+    /// Runs after each synthetic key went out (with the count so far): the user's key can meet a burst or a unit here.
+    var onKeySent: ((Int) -> Void)?
+    /// Like Safari's autocorrect: a write that starts with a space capitalises the word it follows when it is one of these.
+    var autocapitalize: Set<String> = []
     private enum Event { case key(FieldKey), caret(UTF16Range) }
     private var inFlight: [(due: ContinuousClock.Instant, event: Event)] = []
     /// The caret the field reports instead of the real one, and until when (nil: until the next key).
@@ -136,6 +140,7 @@ import LegatoKeyboardCore
         if late { keysLate += 1 }
         let lag = late ? 450 + rng.next(450) : rng.next(30)
         inFlight.append((clock() + .milliseconds(lag), .key(key)))
+        onKeySent?(keysSent)
     }
 
     /// A key of a burst after one still on its way: every guard except the selection.
@@ -154,6 +159,7 @@ import LegatoKeyboardCore
         // Keys of a burst land in the order they were sent.
         let due = max(clock() + .milliseconds(lag), inFlight.last?.due ?? clock())
         inFlight.append((due, .key(key)))
+        onKeySent?(keysSent)
     }
 
     func setCaret(_ range: UTF16Range, mark: Int, selection planned: UTF16Range) throws {
@@ -338,6 +344,16 @@ import LegatoKeyboardCore
         value = Array(ns.replacingCharacters(in: NSRange(location: range.location, length: range.length), with: text))
         selection = .init(location: range.location + text.utf16.count, length: 0)
         writes += 1
+        if text.hasPrefix(" "), !autocapitalize.isEmpty {
+            let upTo = String(value.prefix(range.location))
+            if let word = upTo.split(separator: " ", omittingEmptySubsequences: true).last.map(String.init),
+               autocapitalize.contains(word), upTo.hasSuffix(word) {
+                var rewritten = value
+                let at = upTo.count - word.count
+                rewritten.replaceSubrange(at..<upTo.count, with: Array(word.prefix(1).uppercased() + word.dropFirst()))
+                value = rewritten
+            }
+        }
         if rng.chance(lagChance) { lagging = before }
         onNativeReplace?()
         emit()
@@ -1168,6 +1184,22 @@ private struct SeededRandom {
         #expect(field.unitsBlocked == 0)
     }
 
+    /// Safari again: the capitalised word met a write that failed midway, so the field showed more (or less) than the queue
+    /// counted. The same letters in other cases are still the host's rewrite: adopted, the take goes on and is never dropped.
+    @Test func aHostRewriteMeetingAWriteThatFailedMidwayIsStillAdopted() async {
+        let (field, queue, entries, _) = slowNativeField(writeMs: 20, budgetMs: 100)
+        field.autocapitalize = ["anna"]
+        var drops: [MacFieldQueue.Drop] = []
+        queue.onDrop = { drops.append($0) }
+        queue.live(runID: "take", version: 1, text: "send the invoice to anna")
+        await queue.whenIdle()
+        queue.live(runID: "take", version: 2, text: "send the invoice to anna um by friday and then some more words", complete: true)
+        await queue.whenIdle()
+        #expect(field.string == "send the invoice to Anna um by friday and then some more words", Comment(rawValue: field.string))
+        #expect(drops.isEmpty, Comment(rawValue: "\(drops) \(entries().map { $0.reason ?? $0.kind.rawValue })"))
+        #expect(entries().contains { $0.detail?.hasPrefix("midBurst") == true }, "the rig did fail a write midway")
+    }
+
     @Test func aBlockedNativeLeaseDropsAnEditOnceAndNeverReplansItInALoop() async {
         let (field, queue, entries, _) = slowNativeField(writeMs: 2)
         field.value = Array("um so I wanted t"); field.selection = .init(location: 16, length: 0)
@@ -1203,6 +1235,133 @@ private struct SeededRandom {
         #expect(shadow.observe(text: "calm sea!!", selection: .init(location: 10, length: 0)) == .userChange, "a notification accounts for it")
         #expect(shadow.observe(text: "calm", selection: .init(location: 4, length: 0)) == .unknown, "no input, no notification, not ours")
         #expect(!shadow.dirty)
+    }
+
+    /// Safari (acceptance round 3): autocorrect capitalised "anna" once the next words were typed after it. The queue read
+    /// it as the user's change and dropped the take. It is the host's rewrite (no real input): taken as landed, the take goes on.
+    @Test func aHostThatCapitalisesAWordJustTypedIsNotTheUsersChange() async {
+        let field = FakeAXField("Log: ", rng: SeededRandom(2))
+        field.autocapitalize = ["anna"]
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.sleep = { _ in }
+        var drops: [MacFieldQueue.Drop] = [], entries: [MacEditJournal.Entry] = []
+        queue.onDrop = { drops.append($0) }
+        queue.journal = { entries.append($0) }
+        queue.live(runID: "take", version: 1, text: "send the invoice to anna")
+        await queue.whenIdle()
+        queue.live(runID: "take", version: 2, text: "send the invoice to anna um by friday")
+        await queue.whenIdle()
+        #expect(field.string == "Log: send the invoice to Anna um by friday")
+        queue.live(runID: "take", version: 3, text: "send the invoice to anna um by friday ok", complete: true)
+        await queue.whenIdle()
+        #expect(field.string == "Log: send the invoice to Anna um by friday ok", "the raw word is never typed over the host's")
+        #expect(drops.isEmpty, "\(drops)")
+        #expect(entries.contains { $0.reason == "hostRewrite" })
+    }
+
+    @Test func aRealKeyInsideTheRewrittenWordIsStillTheUsers() async {
+        let field = FakeAXField("Log: ", rng: SeededRandom(2))
+        field.autocapitalize = ["anna"]
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.sleep = { _ in }
+        queue.live(runID: "take", version: 1, text: "send the invoice to anna")
+        await queue.whenIdle()
+        // The user types right after the text, then the take goes on: their key is theirs, never read as a host rewrite.
+        field.type("!"); queue.userActed()
+        queue.live(runID: "take", version: 2, text: "send the invoice to anna um by friday")
+        await queue.whenIdle()
+        #expect(field.string.contains("!"))
+        #expect(field.string.hasPrefix("Log: send the invoice to anna!") || field.string.hasPrefix("Log: send the invoice to Anna!"), Comment(rawValue: field.string))
+    }
+
+    /// Edge Markdown editor (acceptance round 3): a burst met by the user's keys left "water t" behind, the whole take
+    /// typed again at the caret. The fragment that landed is the region's own: the rest goes on from its end.
+    @Test(arguments: [8, 3]) func aBurstMetByARealKeyAdoptsItsFragmentAndFinishesFromThere(after: Int) async {
+        let (field, queue, _, _) = keyedField("Log: ")
+        var drops: [MacFieldQueue.Drop] = []
+        queue.onDrop = { drops.append($0) }
+        var fired = false
+        field.onKeySent = { [unowned field] sent in
+            guard sent == after, !fired else { return }
+            fired = true
+            field.type("X"); queue.userActed()
+        }
+        queue.live(runID: "take", version: 1, text: "water the plants", complete: true)
+        await queue.whenIdle()
+        field.settle(all: true)
+        let text = field.string
+        #expect(text.components(separatedBy: "water").count == 2, "our text is in the field once: \(text)")
+        #expect(text.contains("X") && text.components(separatedBy: "X").count == 2, "the user's key stays: \(text)")
+        let ours = text.replacingOccurrences(of: "X", with: "")
+        let trail = field.trail.suffix(10).joined(separator: "\n")
+        #expect(ours == "Log: water the plants", Comment(rawValue: "\(text)\n\(trail)"))
+        #expect(drops.isEmpty, "\(drops)")
+    }
+
+    /// Edge textarea (acceptance round 3): the user's key landed at the caret a keyed cleanup left mid-text. The cleanup
+    /// stops, what it retyped is its own, and the take's next words go at the take's end, never at that caret.
+    @Test func aUserKeyAtTheCaretACleanupLeftMidTextDoesNotReorderTheTake() async {
+        let (field, queue, _, _) = keyedField("go\n")
+        var entries: [MacEditJournal.Entry] = []
+        let trail = queue.journal
+        queue.journal = { entries.append($0); trail?($0) }
+        let take = "the release notes need a short summary um and a list of known issues"
+        queue.live(runID: "take", version: 1, text: take, complete: true)
+        await queue.whenIdle()
+        field.settle(all: true)
+        #expect(field.string == "go\n" + take)
+        // The pause cleanup title-cases every word, backwards through the sentence; the user's key lands after a few units.
+        var fired = false
+        field.onKeySent = { [unowned field] _ in
+            guard !fired, field.string.hasSuffix("List Of Known Issues") else { return }
+            fired = true
+            field.type("3"); queue.userActed()
+        }
+        let cleaned = take.split(separator: " ").map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: " ")
+        _ = await queue.edit(.init(range: .init(location: 3, length: take.utf16.count), scope: take, before: "go\n", target: cleaned))
+        field.settle(all: true)
+        #expect(fired, "the user's key met the cleanup: \(field.string)")
+        queue.live(runID: "take", version: 2, text: take + " oh and the changelog link", complete: true)
+        await queue.whenIdle()
+        field.settle(all: true)
+        let text = field.string
+        #expect(text.hasSuffix(" oh and the changelog link"), "the rest of the take goes at its end: \(text)")
+        #expect(text.components(separatedBy: "3").count == 2, "the user's key stays once: \(text)")
+        let words = text.replacingOccurrences(of: "3", with: "")
+        #expect(words.lowercased() == "go\n" + take + " oh and the changelog link", "no word moved: \(text)")
+        #expect(entries.contains { $0.detail?.hasPrefix("typedAtOwnCaret") == true })
+    }
+
+    /// The user's key can also come between the keys of one unit (a Backspace landed, its retyped letter was refused). The
+    /// take's next words still go at its end; the text is in order, at worst one letter of the cleaned word short.
+    @Test(arguments: [4, 6, 9, 12, 15]) func aUserKeyBetweenTheKeysOfACleanupUnitKeepsTheTakeInOrder(after: Int) async {
+        let (field, queue, _, _) = keyedField("go\n")
+        let take = "the release notes need a short summary um and a list of known issues"
+        queue.live(runID: "take", version: 1, text: take, complete: true)
+        await queue.whenIdle()
+        field.settle(all: true)
+        var fired = false
+        let base = field.keysSent
+        field.onKeySent = { [unowned field] sent in
+            guard !fired, sent == base + after else { return }
+            fired = true
+            field.type("3"); queue.userActed()
+        }
+        let cleaned = take.split(separator: " ").map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: " ")
+        _ = await queue.edit(.init(range: .init(location: 3, length: take.utf16.count), scope: take, before: "go\n", target: cleaned))
+        queue.live(runID: "take", version: 2, text: take + " oh and the changelog link", complete: true)
+        await queue.whenIdle()
+        field.settle(all: true)
+        let text = field.string
+        #expect(fired && text.hasSuffix(" oh and the changelog link"), Comment(rawValue: text))
+        #expect(text.components(separatedBy: "3").count == 2, Comment(rawValue: text))
+        let expected = Array("go\n" + take + " oh and the changelog link")
+        let got = Array(text.replacingOccurrences(of: "3", with: "").lowercased())
+        var i = 0
+        for character in got where i < expected.count && expected[i] == character { i += 1 }
+        #expect(i == got.count && expected.count - got.count <= 1, Comment(rawValue: "in order, at most one letter short: \(text)"))
     }
 
     private func keyedField(_ text: String, seed: UInt64 = 5, configure: (FakeAXField) -> Void = { _ in })
