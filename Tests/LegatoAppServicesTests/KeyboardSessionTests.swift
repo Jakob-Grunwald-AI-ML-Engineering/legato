@@ -200,7 +200,9 @@ import LegatoSoniox
         #expect(composer.holdsWarmInput, "The microphone keeps running between taps")
     }
 
-    @Test func disappearingDropsHalfSpokenWordsAndResetsTheSession() async throws {
+    /// Contract change (issue #312, undelivered speech stays recoverable): hiding mid-take used to drop the half-spoken
+    /// words; it now finalizes them like Stop, then closes the route and resets the session.
+    @Test func disappearingFinalizesHalfSpokenWordsLikeStopThenResetsTheSession() async throws {
         let (composer, keyboard) = try await openOnTyping()
         let socket = try #require(sockets.last)
         #expect(await keyboard.openGate())
@@ -208,12 +210,16 @@ import LegatoSoniox
         await socket.feed(#"{"tokens":[{"text":"Halb","is_final":true},{"text":" gesp","is_final":false}]}"#)
         try await until { !keyboard.dictationTail.isEmpty }
         keyboard.update(visible: false, surface: .dictation)
+        try await until { await socket.sent.contains(.text(#"{"type":"finalize"}"#)) }
+        await socket.feed(#"{"tokens":[{"text":" gesp","is_final":true},{"text":"rochen","is_final":true},{"text":"<fin>","is_final":true}]}"#)
+        try await until { await socket.sent.contains(.text("")) }
+        await socket.feed(#"{"finished":true}"#)
         await keyboard.settle()
         #expect(!keyboard.isOpen && composer.route == .idle && !composer.holdsWarmInput)
-        #expect(sink.lines.isEmpty, "Unfinished words are dropped, not delivered")
+        #expect(sink.lines.map(\.text).joined().contains("gesp"), "The half-spoken words are finalized and delivered")
+        try await until { sink.finishes == 1 }
         #expect(sink.resets == 1)
         #expect(await socket.closed)
-        #expect(!(await socket.sent.contains(.text(#"{"type":"finalize"}"#))))
     }
 
     @Test func disappearingMidTakeStillEndsTheTakeSoItsFinalWordsAreRecorded() async throws {
