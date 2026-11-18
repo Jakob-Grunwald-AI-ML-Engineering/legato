@@ -27,6 +27,63 @@ final class AXTextTarget: TextTarget {
     /// Chromium web text reads through this: its value with the selection mapped into it, or its editable root.
     private var reader: AXFieldReader
 
+    /// Value and selection change notifications of the bound element (`observeChanges`).
+    private var observation: ChangeObservation?
+    private var changeHandler: (@MainActor () -> Void)?
+
+    func observeChanges(_ handler: @escaping @MainActor () -> Void) -> Bool {
+        changeHandler = handler
+        return registerObserver()
+    }
+
+    func stopObserving() {
+        changeHandler = nil
+        observation = nil
+    }
+
+    /// Registers the bound element; a rebind registers its fresh element and drops the old registration.
+    private func registerObserver() -> Bool {
+        observation = nil
+        guard changeHandler != nil else { return false }
+        guard let fresh = ChangeObservation(pid: pid, element: element, target: self) else { return false }
+        observation = fresh
+        return true
+    }
+
+    fileprivate func changed() { changeHandler?() }
+
+    /// An `AXObserver` on the main run loop for `kAXValueChangedNotification` and `kAXSelectedTextChangedNotification`.
+    /// Releasing it removes the run loop source. Notifications only say "look again": they are never counted
+    /// (Mac VM, 2026-11-17: one to several per operation, Chromium coalesces a burst).
+    private final class ChangeObservation {
+        private let observer: AXObserver
+        private let element: AXUIElement
+        init?(pid: pid_t, element: AXUIElement, target: AXTextTarget) {
+            var created: AXObserver?
+            let callback: AXObserverCallback = { _, _, _, refcon in
+                guard let refcon else { return }
+                let target = Unmanaged<AXTextTarget>.fromOpaque(refcon).takeUnretainedValue()
+                MainActor.assumeIsolated { target.changed() }
+            }
+            guard AXObserverCreate(pid, callback, &created) == .success, let created else { return nil }
+            let refcon = Unmanaged.passUnretained(target).toOpaque()
+            var added = 0
+            for name in [kAXValueChangedNotification, kAXSelectedTextChangedNotification] {
+                if AXObserverAddNotification(created, element, name as CFString, refcon) == .success { added += 1 }
+            }
+            guard added > 0 else { return nil }
+            CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(created), .defaultMode)
+            observer = created
+            self.element = element
+        }
+        deinit {
+            for name in [kAXValueChangedNotification, kAXSelectedTextChangedNotification] {
+                AXObserverRemoveNotification(observer, element, name as CFString)
+            }
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        }
+    }
+
     private init(element: AXUIElement, appElement: AXUIElement) {
         var process: pid_t = 0
         AXUIElementGetPid(appElement, &process)
@@ -299,6 +356,7 @@ final class AXTextTarget: TextTarget {
         guard AXIsProcessTrusted(), let app = NSWorkspace.shared.frontmostApplication else { return }
         let pid = app.processIdentifier
         requestTree(pid: pid)
+        let began = ContinuousClock.now
         var deadline = warmup.retryDeadline(pid: pid, now: .now)
         var refreshed = false
         while !Task.isCancelled {
@@ -311,7 +369,14 @@ final class AXTextTarget: TextTarget {
                     let extended = ContinuousClock.now + AccessibilityWarmup.budget
                     deadline = max(deadline ?? extended, extended)
                 }
-            case .capture(.none): break
+            case .capture(.none):
+                // Right after an app switch (a click on its Dock icon, Command-Tab) the app has no focused element for a moment,
+                // or one that does not answer yet, whatever its kind: the take would start in the panel with the field in front
+                // of the user (acceptance round 2: Safari, first take after TextEdit). A short grace; the panel stays the answer
+                // when the field never shows.
+                if ["no-focus", "no-selection", "unreadable-text"].contains(lastCaptureNote) {
+                    deadline = max(deadline ?? began + AccessibilityWarmup.focusGrace, began + AccessibilityWarmup.focusGrace)
+                }
             case .capture: return
             }
             guard let deadline, ContinuousClock.now < deadline else { return }
@@ -473,6 +538,7 @@ final class AXTextTarget: TextTarget {
         editableCache = nil; textOperationSupported = nil; writeCapabilitiesCache = nil
         if !same { scopedWriteFailed = false }
         editor = Editor(of: focused)
+        if changeHandler != nil { _ = registerObserver() }
         return .rebound(sameEditor: same)
     }
 
@@ -646,6 +712,24 @@ final class AXTextTarget: TextTarget {
         guard sent else { throw FieldKeyRefusal.unavailable }
     }
 
+    /// A key of a burst after one still on its way: focus, no real input since `mark` and no modifier, without reading
+    /// the selection (the earlier keys of the burst have not moved it yet). Only keys a burst carries.
+    func pressFollowing(_ key: FieldKey, mark: Int) throws {
+        guard isFocused() else { throw FieldKeyRefusal.notFocused }
+        guard RealInput.shared.count == mark else { throw FieldKeyRefusal.userInput }
+        guard CGEventSource.flagsState(.hidSystemState).intersection(Self.modifiers).isEmpty else { throw FieldKeyRefusal.modifiersHeld }
+        let sent: Bool
+        switch key {
+        case .backspace: sent = SyntheticKeys.tap(kVK_Delete)
+        case .text(let character):
+            let text = String(character)
+            guard SyntheticEvent.typeable(text) else { throw FieldKeyRefusal.unavailable }
+            sent = SyntheticKeys.type(text)
+        default: throw FieldKeyRefusal.unavailable
+        }
+        guard sent else { throw FieldKeyRefusal.unavailable }
+    }
+
     /// The caret through Accessibility, under the key guards (no modifier check: nothing is typed). Chromium may or
     /// may not honour it; the queue reads it back and remembers per field which way works.
     func setCaret(_ range: UTF16Range, mark: Int, selection: UTF16Range) throws {
@@ -812,6 +896,20 @@ final class AXTextTarget: TextTarget {
     var axMarkerText: String? {
         guard let range = parameter("AXTextMarkerRangeForUIElement", element) else { return nil }
         return parameter("AXStringForTextMarkerRange", range) as? String
+    }
+    var axMarkerSelection: UTF16Range? {
+        guard let whole = parameter("AXTextMarkerRangeForUIElement", element), CFGetTypeID(whole) == AXTextMarkerRangeGetTypeID(),
+              let value = copy("AXSelectedTextMarkerRange"), CFGetTypeID(value) == AXTextMarkerRangeGetTypeID() else { return nil }
+        let first = AXTextMarkerRangeCopyStartMarker(unsafeDowncast(whole, to: AXTextMarkerRange.self))
+        let selection = unsafeDowncast(value, to: AXTextMarkerRange.self)
+        func offset(_ marker: AXTextMarker) -> Int? {
+            guard let span = parameter("AXTextMarkerRangeForUnorderedTextMarkers", [first, marker] as CFArray),
+                  let text = parameter("AXStringForTextMarkerRange", span) as? String else { return nil }
+            return text.utf16.count
+        }
+        guard let start = offset(AXTextMarkerRangeCopyStartMarker(selection)),
+              let end = offset(AXTextMarkerRangeCopyEndMarker(selection)), end >= start else { return nil }
+        return UTF16Range(location: start, length: end - start)
     }
     func axAfterHiddenBreak(end: Bool) -> Bool? {
         guard let value = copy("AXSelectedTextMarkerRange"), CFGetTypeID(value) == AXTextMarkerRangeGetTypeID() else { return nil }

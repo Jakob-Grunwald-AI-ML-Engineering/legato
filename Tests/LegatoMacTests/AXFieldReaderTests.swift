@@ -12,6 +12,10 @@ import Testing
     var readable = true
     var split = true
     var roots: [ChromiumElement] = []
+    /// Edge's list editor (measured in the Mac VM, 2026-11-18): `AXSelectedTextRange` answers `0+0` for a caret in an empty
+    /// last item (the value ends in the placeholder break) while the text markers have the caret where it is.
+    var staleCaretInEmptyLastItem = false
+    var hasMarkers = false
     init(_ text: String, caret: Int? = nil) {
         self.text = text
         selection = UTF16Range(location: caret ?? text.utf16.count, length: 0)
@@ -33,9 +37,16 @@ import Testing
     var axCharacterCount: Int? { readable ? text.utf16.count : nil }
     var axSelection: UTF16Range? {
         guard readable else { return nil }
+        if staleCaretInEmptyLastItem, selection.length == 0, text.hasSuffix("\n"), selection.location == text.utf16.count - 1 {
+            return UTF16Range(location: 0, length: 0)
+        }
+        return markerSelection
+    }
+    private var markerSelection: UTF16Range {
         let start = ranged(selection.location)
         return UTF16Range(location: start, length: ranged(selection.end) - start)
     }
+    var axMarkerSelection: UTF16Range? { readable && hasMarkers ? markerSelection : nil }
     func axString(in range: UTF16Range) -> String? {
         guard readable else { return nil }
         let ranged = ranged as NSString
@@ -85,6 +96,30 @@ import Testing
         #expect(try reader.selectedRange() == UTF16Range(location: 17, length: 3))
         #expect(try reader.selectionSpace(UTF16Range(location: 17, length: 3)) == UTF16Range(location: 15, length: 2))
         #expect(reader.readsWhole())
+    }
+
+    /// Edge, `<ul>` with two items and an empty third (Mac VM, 2026-11-18, acceptance round 2): the value carries the bullet
+    /// markers and a placeholder break, the caret in the empty item reads `0+0` through `AXSelectedTextRange`, and only the
+    /// markers say where it is. The queue typed its first burst at the field's start.
+    @Test(arguments: [false, true]) func aCaretInAnEmptyBulletReadsWhereItIsThroughTheMarkers(markers: Bool) throws {
+        let value = "\u{2022} first item\n\u{2022} second item\n\u{2022} \n"
+        let element = ChromiumElement(value, caret: 29)
+        element.staleCaretInEmptyLastItem = true
+        element.hasMarkers = markers
+        let reader = AXFieldReader(element: element)
+        #expect(value.utf16.count == 30)
+        #expect(try reader.textLength() == 30)
+        #expect(try reader.text(in: UTF16Range(location: 0, length: 30)) == value)
+        let caret = try reader.selectedRange()
+        // Without markers the reader can only believe the stale answer (the start of the field).
+        #expect(caret == UTF16Range(location: markers ? 29 : 0, length: 0))
+        // Typed into the item the value has no placeholder; the plain answer is right again.
+        element.text = "\u{2022} first item\n\u{2022} second item\n\u{2022} x"
+        element.selection = UTF16Range(location: 30, length: 0)
+        #expect(try reader.selectedRange() == UTF16Range(location: 30, length: 0))
+        // The first item's start, after its marker.
+        element.selection = UTF16Range(location: 2, length: 0)
+        #expect(try reader.selectedRange() == UTF16Range(location: 2, length: 0))
     }
 
     /// Lines with an empty line between them keep their break in both spaces: read as they are.

@@ -92,6 +92,8 @@ import LegatoMac
     private var activeInstructionID: String?
     /// The active read was a cleanup's (`FieldReadRequest.Kind.cleanup`).
     private var activeReadIsCleanup = false
+    /// The field as each cleanup pass's shadow showed it (the pass's id), so the result is rebased through every change since.
+    private var shadowReads: [(id: String, text: String)] = []
     private var streamedRunID: String?
     /// Runs this editor saw; a rebind retires them, so a late cleanup never follows into another field or session.
     private var seenRunIDs: Set<String> = []
@@ -545,18 +547,76 @@ import LegatoMac
         if let span = queue.lastRegionAtCaret, span.range.end == selection.location, selection.length == 0 {
             sessionLength = min(span.text.count, above.count)
         }
+        // A cleanup read tells where the take's own text stands: the pass edits only that, never what stood in the field before.
+        var takeStart: Int?, takeEnd: Int?
+        if kind == .cleanup {
+            let whole = captured as NSString
+            if let span = queue.latestRunSpan(inField: snapshot), span.end <= whole.length {
+                takeStart = whole.substring(to: span.location).count; takeEnd = whole.substring(to: span.end).count
+            } else {
+                takeStart = above.count; takeEnd = above.count
+            }
+        }
         return FieldReadReply(id: instructionID, state: .done, above: above, below: below, selection: selected,
                               sessionLength: sessionLength, stop: aboveStop,
                               stopBelow: belowStop, moreAbove: aboveStop == .cap,
-                              moreBelow: belowStop == .cap, documentID: documentID)
+                              moreBelow: belowStop == .cap, documentID: documentID, takeStart: takeStart, takeEnd: takeEnd)
+    }
+
+    /// The field as the queue's shadow has it, for a cleanup pass (no flush, no read): the text above and below the caret and
+    /// where the newest run's text starts and ends in them (characters). Nil until the queue has typed every word it holds, so
+    /// the pass sees the words it cleans. The edit it leads to is placed by the queue like Magic's (`apply`), through whatever
+    /// the user changed since.
+    public func shadow(id: String) -> FieldShadow? {
+        guard !passwordField, queue.shadowSettled, let snapshot = queue.shadowSnapshot else { return nil }
+        let selection = snapshot.selection
+        let text = snapshot.text as NSString
+        guard selection.location >= 0, selection.end <= text.length else { return nil }
+        let above = text.substring(to: selection.location), below = text.substring(from: selection.end)
+        // The take's own text bounds every pass: what stands before it is context, never edited. A take that cannot be told in
+        // the field (nothing of it left, or the field no longer shows it) is not cleaned from the shadow.
+        var start: Int?, end: Int?
+        var refusal: String? = selection.length > 0 ? "selection" : nil
+        if let span = queue.latestRunSpan(inField: snapshot.text), span.end <= text.length {
+            start = text.substring(to: span.location).count
+            end = text.substring(to: span.end).count
+        } else if refusal == nil {
+            refusal = "noTake"
+        }
+        activeInstructionID = id; activeReadIsCleanup = true
+        shadowReads.append((id, snapshot.text))
+        if shadowReads.count > 4 { shadowReads.removeFirst() }
+        readSelection = selection; readText = snapshot.text; readRange = UTF16Range(location: 0, length: text.length)
+        instructionCursor = selection
+        return FieldShadow(id: id, runID: streamedRunID ?? "", above: above, below: below, takeStart: start, takeEnd: end,
+                           documentID: documentID, refused: refusal)
     }
 
     /// Magic's result (or its undo) goes to the queue as one edit of the text it read; the user's typing or clicks
     /// meanwhile rebase it, and only a scope the user changed is refused.
-    public func apply(_ edit: ScopedEdit) async -> ScopedEditAck? {
+    public func apply(_ original: ScopedEdit) async -> ScopedEditAck? {
+        var edit = original
         func refused(_ reason: String) -> ScopedEditAck { .init(id: edit.id, applied: false, reason: reason) }
         guard edit.documentID == documentID, let target else { return refused("The focused field changed. Nothing was edited.") }
         guard activeInstructionID == edit.instructionID else { return refused("A newer field read owns this edit. Nothing was edited.") }
+        // A cleanup pass planned from the shadow: what the field shows now is the base, the pass's changes land only in
+        // the words nobody changed since (the user's typing, speech typed meanwhile). `FieldMerge`, as on the iPhone.
+        if let index = shadowReads.firstIndex(where: { $0.id == edit.instructionID }) {
+            let read = shadowReads.remove(at: index).text
+            if edit.selected == nil, edit.before + edit.after == read {
+                guard let length = try? target.textLength(), let current = try? target.text(in: .init(location: 0, length: length)),
+                      let caret = try? target.selectedRange(), caret.length == 0, caret.end <= length
+                else { return .init(id: edit.id, applied: false, reason: "The field changed. Nothing was edited.", unplaceable: true) }
+                if current != read {
+                    let merged = String(FieldMerge.rebase(base: Array(read), kept: Array(current), incoming: Array(edit.target)).text)
+                    guard merged != current else { return refused("The words changed meanwhile. Nothing was edited.") }
+                    let ns = current as NSString
+                    edit.before = ns.substring(to: caret.location); edit.after = ns.substring(from: caret.end); edit.target = merged
+                    readSelection = caret; readText = current; readRange = .init(location: 0, length: length)
+                    instructionCursor = caret
+                }
+            }
+        }
         guard let anchor = readSelection ?? instructionCursor else { return refused("The field changed. Nothing was edited.") }
         let range: UTF16Range
         if let selected = edit.selected {
@@ -603,6 +663,11 @@ import LegatoMac
                          reason: "The app did not confirm the edit. The original and suggestion are saved; check the field before retrying.",
                          stopped: true)
         case .dropped:
+            // Native edits are stopped for this run (the caret could not be restored): another pass would only park and drop
+            // again, so the cleanup session is told the field stopped (no repass), and the notice says why.
+            if let notice = target.nativeInputNotice {
+                return .init(id: edit.id, applied: false, reason: notice, stopped: true)
+            }
             return refused("The field changed. Nothing was edited.")
         }
     }

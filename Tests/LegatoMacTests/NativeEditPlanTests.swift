@@ -6,11 +6,10 @@ import LegatoKeyboardCore
 @Suite struct NativeEditPlanTests {
     @Test func aReplacementIsOneWholeHunkStepSoNoInterruptionLeavesAGap() {
         let original = "return before sunset"
-        var plan = NativeEditPlan(current: Array(original), desired: Array(original.uppercased()), paced: true)
+        var plan = NativeEditPlan(current: Array(original), desired: Array(original.uppercased()))
         var lengths: [Int] = []
-        while let step = plan.next, let after = plan.afterNext {
-            #expect(!step.typewriter)
-            lengths.append(step.range.count)
+        while plan.next != nil, let after = plan.afterNext {
+            lengths.append(plan.next!.range.count)
             #expect(after.count == original.count, "A replaced hunk never leaves a deleted-word gap")
             let confirmed = plan.confirm(after)
             #expect(confirmed)
@@ -19,32 +18,27 @@ import LegatoKeyboardCore
         #expect(String(plan.expected) == original.uppercased())
     }
 
-    @Test func aTailHunkAndAMidTextHunkAreOneStepEachAndOnlyNewSpeechIsTyped() {
-        let tail = NativeEditPlan(current: Array("we saw a boat"), desired: Array("we saw a boat today"), paced: true)
-        #expect(tail.next?.typewriter == true, "new speech at the end keeps the typewriter")
-        let flushed = NativeEditPlan(current: Array("we saw a boat"), desired: Array("we saw a boat today"), paced: false)
-        #expect(flushed.next == .init(range: 13..<13, replacement: Array(" today")))
-        let mid = NativeEditPlan(current: Array("we saw a boat today"), desired: Array("we saw a big red boat today"), paced: true)
-        var midCopy = mid, midSteps = 0
-        while let after = midCopy.afterNext { #expect(midCopy.next?.typewriter == false); _ = midCopy.confirm(after); midSteps += 1 }
+    @Test func everyHunkIsOneStepWhereverItIsAndTheEntranceIsTheExecutorsBusiness() {
+        let tail = NativeEditPlan(current: Array("we saw a boat"), desired: Array("we saw a boat today"))
+        #expect(tail.next == .init(range: 13..<13, replacement: Array(" today")), "new speech at the end is one hunk too")
+        var mid = NativeEditPlan(current: Array("we saw a boat today"), desired: Array("we saw a big red boat today")), midSteps = 0
+        while let after = mid.afterNext { _ = mid.confirm(after); midSteps += 1 }
         #expect(midSteps == 1, "a mid-text insert is one write")
-        let cleanup = NativeEditPlan(current: Array("um we saw a boat"), desired: Array("We saw a boat."), paced: true)
-        var steps = 0, copy = cleanup
-        while let after = copy.afterNext { #expect(copy.next?.typewriter == false || copy.next?.replacement.count == 1); _ = copy.confirm(after); steps += 1 }
+        var cleanup = NativeEditPlan(current: Array("um we saw a boat"), desired: Array("We saw a boat.")), steps = 0
+        while let after = cleanup.afterNext { _ = cleanup.confirm(after); steps += 1 }
         #expect(steps <= 3, "a cleanup is a few hunks, not one step per character")
     }
 
     @Test(arguments: [("a colour boat", "a color boat"), ("abc", "x"), ("x", "abc"), ("a⛵️b", "a🌊b"), ("old tail", ""), ("", "new tail")])
     func cachedStepsReachTheExactTarget(old: String, target: String) {
-        var plan = NativeEditPlan(current: Array(old), desired: Array(target), paced: true)
+        var plan = NativeEditPlan(current: Array(old), desired: Array(target))
         while let after = plan.afterNext {
             let confirmed = plan.confirm(after)
             #expect(confirmed)
         }
         #expect(String(plan.expected) == target)
-        #expect(plan.remainingInsertions == 0)
-        #expect(!plan.matches(current: Array("external text"), desired: Array(target), paced: true))
-        #expect(!plan.matches(current: plan.expected, desired: Array(target + "changed"), paced: true))
+        #expect(!plan.matches(current: Array("external text"), desired: Array(target)))
+        #expect(!plan.matches(current: plan.expected, desired: Array(target + "changed")))
     }
 }
 
@@ -200,6 +194,7 @@ import LegatoKeyboardCore
         let original = String(repeating: "return before sunset and keep these words. ", count: 20)
         let field = NativePlanField(original)
         let bound = MacFieldQueue(target: field)
+        bound.paced = { false } // chunk contract here; the entrance burst has its own tests
         bound.sleep = { _ in await Task.yield() }
         let result = await bound.edit(.init(range: .init(location: 0, length: original.utf16.count), scope: original, target: original.uppercased()))
         guard case .applied = result else { Issue.record("rewrite did not finish"); return }
@@ -213,6 +208,7 @@ import LegatoKeyboardCore
         let field = NativePlanField(original)
         field.loseFocusAfter = 2
         let queue = MacFieldQueue(target: field)
+        queue.paced = { false } // chunk contract here; the entrance burst has its own tests
         var clock = ContinuousClock.now
         queue.now = { clock }
         queue.sleep = { duration in clock += duration; await Task.yield() }
@@ -227,6 +223,7 @@ import LegatoKeyboardCore
         let original = "return before sunset"
         let field = NativePlanField("Header " + original)
         let bound = MacFieldQueue(target: field)
+        bound.paced = { false } // chunk contract here; the entrance burst has its own tests
         bound.sleep = { _ in await Task.yield() }
         var typed = false
         var writesAtKey = 0
@@ -269,6 +266,7 @@ import LegatoKeyboardCore
         let field = NativePlanField(original)
         field.ignoreFirstWrites = 1
         let queue = MacFieldQueue(target: field)
+        queue.paced = { false } // chunk contract here; the entrance burst has its own tests
         queue.sleep = { _ in await Task.yield() }
         let result = await queue.edit(.init(range: .init(location: 0, length: original.utf16.count), scope: original, target: original.uppercased()))
         guard case .applied = result else { Issue.record("edit did not recover"); return }

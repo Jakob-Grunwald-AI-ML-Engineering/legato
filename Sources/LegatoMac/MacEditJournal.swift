@@ -24,6 +24,8 @@ public enum MacEditJournal {
         case applied, dropped, waiting, reset, recovery
         /// Keystroke fields: a region's keys were planned; a key was refused by its guards (nothing sent).
         case planned, refused
+        /// A read that differed from the shadow: `detail` is the `MacFieldShadow.Observation`.
+        case observed
         /// The field stopped reading: a run went on in the panel (`text`: its newest text, `length`: the characters of it
         /// the field shows).
         case panel

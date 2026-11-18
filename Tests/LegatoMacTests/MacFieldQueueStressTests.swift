@@ -59,6 +59,10 @@ import LegatoKeyboardCore
     var trail: [String] = []
     var mark = 0
     var keysSent = 0, keysDropped = 0, keysLate = 0, refusals = 0, caretSets = 0, hops = 0, lazyCarets = 0
+    /// Runs after each synthetic key went out (with the count so far): the user's key can meet a burst or a unit here.
+    var onKeySent: ((Int) -> Void)?
+    /// Like Safari's autocorrect: a write that starts with a space capitalises the word it follows when it is one of these.
+    var autocapitalize: Set<String> = []
     private enum Event { case key(FieldKey), caret(UTF16Range) }
     private var inFlight: [(due: ContinuousClock.Instant, event: Event)] = []
     /// The caret the field reports instead of the real one, and until when (nil: until the next key).
@@ -69,14 +73,47 @@ import LegatoKeyboardCore
     var nativeCanAdmit = true
     var nativeInputProtected = false
     var onNativeEnd: (() -> Void)?
-    func beginNativeInputUnit() -> Bool { nativeCanAdmit }
+    /// Time passing inside the field (`nativeWriteCost`: an AX write is a few milliseconds, not free) and the native unit's
+    /// lease like `NativeInputHandoff`: with `nativeWorkBudget`, every AX call after that long since the unit began throws
+    /// until `prepareNativeInputHome` (then the full budget), and a unit that ends away from its home blocks the lease.
+    var spend: (Duration) -> Void = { _ in }
+    var nativeWriteCost = Duration.zero
+    var nativeWorkBudget: Duration?
+    var nativeFullBudget = Duration.milliseconds(500)
+    private var unitStart: ContinuousClock.Instant?
+    private var homing = false
+    var unitsBlocked = 0, expiredCalls = 0
+    private func budget() throws {
+        guard let limit = nativeWorkBudget, let start = unitStart else { return }
+        if clock() - start >= (homing ? nativeFullBudget : limit) { expiredCalls += 1; throw TextTargetReadError.unsupported }
+    }
+    func beginNativeInputUnit() -> Bool {
+        guard nativeCanAdmit else { return false }
+        unitStart = clock(); homing = false
+        return true
+    }
+    func prepareNativeInputHome() { homing = true }
     func endNativeInputUnit(homeVerified: Bool) -> Bool {
+        unitStart = nil
+        if nativeWorkBudget != nil, !homeVerified { nativeCanAdmit = false; unitsBlocked += 1 }
         if homeVerified { onNativeEnd?() }
         return homeVerified
     }
 
     var inputMark: Int { mark }
     var fieldKey: AnyHashable? { key }
+
+    /// Value and selection notifications like AX's: one per op that landed (`notifies` false: a host that never sends one).
+    var notifies = true
+    var notificationsSent = 0
+    private var handler: (@MainActor () -> Void)?
+    func observeChanges(_ handler: @escaping @MainActor () -> Void) -> Bool {
+        guard notifies else { return false }
+        self.handler = handler
+        return true
+    }
+    func stopObserving() { handler = nil }
+    private func emit() { notificationsSent += 1; handler?() }
 
     /// The real caret, the reported one when it differs, keys in flight, and the text (for failure trails).
     var state: String {
@@ -103,6 +140,26 @@ import LegatoKeyboardCore
         if late { keysLate += 1 }
         let lag = late ? 450 + rng.next(450) : rng.next(30)
         inFlight.append((clock() + .milliseconds(lag), .key(key)))
+        onKeySent?(keysSent)
+    }
+
+    /// A key of a burst after one still on its way: every guard except the selection.
+    func pressFollowing(_ key: FieldKey, mark: Int) throws {
+        settle()
+        guard keys else { throw FieldKeyRefusal.unavailable }
+        guard isFocused() else { refusals += 1; throw FieldKeyRefusal.notFocused }
+        if rng.chance(blipChance) { refusals += 1; throw FieldKeyRefusal.notFocused }
+        guard mark == self.mark else { refusals += 1; throw FieldKeyRefusal.userInput }
+        if case .text(let character) = key { precondition(!character.isNewline && character != "\t", "Return or Tab synthesized") }
+        keysSent += 1
+        if rng.chance(dropChance) { keysDropped += 1; return }
+        let late = rng.chance(lateChance)
+        if late { keysLate += 1 }
+        let lag = late ? 450 + rng.next(450) : rng.next(30)
+        // Keys of a burst land in the order they were sent.
+        let due = max(clock() + .milliseconds(lag), inFlight.last?.due ?? clock())
+        inFlight.append((due, .key(key)))
+        onKeySent?(keysSent)
     }
 
     func setCaret(_ range: UTF16Range, mark: Int, selection planned: UTF16Range) throws {
@@ -126,6 +183,7 @@ import LegatoKeyboardCore
     func settle(all: Bool = false) {
         while let first = inFlight.first, all || first.due <= clock() {
             inFlight.removeFirst()
+            defer { emit() }
             switch first.event {
             case .key(let key): apply(key)
             case .caret(let range):
@@ -250,9 +308,10 @@ import LegatoKeyboardCore
         other = (Array(text), UTF16Range(location: text.utf16.count, length: 0))
         focusedElement += 1; focusedBase = 0; mark += 1
     }
-    func selectedRange() throws -> UTF16Range { settle(); return shownCaret.shifted(-base) }
-    func textLength() throws -> Int { settle(); return shown.utf16.count - base }
+    func selectedRange() throws -> UTF16Range { try budget(); settle(); return shownCaret.shifted(-base) }
+    func textLength() throws -> Int { try budget(); settle(); return shown.utf16.count - base }
     func text(in range: UTF16Range) throws -> String {
+        try budget()
         settle()
         let shown = (lagging ?? self.shown) as NSString
         lagging = nil
@@ -269,11 +328,13 @@ import LegatoKeyboardCore
         return shown.substring(from: base)
     }
     func setSelectedRange(_ range: UTF16Range) throws {
+        try budget()
         let range = range.shifted(base)
         guard range.location >= base, range.end <= string.utf16.count else { throw TextTargetReadError.unsupported }
         selection = range
     }
     func replace(_ range: UTF16Range, with text: String) throws {
+        try budget()
         let range = range.shifted(base)
         // A Chromium field reports success for an Accessibility write and changes nothing.
         guard !keys else { writes += 1; return }
@@ -283,8 +344,20 @@ import LegatoKeyboardCore
         value = Array(ns.replacingCharacters(in: NSRange(location: range.location, length: range.length), with: text))
         selection = .init(location: range.location + text.utf16.count, length: 0)
         writes += 1
+        if text.hasPrefix(" "), !autocapitalize.isEmpty {
+            let upTo = String(value.prefix(range.location))
+            if let word = upTo.split(separator: " ", omittingEmptySubsequences: true).last.map(String.init),
+               autocapitalize.contains(word), upTo.hasSuffix(word) {
+                var rewritten = value
+                let at = upTo.count - word.count
+                rewritten.replaceSubrange(at..<upTo.count, with: Array(word.prefix(1).uppercased() + word.dropFirst()))
+                value = rewritten
+            }
+        }
         if rng.chance(lagChance) { lagging = before }
         onNativeReplace?()
+        emit()
+        spend(nativeWriteCost)
     }
 
     /// The user types `character` at their caret (replacing a selection).
@@ -293,6 +366,7 @@ import LegatoKeyboardCore
         let ns = string as NSString
         value = Array(ns.replacingCharacters(in: NSRange(location: selection.location, length: selection.length), with: String(character)))
         selection = .init(location: selection.location + String(character).utf16.count, length: 0)
+        emit()
     }
     /// The user clicks somewhere (on a grapheme boundary).
     func click() {
@@ -334,6 +408,10 @@ private struct SeededRandom {
     unowned let field: FakeAXField
     let readable: () -> Bool
     var roots: [SplitView] = []
+    /// Edge's bulleted list (Mac VM, 2026-11-18): an empty last item (the value ends in its marker) reads with a placeholder
+    /// break after it, and `AXSelectedTextRange` answers `0+0` for a caret in it, while the text markers have it right.
+    var edgeList = false
+    private var staleCaret = false
     init(_ field: FakeAXField, readable: @escaping () -> Bool) { self.field = field; self.readable = readable }
 
     /// The field's text as this element exposes it: the value, the selection's space without the hidden line breaks, and
@@ -359,7 +437,12 @@ private struct SeededRandom {
     private var memo: View?
     /// The text and selection as the field shows them now.
     private var view: View? {
-        guard readable(), let text = try? field.wholeText(), let selection = try? field.selectedRange() else { return nil }
+        guard readable(), var text = try? field.wholeText(), let selection = try? field.selectedRange() else { return nil }
+        staleCaret = false
+        if edgeList, text.hasSuffix("\u{2022} ") {
+            staleCaret = selection.length == 0 && selection.location == text.utf16.count
+            text += "\n"
+        }
         if let memo, memo.value == text, memo.selection == selection { return memo }
         memo = View(text, selection: selection)
         return memo
@@ -370,9 +453,14 @@ private struct SeededRandom {
     var axCharacterCount: Int? { view?.value.utf16.count }
     var axSelection: UTF16Range? {
         guard let view else { return nil }
+        if edgeList, staleCaret { return UTF16Range(location: 0, length: 0) }
+        return markerSelection(view)
+    }
+    private func markerSelection(_ view: View) -> UTF16Range {
         let start = view.ranged(view.selection.location)
         return UTF16Range(location: start, length: view.ranged(view.selection.end) - start)
     }
+    var axMarkerSelection: UTF16Range? { edgeList ? view.map(markerSelection) : nil }
     func axString(in range: UTF16Range) -> String? {
         guard let view, range.location >= 0, range.length >= 0, range.end <= view.ranged.count else { return nil }
         return Self.string(Array(view.ranged[range.location..<range.end]))
@@ -393,6 +481,7 @@ private struct SeededRandom {
     let field: FakeAXField
     var nestedBroken = false
     var unreadable = false
+    var edgeList = false { didSet { rebuild() } }
     /// Reads answered by the editable root.
     var rootReads = 0
     private var reader: AXFieldReader!
@@ -406,6 +495,7 @@ private struct SeededRandom {
             return !unreadable
         }
         let element = SplitView(field) { [unowned self] in !unreadable && !nestedBroken }
+        root.edgeList = edgeList; element.edgeList = edgeList
         element.roots = [root]
         reader = AXFieldReader(element: element)
     }
@@ -519,7 +609,12 @@ private struct SeededRandom {
     /// element that sometimes exposes nothing); or like that, with the whole editor unreadable for a while or for good.
     private enum ReadMode { case direct, split, unreadable }
 
-    private func session(seed: UInt64, keys: Bool = false, read: ReadMode = .direct, stats: inout Stats) async -> String? {
+    /// `verifiedKeys`: the field fell back to verified keys (`MacFieldHost.burstFailureLimit` failed burst checks; here
+    /// `verifiedKeysOnly`), so every key is verified one by one, as before bursts. Rig change with bursts: a burst is sent blind, so a key the host silently drops
+    /// mid-burst leaves a mangled word that only the field's own recovery can reshape; sessions with bursts therefore drop no
+    /// keys, and the verified-key sessions keep every old fault.
+    private func session(seed: UInt64, keys: Bool = false, read: ReadMode = .direct, verifiedKeys: Bool = false,
+                         stats: inout Stats) async -> String? {
         var rng = SeededRandom(seed)
         var modeRng = SeededRandom(seed &+ 101)
         // Keystroke fields sometimes start on an empty last line, which a rich editor shows as a placeholder.
@@ -554,7 +649,9 @@ private struct SeededRandom {
         }
         let reader = read == .direct ? nil : ReaderField(field)
         if read == .unreadable { field.dropChance = 0 }
+        if keys, !verifiedKeys { field.dropChance = 0 }
         let queue = MacFieldQueue(target: reader ?? field)
+        queue.verifiedKeysOnly = verifiedKeys
         queue.paced = { true }
         queue.now = { clock }
         // The whole editor stops reading a while after the take starts: briefly (under the panel grace) or for the rest
@@ -732,18 +829,18 @@ private struct SeededRandom {
     /// The same sessions in a field that ignores Accessibility writes and takes verified keys (Chromium): keys lag,
     /// some land past the read-back window, some are dropped, the focus blips. The same invariants hold, the caret
     /// ends after Magic's result, and no key is left in flight.
-    @Test func seededKeystrokeSessionsKeepTheUsersTextAndAlwaysFinish() async {
+    @Test(arguments: [false, true]) func seededKeystrokeSessionsKeepTheUsersTextAndAlwaysFinish(verifiedKeys: Bool) async {
         let runs = Int(ProcessInfo.processInfo.environment["LEGATO_STRESS_RUNS"] ?? "") ?? 150
         let only = ProcessInfo.processInfo.environment["LEGATO_STRESS_SEED"].flatMap(UInt64.init)
         var failures: [String] = []
         var stats = Stats()
         for seed in only.map({ [$0] }) ?? (1...UInt64(runs)).map({ $0 }) {
-            if let failure = await session(seed: seed, keys: true, stats: &stats) { failures.append(failure) }
+            if let failure = await session(seed: seed, keys: true, verifiedKeys: verifiedKeys, stats: &stats) { failures.append(failure) }
             if failures.count >= 3 { break }
         }
         #expect(failures.isEmpty, "\(failures.joined(separator: "\n"))")
         if only == nil {
-            #expect(stats.digits > runs && stats.dropped > 0 && stats.late > 0 && stats.refusals > 0, "stats: \(stats)")
+            #expect(stats.digits > runs && (verifiedKeys ? stats.dropped > 0 : true) && stats.late > 0 && stats.refusals > 0, "stats: \(stats)")
             #expect(stats.caretSets > 0 && stats.hops > 0 && stats.lazy > 0 && stats.placeholders > 0, "stats: \(stats)")
             #expect(stats.rebinds > runs / 4, "stats: \(stats)")
         }
@@ -754,13 +851,14 @@ private struct SeededRandom {
     /// `unreadable`: the whole editor also stops reading, briefly or for the rest of the dictation; a run with words left
     /// then goes on in the panel, never dropped, and the field's words plus the panel's rest are the take's, each once.
     /// Reads cost more here, so the gate plays fewer sessions; `LEGATO_STRESS_RUNS` sets a long local run.
-    @Test(arguments: [false, true]) func seededTightListSessionsReadThroughTheEditorAndNeverDrop(unreadable: Bool) async {
+    @Test(arguments: [false, true], [false, true])
+    func seededTightListSessionsReadThroughTheEditorAndNeverDrop(unreadable: Bool, verifiedKeys: Bool) async {
         let runs = Int(ProcessInfo.processInfo.environment["LEGATO_STRESS_RUNS"] ?? "") ?? 50
         let only = ProcessInfo.processInfo.environment["LEGATO_STRESS_SEED"].flatMap(UInt64.init)
         var failures: [String] = []
         var stats = Stats()
         for seed in only.map({ [$0] }) ?? (1...UInt64(runs)).map({ $0 }) {
-            if let failure = await session(seed: seed, keys: true, read: unreadable ? .unreadable : .split, stats: &stats) { failures.append(failure) }
+            if let failure = await session(seed: seed, keys: true, read: unreadable ? .unreadable : .split, verifiedKeys: verifiedKeys, stats: &stats) { failures.append(failure) }
             if failures.count >= 3 { break }
         }
         #expect(failures.isEmpty, "\(failures.joined(separator: "\n"))")
@@ -973,6 +1071,299 @@ private struct SeededRandom {
     }
 
     /// A keystroke field with its own clock, driven by the queue's sleeps.
+    // MARK: Shadow, bursts, entrance
+
+    @Test func aKeyedChunkIsOneBurstWithOneCheckAndItsInsertEntersInPieces() async {
+        let (field, queue, _, advance) = keyedField("Log: ")
+        var gaps: [Duration] = []
+        queue.paced = { true }
+        queue.sleep = { gaps.append($0); advance($0) }
+        var entries: [MacEditJournal.Entry] = []
+        let trail = queue.journal
+        queue.journal = { entry in entries.append(entry); trail?(entry) }
+        queue.live(runID: "take", version: 1, text: "the harbor is calm")
+        await queue.whenIdle()
+        #expect(field.string == "Log: the harbor is calm")
+        let sent = entries.filter { $0.kind == .sent }, verified = entries.filter { $0.kind == .verified }
+        #expect(sent.count == 1 && sent[0].detail?.hasPrefix("burst keys=18") == true, "\(sent.map { $0.detail ?? "" })")
+        #expect(verified.count == 1, "one check for the chunk")
+        #expect(field.keysSent == 18)
+        let entrance = gaps.filter { $0 < .milliseconds(20) }.reduce(Duration.zero, +)
+        #expect(entrance > .zero && entrance <= .milliseconds(Int(ChunkEntrance.capMs) + 10), "typewriter gaps stay inside the cap: \(entrance)")
+        #expect(queue.host.latency.samples == 1)
+    }
+
+    @Test func aFieldWhoseBurstChecksFailTwiceFallsBackToVerifiedKeysAndStillGetsTheText() async {
+        let (field, queue, _, _) = keyedField("Log: ") { $0.lateChance = 1 }
+        queue.live(runID: "take", version: 1, text: "one two")
+        await queue.whenIdle()
+        queue.live(runID: "take", version: 2, text: "one two three four")
+        await queue.whenIdle()
+        queue.live(runID: "take", version: 3, text: "one two three four five six", complete: true)
+        await queue.whenIdle()
+        field.settle(all: true)
+        #expect(field.string == "Log: one two three four five six", "\(field.trail.suffix(12).joined(separator: "\n"))")
+        #expect(queue.host.burstFailures >= MacFieldHost.burstFailureLimit)
+        #expect(!queue.host.bursts, "learned for the field: later chunks go key by key")
+    }
+
+    @Test func aNativeChunkEntersAsFastAXInsertsWithOneCheckAndFlushWritesItWhole() async {
+        let field = FakeAXField("Log: ", rng: SeededRandom(3))
+        var clock = ContinuousClock.now
+        let queue = MacFieldQueue(target: field)
+        var slept = Duration.zero
+        queue.sleep = { slept += $0; clock += $0 }
+        queue.now = { clock }
+        var entries: [MacEditJournal.Entry] = []
+        queue.journal = { entries.append($0) }
+        queue.live(runID: "take", version: 1, text: "the harbor is calm today")
+        await queue.whenIdle()
+        #expect(field.string == "Log: the harbor is calm today")
+        #expect(field.writes > 1, "pieces: \(field.writes)")
+        #expect(entries.filter { $0.kind == .verified }.count == 1, "one check for the chunk")
+        #expect(slept <= .milliseconds(Int(ChunkEntrance.capMs) + 10), "\(slept)")
+        // A flush, like Reduce Motion, writes the chunk as one insert.
+        let before = field.writes
+        queue.live(runID: "take", version: 2, text: "the harbor is calm today and quiet")
+        await queue.flush()
+        #expect(field.string == "Log: the harbor is calm today and quiet")
+        #expect(field.writes == before + 1)
+    }
+
+    /// Acceptance in the Mac VM (9bca5ca): TextEdit and Safari took ~16 characters of a 21-piece burst, then every AX call threw
+    /// (the native unit's work budget is 250 ms and a write costs milliseconds), the queue read its own half-written burst as
+    /// the user's, the caret stayed away from home, the lease blocked, and the take dropped. The earlier rigs wrote for free.
+    private func slowNativeField(writeMs: Int, budgetMs: Int? = 250, seed: UInt64 = 21)
+        -> (field: FakeAXField, queue: MacFieldQueue, entries: () -> [MacEditJournal.Entry], elapsed: () -> Duration) {
+        let field = FakeAXField("", rng: SeededRandom(seed))
+        var clock = ContinuousClock.now
+        let start = clock
+        field.clock = { clock }
+        field.spend = { clock += $0 }
+        field.nativeWriteCost = .milliseconds(writeMs)
+        field.nativeWorkBudget = budgetMs.map { .milliseconds($0) }
+        let queue = MacFieldQueue(target: field)
+        queue.now = { clock }
+        queue.sleep = { clock += $0 }
+        var entries: [MacEditJournal.Entry] = []
+        queue.journal = { entries.append($0) }
+        return (field, queue, { entries }, { clock - start })
+    }
+
+    @Test(arguments: [2, 6, 10, 25, 60]) func aBurstOnAFieldWhoseWritesTakeTimeLandsWholeWithOneCheckAndNothingTheUsers(writeMs: Int) async {
+        let (field, queue, entries, elapsed) = slowNativeField(writeMs: writeMs)
+        queue.live(runID: "take", version: 1, text: "um so I wanted to say")
+        await queue.whenIdle()
+        let kinds = entries().map(\.kind)
+        #expect(field.string == "um so I wanted to say", "\(field.string)")
+        #expect(entries().filter { $0.kind == .sent }.count == 1 && kinds.filter { $0 == .verified }.count == 1, "one chunk, one check: \(kinds)")
+        #expect(!kinds.contains(.mismatch) && !kinds.contains(.regionClosed) && !kinds.contains(.user) && !kinds.contains(.dropped), "\(kinds)")
+        #expect(!entries().contains { $0.kind == .observed && $0.detail == "userChange" })
+        #expect(field.expiredCalls == 0 && field.unitsBlocked == 0, "the unit's budget held: \(field.expiredCalls)")
+        // Wall-clock: the burst (and its check) end inside the unit's work budget however slow the writes are.
+        #expect(elapsed() <= .milliseconds(250), "\(elapsed())")
+        if writeMs >= 25 { #expect(field.writes < 21, "slow writes catch up in fewer pieces: \(field.writes)") }
+    }
+
+    @Test func aWriteThatFailsMidBurstLeavesItsPiecesAsTheQueuesOwnAndTheRestLandsLater() async {
+        // A budget the burst's own cap does not know about (a slower host): the 6th write throws.
+        let (field, queue, entries, _) = slowNativeField(writeMs: 20, budgetMs: 100)
+        queue.live(runID: "take", version: 1, text: "um so I wanted to say")
+        await queue.whenIdle()
+        let kinds = entries().map(\.kind)
+        #expect(field.string == "um so I wanted to say", "\(field.string) \(kinds)")
+        let trail = entries().map { "\($0.kind.rawValue) \($0.reason ?? "") \($0.detail ?? "")" }.joined(separator: "\n")
+        #expect(!kinds.contains(.regionClosed) && !kinds.contains(.user) && !kinds.contains(.dropped), "\(trail)")
+        #expect(!entries().contains { $0.kind == .observed && $0.detail == "userChange" })
+        #expect(field.unitsBlocked == 0, "the caret went home after the failed write: native edits stay available")
+        #expect(field.expiredCalls > 0, "the rig did model the budget running out")
+        // A cleanup edit afterwards lands once: no drop, no loop.
+        let result = await queue.edit(.init(range: .init(location: 0, length: 21), scope: "um so I wanted to say", target: "Um so I wanted to say"))
+        #expect(result == .applied(.init(location: 0, length: 21)))
+        #expect(field.string == "Um so I wanted to say")
+        #expect(field.unitsBlocked == 0)
+    }
+
+    /// Safari again: the capitalised word met a write that failed midway, so the field showed more (or less) than the queue
+    /// counted. The same letters in other cases are still the host's rewrite: adopted, the take goes on and is never dropped.
+    @Test func aHostRewriteMeetingAWriteThatFailedMidwayIsStillAdopted() async {
+        let (field, queue, entries, _) = slowNativeField(writeMs: 20, budgetMs: 100)
+        field.autocapitalize = ["anna"]
+        var drops: [MacFieldQueue.Drop] = []
+        queue.onDrop = { drops.append($0) }
+        queue.live(runID: "take", version: 1, text: "send the invoice to anna")
+        await queue.whenIdle()
+        queue.live(runID: "take", version: 2, text: "send the invoice to anna um by friday and then some more words", complete: true)
+        await queue.whenIdle()
+        #expect(field.string == "send the invoice to Anna um by friday and then some more words", Comment(rawValue: field.string))
+        #expect(drops.isEmpty, Comment(rawValue: "\(drops) \(entries().map { $0.reason ?? $0.kind.rawValue })"))
+        #expect(entries().contains { $0.detail?.hasPrefix("midBurst") == true }, "the rig did fail a write midway")
+    }
+
+    @Test func aBlockedNativeLeaseDropsAnEditOnceAndNeverReplansItInALoop() async {
+        let (field, queue, entries, _) = slowNativeField(writeMs: 2)
+        field.value = Array("um so I wanted t"); field.selection = .init(location: 16, length: 0)
+        field.nativeCanAdmit = false
+        let result = await queue.edit(.init(range: .init(location: 0, length: 16), scope: "um so I wanted t", target: "Um So I Wanted T"))
+        #expect(result == .dropped(.focusLost))
+        await queue.whenIdle()
+        #expect(entries().filter { $0.kind == .edit }.count == 1 && entries().filter { $0.kind == .dropped }.count == 1)
+        #expect(field.writes == 0 && !queue.hasWork)
+    }
+
+    @Test(arguments: [false, true]) func theShadowFollowsTheFieldWithOrWithoutNotifications(notifies: Bool) async {
+        let field = FakeAXField("Log: ", rng: SeededRandom(4))
+        field.notifies = notifies
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.live(runID: "take", version: 1, text: "calm water")
+        await queue.whenIdle()
+        field.type("!")
+        queue.live(runID: "take", version: 2, text: "calm water ahead")
+        await queue.whenIdle()
+        #expect(queue.shadowSnapshot?.text == field.string)
+        #expect(notifies ? queue.notifications > 0 : queue.notifications == 0)
+        #expect(queue.host.notifies == (notifies ? true : nil))
+    }
+
+    @Test func shadowReadsAreClassifiedAsMatchesOwnWritesUserChangesOrUnknown() {
+        var shadow = MacFieldShadow(text: "calm", selection: .init(location: 4, length: 0))
+        #expect(shadow.observe(text: "calm", selection: .init(location: 4, length: 0)) == .matches)
+        #expect(shadow.observe(text: "calm sea", selection: .init(location: 8, length: 0), candidates: ["calm sea"]) == .ownWrite)
+        #expect(shadow.observe(text: "calm sea!", selection: .init(location: 9, length: 0), userInput: true) == .userChange)
+        shadow.notified()
+        #expect(shadow.observe(text: "calm sea!!", selection: .init(location: 10, length: 0)) == .userChange, "a notification accounts for it")
+        #expect(shadow.observe(text: "calm", selection: .init(location: 4, length: 0)) == .unknown, "no input, no notification, not ours")
+        #expect(!shadow.dirty)
+    }
+
+    /// Safari (acceptance round 3): autocorrect capitalised "anna" once the next words were typed after it. The queue read
+    /// it as the user's change and dropped the take. It is the host's rewrite (no real input): taken as landed, the take goes on.
+    @Test func aHostThatCapitalisesAWordJustTypedIsNotTheUsersChange() async {
+        let field = FakeAXField("Log: ", rng: SeededRandom(2))
+        field.autocapitalize = ["anna"]
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.sleep = { _ in }
+        var drops: [MacFieldQueue.Drop] = [], entries: [MacEditJournal.Entry] = []
+        queue.onDrop = { drops.append($0) }
+        queue.journal = { entries.append($0) }
+        queue.live(runID: "take", version: 1, text: "send the invoice to anna")
+        await queue.whenIdle()
+        queue.live(runID: "take", version: 2, text: "send the invoice to anna um by friday")
+        await queue.whenIdle()
+        #expect(field.string == "Log: send the invoice to Anna um by friday")
+        queue.live(runID: "take", version: 3, text: "send the invoice to anna um by friday ok", complete: true)
+        await queue.whenIdle()
+        #expect(field.string == "Log: send the invoice to Anna um by friday ok", "the raw word is never typed over the host's")
+        #expect(drops.isEmpty, "\(drops)")
+        #expect(entries.contains { $0.reason == "hostRewrite" })
+    }
+
+    @Test func aRealKeyInsideTheRewrittenWordIsStillTheUsers() async {
+        let field = FakeAXField("Log: ", rng: SeededRandom(2))
+        field.autocapitalize = ["anna"]
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.sleep = { _ in }
+        queue.live(runID: "take", version: 1, text: "send the invoice to anna")
+        await queue.whenIdle()
+        // The user types right after the text, then the take goes on: their key is theirs, never read as a host rewrite.
+        field.type("!"); queue.userActed()
+        queue.live(runID: "take", version: 2, text: "send the invoice to anna um by friday")
+        await queue.whenIdle()
+        #expect(field.string.contains("!"))
+        #expect(field.string.hasPrefix("Log: send the invoice to anna!") || field.string.hasPrefix("Log: send the invoice to Anna!"), Comment(rawValue: field.string))
+    }
+
+    /// Edge Markdown editor (acceptance round 3): a burst met by the user's keys left "water t" behind, the whole take
+    /// typed again at the caret. The fragment that landed is the region's own: the rest goes on from its end.
+    @Test(arguments: [8, 3]) func aBurstMetByARealKeyAdoptsItsFragmentAndFinishesFromThere(after: Int) async {
+        let (field, queue, _, _) = keyedField("Log: ")
+        var drops: [MacFieldQueue.Drop] = []
+        queue.onDrop = { drops.append($0) }
+        var fired = false
+        field.onKeySent = { [unowned field] sent in
+            guard sent == after, !fired else { return }
+            fired = true
+            field.type("X"); queue.userActed()
+        }
+        queue.live(runID: "take", version: 1, text: "water the plants", complete: true)
+        await queue.whenIdle()
+        field.settle(all: true)
+        let text = field.string
+        #expect(text.components(separatedBy: "water").count == 2, "our text is in the field once: \(text)")
+        #expect(text.contains("X") && text.components(separatedBy: "X").count == 2, "the user's key stays: \(text)")
+        let ours = text.replacingOccurrences(of: "X", with: "")
+        let trail = field.trail.suffix(10).joined(separator: "\n")
+        #expect(ours == "Log: water the plants", Comment(rawValue: "\(text)\n\(trail)"))
+        #expect(drops.isEmpty, "\(drops)")
+    }
+
+    /// Edge textarea (acceptance round 3): the user's key landed at the caret a keyed cleanup left mid-text. The cleanup
+    /// stops, what it retyped is its own, and the take's next words go at the take's end, never at that caret.
+    @Test func aUserKeyAtTheCaretACleanupLeftMidTextDoesNotReorderTheTake() async {
+        let (field, queue, _, _) = keyedField("go\n")
+        var entries: [MacEditJournal.Entry] = []
+        let trail = queue.journal
+        queue.journal = { entries.append($0); trail?($0) }
+        let take = "the release notes need a short summary um and a list of known issues"
+        queue.live(runID: "take", version: 1, text: take, complete: true)
+        await queue.whenIdle()
+        field.settle(all: true)
+        #expect(field.string == "go\n" + take)
+        // The pause cleanup title-cases every word, backwards through the sentence; the user's key lands after a few units.
+        var fired = false
+        field.onKeySent = { [unowned field] _ in
+            guard !fired, field.string.hasSuffix("List Of Known Issues") else { return }
+            fired = true
+            field.type("3"); queue.userActed()
+        }
+        let cleaned = take.split(separator: " ").map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: " ")
+        _ = await queue.edit(.init(range: .init(location: 3, length: take.utf16.count), scope: take, before: "go\n", target: cleaned))
+        field.settle(all: true)
+        #expect(fired, "the user's key met the cleanup: \(field.string)")
+        queue.live(runID: "take", version: 2, text: take + " oh and the changelog link", complete: true)
+        await queue.whenIdle()
+        field.settle(all: true)
+        let text = field.string
+        #expect(text.hasSuffix(" oh and the changelog link"), "the rest of the take goes at its end: \(text)")
+        #expect(text.components(separatedBy: "3").count == 2, "the user's key stays once: \(text)")
+        let words = text.replacingOccurrences(of: "3", with: "")
+        #expect(words.lowercased() == "go\n" + take + " oh and the changelog link", "no word moved: \(text)")
+        #expect(entries.contains { $0.detail?.hasPrefix("typedAtOwnCaret") == true })
+    }
+
+    /// The user's key can also come between the keys of one unit (a Backspace landed, its retyped letter was refused). The
+    /// take's next words still go at its end; the text is in order, at worst one letter of the cleaned word short.
+    @Test(arguments: [4, 6, 9, 12, 15]) func aUserKeyBetweenTheKeysOfACleanupUnitKeepsTheTakeInOrder(after: Int) async {
+        let (field, queue, _, _) = keyedField("go\n")
+        let take = "the release notes need a short summary um and a list of known issues"
+        queue.live(runID: "take", version: 1, text: take, complete: true)
+        await queue.whenIdle()
+        field.settle(all: true)
+        var fired = false
+        let base = field.keysSent
+        field.onKeySent = { [unowned field] sent in
+            guard !fired, sent == base + after else { return }
+            fired = true
+            field.type("3"); queue.userActed()
+        }
+        let cleaned = take.split(separator: " ").map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: " ")
+        _ = await queue.edit(.init(range: .init(location: 3, length: take.utf16.count), scope: take, before: "go\n", target: cleaned))
+        queue.live(runID: "take", version: 2, text: take + " oh and the changelog link", complete: true)
+        await queue.whenIdle()
+        field.settle(all: true)
+        let text = field.string
+        #expect(fired && text.hasSuffix(" oh and the changelog link"), Comment(rawValue: text))
+        #expect(text.components(separatedBy: "3").count == 2, Comment(rawValue: text))
+        let expected = Array("go\n" + take + " oh and the changelog link")
+        let got = Array(text.replacingOccurrences(of: "3", with: "").lowercased())
+        var i = 0
+        for character in got where i < expected.count && expected[i] == character { i += 1 }
+        #expect(i == got.count && expected.count - got.count <= 1, Comment(rawValue: "in order, at most one letter short: \(text)"))
+    }
+
     private func keyedField(_ text: String, seed: UInt64 = 5, configure: (FakeAXField) -> Void = { _ in })
         -> (FakeAXField, MacFieldQueue, () -> ContinuousClock.Instant, (Duration) -> Void) {
         let field = FakeAXField(text, rng: SeededRandom(seed))
@@ -1037,7 +1428,7 @@ private struct SeededRandom {
         #expect(field.string == prefix + "Also, very fast.", "\(entries.joined(separator: "\n"))")
         #expect(field.selection == UTF16Range(location: field.string.utf16.count, length: 0))
         // Every typed key went out once.
-        #expect(entries.filter { $0.hasPrefix("sent") && $0.hasSuffix(" key") }.count == "Also, very fast.".count)
+        #expect(field.keysSent == "Also, very fast.".count)
     }
 
     /// Plays `script` (milliseconds after the start, a run's text) into `queue` on a virtual clock that the queue's sleeps
@@ -1190,6 +1581,78 @@ private struct SeededRandom {
         #expect(field.selection == UTF16Range(location: (head + typed).utf16.count, length: 0))
     }
 
+    /// Edge, CodeMirror list editor (Mac VM, 2026-11-17, `Fixtures/journal-edge-cm-*.jsonl`): the caret is at the end of the
+    /// last item, followed by the empty last line's break; the first key landed, the next one did not verify, recovery
+    /// refused (`changedOrAmbiguous`) and the take dropped `userChanged`. Replayed through the reader over the hidden
+    /// break between the two items: the take must land, at the caret, with the break after it untouched.
+    @Test(arguments: ["journal-edge-cm-1.jsonl", "journal-edge-cm-2.jsonl"], [false, true])
+    func aTakeInAnEdgeCodeMirrorListLandsAtTheCaretBeforeTheEmptyLastLine(journal: String, verifiedKeys: Bool) async throws {
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Fixtures/\(journal)")
+        let entries = try String(contentsOf: url, encoding: .utf8).split(separator: "\n").compactMap {
+            try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+        }
+        let take = try #require(entries.first { $0["kind"] as? String == "live" }?["text"] as? String)
+        let read = try #require(entries.first { $0["kind"] as? String == "sent" }?["read"] as? String)
+        let field = FakeAXField(read.replacingOccurrences(of: "|", with: ""), rng: SeededRandom(51))
+        field.keys = true
+        field.selection = UTF16Range(location: read.components(separatedBy: "|")[0].utf16.count, length: 0)
+        let reader = ReaderField(field)
+        let queue = MacFieldQueue(target: reader)
+        queue.paced = { true }
+        queue.verifiedKeysOnly = verifiedKeys
+        var drops: [MacFieldQueue.Drop] = []
+        queue.onDrop = { drops.append($0) }
+        var trail: [String] = []
+        queue.journal = { trail.append("\($0.kind.rawValue) \($0.text ?? "") \($0.detail ?? "") \($0.reason ?? "")") }
+        await replay(queue, field: field, script: [(ms: 0, text: String(take.prefix(12))), (ms: 400, text: take)])
+        let expected = "- first item\n- second item " + take + "\n"
+        #expect(field.string.replacingOccurrences(of: "\u{00A0}", with: " ") == expected, "\(trail.suffix(25).joined(separator: "\n"))")
+        #expect(drops.isEmpty, "\(drops)")
+    }
+
+    /// Edge, `<ul>` with two items and an empty third (Mac VM, 2026-11-18, acceptance round 2): the caret in the empty item
+    /// reads `0+0`, so the queue planned from the field's start, typed a burst at the real caret and never saw it land, then
+    /// failed caret moves for seconds and handed the take to the panel. The markers give the caret; the take lands in the
+    /// item, once, and a second sentence after a Return-less continuation follows it.
+    @Test(arguments: [false, true]) func aTakeInAnEdgeBulletListTypesIntoTheEmptyItemWhereTheCaretIs(verifiedKeys: Bool) async {
+        let head = "\u{2022} first item\n\u{2022} second item\n\u{2022} "
+        let field = FakeAXField(head, rng: SeededRandom(61))
+        field.keys = true
+        let reader = ReaderField(field)
+        reader.edgeList = true
+        let queue = MacFieldQueue(target: reader)
+        queue.paced = { true }
+        queue.verifiedKeysOnly = verifiedKeys
+        var drops: [MacFieldQueue.Drop] = [], handovers: [MacFieldQueue.Handover] = []
+        queue.onDrop = { drops.append($0) }
+        queue.onUnreadable = { handovers += $0 }
+        var trail: [String] = []
+        queue.journal = { trail.append("\($0.kind.rawValue) \($0.text ?? "") \($0.detail ?? "") \($0.reason ?? "")") }
+        await replay(queue, field: field, script: [(ms: 0, text: "buy oat"), (ms: 400, text: "buy oat milk.")])
+        #expect(field.string == head + "buy oat milk.", "\(trail.suffix(20).joined(separator: "\n"))")
+        #expect(drops.isEmpty && handovers.isEmpty, "\(drops) \(handovers)")
+    }
+
+    /// Acceptance round 2 (Edge list, Mac VM): caret moves that never read back were retried four times, about five seconds
+    /// with the field's keys held. They give up within the move budget, and the edit drops once.
+    @Test func caretMovesThatNeverReadBackGiveUpWithinTheMoveBudget() async {
+        let field = FakeAXField("abc def", rng: SeededRandom(62))
+        field.keys = true
+        field.dropChance = 1
+        var clock = ContinuousClock.now
+        let start = clock
+        field.clock = { clock }
+        let queue = MacFieldQueue(target: field)
+        queue.paced = { false }
+        queue.now = { clock }
+        queue.sleep = { clock += $0 }
+        let result = await queue.edit(.init(range: .init(location: 0, length: 3), scope: "abc", target: "ABC"))
+        guard case .dropped = result else { Issue.record("expected a drop, got \(result)"); return }
+        let elapsed = clock - start
+        #expect(elapsed < .milliseconds(2_100), "\(elapsed)")
+        #expect(field.string == "abc def")
+    }
+
     /// Pinned: neither the focused element nor its editable root reads. The take is never dropped: what was typed stays,
     /// and the rest goes on in the panel (`onUnreadable`) after the grace, whole when nothing was typed yet.
     @Test(arguments: [false, true]) func aFieldThatReadsNeitherItselfNorItsRootGoesOnInThePanel(midTake: Bool) async {
@@ -1265,7 +1728,7 @@ private struct SeededRandom {
         queue.journal = { entry in
             guard entry.kind == .sent else { return }
             if entry.detail == "caret" { jumpedAt = clock(); confirmedAt = nil }
-            else if entry.detail == "key", jumpedAt != nil {
+            else if entry.detail == "key" || entry.detail?.hasPrefix("burst") == true, jumpedAt != nil {
                 if let confirmed = confirmedAt { gaps.append(clock() - confirmed) }
                 else { Issue.record("edit was sent before the fake host applied its caret jump") }
                 jumpedAt = nil; confirmedAt = nil

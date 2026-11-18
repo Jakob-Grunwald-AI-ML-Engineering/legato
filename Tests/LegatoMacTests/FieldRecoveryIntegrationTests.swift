@@ -49,7 +49,7 @@ import LegatoKeyboardCore
         queue.live(runID: "take", version: 2, text: "Keep four Stay", complete: true)
         await queue.whenIdle()
         #expect(field.value == duplicated, "Neither indistinguishable copy can be chosen for a destructive revision")
-        #expect(journal.contains { $0.kind == .recovery && $0.reason == "changedOrAmbiguous" })
+        #expect(journal.contains { $0.kind == .recovery && $0.reason == "ambiguous" })
         #expect(!journal.contains { $0.kind == .recovery && $0.detail?.contains("unique replan") == true })
     }
 

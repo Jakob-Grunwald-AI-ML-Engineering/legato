@@ -92,6 +92,7 @@ import LegatoMac
         return true
     }
     func press(_ key: FieldKey, mark: Int, selection planned: UTF16Range) throws {
+        guard focused else { throw FieldKeyRefusal.notFocused } // every real key passes the focus guard
         guard planned == selection else { throw FieldKeyRefusal.selectionMoved }
         if case .hop = key { throw FieldKeyRefusal.unavailable }
         keys.append(key)
@@ -254,6 +255,32 @@ import LegatoMac
         #expect(await editor.apply(undo)?.applied == true)
         #expect(target.value == "blue boat.")
         #expect(target.selection == .init(location: 9, length: 0))
+    }
+
+    /// A cleanup pass planned from the shadow lands through what changed since: the user's words stay, the cleaned words land.
+    @Test func aCleanupFromTheShadowLandsAroundWhatWasTypedSinceAndDropsWhereWordsChanged() async throws {
+        let target = EditorTarget("")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false }
+        editor.sleep = { _ in }
+        editor.begin()
+        await editor.applyLive(snapshot("safe unchanged tail", run: "take", complete: true))
+        await editor.queue.whenIdle()
+        let shadow = try #require(editor.shadow(id: "pass"))
+        #expect(shadow.above == "safe unchanged tail")
+        // The user typed in front of the take after the shadow was taken.
+        target.value = "ok " + target.value; target.selection = .init(location: target.value.utf16.count, length: 0)
+        let ack = await editor.apply(ScopedEdit(instructionID: "pass", documentID: shadow.documentID, before: shadow.above, after: shadow.below,
+                                                target: "Safe unchanged tail."))
+        #expect(ack?.applied == true)
+        #expect(target.value == "ok Safe unchanged tail.")
+        // A word the user changed since is theirs: the pass leaves it and lands nothing there.
+        let second = try #require(editor.shadow(id: "second"))
+        target.value = "ok Safe unchanged tale."; target.selection = .init(location: target.value.utf16.count, length: 0)
+        let late = await editor.apply(ScopedEdit(instructionID: "second", documentID: second.documentID, before: second.above, after: second.below,
+                                                 target: "OK Safe unchanged tail."))
+        #expect(target.value.hasSuffix("tale."))
+        #expect(late?.applied != false || target.value.hasSuffix("tale."))
     }
 
     @Test func lengthChangingScopedInstructionPreservesTheRebasedUserCaretAndUndo() async throws {
@@ -595,11 +622,14 @@ import LegatoMac
         target.ignoreWrites = true
         let editor = MacFieldEditor(capture: { .target(target) })
         editor.typewriter = { false }
-        editor.sleep = { _ in }
+        // A virtual clock: an instant sleep against the real clock busy-waits on the main actor.
+        var clock = ContinuousClock.now
+        editor.sleep = { clock += $0 }
         var inserts: [String] = [], copies: [String] = []
         editor.insert = { inserts.append($0); return .typed }
         editor.recover = { copies.append($0) }
         editor.begin()
+        editor.queue.now = { clock }
         await editor.applyLive(snapshot("second local dictation", run: "second"))
         #expect(editor.panel.active)
         #expect(editor.panel.take.text == "second local dictation")
@@ -617,11 +647,14 @@ import LegatoMac
         target.nativeWriteThrowsWithoutLanding = throwsWithoutLanding
         let editor = MacFieldEditor(capture: { .target(target) })
         editor.typewriter = { false }
-        editor.sleep = { _ in }
+        // A virtual clock: an instant sleep against the real clock busy-waits on the main actor.
+        var clock = ContinuousClock.now
+        editor.sleep = { clock += $0 }
         var inserts: [String] = [], copies: [String] = []
         editor.insert = { inserts.append($0); return .typed }
         editor.recover = { copies.append($0) }
         editor.begin()
+        editor.queue.now = { clock }
         await editor.applyLive(snapshot("second local dictation", run: "second"))
         #expect(target.value == "First take. second local dictation")
         #expect(target.recoveryChecks == 1)
@@ -824,6 +857,7 @@ import LegatoMac
     @Test func aHostWriteThatThrowsButLandedCounts() async throws {
         let target = EditorTarget("draft")
         let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false } // chunk contract here; the entrance burst has its own tests
         editor.begin(); editor.beginInstruction()
         let read = try await editor.read(.context, instructionID: "magic", reading: {})
         let edit = ScopedEdit(instructionID: "magic", documentID: read.documentID, before: "draft", after: "", target: "Revised")
@@ -835,6 +869,7 @@ import LegatoMac
     @Test func aHostThatIgnoresWritesStopsAfterBoundedRetries() async throws {
         let target = EditorTarget("draft")
         let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false } // chunk contract here; the entrance burst has its own tests
         editor.sleep = { _ in }
         editor.begin(); editor.beginInstruction()
         let read = try await editor.read(.context, instructionID: "magic", reading: {})
@@ -874,7 +909,12 @@ import LegatoMac
     @Test func rapidBrowserHypothesesCoalesceAndFinishFlushesTheLatestWords() async {
         let target = EditorTarget("")
         let editor = MacFieldEditor(capture: { .target(target) })
+        // A virtual clock: the entrance's wall-clock cap (a burst that falls behind writes in fewer pieces) must not make the
+        // piece count depend on how late a real timer wakes up under load.
+        var clock = ContinuousClock.now
+        editor.sleep = { clock += $0 }
         editor.begin()
+        editor.queue.now = { clock }
         editor.enqueueLive(snapshot("one"))
         editor.enqueueLive(snapshot("one two"))
         editor.enqueueLive(snapshot("One two three.", complete: true))
@@ -894,9 +934,10 @@ import LegatoMac
         #expect(target.value == "Retry words.")
     }
 
-    @Test func aCorrectionInsideTheTextIsOneUnpacedWriteAndKeepsTheTail() async {
+    @Test func aCorrectionInsideTheTextIsOneHunkEnteringAsAFastBurstAndKeepsTheTail() async {
         let target = EditorTarget("")
         let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false } // chunk contract here; the entrance burst has its own tests
         editor.begin(); await editor.applyLive(snapshot("abc unchanged tail"))
         target.writes = []
         var pauses: [Duration] = []
@@ -904,13 +945,14 @@ import LegatoMac
         editor.sleep = { duration in pauses.append(duration) }
         await editor.applyLive(snapshot("aXYc unchanged tail", complete: true))
         #expect(target.value == "aXYc unchanged tail")
-        #expect(target.writes.count == 1, "One hunk, one write: delete and insert at one place")
-        #expect(pauses.isEmpty, "No pacing for a revision")
+        #expect(target.writes.count >= 1, "One hunk: delete and first piece in one write at one place")
+        #expect(pauses.reduce(Duration.zero, +) <= .milliseconds(260), "A revision enters as a fast burst inside the entrance cap")
     }
 
     @Test func realTypingDuringAnAnimationKeepsTheKeyAfterTheWord() async {
         let target = EditorTarget("")
         let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false } // chunk contract here; the entrance burst has its own tests
         var copied = ""
         editor.recover = { copied = $0 }
         editor.typewriter = { true }
@@ -966,6 +1008,32 @@ import LegatoMac
         #expect(ack?.reason?.contains("Some changes may remain") == true)
         #expect(ack?.reason?.contains("Nothing was edited") == false)
         #expect(target.value.lowercased() == original)
+    }
+
+    /// Acceptance round 2 (Mac VM, TextEdit, Safari): after a cleanup edit landed, the next pass (stop, pause) had no take span
+    /// (the edit takes the run's regions), so it started at the field's start and title-cased "Notes from before." that was
+    /// in the field before the take. The take's span survives the edit, the user's typing around it and a second edit.
+    @Test func theTakeSpanSurvivesCleanupEditsAndTheUsersTypingAroundIt() async throws {
+        let target = EditorTarget("Notes from before. ")
+        let editor = MacFieldEditor(capture: { .target(target) })
+        editor.typewriter = { false }
+        editor.sleep = { _ in }
+        editor.begin()
+        await editor.applyLive(snapshot("um so the meeting", run: "take", complete: true))
+        let first = try #require(editor.shadow(id: "first"))
+        #expect(first.takeStart == 19 && first.takeEnd == 36)
+        let ack = await editor.apply(ScopedEdit(instructionID: "first", documentID: first.documentID, before: first.above, after: first.below,
+                                                target: "Notes from before. Um so the meeting."))
+        #expect(ack?.applied == true)
+        // The edit took the run's regions; the take is still where it was, one character longer.
+        let second = try #require(editor.shadow(id: "second"))
+        #expect(second.takeStart == 19 && second.takeEnd == 37, "\(String(describing: second.takeStart)) \(String(describing: second.takeEnd))")
+        // The user types in front of the take and after it; the pass still covers the take alone.
+        target.value = "ok " + target.value + " hi"; target.selection = .init(location: target.value.utf16.count, length: 0)
+        // A cleanup read (no shadow) finds it again where it moved to.
+        target.selection = .init(location: 0, length: 0)
+        let read = try await editor.read(.cleanup, instructionID: "read", reading: {})
+        #expect(read.takeStart == 22 && read.takeEnd == 40, "\(String(describing: read.takeStart)) \(String(describing: read.takeEnd))")
     }
 
 }

@@ -154,7 +154,10 @@ import Observation
         dictation.deliverStream = { [weak fieldEditor] poll in await fieldEditor?.stream(poll) ?? false }
         dictation.retractStream = { [weak fieldEditor] in fieldEditor?.retractStreamed() }
         pipeline.onLiveChange = { [weak fieldEditor] in fieldEditor?.enqueueLive($0) }
-        pipeline.attachCleanupField(fieldEditor, duringPauses: true)
+        // As on the iPhone: per sentence while speaking, whole-take pass with the raw words at stop and after a pause, from the
+        // field's shadow (the queue's, answered without a flush or read).
+        pipeline.attachCleanupField(fieldEditor, duringPauses: true, perSentence: true)
+        pipeline.takeFieldShadow = { [weak fieldEditor] id in fieldEditor?.shadow(id: id) }
         pipeline.cleanupFieldAvailable = { [weak fieldEditor] in fieldEditor?.canCleanField == true }
         pipeline.onSpeechActivity = { [weak fieldEditor] in fieldEditor?.speechActivity($0) }
         pipeline.keepsTakes = { [weak fieldEditor] in fieldEditor?.passwordField != true }

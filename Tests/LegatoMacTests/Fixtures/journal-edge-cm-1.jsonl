@@ -1,0 +1,13 @@
+{"field":"EAD5C55C-AA80-419A-B233-52DBF3AF535B","kind":"reset","reason":"cancelled","t":1517184.2585000002}
+{"field":"1A1565C0-D98B-491B-BBBE-F44599CF9953","kind":"field","t":1517186.25275}
+{"detail":"v1","field":"1A1565C0-D98B-491B-BBBE-F44599CF9953","kind":"live","run":"614E2B01-6535-4432-882E-3631266BB80C","t":1517187.344375,"text":"We should, um, you know, uh, go to the market."}
+{"field":"1A1565C0-D98B-491B-BBBE-F44599CF9953","id":"23CF0DCB-DB2D-40F7-8CD4-2335F4C06E54","kind":"regionStarted","length":0,"location":26,"run":"614E2B01-6535-4432-882E-3631266BB80C","t":1517198.5222916666}
+{"detail":"keys=47 typed=47 pace=5","field":"1A1565C0-D98B-491B-BBBE-F44599CF9953","id":"23CF0DCB-DB2D-40F7-8CD4-2335F4C06E54","kind":"planned","location":26,"run":"614E2B01-6535-4432-882E-3631266BB80C","t":1517200.448625,"text":" We should, um, you know, uh, go to the market."}
+{"detail":"key","field":"1A1565C0-D98B-491B-BBBE-F44599CF9953","id":"23CF0DCB-DB2D-40F7-8CD4-2335F4C06E54","kind":"sent","length":0,"location":26,"read":"- first item\n- second item|\n","run":"614E2B01-6535-4432-882E-3631266BB80C","t":1517200.5574166668,"text":" "}
+{"detail":"rev=1 owed=false caret=27+0 edits=0+0 regions=[\"614E2B01-6535-4432-882E-3631266BB80C@26[ → We should, um, you know, uh, go to the market.]o\"]","field":"1A1565C0-D98B-491B-BBBE-F44599CF9953","id":"23CF0DCB-DB2D-40F7-8CD4-2335F4C06E54","kind":"verified","length":1,"location":26,"run":"614E2B01-6535-4432-882E-3631266BB80C","selection":"27+0","t":1517209.8301666668,"text":" "}
+{"detail":"piped key","field":"1A1565C0-D98B-491B-BBBE-F44599CF9953","id":"23CF0DCB-DB2D-40F7-8CD4-2335F4C06E54","kind":"sent","length":0,"location":27,"run":"614E2B01-6535-4432-882E-3631266BB80C","t":1517210.0506666668,"text":"W"}
+{"detail":"failures=1","field":"1A1565C0-D98B-491B-BBBE-F44599CF9953","id":"23CF0DCB-DB2D-40F7-8CD4-2335F4C06E54","kind":"mismatch","reason":"key","run":"614E2B01-6535-4432-882E-3631266BB80C","t":1517739.8108333335}
+{"detail":"attempt 1","field":"1A1565C0-D98B-491B-BBBE-F44599CF9953","id":"23CF0DCB-DB2D-40F7-8CD4-2335F4C06E54","kind":"recovery","t":1518255.6582083334}
+{"detail":"evidence 29 restored 1","field":"1A1565C0-D98B-491B-BBBE-F44599CF9953","id":"23CF0DCB-DB2D-40F7-8CD4-2335F4C06E54","kind":"recovery","t":1518258.0960000001}
+{"detail":"refused 1","field":"1A1565C0-D98B-491B-BBBE-F44599CF9953","id":"23CF0DCB-DB2D-40F7-8CD4-2335F4C06E54","kind":"recovery","reason":"changedOrAmbiguous","t":1518258.1995416668}
+{"field":"1A1565C0-D98B-491B-BBBE-F44599CF9953","id":"23CF0DCB-DB2D-40F7-8CD4-2335F4C06E54","kind":"dropped","reason":"userChanged","run":"614E2B01-6535-4432-882E-3631266BB80C","t":1518258.237625,"text":" We should, um, you know, uh, go to the market."}

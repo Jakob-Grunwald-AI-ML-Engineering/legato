@@ -146,7 +146,7 @@ struct ListSession {
         field.window = Int.random(in: 20...80, using: &rng)
         field.blockEcho = chance(0.3)
         _ = chance(0.6) // was the typewriter setting; drawn so seeds keep their sessions
-        var rig = QueueRig(field, config: .init())
+        var rig = QueueRig(field, config: .init(chunkEntrance: true))
         let items = (0..<Int.random(in: 2...4, using: &rng)).map { _ in
             (0..<Int.random(in: 1...4, using: &rng)).map { _ in pick(words) }.joined(separator: " ")
         }
@@ -333,7 +333,9 @@ struct StressSession {
         if field.hostDelays, Bool.random(using: &extra) { field.staleReportsAfterTap = Int.random(in: 1...4, using: &extra) }
         let clean = chance(0.35)
         _ = chance(0.5) // was the typewriter setting; drawn so seeds keep their sessions
-        var rig = QueueRig(field, config: .init())
+        var rig = QueueRig(field, config: .init(chunkEntrance: true))
+        // The keyboard's own ticker is 5 ms: a burst's gaps (8 ms) are real, not stretched to the rig's 33 ms.
+        rig.tickMs = 8
         // The cleanup comes late: after the take is typed and the user edited and moved (real Claude cleanup, ~20 s).
         let lateCleanup = lateCleanups && Double.random(in: 0..<1, using: &late) < 0.4
 

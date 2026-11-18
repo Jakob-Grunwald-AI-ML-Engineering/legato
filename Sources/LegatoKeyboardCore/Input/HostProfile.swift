@@ -11,14 +11,6 @@ import Foundation
 ///   deviation). The check's deadline is that estimate with a margin, within bounds; until enough samples exist it is
 ///   the cold-start default.
 public struct HostProfile: Sendable, Equatable {
-    /// The deadline before anything is learned: Safari's slowest measured burst showed at 348 ms (2026-11-16).
-    public static let coldDeadlineMs = 400.0
-    /// A learned deadline never goes below this (native hosts answer a burst in 26–51 ms, measured) nor above that.
-    public static let minDeadlineMs = 100.0
-    public static let maxDeadlineMs = 1_000.0
-    /// Samples before the learned deadline replaces the cold one.
-    public static let samplesNeeded = 3
-
     public enum Callbacks: String, Sendable { case perBurst, perStage }
 
     /// The unit a move counts in, once a look showed it (nil: as configured).
@@ -27,9 +19,11 @@ public struct HostProfile: Sendable, Equatable {
     public private(set) var windowAfter = 0
     private var burstVotes = 0
     private var stageVotes = 0
-    public private(set) var latencyMs: Double?
-    public private(set) var deviationMs = 0.0
-    public private(set) var samples = 0
+    /// The latency learner and the deadline (`HostLatency`, shared with the Mac).
+    public private(set) var latency = HostLatency()
+    public var latencyMs: Double? { latency.latencyMs }
+    public var deviationMs: Double { latency.deviationMs }
+    public var samples: Int { latency.samples }
 
     public init() {}
 
@@ -40,19 +34,10 @@ public struct HostProfile: Sendable, Equatable {
     }
 
     /// How long a chunk's result may be missing from the reports before its check has failed.
-    public var deadlineMs: Double {
-        guard samples >= Self.samplesNeeded, let latencyMs else { return Self.coldDeadlineMs }
-        return min(Self.maxDeadlineMs, max(Self.minDeadlineMs, latencyMs + 4 * deviationMs))
-    }
+    public var deadlineMs: Double { latency.deadlineMs }
 
-    /// A host applies a delete run one delete at a time, so a chunk's result shows later the more it deletes. Device run 4
-    /// (WhatsApp, 2026-11-17): a chunk deleting 9 graphemes showed at 46 ms, one deleting 23 at about 104 ms, just past its
-    /// learned 104 ms deadline, and the failed check cost a 1.8 s read walk. About 4 ms a delete: two samples, an estimate
-    /// (Notes applies 500 deletes in about 300 ms).
-    public static let perDeleteMs = 4.0
-
-    /// The deadline of a chunk that deletes `deletes` graphemes: the learned one plus the delete run's own time.
-    public func deadlineMs(deletes: Int) -> Double { deadlineMs + Self.perDeleteMs * Double(max(0, deletes)) }
+    /// The deadline of a chunk that deletes `deletes` graphemes (`HostLatency.deadlineMs(deletes:)`).
+    public func deadlineMs(deletes: Int) -> Double { latency.deadlineMs(deletes: deletes) }
 
     /// A report: how much it shows around the caret.
     mutating func saw(_ report: FieldQueue.Report) {
@@ -62,32 +47,17 @@ public struct HostProfile: Sendable, Equatable {
 
     /// A chunk's result showed in a host callback `ms` after its last op, the `callbacks`-th callback since then.
     mutating func heard(afterMs ms: Double, callbacks: Int) {
-        let sample = max(0, ms)
-        if let latencyMs {
-            deviationMs = 0.75 * deviationMs + 0.25 * abs(sample - latencyMs)
-            self.latencyMs = 0.875 * latencyMs + 0.125 * sample
-        } else {
-            latencyMs = sample
-            deviationMs = sample / 2
-        }
-        samples += 1
+        latency.heard(afterMs: ms)
         if callbacks <= 1 { burstVotes += 1 } else { stageVotes += 1 }
     }
 
-    /// A chunk's result did not show by the learned deadline: the host may have become slower, so the deadline backs off
-    /// (later samples bring it down again). The cold deadline is not learned and stays.
-    mutating func timedOut() {
-        guard samples >= Self.samplesNeeded, let latencyMs else { return }
-        let deadline = deadlineMs
-        self.latencyMs = max(latencyMs, deadline)
-        deviationMs = max(deviationMs, deadline / 4)
-    }
+    /// A chunk's result did not show by the learned deadline: the deadline backs off (`HostLatency.timedOut`).
+    mutating func timedOut() { latency.timedOut() }
 
     /// For traces and the edit journal.
     public var summary: String {
         let unit = movesByCharacters.map { $0 ? "graphemes" : "utf16" } ?? "-"
-        let latency = latencyMs.map { "\(Int($0.rounded()))±\(Int(deviationMs.rounded()))" } ?? "-"
         return "unit=\(unit) window=\(windowBefore)/\(windowAfter) callbacks=\(callbacks?.rawValue ?? "-") "
-            + "latency=\(latency)x\(samples) deadline=\(Int(deadlineMs))"
+            + latency.summary
     }
 }

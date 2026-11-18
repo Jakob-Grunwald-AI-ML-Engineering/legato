@@ -88,6 +88,9 @@ public final class MacFieldQueue {
     /// An edit's scope found away from where it was read must be at least this long when its context is gone.
     public static let relocateChars = 16
     public static let contextChars = 16
+    /// A real key within this many characters of the caret a keyed unit of ours left (and a length change of no more) is typed
+    /// at that caret, not a caret of the user's own placing (an estimate: a few keys between two reads).
+    static let interruptReach = 8
     /// How long work waits for an unfocused field before it is dropped (or, without `onUnreadable`, an unreadable one).
     public static let parkLimit = Duration.seconds(3)
     /// How long dictation waits for a focused field that does not read before it goes on in the panel (`onUnreadable`).
@@ -96,6 +99,10 @@ public final class MacFieldQueue {
     public static let placeGrace = Duration.milliseconds(400)
     /// Ops of one region that failed to verify in a row before its work is dropped.
     public static let retryLimit = 4
+    /// Caret moves that do not read back, with a caret that never changed, give up (from the second failure) once this long
+    /// has passed since the first of them: the field's keys are held while they run, so the 1 s input-lock budget bounds them
+    /// (a field whose arrows do nothing is not retried for seconds).
+    public static let moveBudget = Duration.seconds(1)
     /// The pause between attempts while the field cannot take an op.
     public static let waitTick = Duration.milliseconds(50)
     /// Fields up to this long are read whole; longer ones around the work.
@@ -110,12 +117,6 @@ public final class MacFieldQueue {
     /// Keystroke fields: after the user's real key or click, no key goes out until their input has rested this long.
     /// A key moves the field's own caret, so a key the user types meanwhile lands wherever the queue's caret is.
     public static let keyQuiet = Duration.milliseconds(600)
-    /// Typed graphemes of one change go out in runs of at most this many, each key verified by the caret alone and the run
-    /// by one read of the text; `pipelineRunBehind` while typing is behind speech.
-    public static let pipelineRun = 4
-    public static let pipelineRunBehind = 8
-    /// How long a run's key may take to show its caret before the run is verified whole (and the key is waited for).
-    public static let pipelineWait = Duration.milliseconds(120)
     /// The pause at a transition between moves and edits.
     public static let keySettle = Duration.milliseconds(Int(KeystrokePlanner.settleMs))
     /// How long an edit key whose text already shows may wait for the caret before it counts as landed with a lagging
@@ -139,7 +140,11 @@ public final class MacFieldQueue {
     public let target: (any TextTarget)?
     /// Typewriter pacing (false with Reduce Motion: every change goes whole).
     public var paced: @MainActor () -> Bool = { true }
-    public var sleep: @MainActor (Duration) async -> Void = { try? await Task.sleep(for: $0) }
+    public var sleep: @MainActor (Duration) async -> Void = { try? await Task.sleep(for: $0) } {
+        didSet { sleepInjected = true }
+    }
+    /// A rig drives the clock itself: waits are plain `sleep` calls (a wait that ends early would not advance its clock).
+    private var sleepInjected = false
     public var now: @MainActor () -> ContinuousClock.Instant = { .now }
     public var journal: (@MainActor (MacEditJournal.Entry) -> Void)?
     public var onDrop: (@MainActor (Drop) -> Void)?
@@ -189,26 +194,44 @@ public final class MacFieldQueue {
         /// Keystroke fields: the planned keys toward `desired`.
         var keys: KeyUnit?
         var nativePlan: NativeEditPlan?
+        /// Keystroke fields: a burst of keys sent whose last check ran out; what it may still land (`settleBurst`).
+        var burst: Burst?
         var verifiedWrites = 0
         var uncertainWrite = false
+        /// The input mark and the field's length when the region's last op went out: a rewrite of the text by the host
+        /// (autocapitalisation, autocorrect) is told from the user's change by no real input since and the length it leaves.
+        var sentMark: Int?
+        var writeLength: Int?
+        /// Words the host rewrote in the text the region typed (raw word to the host's word). The region keeps the host's
+        /// version: its desired text carries them, so the queue never types the raw word over the host's again.
+        var rewrites: [String: String] = [:]
+        /// An edit region: runs once the edit is applied (the take spans move through it).
+        var onApplied: (@MainActor () -> Void)?
         init(id: String, runID: String?, start: Int, current: [Character], desired: [Character], open: Bool) {
             self.id = id; self.runID = runID; self.start = start; self.current = current; self.desired = desired; self.open = open
         }
         var end: Int { start + String(current).utf16.count }
         var pending: Bool { !lost && current != desired }
     }
+    /// A burst of edit keys sent back to back (one chunk, one check): the text each key leaves and its range, so a check that
+    /// ran out can still find how far the host got. Keys apply in order, so the field shows one of these states, or, when
+    /// the host dropped a key, a shape of its own that the region adopts once the field is quiet.
+    private struct Burst {
+        struct Item { var after: [Character]; var range: UTF16Range; var inserted: Int; var delta: Int }
+        var items: [Item]
+        var applied = 0
+        var unitStart: Int
+        /// The field's length that goes with the region's text now.
+        var lengthBase: Int
+        var sentAt: ContinuousClock.Instant
+        var mark: Int
+    }
     /// A region's planned edit keys (`KeystrokePlanner.steps`), done up to `index`.
     private final class KeyUnit {
         let desired: [Character]
         let steps: [KeystrokePlanner.Step]
         var index = 0
-        /// The gap between its typed graphemes that spreads the change over the time budget.
-        let paceMs: Double
-        /// Only new speech appended at the region's end is typed at a pace; every other change goes out at full speed.
-        let typewriter: Bool
-        init(desired: [Character], steps: [KeystrokePlanner.Step], paceMs: Double, typewriter: Bool) {
-            self.desired = desired; self.steps = steps; self.paceMs = paceMs; self.typewriter = typewriter
-        }
+        init(desired: [Character], steps: [KeystrokePlanner.Step]) { self.desired = desired; self.steps = steps }
         var typedLeft: Int { steps[index...].reduce(0) { if case .type = $1.key { $0 + 1 } else { $0 } } }
     }
     private enum KeyKind { case move, edit }
@@ -228,6 +251,9 @@ public final class MacFieldQueue {
         var fast = false
         var speaking = false
         var speechTarget = FieldSpeechScheduling.Target()
+        /// Where the take's text stood when a cleanup edit last took its regions (they are given up under an edit's scope):
+        /// the range and its text then, moved through the edit. Checked against the field before it is used (`takeSpan`).
+        var kept: (range: UTF16Range, text: String)?
         /// Words past the last region wait for a region of their own (whitespace alone waits for more words).
         var needsRegion: Bool {
             !retracted && !abandoned && remainder.contains { !$0.isWhitespace || $0.isNewline }
@@ -276,6 +302,12 @@ public final class MacFieldQueue {
     }
 
     private var userActedFlag = false
+    /// The user's real input showed at the latest read (their key or click, or a caret that moved on its own).
+    private var userSeen = false
+    /// A keyed edit of ours left the caret mid-text and the user's key landed there: where the run's next words go (the
+    /// caret the user had before our edit, mapped through the key), never the caret our edit left behind. Ends with the
+    /// next input of theirs that is not that key.
+    private var runHome: UTF16Range?
     /// The caret the user expects (nil until first read).
     private var userCaret: UTF16Range?
     /// The selection the queue last left or saw; a different one on the next read is the user's.
@@ -289,7 +321,11 @@ public final class MacFieldQueue {
     /// Keystroke fields: the caret is away from where the user expects it (a jump that still has to come back).
     private var caretOwed = false
     /// Keystroke fields: arrows that did not read back in a row.
-    private var moveFailures = 0
+    private var moveFailures = 0 { didSet { if moveFailures == 0 { moveSeriesStart = nil } } }
+    /// When the first move of the current series of failed ones went out, and the caret the field showed then (`moveBudget`);
+    /// a caret that changed since restarts the series (late keys are landing, the field is not deaf).
+    private var moveSeriesStart: ContinuousClock.Instant?
+    private var moveSeriesCaret: UTF16Range?
     /// A modifier is held: the queue waits without counting toward `parkLimit` (a held push-to-talk key).
     private var holding = false
     /// Keystroke fields: a key that did not read back in time (or whose caret lags), the selection it would leave, and
@@ -309,7 +345,7 @@ public final class MacFieldQueue {
     /// Hops that missed toward the current target are not repeated for it (a wrapped line's Command+Left stays put).
     private var missedHops: Set<CaretHop> = []
     /// What each keystroke field showed about moving its caret, by `TextTarget.fieldKey` (bounded).
-    private static var memory: [AnyHashable: CaretJumps] = [:]
+    private static var memory = FieldMemory<CaretJumps>()
     /// Keystroke fields: the last input mark seen, and when the user's real input last showed.
     private var lastMark: Int?
     private var inputAt: ContinuousClock.Instant?
@@ -322,6 +358,132 @@ public final class MacFieldQueue {
     private var blockedNote: String?
     /// Since when the focused field has not read, without a read in between (`unreadableGrace`).
     private var unreadableSince: ContinuousClock.Instant?
+
+    // MARK: Shadow and host memory
+
+    /// The field as last read (`MacFieldShadow`), kept whole; fed by every read and by the host's notifications.
+    private var shadow: MacFieldShadow?
+    /// Keys go one by one, each verified, whatever the field's learned host says (for tests and diagnosis).
+    public var verifiedKeysOnly = false
+    private var observingStarted = false
+    /// Notifications seen from the bound element (they say "look again"; never counted per operation).
+    public private(set) var notifications = 0
+    private var lastObservedMark: Int?
+    /// What each field showed about its host (latency, bursts, notifications), by `TextTarget.fieldKey` (bounded).
+    private static var hostMemory = FieldMemory<MacFieldHost>()
+    private var localHost = MacFieldHost()
+    public var host: MacFieldHost {
+        get { target?.fieldKey.flatMap { Self.hostMemory[$0] } ?? localHost }
+        set {
+            guard let key = target?.fieldKey else { localHost = newValue; return }
+            Self.hostMemory[key] = newValue
+        }
+    }
+    /// The field's text and selection as the queue last knew them, without a read: what cleanup starts from. Nil before
+    /// the first read, or while the shadow does not hold the whole field.
+    public var shadowSnapshot: (text: String, selection: UTF16Range)? { shadow.map { ($0.text, $0.selection) } }
+
+    /// Where the newest run's text stands in the field now (its first region's start to its last region's end, together with
+    /// the span kept across a cleanup edit that took its regions), for a cleanup pass bounded to the take. `text` is the field
+    /// the range is checked against: the kept span counts only while the field still shows its text there (or once, elsewhere).
+    /// Nil when the run has nothing in the field that can be told.
+    public func latestRunSpan(inField text: String?) -> UTF16Range? {
+        guard let run = runs.last(where: { !$0.abandoned }) else { return nil }
+        return takeSpan(of: run, in: text.map { $0 as NSString })
+    }
+    public var latestRunSpan: UTF16Range? { latestRunSpan(inField: shadow?.text) }
+
+    private func takeSpan(of run: Run, in text: NSString?) -> UTF16Range? {
+        let regions = run.regions.filter { !$0.lost && !$0.current.isEmpty }
+        var low: Int?, high: Int?
+        if let first = regions.first, let last = regions.last { low = first.start; high = last.end }
+        if let kept = run.kept, let text {
+            var range: UTF16Range?
+            if kept.range.location >= 0, kept.range.end <= text.length,
+               text.substring(with: NSRange(location: kept.range.location, length: kept.range.length)) == kept.text {
+                range = kept.range
+            } else if kept.text.utf16.count >= Self.relocateMinimum {
+                let first = text.range(of: kept.text, options: .literal)
+                if first.location != NSNotFound {
+                    let rest = NSRange(location: first.location + 1, length: text.length - first.location - 1)
+                    if text.range(of: kept.text, options: .literal, range: rest).location == NSNotFound {
+                        range = UTF16Range(location: first.location, length: first.length)
+                    }
+                }
+            }
+            if let range { low = min(low ?? range.location, range.location); high = max(high ?? range.end, range.end) }
+        }
+        guard let low, let high else { return nil }
+        return UTF16Range(location: low, length: high - low)
+    }
+
+    /// Nothing of dictation is waiting to be typed: the shadow shows every word the field is going to get.
+    public var shadowSettled: Bool { shadow != nil && !runs.contains { !$0.abandoned && ($0.needsRegion || $0.regions.contains(where: \.pending)) } }
+
+    /// Steps planned from the shadow without a read of the field.
+    public private(set) var shadowSteps = 0
+    private var readOps = -1
+    private var readMark: Int?
+    private var readAt: ContinuousClock.Instant?
+    private var ticker: Task<Void, Never>?
+    /// The longest the shadow stands in for a read on a host that notifies (an estimate: a guard against a missed
+    /// notification, not a measured value).
+    public static let shadowMaxAge = Duration.milliseconds(1_000)
+
+    /// The shadow as the step's picture, when it can stand in for a read: the host notifies (so a change would have said
+    /// so), nothing arrived since the last read, no key or write of ours is in flight or unchecked, the user did not touch
+    /// the field, and the picture is not old. Otherwise nil: the step reads, as on a host that does not notify.
+    private func shadowDocument(_ target: any TextTarget, mark: Int) -> (Document, UTF16Range)? {
+        guard let held = shadow, !held.dirty, host.notifies == true, readOps == opsSent, readMark == mark, let at = readAt,
+              now() - at < Self.shadowMaxAge, !recoveredRead, rebindPending == nil, lateKey == nil, staleCaret == nil, probeAt == nil,
+              !holding, !allRegions.contains(where: { $0.burst != nil || $0.uncertainWrite || $0.landing != nil })
+        else { return nil }
+        let text = held.text as NSString
+        return (Document(base: 0, text: text, length: text.length), held.selection)
+    }
+
+    /// One wait of the drain loop: a notification from the host that arrives during it ends it early (one that came before
+    /// it dirtied the shadow, which the next step reads; a wait is never skipped, so an injected clock still advances).
+    private func tick() async {
+        guard !sleepInjected else { await sleep(Self.waitTick); return }
+        let wait = Task<Void, Never> { try? await Task.sleep(for: Self.waitTick) }
+        ticker = wait
+        await wait.value
+        ticker = nil
+    }
+
+    private func startObserving(_ target: any TextTarget) {
+        guard !observingStarted else { return }
+        observingStarted = true
+        _ = target.observeChanges { [weak self] in
+            guard let self else { return }
+            notifications += 1
+            shadow?.notified()
+            ticker?.cancel()
+            var memory = host
+            if memory.notifies != true { memory.notifies = true; host = memory }
+        }
+    }
+
+    /// Feeds a fresh whole-field read to the shadow, classified against what the queue's own chunks in flight would leave.
+    private func observe(_ doc: Document, selection: UTF16Range, target: any TextTarget) {
+        guard doc.base == 0, doc.text.length == doc.length else { shadow = nil; return }
+        let fresh = doc.text as String
+        guard var current = shadow else { shadow = MacFieldShadow(text: fresh, selection: selection); lastObservedMark = target.inputMark; return }
+        let mark = target.inputMark
+        var candidates: [String] = []
+        for region in allRegions where !region.lost {
+            guard let landing = region.landing, region.start >= 0 else { continue }
+            let ns = current.text as NSString
+            let length = String(region.current).utf16.count
+            guard region.start + length <= ns.length else { continue }
+            candidates.append(ns.replacingCharacters(in: NSRange(location: region.start, length: length), with: String(landing)))
+        }
+        let result = current.observe(text: fresh, selection: selection, candidates: candidates, userInput: lastObservedMark.map { $0 != mark } ?? false)
+        lastObservedMark = mark
+        shadow = current
+        if result != .matches { note(.observed, detail: result.rawValue) }
+    }
 
     // MARK: Inspection
 
@@ -341,7 +503,6 @@ public final class MacFieldQueue {
         get { target?.fieldKey.flatMap { Self.memory[$0] } ?? localJumps }
         set {
             guard let key = target?.fieldKey else { localJumps = newValue; return }
-            if Self.memory[key] == nil, Self.memory.count >= 64, let any = Self.memory.keys.first { Self.memory[any] = nil }
             Self.memory[key] = newValue
         }
     }
@@ -360,6 +521,7 @@ public final class MacFieldQueue {
     public func live(runID: String, version: Int, text: String, fast: Bool = false, complete: Bool = false, speaking: Bool = false) {
         let index = runs.firstIndex { $0.id == runID } ?? {
             runs.append(Run(id: runID))
+            runHome = nil
             // New dictation is a new change: whatever was undone can no longer be redone.
             if !redoing { undone = [] }
             ledger.append(.run(runID))
@@ -566,6 +728,7 @@ public final class MacFieldQueue {
 
     /// The field went away: everything pending is dropped.
     public func reset(_ reason: Reason = .cancelled) {
+        target?.stopObserving(); observingStarted = false; shadow = nil
         dropAll(reason)
         runs = []
         ledger = []; undone = []
@@ -595,7 +758,7 @@ public final class MacFieldQueue {
             } else if holding {
                 // Keys wait for the user's modifier to come up; that is not a field that went away.
                 idleSteps = 0; blockedSince = nil
-                await sleep(Self.waitTick)
+                await tick()
             } else {
                 idleSteps = 0
                 let started = blockedSince ?? now()
@@ -614,11 +777,13 @@ public final class MacFieldQueue {
                     blockedSince = nil; blockedNote = nil
                     break
                 }
-                await sleep(Self.waitTick)
+                await tick()
             }
         }
         finishEdits()
         pump = nil
+        // The shadow ends at what the last chunk left (cleanup starts from it without a read of its own).
+        if let target, let (doc, selection) = read(target) { observe(doc, selection: selection, target: target) }
         if !hasWork {
             onIdle?()
             let waiters = idleWaiters; idleWaiters = []; waiters.forEach { $0.resume() }
@@ -692,16 +857,29 @@ public final class MacFieldQueue {
         // Real input after this mark refuses a key planned from this read.
         let mark = target.inputMark
         guard focus(target) else { return false }
-        guard let (doc, selection) = read(target).map({ ($0.0, $0.1) }) else { blocked("unreadable"); return false }
-        unreadableSince = nil
+        startObserving(target)
+        let doc: Document, selection: UTF16Range
+        if let held = shadowDocument(target, mark: mark) {
+            // Clean shadow on a host that notifies, nothing of ours in flight: planned from the shadow, no read.
+            (doc, selection) = held
+            shadowSteps += 1
+        } else {
+            guard let (fresh, caret) = read(target).map({ ($0.0, $0.1) }) else { blocked("unreadable"); return false }
+            (doc, selection) = (fresh, caret)
+            unreadableSince = nil
+            observe(doc, selection: selection, target: target)
+            readOps = opsSent; readMark = mark; readAt = now()
+        }
         if let caret = rebindPending {
             rebindPending = nil
             adoptRebind(doc, selection: selection, caret: caret)
         }
+        let lengthBefore = lastLength
         lastLength = doc.length
         let keyed = !target.editsInPlace && target.typesKeys
         // A caret that moved with no real input while a key of ours may still land is that key's, not the user's.
-        noteUser(selection: selection, doc: doc, ownKey: keyed && lateKey != nil && (lastMark == nil || mark == lastMark))
+        noteUser(selection: selection, doc: doc, ownKey: keyed && lateKey != nil && (lastMark == nil || mark == lastMark),
+                 keyed: keyed, lengthBefore: lengthBefore)
         locateAll(doc)
         // Recovery acquired a new observation; no write is planned against the document read before it.
         if recoveredRead { recoveredRead = false; return true }
@@ -733,6 +911,8 @@ public final class MacFieldQueue {
             else if late.edit, lateKeyLanded { staleCaret = (selection, late.selection) }
             lateKey = nil
         }
+        // A burst that is not settled yet may still land (or be found by what the user's keys left): no key goes out meanwhile.
+        if keyed, allRegions.contains(where: { $0.burst != nil && !$0.lost }) { return false }
         if let stale = staleCaret, stale.reported != selection { staleCaret = nil }
         if let probe = probeAt, selection != UTF16Range(location: probe, length: 0) { probeAt = nil }
         if let region = nextRegion() {
@@ -794,6 +974,8 @@ public final class MacFieldQueue {
     private enum ShiftPass: CaseIterable { case fitted, landed, any }
 
     private func adoptRebind(_ doc: Document, selection: UTF16Range, caret old: UTF16Range?) {
+        // A burst that did not show yet keeps its coordinates moving with the region's; its partial states can show the
+        // final text a character off, so it never serves as the evidence for a shift.
         for index in runs.indices {
             while let last = runs[index].regions.last, !last.lost, last.current.isEmpty, last.original.isEmpty {
                 runs[index].regions.removeLast()
@@ -865,6 +1047,10 @@ public final class MacFieldQueue {
         for region in allRegions where !region.lost {
             guard let shift, shows(region, at: region.start + shift, .any) else { continue }
             region.start += shift
+            if var burst = region.burst {
+                for index in burst.items.indices { burst.items[index].range.location += shift }
+                region.burst = burst
+            }
             // The context after it stays as it was (a late key's landing is judged by it on the next locate); the context
             // before it may start before the new element's text.
             let before = doc.context(before: region.start, region.before.utf16.count)
@@ -888,17 +1074,33 @@ public final class MacFieldQueue {
         probeAt = probeAt.map { $0 + shift }
     }
 
-    private func noteUser(selection: UTF16Range, doc: Document, ownKey: Bool = false) {
+    private func noteUser(selection: UTF16Range, doc: Document, ownKey: Bool = false, keyed: Bool = false, lengthBefore: Int? = nil) {
         let moved = !ownKey && !expectedSelections.isEmpty && !expectedSelections.contains(selection)
+        userSeen = userActedFlag || moved
         if userActedFlag || moved {
             userActedFlag = false
             probeAt = nil; staleCaret = nil
+            // The user's key landed at the caret an edit of ours left mid-text (a keyed unit's jump): their caret before our
+            // edit is where the run's next words go, whatever the text there became; they keep the caret they typed at.
+            let previous = userCaret
+            runHome = nil
+            if keyed, caretOwed, let home = previous, selection.length == 0, let lengthBefore {
+                // Near the caret our unit left (a few keys), with the field's length changed by about as little: a key of
+                // theirs typed there. A click elsewhere is their own caret and ends this.
+                let growth = doc.length - lengthBefore
+                if abs(growth) <= Self.interruptReach,
+                   let own = expectedSelections.first(where: { $0.length == 0 && abs(selection.location - $0.location) <= Self.interruptReach }) {
+                    let shifted = home.location >= own.location ? home.location + growth : home.location
+                    runHome = UTF16Range(location: max(0, min(shifted, doc.length)), length: home.length)
+                    note(.user, selection: selection, detail: "typedAtOwnCaret home=\(runHome!.location)")
+                }
+            }
             userCaret = selection
             caretOwed = false
             revision += 1
             for index in runs.indices { close(&runs[index], cause: moved ? "cursor" : "input") }
             for region in allRegions { region.nativePlan = nil }
-            note(.user, selection: selection, detail: moved ? "moved" : "acted")
+            if runHome == nil { note(.user, selection: selection, detail: moved ? "moved" : "acted") }
         }
         // A caret past the text (work that did not land after all) is the field's own caret again.
         if userCaret == nil || (userCaret.map { $0.location + $0.length > doc.length } ?? false) { userCaret = selection }
@@ -927,6 +1129,7 @@ public final class MacFieldQueue {
     }
 
     private func locate(_ region: Region, _ doc: Document) {
+        if settleBurst(region, doc) { return }
         let length = String(region.current).utf16.count
         if let landing = region.landing {
             region.landing = nil
@@ -943,12 +1146,15 @@ public final class MacFieldQueue {
                 refreshContext(region, doc)
                 return
             }
+            // The host rewrote what the write typed (autocapitalisation, autocorrect): the host's version is the region's.
+            if adoptHostRewrite(region, expected: landing, doc: doc) { return }
             // A late key keeps its landing until it shows or its window passes.
             if lateKey != nil { region.landing = landing }
         }
         if doc.string(region.start, length) == String(region.current), contextHolds(region, doc) {
             refreshContext(region, doc); return
         }
+        if adoptHostRewrite(region, expected: region.current, doc: doc) { return }
         if let found = relocate(region, doc) {
             note(.relocated, id: region.id, run: region.runID, location: found, detail: "from \(region.start)")
             region.start = found
@@ -1019,7 +1225,10 @@ public final class MacFieldQueue {
         let decisions = recovery.resolve(request, text: fresh.text as String, generation: documentID,
                                          revision: UInt64(max(0, revision)), restored: true, completeDocument: complete)
         guard case .replan(let placement)? = decisions.first else {
-            note(.recovery, id: id, reason: "changedOrAmbiguous", detail: "refused \(request.id)")
+            // The exact refusal (`changed`, `ambiguous`, `uncorroborated`, `cancelled`, ...), not one lumped reason.
+            var why = "refused"
+            if case .stop(_, let refusal)? = decisions.first { why = refusal.rawValue }
+            note(.recovery, id: id, reason: why, detail: "refused \(request.id) evidence=\(fresh.text.length) complete=\(complete)")
             return .stop
         }
         note(.recovery, id: id, detail: "unique replan \(request.id)")
@@ -1057,6 +1266,73 @@ public final class MacFieldQueue {
         region.before = doc.context(before: region.start, Self.contextChars)
         region.after = doc.context(after: region.end, Self.contextChars)
         region.afterAtEnd = region.end + region.after.utf16.count == doc.length
+    }
+
+    /// Whether `shown` is the host's own rewrite of `expected`, the text just typed: the same letters in another case
+    /// (autocapitalisation), or the same words but one (autocorrect). Anything else is not told from the user's change.
+    /// `completedWord`: the index of the word the write completed (the last word of what stood before it): autocorrect
+    /// replaces that one, so a replaced word elsewhere, or with no write to tell by, is not taken for it.
+    static func isHostRewrite(of expected: String, shown: String, completedWord: Int?) -> Bool {
+        guard expected != shown else { return false }
+        if expected.count == shown.count, expected.lowercased() == shown.lowercased() { return true }
+        guard let completedWord else { return false }
+        let a = expected.split(separator: " ", omittingEmptySubsequences: false)
+        let b = shown.split(separator: " ", omittingEmptySubsequences: false)
+        guard a.count == b.count, a.count > 1 else { return false }
+        let differing = zip(a, b).enumerated().filter { $0.element.0 != $0.element.1 }.map(\.offset)
+        return differing == [completedWord]
+    }
+
+    /// The region's text as the host rewrote it, `desired` carrying the host's words (`rewrites`).
+    private func carryRewrites(_ region: Region, in text: [Character]) -> [Character] {
+        guard !region.rewrites.isEmpty else { return text }
+        return Array(String(text).split(separator: " ", omittingEmptySubsequences: false)
+            .map { region.rewrites[String($0)] ?? String($0) }.joined(separator: " "))
+    }
+
+    /// A region's text (or what its last write would leave, `expected`) that the field shows rewritten by the host, with no
+    /// real key or click since the write: the host's version is taken as landed and kept in the region's desired text, so
+    /// the take goes on and never types the raw word over the host's again. Where the rewrite changes the length, the
+    /// field's length at the write tells the window.
+    private func adoptHostRewrite(_ region: Region, expected: [Character], doc: Document) -> Bool {
+        guard !region.lost, !userSeen, let target, let sentMark = region.sentMark, sentMark == target.inputMark else { return false }
+        let expectedLength = String(expected).utf16.count
+        // A write completed the last word of what stood before it: that is the one word a host may correct.
+        let completedWord: Int? = expected != region.current && !region.current.isEmpty
+            ? String(region.current).split(separator: " ", omittingEmptySubsequences: false).count - 1 : nil
+        var lengths = [expectedLength]
+        if expected != region.current, let base = region.writeLength {
+            let drift = doc.length - (base + expectedLength - String(region.current).utf16.count)
+            if drift != 0, expectedLength + drift >= 0 { lengths.insert(expectedLength + drift, at: 0) }
+        }
+        for length in lengths {
+            guard doc.context(before: region.start, region.before.utf16.count) == region.before,
+                  let shown = doc.string(region.start, length), shown != String(region.current) else { continue }
+            let tail = region.start + length
+            let context = doc.context(after: tail, Self.contextChars)
+            guard Self.tailMatches(old: region.after, oldAtEnd: region.afterAtEnd, new: context,
+                                   newAtEnd: tail + context.utf16.count == doc.length) else { continue }
+            // What the write meant to leave, or, when the host took more or less of it than the queue counted (a write that
+            // failed midway), the same length of what the region is meant to say: the same letters in other cases.
+            var reference = String(expected)
+            if !Self.isHostRewrite(of: reference, shown: shown, completedWord: completedWord) {
+                let intended = String(region.desired.prefix(shown.count))
+                guard intended != shown, intended.count == shown.count, intended.lowercased() == shown.lowercased() else { continue }
+                reference = intended
+            }
+            let was = reference.split(separator: " ", omittingEmptySubsequences: false)
+            let now = shown.split(separator: " ", omittingEmptySubsequences: false)
+            if was.count == now.count { for (raw, host) in zip(was, now) where raw != host { region.rewrites[String(raw)] = String(host) } }
+            let follows = region.open && userCaret == UTF16Range(location: region.end, length: 0)
+            note(.mismatch, id: region.id, run: region.runID, reason: "hostRewrite", detail: "\(expected.count) -> \(shown.count) chars")
+            apply(region, landed: Array(shown))
+            region.desired = carryRewrites(region, in: region.desired)
+            region.landing = nil; region.keys = nil; region.nativePlan = nil; region.burst = nil
+            if follows { userCaret = UTF16Range(location: region.end, length: 0) }
+            refreshContext(region, doc)
+            return true
+        }
+        return false
     }
 
     /// Whether the text after an edit is still what followed it before. A rich editor shows an empty last line as a
@@ -1102,6 +1378,7 @@ public final class MacFieldQueue {
                 // Dictation under the edit's scope is the edit's now: its regions are given up (a pending revision of
                 // them is dropped like one the user overwrote).
                 let end = region.end
+                keepTakeSpans(through: region, in: doc)
                 for other in runs.flatMap(\.regions) where !other.lost {
                     let overlaps = other.current.isEmpty ? (start < other.start && other.start < end) : (other.start < end && start < other.end)
                     guard overlaps else { continue }
@@ -1121,6 +1398,39 @@ public final class MacFieldQueue {
         edits = waiting
     }
 
+    /// The edit takes the dictation under its scope (its regions are given up): each run keeps where its text stood, moved
+    /// through the edit once it applies, so a later cleanup pass is still bounded to the take. Offsets map through the
+    /// edit's changed middle (what its scope and target do not share at either end): a point before it stays, one after it
+    /// moves by the length change, the span's start inside it goes to its start and its end to its new end.
+    private func keepTakeSpans(through region: Region, in doc: Document) {
+        guard doc.base == 0, doc.text.length == doc.length else { return }
+        let old = Array(String(region.current).utf16), new = Array(String(region.desired).utf16)
+        var prefix = 0
+        while prefix < old.count, prefix < new.count, old[prefix] == new[prefix] { prefix += 1 }
+        var suffix = 0
+        while suffix < old.count - prefix, suffix < new.count - prefix, old[old.count - 1 - suffix] == new[new.count - 1 - suffix] { suffix += 1 }
+        let changedStart = region.start + prefix, oldChangedEnd = region.start + old.count - suffix
+        let delta = new.count - old.count
+        let after = doc.text.replacingCharacters(in: NSRange(location: region.start, length: old.count), with: String(region.desired)) as NSString
+        for index in runs.indices where !runs[index].abandoned {
+            guard let range = takeSpan(of: runs[index], in: doc.text), range.length > 0 else { continue }
+            func mapped(_ point: Int, isEnd: Bool) -> Int {
+                if point <= changedStart { return point }
+                if point >= oldChangedEnd { return point + delta }
+                return isEnd ? oldChangedEnd + delta : changedStart
+            }
+            let start = mapped(range.location, isEnd: false), end = mapped(range.end, isEnd: true)
+            guard end >= start, end <= after.length else { runs[index].kept = nil; continue }
+            let id = runs[index].id
+            region.onApplied = { [weak self, previous = region.onApplied] in
+                previous?()
+                guard let self, let at = self.runs.firstIndex(where: { $0.id == id }) else { return }
+                self.runs[at].kept = (UTF16Range(location: start, length: end - start),
+                                      after.substring(with: NSRange(location: start, length: end - start)))
+            }
+        }
+    }
+
     private func stoppedResult(_ region: Region, reason: Reason) -> EditResult {
         if region.verifiedWrites > 0 { return .stopped(reason) }
         // An unconfirmed write is uncertain, even if focus loss is what finally stopped the work.
@@ -1132,6 +1442,7 @@ public final class MacFieldQueue {
         editRegions.removeAll { entry in
             if entry.region.lost { entry.done.resume(returning: stoppedResult(entry.region, reason: entry.region.dropReason)); return true }
             guard !entry.region.pending else { return false }
+            entry.region.onApplied?(); entry.region.onApplied = nil
             let range = UTF16Range(location: entry.region.start, length: entry.region.end - entry.region.start)
             note(.applied, id: entry.region.id, location: range.location, length: range.length)
             entry.done.resume(returning: .applied(range))
@@ -1156,7 +1467,9 @@ public final class MacFieldQueue {
 
     /// Words of a run with no open region start one at the user's caret.
     private func openRemainderRegion(_ doc: Document) -> Bool {
-        guard let index = runs.firstIndex(where: \.needsRegion), let caret = userCaret else { return false }
+        guard let index = runs.firstIndex(where: \.needsRegion), let caret = runHome.flatMap({ $0.end <= doc.length ? $0 : nil }) ?? userCaret
+        else { return false }
+        runHome = nil
         let first = runs[index].regions.isEmpty
         // The run's first words replace the user's selection; later regions never eat one.
         let replaced = first ? (doc.string(caret.location, caret.length) ?? "") : ""
@@ -1188,13 +1501,23 @@ public final class MacFieldQueue {
 
     private var pacedNow: Bool { flushing == 0 && paced() }
 
+    /// A chunk's burst never runs longer than this in wall-clock. A native unit's work budget is half the 500 ms input
+    /// response target (`NativeInputHandoff.prepare` fails every AX call after it); the burst takes the share that leaves
+    /// room for the unit's first write, its one check and the caret's way home. An estimate, to be tuned on the Mac.
+    public static let entranceCapMs = FieldEditCoordinator.inputResponseTargetMs * 0.3
+
+    private static func milliseconds(_ duration: Duration) -> Double {
+        let parts = duration.components
+        return Double(parts.seconds) * 1000 + Double(parts.attoseconds) / 1e15
+    }
+
     /// Diagnostic count: verified character advances reuse a plan; only a changed target or field rebuilds the diff.
     private(set) var nativePlanBuilds = 0
 
     private func nativePlan(for region: Region) -> NativeEditPlan {
-        if let plan = region.nativePlan, plan.matches(current: region.current, desired: region.desired, paced: pacedNow) { return plan }
+        if let plan = region.nativePlan, plan.matches(current: region.current, desired: region.desired) { return plan }
         nativePlanBuilds += 1
-        let plan = NativeEditPlan(current: region.current, desired: region.desired, paced: pacedNow)
+        let plan = NativeEditPlan(current: region.current, desired: region.desired)
         region.nativePlan = plan
         return plan
     }
@@ -1210,6 +1533,12 @@ public final class MacFieldQueue {
         var nativeHome = userCaret
         func endNativeUnit() -> Bool {
             target.prepareNativeInputHome()
+            // Whatever ended the unit (a failed write, a check that ran out), the caret goes home first: a caret left at the
+            // temporary selection blocks native edits for the whole run ("the cursor could not be restored"), and the work
+            // then drops as focus lost. Never over the user's own input.
+            if let home = nativeHome, target.inputMark == mark, !userActedFlag, (try? target.selectedRange()) != home {
+                try? target.setSelectedRange(home)
+            }
             let confirmed = nativeHome.map { (try? target.selectedRange()) == $0 } ?? false
             nativeUnitOpen = false
             return target.endNativeInputUnit(homeVerified: confirmed)
@@ -1223,36 +1552,110 @@ public final class MacFieldQueue {
         }
         let lower = step.range.lowerBound, upper = step.range.upperBound
         let insertion = step.replacement
+        // Where the caret goes when the unit ends without a verified result (a failed write or check): the user's caret when
+        // it lies before the edit (no outcome of the op moves it), else the caret the field has (ours or the host's; the
+        // next read places it through `expectedSelections`). Never a stale caret from before the op, which would put the
+        // caret away from where the write left it, read as the user's move, and, unconfirmed, block native edits.
+        func failureHome() -> UTF16Range? {
+            target.prepareNativeInputHome()
+            let caret = try? target.selectedRange()
+            if let user = userCaret, user.location + user.length <= region.start + String(region.current[..<lower]).utf16.count,
+               !(region.open && user == UTF16Range(location: region.end, length: 0)) { return user }
+            return caret
+        }
         let location = region.start + String(region.current[..<lower]).utf16.count
         let removed = String(region.current[lower..<upper])
         let range = UTF16Range(location: location, length: removed.utf16.count)
         let text = String(insertion)
         // The caret follows an open region's end when the user's caret was there.
         let follows = region.open && userCaret == UTF16Range(location: region.end, length: 0)
+        // The chunk's insert enters as a very fast burst of AX inserts at the caret (`ChunkEntrance`); the delete run and the
+        // first piece are the hunk's one replace. One chunk, one check.
+        let entrance = ChunkEntrance.plan(text, enabled: pacedNow, capMs: Self.entranceCapMs)
+        let pieces = entrance.pieces.isEmpty ? [""] : entrance.pieces
         note(.sent, id: region.id, run: region.runID, location: range.location, length: range.length, text: text,
-             read: doc.context(before: range.location, 40) + "|" + doc.context(after: range.location, 40))
+             read: doc.context(before: range.location, 40) + "|" + doc.context(after: range.location, 40),
+             detail: pieces.count > 1 ? "entrance pieces=\(pieces.count) \(host.latency.summary)" : nil)
         opsSent += 1
         region.uncertainWrite = true
-        do {
-            try target.replace(range, with: text)
-            operationDispatched()
-        } catch {
-            expectedSelections.append(UTF16Range(location: range.location + text.utf16.count, length: 0))
-            return await failed(region, after: after, reason: "write", unchanged: nativeWriteUnchanged(region, doc: doc, target: target))
+        region.sentMark = mark; region.writeLength = doc.length
+        var written = 0, aborted = false, brokeOff = false
+        var insertedText = ""
+        // The burst is wall-clock bound (`entranceCapMs`, inside the native unit's work budget): writes cost time here, so a
+        // burst that falls behind writes what is left in fewer pieces. Its one check comes after the last piece, and nothing
+        // the field shows meanwhile is read as the user's (the queue reads nothing until `perform` returns).
+        var rest = pieces
+        let burstStart = now()
+        var writeMs = 0.0
+        var index = 0
+        while !rest.isEmpty {
+            if index > 0 {
+                let fitted = ChunkEntrance.fit(rest, elapsedMs: Self.milliseconds(now() - burstStart), writeMs: writeMs,
+                                               gapMs: entrance.gapMs, capMs: Self.entranceCapMs)
+                rest = fitted.pieces
+                if fitted.waitMs > 0, entrance.gapMs > 0 { await sleep(.milliseconds(fitted.waitMs)) }
+                // A key of the user's ends the burst: what is in stays, the rest is planned again from the next read.
+                guard target.inputMark == mark, !userActedFlag else { aborted = true; userActedFlag = true; inputAt = now(); break }
+            }
+            let piece = rest.removeFirst()
+            let writeStart = now()
+            do {
+                if index == 0 { try target.replace(range, with: piece) }
+                else { try target.replace(UTF16Range(location: range.location + written, length: 0), with: piece) }
+                if index == 0 { operationDispatched() }
+            } catch {
+                expectedSelections.append(UTF16Range(location: range.location + written, length: 0))
+                expectedSelections.append(UTF16Range(location: range.location + written + piece.utf16.count, length: 0))
+                if index > 0 {
+                    // The pieces before it are in, and are ours: the check reads them and the region takes them as landed;
+                    // the rest is planned again from there. Never a field state left for the observer to call the user's.
+                    note(.mismatch, id: region.id, run: region.runID, reason: "write", detail: "midBurst \(index)/\(pieces.count)")
+                    brokeOff = true
+                    break
+                }
+                nativeHome = failureHome()
+                return await failed(region, after: after, reason: "write",
+                                    unchanged: nativeWriteUnchanged(region, doc: doc, target: target), waited: true)
+            }
+            writeMs = Self.milliseconds(now() - writeStart)
+            written += piece.utf16.count
+            insertedText += piece
+            index += 1
         }
-        // Read back the region and the caret before anything else goes out.
-        let shown = shown(target, in: UTF16Range(location: region.start, length: String(after).utf16.count))
-        guard shown == String(after) else {
+        var expectedAfter = after
+        if aborted || brokeOff {
+            var partial = region.current
+            partial.replaceSubrange(lower..<upper, with: Array(insertedText))
+            expectedAfter = partial
+        }
+        // One check after the last write: the chunk's range reads back as expected within the host's learned deadline.
+        let windowRange = UTF16Range(location: region.start, length: String(expectedAfter).utf16.count)
+        let wroteAt = now()
+        let deadline = Duration.milliseconds(host.latency.deadlineMs(deletes: removed.count))
+        let showed = await poll(deadline) { shown(target, in: windowRange) == String(expectedAfter) }
+        var learned = host
+        if showed {
+            let waited = (now() - wroteAt).components
+            learned.latency.heard(afterMs: Double(waited.seconds) * 1000 + Double(waited.attoseconds) / 1e15)
+        } else {
+            learned.latency.timedOut()
+        }
+        host = learned
+        guard showed else {
             // The op may still land: the caret it leaves is ours too.
-            expectedSelections.append(UTF16Range(location: range.location + text.utf16.count, length: 0))
-            return await failed(region, after: after, reason: "readback", unchanged: nativeWriteUnchanged(region, doc: doc, target: target))
+            expectedSelections.append(UTF16Range(location: range.location + written, length: 0))
+            nativeHome = failureHome()
+            return await failed(region, after: expectedAfter, reason: "readback", unchanged: nativeWriteUnchanged(region, doc: doc, target: target), waited: true)
         }
-        guard confirmOperation(true), plan.confirm(after) else { region.nativePlan = nil; return false }
+        let partial = aborted || brokeOff
+        if partial { region.nativePlan = nil; plan = NativeEditPlan(current: expectedAfter, desired: expectedAfter) }
+        guard confirmOperation(true), partial || plan.confirm(after) else { region.nativePlan = nil; return false }
         region.nativePlan = plan
-        let delta = text.utf16.count - range.length
-        apply(region, landed: after, at: range, delta: delta, inserted: text.utf16.count)
+        let delta = written - range.length
+        apply(region, landed: expectedAfter, at: range, delta: delta, inserted: written)
+        shadow?.wrote(range: range, with: insertedText, selection: UTF16Range(location: range.location + written, length: 0))
         revision += 1
-        let natural = UTF16Range(location: range.location + text.utf16.count, length: 0)
+        let natural = UTF16Range(location: range.location + written, length: 0)
         let done = region.current == region.desired
         var wanted: UTF16Range = follows || (done && region.caretAfter) ? UTF16Range(location: region.end, length: 0) : (userCaret ?? natural)
         // A retracted run's first region gives back what it replaced, selected again, so the retry replaces it too.
@@ -1262,7 +1665,7 @@ public final class MacFieldQueue {
         let selection = try? target.selectedRange()
         // AX selection/write/readback can overlap a real key or click. The confirmed text landed,
         // but its old return destination no longer owns the caret. Never restore it over the user.
-        if target.inputMark != mark, !target.nativeInputProtected {
+        if target.inputMark != mark || userActedFlag, !target.nativeInputProtected {
             nativeHome = selection
             region.nativePlan = nil
             userActedFlag = true
@@ -1283,24 +1686,278 @@ public final class MacFieldQueue {
             expectedSelections = [wanted]
         }
         nativeHome = wanted
+        shadow?.moved(to: (try? target.selectedRange()) ?? wanted)
         guard endNativeUnit() else {
             region.lost = true; drop(region, .failed); return true
         }
         if target.inputMark != mark { userActedFlag = true; inputAt = now() }
         note(.verified, id: region.id, run: region.runID, location: region.start, length: region.end - region.start, text: String(region.current),
              selection: wanted)
-        // Only new speech typed at the region's end is paced; a revision or cleanup hunk went out whole.
-        if step.typewriter, !insertion.isEmpty {
-            let remaining = plan.remainingInsertions
-            let ops = remaining + typedBacklog(besides: region)
-            // Nothing more to type: no wait after the last grapheme.
-            if ops > 0 {
-                let pace = isFast(region) ? KeystrokePlanner.writeFloorMs
-                    : KeystrokePlanner.paceMs(ops: ops, floor: KeystrokePlanner.writeFloorMs)
-                await sleep(.milliseconds(pace))
+        return true
+    }
+
+    // MARK: Bursts
+
+    /// Finds how far a burst whose check ran out got: the furthest of its states that the field shows lands (the host may
+    /// still be applying the rest, so the region waits for `keyLateLimit`); once the limit has passed, a field that shows
+    /// anything else with the text before and after the region intact is the region's new text (a host dropped or changed
+    /// a key). True: the region is dealt with for this read.
+    private func settleBurst(_ region: Region, _ doc: Document) -> Bool {
+        guard var burst = region.burst else { return false }
+        // A real key or click came in since the burst went out: its keys land in order, so once the host's learned deadline
+        // has passed the field shows all it will; until then the burst waits (nothing else goes out), after it the fragment
+        // that landed is found and taken as ours (`adoptFragment`).
+        let interrupted = target.map { $0.inputMark != burst.mark } ?? false
+        // The user's caret at the end of an open region follows the region as it grows.
+        let follows = followsRegion(region)
+        func tailHolds(_ location: Int) -> Bool {
+            let context = doc.context(after: location, Self.contextChars)
+            return Self.tailMatches(old: region.after, oldAtEnd: region.afterAtEnd, new: context,
+                                    newAtEnd: location + context.utf16.count == doc.length)
+        }
+        for k in stride(from: burst.items.count - 1, through: burst.applied, by: -1) {
+            let item = burst.items[k], length = String(item.after).utf16.count
+            guard doc.string(region.start, length) == String(item.after), tailHolds(region.start + length) else { continue }
+            for j in burst.applied...k {
+                let step = burst.items[j]
+                apply(region, landed: step.after, at: step.range, delta: step.delta, inserted: step.inserted)
+                burst.lengthBase += step.delta
+            }
+            burst.applied = k + 1
+            revision += 1
+            region.keys?.index = burst.unitStart + burst.applied
+            region.nativePlan = nil
+            refreshContext(region, doc)
+            note(.verified, id: region.id, run: region.runID, location: region.start, length: region.end - region.start,
+                 text: String(region.current), detail: "burst late \(burst.applied)/\(burst.items.count)")
+            let done = burst.applied == burst.items.count
+            if follows { userCaret = UTF16Range(location: region.end, length: 0) }
+            if done {
+                let last = burst.items[k]
+                let landed = UTF16Range(location: last.range.location + last.inserted, length: 0)
+                if region.current == region.desired && region.caretAfter { userCaret = UTF16Range(location: region.end, length: 0) }
+                caretOwed = userCaret != landed
+                region.burst = nil; region.landing = nil
+            } else { region.burst = burst }
+            return true
+        }
+        let settleLimit = interrupted ? Duration.milliseconds(host.latency.deadlineMs(deletes: 0) + 50) : Self.keyLateLimit
+        if now() - burst.sentAt < settleLimit { return true }
+        region.burst = nil; region.landing = nil
+        if interrupted {
+            if adoptFragment(region, doc, burst: burst, follows: follows, detail: "input") { return true }
+            note(.mismatch, id: region.id, run: region.runID, reason: "burstGaveUp", detail: "input")
+            return false
+        }
+        guard doc.context(before: region.start, region.before.utf16.count) == region.before else {
+            if adoptFragment(region, doc, burst: burst, follows: follows, detail: "before") { return true }
+            note(.mismatch, id: region.id, run: region.runID, reason: "burstGaveUp", detail: "before")
+            return false
+        }
+        let delta = doc.length - burst.lengthBase
+        let base = String(region.current).utf16.count + delta
+        for length in [base, base - 1, base + 1] where length >= 0 {
+            guard let shown = doc.string(region.start, length), tailHolds(region.start + length) else { continue }
+            let landed = Array(shown)
+            note(.mismatch, id: region.id, run: region.runID, reason: "burst", detail: "adopted \(landed.count)")
+            if landed != region.current { region.verifiedWrites += 1 }
+            apply(region, landed: landed)
+            if follows { userCaret = UTF16Range(location: region.end, length: 0) }
+            region.keys = nil; region.nativePlan = nil
+            refreshContext(region, doc)
+            caretOwed = true
+            return true
+        }
+        if adoptFragment(region, doc, burst: burst, follows: follows, detail: "shape") { return true }
+        note(.mismatch, id: region.id, run: region.runID, reason: "burstGaveUp", detail: "shape len=\(base)")
+        return false
+    }
+
+    /// A burst whose keys were met by the user's (or whose text around it changed) leaves a fragment of the region's text
+    /// in the field. The furthest of the burst's states that the field shows once, anywhere, is the region's own text now
+    /// (our write, found again): the region takes it as landed and goes on from its end, so no half-typed word of ours is
+    /// left behind the user's keys and the rest of the take goes at the region's end. Nothing of the user's is touched: the
+    /// region only ever owns the text its keys typed. False when no state can be told from the user's text.
+    private func adoptFragment(_ region: Region, _ doc: Document, burst: Burst, follows: Bool, detail: String) -> Bool {
+        for k in stride(from: burst.items.count - 1, through: burst.applied, by: -1) {
+            let landed = burst.items[k].after, text = String(landed)
+            var found: Int?
+            let hits = doc.find(text)
+            if landed.count >= Self.relocateMinimum, hits.count == 1 { found = hits[0] }
+            else if !region.after.isEmpty, (text + region.after).count >= Self.relocateMinimum {
+                let withAfter = doc.find(text + region.after)
+                if withAfter.count == 1 { found = withAfter[0] }
+            }
+            // A short fragment is told by the text before the region, where the user's keys did not come in.
+            if found == nil, !region.before.isEmpty, (region.before + text).count >= Self.relocateMinimum {
+                let withBefore = doc.find(region.before + text)
+                if withBefore.count == 1 { found = withBefore[0] + region.before.utf16.count }
+            }
+            guard let start = found else { continue }
+            let was = region.start
+            region.start = start
+            note(.mismatch, id: region.id, run: region.runID, reason: "burst", detail: "fragment \(k + 1)/\(burst.items.count) at \(start) from \(was) \(detail)")
+            apply(region, landed: landed)
+            if follows { userCaret = UTF16Range(location: region.end, length: 0) }
+            region.keys = nil; region.nativePlan = nil
+            refreshContext(region, doc)
+            revision += 1
+            caretOwed = true
+            return true
+        }
+        return false
+    }
+
+    /// One chunk of a keystroke field as a burst: the keys of one place (Backspaces, then the new graphemes) go out back to
+    /// back, each through the key guards, the typed ones in `ChunkEntrance` pieces; the field is then checked once by value
+    /// within the host's learned deadline. A check that runs out is not retried key by key: `settleBurst` reads what landed.
+    /// False when no key went out.
+    private func performBurst(_ region: Region, unit: KeyUnit, doc: Document, selection: UTF16Range, target: any TextTarget,
+                              mark: Int) async -> Bool {
+        var run = [unit.steps[unit.index]]
+        while unit.index + run.count < unit.steps.count {
+            let next = unit.steps[unit.index + run.count], last = run.last!
+            guard next.before == last.after, next.caret == last.caretAfter, Self.burstable(next) else { break }
+            run.append(next)
+        }
+        var items: [Burst.Item] = []
+        var typed: [Character] = [], deletes = 0
+        for step in run {
+            let location = region.start + String(step.before[..<step.caret]).utf16.count
+            switch step.key {
+            case .backspace:
+                let removed = String(step.before[step.caret - 1]).utf16.count
+                items.append(.init(after: step.after, range: UTF16Range(location: location - removed, length: removed), inserted: 0, delta: -removed))
+                deletes += 1
+            case .type(let character):
+                items.append(.init(after: step.after, range: UTF16Range(location: location, length: 0), inserted: String(character).utf16.count,
+                                   delta: String(character).utf16.count))
+                typed.append(character)
             }
         }
+        let plan = ChunkEntrance.plan(String(typed), enabled: pacedNow)
+        let sizes = plan.pieces.map(\.count)
+        let oldTail = doc.context(after: region.end, Self.contextChars)
+        let oldAtEnd = region.end + oldTail.utf16.count == doc.length
+        let follows = followsRegion(region)
+        note(.sent, id: region.id, run: region.runID, location: items[0].range.location, length: items[0].range.length,
+             text: String(typed), read: doc.context(before: items[0].range.location, 40) + "|" + doc.context(after: items[0].range.location, 40),
+             detail: "burst keys=\(run.count) pieces=\(plan.pieces.count) \(host.latency.summary)")
+        var sent = 0, piece = 0, inPiece = 0
+        let burstStart = now()
+        var sentAt = burstStart
+        for (index, step) in run.enumerated() {
+            if case .type = step.key {
+                if piece < sizes.count, inPiece == sizes[piece] {
+                    piece += 1; inPiece = 0
+                    // Piece k is due at k gaps from the burst's start: a burst that fell behind goes on at once, never stretched.
+                    let wait = min(plan.gapMs, Double(piece) * plan.gapMs - Self.milliseconds(now() - burstStart))
+                    if plan.gapMs > 0, wait > 0 { await sleep(.milliseconds(wait)) }
+                }
+                inPiece += 1
+            }
+            let key: FieldKey
+            switch step.key { case .backspace: key = .backspace; case .type(let character): key = .text(character) }
+            let refusal = index == 0 ? sendKey(key, target: target, mark: mark, selection: selection)
+                                     : sendFollowingKey(key, target: target, mark: mark)
+            if refusal != nil { break }
+            region.uncertainWrite = true
+            sentAt = now()
+            sent += 1
+        }
+        guard sent > 0 else { return false }
+        lastKey = (.edit, sentAt)
+        probeAt = nil
+        items = Array(items[0..<sent])
+        let last = items[sent - 1], expected = UTF16Range(location: last.range.location + last.inserted, length: 0)
+        let window = UTF16Range(location: region.start, length: String(last.after).utf16.count)
+        let lengthNow = doc.length + items.reduce(0) { $0 + $1.delta }
+        let deadline = Duration.milliseconds(host.latency.deadlineMs(deletes: deletes) + plan.durationMs)
+        var valueAt: ContinuousClock.Instant?
+        var caretSeen = false
+        var lastSelection = selection
+        _ = await poll(deadline) {
+            guard let length = try? target.textLength(), let shown = try? target.text(in: window) else { return false }
+            let current = try? target.selectedRange()
+            if let current { lastSelection = current }
+            guard Self.folded(shown, keyed: true) == String(last.after),
+                  Self.tailHolds(target, at: window.end, length: length, old: oldTail, oldAtEnd: oldAtEnd, lengthNow: lengthNow) else { return false }
+            if current == expected { caretSeen = true; return true }
+            // The text is there: the caret may follow late (Chromium reports it late at a line start); it gets a short wait.
+            let since = valueAt ?? now()
+            valueAt = since
+            return now() - since >= Self.caretWait
+        }
+        var learned = host
+        guard valueAt != nil || caretSeen else {
+            expectedSelections.append(expected)
+            learned.latency.timedOut(); learned.burstFailures += 1; host = learned
+            if target.inputMark != mark { userActedFlag = true }
+            note(.mismatch, id: region.id, run: region.runID, reason: "burst", detail: "keys=\(sent) \(learned.latency.summary) failures=\(learned.burstFailures)")
+            region.burst = Burst(items: items, unitStart: unit.index, lengthBase: doc.length, sentAt: sentAt, mark: mark)
+            lateKey = (sentAt, expected, Self.keyLateLimit, true)
+            lateKeyLanded = false
+            return true
+        }
+        let heard = (now() - sentAt).components
+        learned.latency.heard(afterMs: Double(heard.seconds) * 1000 + Double(heard.attoseconds) / 1e15)
+        learned.burstFailures = 0
+        host = learned
+        _ = confirmOperation(true)
+        // The shadow takes the burst's end state as the queue's own write: the next read matches it.
+        shadow?.wrote(range: UTF16Range(location: region.start, length: String(region.current).utf16.count), with: String(last.after), selection: expected)
+        for item in items { apply(region, landed: item.after, at: item.range, delta: item.delta, inserted: item.inserted) }
+        unit.index += sent
+        revision += 1
+        if follows || (region.current == region.desired && region.caretAfter) { userCaret = UTF16Range(location: region.end, length: 0) }
+        caretOwed = userCaret != expected
+        if caretSeen {
+            expectedSelections = [expected]
+        } else {
+            expectedSelections = [expected, lastSelection]
+            lateKey = (sentAt, expected, Self.keyLateLimit, true)
+            lateKeyLanded = true
+            staleCaret = (lastSelection, expected)
+        }
+        note(.verified, id: region.id, run: region.runID, location: region.start, length: region.end - region.start,
+             text: String(region.current), selection: expected,
+             detail: (caretSeen ? "burst \(sent)" : "burst \(sent) caretLag \(lastSelection.location)+\(lastSelection.length)") + " " + debugState)
         return true
+    }
+
+    /// The user's caret goes with an open dictation region's end: it is at the end, or inside the region (a click or a key
+    /// of the user's closes the region, so a caret inside an open one is the queue's own, left there by a rebind).
+    private func followsRegion(_ region: Region) -> Bool {
+        guard region.open, let caret = userCaret, caret.length == 0 else { return false }
+        return caret.location >= region.start && caret.location <= region.end
+    }
+
+    /// A key a burst may carry: Backspace or a typed grapheme the host takes as a key (line breaks and tabs are pasted, one
+    /// verified key at a time).
+    private static func burstable(_ step: KeystrokePlanner.Step) -> Bool {
+        if case .type(let character) = step.key { return !(character.isNewline || character == "\t") }
+        return true
+    }
+
+    /// A key of a burst after the first. Besides the target's guards it probes that the field still reads and is bound to
+    /// the element that has focus (AX reads cost 30-100 us in the Mac VM, so this adds nothing); a field that stopped
+    /// reading, lost focus or whose element was replaced ends the burst at that key: never a key into a field that cannot
+    /// be read back. The key's own result is still not waited for.
+    private func sendFollowingKey(_ key: FieldKey, target: any TextTarget, mark: Int) -> FieldKeyRefusal? {
+        do {
+            guard target.isFocused(), (try? target.textLength()) != nil, (try? target.selectedRange()) != nil else {
+                throw FieldKeyRefusal.notFocused
+            }
+            try target.pressFollowing(key, mark: mark)
+            operationDispatched()
+            opsSent += 1
+            return nil
+        } catch {
+            let refusal = error as? FieldKeyRefusal ?? .unavailable
+            note(.refused, reason: "\(refusal)")
+            refused(refusal, target: target, mark: mark)
+            return refusal
+        }
     }
 
     // MARK: Keystrokes
@@ -1318,22 +1975,17 @@ public final class MacFieldQueue {
                 return unit
             }
         }
-        let fast = isFast(region)
-        let typewriter = pacedNow && region.desired.starts(with: region.current)
-        let typedMs = fast ? KeystrokePlanner.floorMs : typewriter ? KeystrokePlanner.calmMs : KeystrokePlanner.keyMs
+        let typedMs = KeystrokePlanner.floorMs
         let lineStart = doc.context(before: region.start, 1).last?.isNewline ?? true
         let lineEnd = doc.context(after: region.end, 1).first?.isNewline ?? true
         let steps = KeystrokePlanner.steps(from: region.current, to: region.desired, paceMs: typedMs, jumpMs: caretJumps.jumpMs,
                                            lineStart: lineStart, lineEnd: lineEnd)
         guard !steps.isEmpty else { region.keys = nil; return nil }
         let typed = steps.reduce(0) { if case .type = $1.key { $0 + 1 } else { $0 } }
-        let fixed = Double(steps.count - typed) * KeystrokePlanner.keyMs
-        let unit = KeyUnit(desired: region.desired, steps: steps,
-                           paceMs: fast ? KeystrokePlanner.floorMs : KeystrokePlanner.paceMs(ops: typed + typedBacklog(besides: region), fixedMs: fixed),
-                           typewriter: typewriter)
+        let unit = KeyUnit(desired: region.desired, steps: steps)
         region.keys = unit
         note(.planned, id: region.id, run: region.runID, location: region.start, text: String(region.desired),
-             detail: "keys=\(steps.count) typed=\(typed) pace=\(Int(unit.paceMs))")
+             detail: "keys=\(steps.count) typed=\(typed)")
         return unit
     }
 
@@ -1343,8 +1995,8 @@ public final class MacFieldQueue {
     private func performKey(_ region: Region, doc: Document, selection: UTF16Range, target: any TextTarget, mark: Int) async -> Bool {
         defer { operations.invalidate() }
         guard let unit = keyUnit(for: region, doc: doc) else { return true }
-        var step = unit.steps[unit.index]
-        var caret = region.start + String(step.before[..<step.caret]).utf16.count
+        let step = unit.steps[unit.index]
+        let caret = region.start + String(step.before[..<step.caret]).utf16.count
         // The field still reports the caret an earlier key left before it showed moving: one arrow makes it report
         // afresh before anything is typed, or planned, from a caret that may not be the real one.
         if let stale = staleCaret, stale.reported == selection {
@@ -1361,12 +2013,11 @@ public final class MacFieldQueue {
             return await probe(doc: doc, selection: selection, target: target, mark: mark, region: region)
         }
         if await settle(before: .edit) { return true }
+        if host.bursts, !verifiedKeysOnly, Self.burstable(step) { return await performBurst(region, unit: unit, doc: doc, selection: selection, target: target, mark: mark) }
         let oldTail = doc.context(after: region.end, Self.contextChars)
         let oldAtEnd = region.end + oldTail.utf16.count == doc.length
-        var docLength = doc.length
-        var piped = 1
-        // Typed graphemes go out in runs of a few, more while typing is behind speech.
-        let maxRun = unit.typedLeft + typedBacklog(besides: region) >= KeystrokePlanner.behindOps ? Self.pipelineRunBehind : Self.pipelineRun
+        let docLength = doc.length
+        let piped = 1
         while true {
             let after = step.after
             let range: UTF16Range, inserted: String, key: FieldKey
@@ -1416,21 +2067,6 @@ public final class MacFieldQueue {
                      detail: caretSeen ? nil : "caretLag \(lastSelection.location)+\(lastSelection.length)")
             }
 
-            // A run of typed graphemes is verified by the caret alone, one read per key; the region's text, and the field's
-            // length and tail, are read once after the run's last key (the window covers the whole run).
-            if piped < maxRun, canPipeline(after: step, unit: unit, region: region, mark: mark, target: target),
-               await poll(Self.pipelineWait, { (try? target.selectedRange()) == expected }) {
-                land(caretSeen: true, lastSelection: expected)
-                docLength = lengthNow
-                let pace = min(unit.paceMs, KeystrokePlanner.paceMs(ops: unit.typedLeft + typedBacklog(besides: region)))
-                let gap = Duration.milliseconds(pace) - (now() - sentAt)
-                if gap > .zero { await sleep(gap) }
-                step = unit.steps[unit.index]
-                caret = region.start + String(step.before[..<step.caret]).utf16.count
-                piped += 1
-                continue
-            }
-
             var valueAt: ContinuousClock.Instant?
             var caretSeen = false, transformed = false
             var lastSelection = selection
@@ -1475,25 +2111,8 @@ public final class MacFieldQueue {
                 return await failed(region, after: after, reason: "key")
             }
             land(caretSeen: caretSeen, lastSelection: lastSelection)
-            if case .type = step.key, unit.typewriter {
-                // The faster of the change's own pace and the backlog's, counted from when the key went out.
-                let pace = min(unit.paceMs, KeystrokePlanner.paceMs(ops: unit.typedLeft + typedBacklog(besides: region)))
-                let gap = Duration.milliseconds(pace) - (now() - sentAt)
-                // Nothing more to type: no wait after the last grapheme.
-                if unit.typedLeft + typedBacklog(besides: region) > 0, gap > .zero { await sleep(gap) }
-            }
             return true
         }
-    }
-
-    /// Whether the key just sent may be verified by the caret alone, so the next typed grapheme goes straight after it:
-    /// both are typed graphemes at one place, the change is still the one planned, and nothing else wants the field.
-    private func canPipeline(after step: KeystrokePlanner.Step, unit: KeyUnit, region: Region, mark: Int, target: any TextTarget) -> Bool {
-        guard unit.typewriter, !exclusive, !userActedFlag, !region.lost, unit.desired == region.desired, target.inputMark == mark,
-              case .type = step.key, unit.index + 1 < unit.steps.count else { return false }
-        let next = unit.steps[unit.index + 1]
-        guard case .type = next.key, next.caret == step.caretAfter, next.before == step.after else { return false }
-        return true
     }
 
     /// Whether the text after an edit key's window is what followed the region before, and the field's length fits
@@ -1729,9 +2348,11 @@ public final class MacFieldQueue {
                 return nil
             }
             lateKey = (sentAt, exact, Self.keyLateLimit, false)
+            let caretNow = try? target.selectedRange()
+            if moveFailures == 0 || (caretNow != nil && caretNow != moveSeriesCaret) { moveSeriesStart = sentAt; moveSeriesCaret = caretNow }
             moveFailures += 1
             note(.mismatch, id: region?.id, run: region?.runID, reason: "move", detail: "failures=\(moveFailures)")
-            if moveFailures >= Self.retryLimit {
+            if moveFailures >= Self.retryLimit || (moveFailures >= 2 && now() - (moveSeriesStart ?? sentAt) >= Self.moveBudget) {
                 moveFailures = 0
                 if let region { region.lost = true; drop(region, .failed) } else { caretOwed = false }
             }
@@ -1905,7 +2526,7 @@ public final class MacFieldQueue {
             && shown(target, in: UTF16Range(location: region.start, length: String(region.current).utf16.count)) == String(region.current)
     }
 
-    private func failed(_ region: Region, after: [Character], reason: String, unchanged: Bool = false) async -> Bool {
+    private func failed(_ region: Region, after: [Character], reason: String, unchanged: Bool = false, waited: Bool = false) async -> Bool {
         region.nativePlan = nil
         if unchanged { region.uncertainWrite = false }
         region.failures += 1
@@ -1926,8 +2547,9 @@ public final class MacFieldQueue {
             region.lost = true
             drop(region, .failed)
         }
-        // Give a slow field time to show the op before the next read decides whether it landed.
-        await sleep(Self.waitTick)
+        // Give a slow field time to show the op before the next read decides whether it landed (a check that already waited
+        // out the host's learned deadline has given it that).
+        if !waited { await sleep(Self.waitTick) }
         return true
     }
 
@@ -1968,7 +2590,7 @@ public final class MacFieldQueue {
             if !region.lost {
                 let body = region.trimsLead ? Array(slice.drop { $0.isWhitespace && !$0.isNewline }) : slice
                 region.suffix = Array(FieldInsertion.trailingSeparator(after: String(body), before: region.following))
-                region.desired = region.separator + body + region.suffix
+                region.desired = carryRewrites(region, in: region.separator + body + region.suffix)
             }
             lower = upper
         }
@@ -2021,9 +2643,9 @@ public final class MacFieldQueue {
     /// and its later versions are neither placed nor dropped again. A run with nothing left to place stays as it is.
     private func abandon(_ index: Int, _ reason: Reason) {
         guard !runs[index].abandoned, runs[index].regions.contains(where: \.pending) || runs[index].needsRegion else { return }
-        let onlyAppending = runs[index].regions.filter(\.pending).allSatisfy { $0.desired.starts(with: $0.landing ?? $0.current) }
+        let onlyAppending = runs[index].regions.filter(\.pending).allSatisfy { $0.desired.starts(with: Self.likely($0)) }
         let typed = onlyAppending && !runs[index].speechTarget.hasDeferredRevision ? Self.typedCount(runs[index].regions.map {
-            TypedRegion(current: $0.landing ?? $0.current, desired: $0.desired, source: $0.source, separator: $0.separator,
+            TypedRegion(current: Self.likely($0), desired: $0.desired, source: $0.source, separator: $0.separator,
                         original: Array($0.original), trimsLead: $0.trimsLead, lost: $0.lost)
         }) : 0
         for region in runs[index].regions {
@@ -2041,6 +2663,9 @@ public final class MacFieldQueue {
 
     // MARK: Panel handover
 
+    /// What the region shows or most likely shows: a burst or key that went out and did not read back usually landed.
+    private static func likely(_ region: Region) -> [Character] { region.burst?.items.last?.after ?? region.landing ?? region.current }
+
     /// A run with words still to place that was neither given up nor handed over.
     private func handable(_ index: Int) -> Bool {
         !runs[index].abandoned && !runs[index].retracted && (runs[index].regions.contains(where: \.pending) || runs[index].needsRegion)
@@ -2052,10 +2677,10 @@ public final class MacFieldQueue {
         var handovers: [Handover] = []
         for index in runs.indices where handable(index) {
             let requiresReview = runs[index].speechTarget.hasDeferredRevision
-                || runs[index].regions.filter(\.pending).contains(where: { !$0.desired.starts(with: $0.landing ?? $0.current) })
+                || runs[index].regions.filter(\.pending).contains(where: { !$0.desired.starts(with: Self.likely($0)) })
             // A key that went out but did not read back usually landed: it counts as typed, so it is not typed twice.
             let typed = Self.typedCount(runs[index].regions.map {
-                TypedRegion(current: $0.landing ?? $0.current, desired: $0.desired, source: $0.source, separator: $0.separator,
+                TypedRegion(current: Self.likely($0), desired: $0.desired, source: $0.source, separator: $0.separator,
                             original: Array($0.original), trimsLead: $0.trimsLead, lost: $0.lost)
             })
             for region in runs[index].regions {
@@ -2066,7 +2691,7 @@ public final class MacFieldQueue {
             runs[index].abandoned = true
             runs[index].speaking = false
             let run = runs[index]
-            note(.panel, run: run.id, length: typed, text: String(run.speechTarget.authoritative), reason: "unreadable")
+            note(.panel, run: run.id, length: typed, text: String(run.speechTarget.authoritative), reason: "unreadable", detail: debugState + " burst=\(runs[index].regions.map { $0.burst?.items.count ?? -1 })")
             handovers.append(Handover(runID: run.id, version: run.version, text: String(run.speechTarget.authoritative), typed: typed,
                                       complete: run.complete, requiresReview: requiresReview))
         }
@@ -2157,4 +2782,23 @@ public struct CaretJumps: Sendable, Equatable {
     }
     /// What a jump costs the planner here: one caret set where it is trusted, else a few hops and arrows.
     public var jumpMs: Double { direct == .trusted ? KeystrokePlanner.keyMs : KeystrokePlanner.jumpMs }
+}
+
+
+/// What the queue learned per field (`TextTarget.fieldKey`), bounded: the field that was written least recently is
+/// forgotten first, never one still in use (an arbitrary eviction could drop what a running take had just learned).
+struct FieldMemory<Value> {
+    static var limit: Int { 64 }
+    private var values: [AnyHashable: Value] = [:]
+    private var order: [AnyHashable] = []
+    subscript(key: AnyHashable) -> Value? {
+        get { values[key] }
+        set {
+            if let index = order.firstIndex(of: key) { order.remove(at: index) }
+            guard let newValue else { values[key] = nil; return }
+            while order.count >= Self.limit, let oldest = order.first { order.removeFirst(); values[oldest] = nil }
+            values[key] = newValue
+            order.append(key)
+        }
+    }
 }
