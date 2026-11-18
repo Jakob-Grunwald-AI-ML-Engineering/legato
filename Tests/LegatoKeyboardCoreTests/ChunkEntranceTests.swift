@@ -50,9 +50,24 @@ import Testing
             #expect(plan.durationMs <= ChunkEntrance.capMs + 1e-9, "\(count): \(plan.durationMs)")
             #expect(plan.gapMs <= ChunkEntrance.gapMs && (plan.pieces.count < 2 || plan.gapMs >= ChunkEntrance.minGapMs - 1e-9), "\(count)")
         }
-        // The gap shrinks before graphemes group: 40 graphemes are still 40 pieces.
-        #expect(ChunkEntrance.plan(String(repeating: "x", count: 40)).pieces.count == 40)
+        // One piece per frame, never faster: what fits the cap at 120 Hz goes grapheme by grapheme, more groups.
+        #expect(ChunkEntrance.plan(String(repeating: "x", count: 25)).pieces.count == 25)
+        #expect(ChunkEntrance.plan(String(repeating: "x", count: 40)).pieces.count < 40)
         #expect(ChunkEntrance.plan(String(repeating: "x", count: 500)).pieces.count < 500)
+    }
+
+    @Test func thePaceIsOnePiecePerDisplayFrame() {
+        #expect(abs(ChunkEntrance.frameMs(fps: 60) - 1000 / 60.0) < 1e-9)
+        #expect(abs(ChunkEntrance.frameMs(fps: 120) - ChunkEntrance.gapMs) < 1e-9)
+        #expect(ChunkEntrance.frameMs(fps: 0) == ChunkEntrance.frameMs(fps: 30))
+        for fps in [60, 120] {
+            let frame = ChunkEntrance.frameMs(fps: fps)
+            for count in [5, 20, 100] {
+                let plan = ChunkEntrance.plan(String(repeating: "x", count: count), gapMs: frame)
+                // Never two pieces in one frame, and never past the cap.
+                #expect(abs(plan.gapMs - frame) < 1e-9 && plan.durationMs <= ChunkEntrance.capMs + 1e-9, "\(fps) Hz, \(count)")
+            }
+        }
     }
 
     @Test func disabledOrTrivialIsOnePiece() {
