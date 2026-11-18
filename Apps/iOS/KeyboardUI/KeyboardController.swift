@@ -749,7 +749,7 @@ final class KeyboardController {
             self.blankProbeLease = lease
             self.fieldOperationCancelled = false
 
-            func stillOwnsCaret() -> Bool {
+            @MainActor func stillOwnsCaret() -> Bool {
                 !Task.isCancelled && self.isVisible && !self.isTornDown && self.draftID == draft
                     && self.document.documentID == field && !self.document.isSecureTextEntry
                     && self.document.selectedText?.isEmpty != false && !self.fieldOperationCancelled
@@ -786,7 +786,7 @@ final class KeyboardController {
         journal.write(entry)
     }
 
-    private func verifyBlankProbeWindow(_ stillOwnsCaret: () -> Bool, matching: (FieldQueue.Report) -> Bool) async -> Bool {
+    private func verifyBlankProbeWindow(_ stillOwnsCaret: @MainActor () -> Bool, matching: (FieldQueue.Report) -> Bool) async -> Bool {
         // Divide the response budget between the outward and return moves. Typing can cancel on any sample.
         let samples = Int(FieldEditCoordinator.inputResponseTargetMs) / (2 * FieldReader.walkSettleMs)
         var previous: FieldQueue.Report?
