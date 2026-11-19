@@ -1,4 +1,5 @@
 import Foundation
+import LegatoKeyboardCore
 import LegatoSoniox
 
 /// Shared speech-route ownership. Hosts supply capture and field settling; the route alone owns
@@ -11,8 +12,23 @@ import LegatoSoniox
     private var finishingDictation: Task<Void, Never>?
     private var cutTimeout: Task<Void, Never>?
     private var cutGeneration = 0
+    private var sendingCut: Task<Void, Never>?
+    private struct PreviewCapture {
+        let hold: KeyboardRequest.PreviewHold
+        let anchor: KeyboardRequest.PreviewAnchor?
+        var lines: [String] = []
+        var tail = ""
+        var apply = false
+    }
+    private var previewCapture: PreviewCapture?
     var afterDictationSettled: @MainActor () async -> Void = {}
     var speechMode: SpeechMode { modeSink.target }
+    var isFinishingPreviewHold: Bool { previewCapture != nil && modeSink.target == .dictation }
+    var previewInstruction: DictationStatus.PreviewInstruction? {
+        guard let capture = previewCapture else { return nil }
+        let text = LiveSegment.joined(capture.lines + [capture.tail])
+        return text.isEmpty ? nil : .init(holdID: capture.hold.id, text: text)
+    }
 
     init(sink: any DictationRouteSink, instruction: InstructionSession,
          sonioxKey: @escaping @MainActor () -> String,
@@ -26,12 +42,25 @@ import LegatoSoniox
         pipeline?.cutRecognizer = { [engine] in await engine.finalizeChunk() }
         modeSink.onInstructionLine = { instruction.hear($0) }
         modeSink.onInstructionTail = { instruction.hearTail($0) }
+        modeSink.onPreviewInstructionLine = { [weak self] line in
+            self?.previewCapture?.lines.append(line.text)
+            self?.previewCapture?.tail = line.remainingTail ?? ""
+        }
+        modeSink.onPreviewInstructionTail = { [weak self] tail in self?.previewCapture?.tail = tail }
         modeSink.onTransition = { [weak self] transition in
             guard let self else { return }
+            if transition.from == .previewInstruction {
+                let capture = previewCapture
+                previewCapture = nil
+                if let capture {
+                    pipeline?.endPreviewHold(capture.hold, anchor: capture.anchor,
+                                             instructions: capture.apply ? capture.lines.joined(separator: " ") : nil)
+                }
+            }
             if transition.to == .instruction {
                 instruction.begin()
                 if let pipeline { finishingDictation = Task { await pipeline.finishLiveRun() } }
-            } else { instruction.end() }
+            } else if transition.from == .instruction { instruction.end() }
         }
         if instruction.beforeRun == nil, pipeline != nil {
             instruction.beforeRun = { [weak self] in await self?.settleBeforeInstruction() }
@@ -53,38 +82,74 @@ import LegatoSoniox
     var isPaused: Bool { pipeline?.isPaused ?? false }
 
     /// The user's send of a staged take: the words so far go to the field now (`DictationPipeline.sendNow`). Dictation only.
-    func sendNow() async {
-        guard modeSink.target == .dictation else { return }
-        await pipeline?.sendNow()
+    func sendNow(editPreview: Bool = false, preview: KeyboardRequest.PreviewAnchor? = nil) async {
+        guard modeSink.target == .dictation, previewCapture == nil else { return }
+        await pipeline?.sendNow(editPreview: editPreview, preview: preview)
     }
 
     /// The user's raw send (`DictationPipeline.sendRawNow`): the same, with no cleanup. Dictation only.
-    func sendRawNow() async {
-        guard modeSink.target == .dictation else { return }
-        await pipeline?.sendRawNow()
+    func sendRawNow(preview: KeyboardRequest.PreviewAnchor? = nil) async {
+        guard modeSink.target == .dictation, previewCapture == nil else { return }
+        await pipeline?.sendRawNow(preview: preview)
     }
 
     /// The user's swipe left (`DictationPipeline.discardNow`) and its undo. Dictation only.
     func discardNow() async {
-        guard modeSink.target == .dictation else { return }
+        guard modeSink.target == .dictation, previewCapture == nil else { return }
         await pipeline?.discardNow()
     }
 
     func undoDiscardNow() async {
-        guard modeSink.target == .dictation else { return }
+        guard modeSink.target == .dictation, previewCapture == nil else { return }
         await pipeline?.undoDiscardNow()
     }
 
     /// Whether audio is still arriving is a host fact (including replay); cut ordering is shared.
     func setMagic(_ enabled: Bool, cut: Bool) {
+        guard previewCapture == nil else { return }
         let mode: SpeechMode = enabled ? .instruction : .dictation
+        changeSpeechMode(to: mode, cut: cut)
+    }
+
+    @discardableResult
+    func beginPreviewHold(_ hold: KeyboardRequest.PreviewHold, anchor: KeyboardRequest.PreviewAnchor?, cut: Bool) -> Bool {
+        guard modeSink.target == .dictation, modeSink.mode == .dictation, previewCapture == nil,
+              pipeline?.beginPreviewHold(hold, anchor: anchor) == true else { return false }
+        previewCapture = PreviewCapture(hold: hold, anchor: anchor)
+        changeSpeechMode(to: .previewInstruction, cut: cut)
+        return true
+    }
+
+    func endPreviewHold(_ hold: KeyboardRequest.PreviewHold, apply: Bool, cut: Bool) {
+        guard previewCapture?.hold == hold, modeSink.target == .previewInstruction else { return }
+        previewCapture?.apply = apply
+        changeSpeechMode(to: .dictation, cut: cut)
+    }
+
+    /// The temporary input stream itself is stopping. Its final boundary closes the instruction
+    /// before the draft is composed, without issuing a second finalize on the same stream.
+    func endPreviewHoldWithTake(_ hold: KeyboardRequest.PreviewHold, apply: Bool) {
+        guard previewCapture?.hold == hold, modeSink.target == .previewInstruction else { return }
+        previewCapture?.apply = apply
+        modeSink.toggle(to: .dictation, cut: true)
+    }
+
+    func finishPreviewHold() {
+        guard let capture = previewCapture else { return }
+        modeSink.flushCuts()
+        if modeSink.target == .previewInstruction { endPreviewHold(capture.hold, apply: false, cut: false) }
+    }
+
+    private func changeSpeechMode(to mode: SpeechMode, cut: Bool) {
         guard mode != modeSink.target else { return }
         modeSink.toggle(to: mode, cut: cut)
         guard cut else { return }
         cutGeneration += 1
         let generation = cutGeneration
-        Task { [weak self] in
-            guard let self else { return }
+        let previous = sendingCut
+        sendingCut = Task { [weak self] in
+            await previous?.value
+            guard let self, !Task.isCancelled else { return }
             if !(await engine.finalizeChunk()), generation == cutGeneration { modeSink.flushCuts() }
         }
         cutTimeout?.cancel()
@@ -98,7 +163,7 @@ import LegatoSoniox
     func finishModes() {
         cancelCut()
         modeSink.flushCuts()
-        if modeSink.target == .instruction { modeSink.toggle(to: .dictation, cut: false) }
+        if modeSink.target != .dictation { modeSink.toggle(to: .dictation, cut: false) }
     }
 
     func reset() async {
@@ -109,6 +174,7 @@ import LegatoSoniox
     /// The session's routing (mode, cut, instruction); the pipeline keeps its run, which may still be ending.
     func resetRouting() {
         cancelCut()
+        previewCapture = nil
         finishingDictation?.cancel(); finishingDictation = nil
         modeSink.resetRouter()
         instruction.reset()
@@ -120,5 +186,6 @@ import LegatoSoniox
     private func cancelCut() {
         cutGeneration += 1
         cutTimeout?.cancel(); cutTimeout = nil
+        sendingCut?.cancel(); sendingCut = nil
     }
 }

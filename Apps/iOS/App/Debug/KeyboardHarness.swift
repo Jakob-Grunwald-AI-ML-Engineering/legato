@@ -237,6 +237,7 @@ final class KeyboardHarnessModel {
     var state: [String: Any] {
         let published = controller.dictationPresentation
         return ["text": document.text, "visible": controller.isVisible,
+                "preview": controller.dictationPreview ?? "", "composedPreview": controller.composedPreview != nil,
                 "takePhase": published.dictationTakePhase?.rawValue ?? "", "takeText": published.dictationTake ?? "",
                 "takeFailed": controller.takeFailed, "status": controller.statusText ?? ""]
     }

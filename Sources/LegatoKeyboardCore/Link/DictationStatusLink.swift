@@ -6,6 +6,16 @@ public enum DictationTakePhase: String, Sendable, Codable, Equatable { case buff
 
 /// Lightweight dictation controls and presentation. Text delivery stays on LiveDictationLink.
 public struct DictationStatus: Codable, Equatable, Sendable {
+    public struct PreviewInstruction: Codable, Equatable, Sendable {
+        public let holdID: String
+        public let text: String
+
+        public init(holdID: String, text: String) {
+            self.holdID = holdID
+            self.text = text
+        }
+    }
+
     public var fieldCleanupOutcome: CleanupFieldOutcome?
     /// Acoustic/semantic activity belongs to this run; absent from older hosts.
     public var speechRunID: String?
@@ -21,6 +31,9 @@ public struct DictationStatus: Codable, Equatable, Sendable {
     public var dictationCountdownDeadline: Double?
     public var dictationNotice: String?
     public var dictationNoticeID: Int?
+    /// Correlates the glow with the press whose speech is being captured.
+    public var previewInstructionReadyID: String?
+    public var previewInstruction: PreviewInstruction?
     public init() {}
 }
 

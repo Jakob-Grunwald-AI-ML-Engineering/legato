@@ -45,6 +45,9 @@ import LegatoVocabulary
     /// with every new notice so the same text can show again.
     public private(set) var dictationNotice: String?
     public private(set) var dictationNoticeID = 0
+    public private(set) var previewInstructionReadyID: String?
+    public var previewInstruction: DictationStatus.PreviewInstruction? { speechRoute.previewInstruction }
+    @ObservationIgnored private var temporaryPreviewMic: KeyboardRequest.PreviewHold?
     /// Mic tap → first live tail, newest last (bounded).
     public private(set) var probes: [TapLatencyProbe.Result] = []
     @ObservationIgnored private let microphone: MicrophoneHost
@@ -124,10 +127,14 @@ import LegatoVocabulary
         await queue?.value
     }
     private func serial<T: Sendable>(_ body: @escaping @MainActor () async -> T) async -> T {
+        await enqueue(body).value
+    }
+    @discardableResult
+    private func enqueue<T: Sendable>(_ body: @escaping @MainActor () async -> T) -> Task<T, Never> {
         let previous = queue
         let task = Task { @MainActor in await previous?.value; return await body() }
         queue = Task { _ = await task.value }
-        return await task.value
+        return task
     }
     private func reconcileStep() async -> Bool {
         let target = desired
@@ -160,6 +167,7 @@ import LegatoVocabulary
     static let takeEndWait = Duration.seconds(3)
 
     private func close() async {
+        cancelPreviewMic()
         // Hiding ends a take that is speaking like Stop does for the words already spoken: the recognizer finalizes what it
         // heard (bounded) before the route closes, so a sentence not yet final when the keyboard hid is not lost. Only audio
         // arriving after the hide is dropped (the route stops first). A debug replay is cut here too; it cannot prove the
@@ -224,12 +232,14 @@ import LegatoVocabulary
     @discardableResult public func openGate(tapAt: Date? = nil) async -> Bool {
         await serial { [weak self] in await self?.performOpen(tapAt: tapAt) ?? false }
     }
-    private func performOpen(tapAt: Date?) async -> Bool {
+    private func performOpen(tapAt: Date?, previewHold: KeyboardRequest.PreviewHold? = nil) async -> Bool {
         guard !VoiceEnrollmentController.shared.isBusy else { return false }
+        if previewHold == nil, speechRoute.isFinishingPreviewHold { await takeFinish?.value }
         guard !meetingSuspended, !microphone.microphoneReserved, isOpen else { return false }
         guard gate.route == .idle else { return true }
         let tapped = now() - max(0, tapAt.map { Date().timeIntervalSince($0) } ?? 0)
         if !microphone.holdsWarmInput, !(await microphone.holdWarmInput()) { return false }
+        if let previewHold, temporaryPreviewMic != previewHold || !desired.visible || meetingSuspended { return false }
         let surface = gate.surface
         let warmSince = dictation.liveSince
         probe.tapped(route: surface, at: tapped, warm: warmSince != nil,
@@ -240,10 +250,20 @@ import LegatoVocabulary
         await microphone.preferTakeInput()
         switch surface {
         case .dictation:
-            // A take of its own: its words never join the previous take's run (which may still be ending).
-            endDebugTake()
-            speechRoute.beginTake()
+            // Temporary instruction audio leaves the original dictation run paused.
+            if previewHold == nil {
+                endDebugTake()
+                speechRoute.beginTake()
+            }
             await dictation.activate()
+            if let previewHold, temporaryPreviewMic != previewHold || !desired.visible || meetingSuspended {
+                _ = gate.close()
+                microphone.setRoute(.idle)
+                await dictation.abandonTake()
+                await microphone.preferIdleInput()
+                probe.cancel()
+                return false
+            }
             if let failure = microphone.takeBufferFailure {
                 await dictation.abandonTake()
                 microphone.discardTakeBuffer(); _ = gate.close(); probe.cancel()
@@ -271,6 +291,7 @@ import LegatoVocabulary
     public func closeGate() async {
         await serial { [weak self] in
             guard let self else { return }
+            self.cancelPreviewMic()
             let action = self.gate.close()
             await self.perform(action)
         }
@@ -278,18 +299,85 @@ import LegatoVocabulary
 
     /// The keyboard's send (a tap on the preview): a staged take sends the words so far to the field now and keeps listening.
     /// Ignored without a take running; it needs no gate change, so it works from the background like Stop.
-    public func sendNow() async {
+    public func sendNow(editPreview: Bool = false, preview: KeyboardRequest.PreviewAnchor? = nil) async {
         guard isOpen, canSend else { return }
-        await speechRoute.sendNow()
+        await speechRoute.sendNow(editPreview: editPreview, preview: preview)
+    }
+
+    public func handlePreviewHold(_ request: KeyboardRequest) {
+        guard isOpen, !meetingSuspended, let hold = request.previewHold else { return }
+        let cut = gate.route == .dictation || dictation.hasActiveTake || dictation.isReplaying
+        switch request.command {
+        case .beginPreviewHold where canSend:
+            guard speechRoute.beginPreviewHold(hold, anchor: request.preview, cut: cut) else { return }
+            if !cut, speechRoute.isPaused {
+                temporaryPreviewMic = hold
+                enqueue { [weak self] in
+                    guard let self, temporaryPreviewMic == hold, gate.route == .idle,
+                          desired.visible, !meetingSuspended else { return }
+                    let accepted = await performOpen(tapAt: request.at, previewHold: hold)
+                    guard temporaryPreviewMic == hold else { return }
+                    if accepted, gate.route == .dictation {
+                        previewInstructionReadyID = hold.id
+                    } else {
+                        temporaryPreviewMic = nil
+                        speechRoute.endPreviewHold(hold, apply: false, cut: false)
+                        if !accepted, desired.visible, !meetingSuspended {
+                            dictationNotice = "Open Legato to start the microphone."
+                            dictationNoticeID += 1
+                        }
+                    }
+                }
+            } else {
+                previewInstructionReadyID = hold.id
+            }
+        case .releasePreviewHold, .cancelPreviewHold:
+            let apply = request.command == .releasePreviewHold
+            let wasReady = previewInstructionReadyID == hold.id
+            if wasReady { previewInstructionReadyID = nil }
+            if temporaryPreviewMic == hold {
+                temporaryPreviewMic = nil
+                if wasReady, gate.route == .dictation {
+                    speechRoute.endPreviewHoldWithTake(hold, apply: apply)
+                    microphone.setRoute(.idle)
+                    enqueue { [weak self] in
+                        guard let self, gate.route == .dictation else { return }
+                        _ = gate.close()
+                        routeClosedAt = now()
+                        await dictation.finalizeTake()
+                        finishDictationTake(waitingForWords: true, previewOnly: true)
+                        await microphone.preferIdleInput()
+                        probe.cancel()
+                    }
+                } else {
+                    speechRoute.endPreviewHold(hold, apply: apply, cut: false)
+                }
+            } else {
+                speechRoute.endPreviewHold(hold, apply: apply, cut: cut)
+            }
+        default: break
+        }
+    }
+
+    private func cancelPreviewMic() {
+        previewInstructionReadyID = nil
+        guard let hold = temporaryPreviewMic else { return }
+        temporaryPreviewMic = nil
+        speechRoute.endPreviewHoldWithTake(hold, apply: false)
     }
 
     /// A take is running, or a manual one is paused with words waiting (Stop keeps them pending, #313).
-    private var canSend: Bool { gate.route == .dictation || dictation.hasActiveTake || dictation.isReplaying || speechRoute.isPaused }
+    private var canSend: Bool {
+        #if DEBUG || LEGATO_INTERNAL
+        if debugTakeOpen { return true }
+        #endif
+        return gate.route == .dictation || dictation.hasActiveTake || dictation.isReplaying || speechRoute.isPaused
+    }
 
     /// The keyboard's raw send (a swipe right on the preview): like `sendNow()`, but the words are typed as spoken, uncleaned.
-    public func sendRawNow() async {
-        guard isOpen, canSend else { return }
-        await speechRoute.sendRawNow()
+    public func sendRawNow(preview: KeyboardRequest.PreviewAnchor? = nil) async {
+        guard isOpen, canSend || preview != nil else { return }
+        await speechRoute.sendRawNow(preview: preview)
     }
 
     /// The keyboard's clear (a swipe left on the preview): the words still in the preview are dropped, kept for a short undo.
@@ -349,13 +437,15 @@ import LegatoVocabulary
     /// Ends a take: after its last words (bounded), the sink cleans and writes it. Ends run in take order, and a later
     /// stop never cancels an earlier take's end (that take would never complete); only closing the session does.
     /// `pausing`: the mic key's Stop; a manual take with words waiting stays open (`DictationRouteSink.pauseTake`).
-    private func finishDictationTake(waitingForWords: Bool, pausing: Bool = false) {
+    private func finishDictationTake(waitingForWords: Bool, pausing: Bool = false, previewOnly: Bool = false) {
         let dictation = self.dictation, sink = self.sink
         let previous = takeFinish, generation = takeGeneration
         takeFinish = Task { [weak self] in
             if waitingForWords { await dictation.waitForFinish(timeout: Self.takeEndWait) }
             await previous?.value
             guard !Task.isCancelled, self?.takeGeneration == generation else { return }
+            self?.speechRoute.finishPreviewHold()
+            if previewOnly { return }
             if pausing { await sink.pauseTake() } else { await sink.finishTake() }
         }
     }

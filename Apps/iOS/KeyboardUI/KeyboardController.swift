@@ -274,6 +274,7 @@ final class KeyboardController {
     /// Hands the row `Self.listening` when nothing is said yet.
     var dictationPreview: String? {
         if stagedTake.runID != nil, !stagedTake.isFinished {
+            if stagedTake.previewDraft?.released == false { return composedPreview == nil ? nil : stagedTake.preview }
             let spoken = stagedTake.preview
             // A unit being typed keeps its start: the row anchors on the exit point, so its head is never cut away.
             let leaving = stagedTake.inFlight != nil
@@ -291,31 +292,83 @@ final class KeyboardController {
     var dictationPreviewLayout: StagedDictation.PreviewLayout? {
         guard stagedTake.runID != nil, !stagedTake.isFinished else { return nil }
         let layout = stagedTake.previewLayout
+        if composedPreview != nil { return layout }
         guard !layout.text.isEmpty else { return nil }
         let shown = dictationPreview.map { $0.hasPrefix("…") ? $0.count - 1 : $0.count } ?? layout.text.count
         return layout.dropping(layout.text.count - shown)
     }
 
-    /// A tap on the preview row sends what is spoken so far to the field (`RequestCommand.send`), cleaned; a swipe right sends it
-    /// as spoken (`previewSwiped`). Listening continues. Only
-    /// while a staged take shows words: the placeholder and a finished take do nothing.
-    var canSendPreview: Bool {
-        stagedTake.runID != nil && (!stagedTake.complete || stagedTake.held) && !stagedTake.preview.isEmpty && fullAccess
+    var composedPreview: StagedDictation.PreviewDraft? {
+        guard let draft = stagedTake.previewDraft, !draft.released, let field = document.documentID, field == liveDocumentID else { return nil }
+        return draft
     }
 
-    func previewTapped() {
-        guard canSendPreview else { return }
-        trace?("preview tapped: send")
-        sendPreview(.send)
+    var canSendPreview: Bool {
+        guard fullAccess, !isHoldingPreview, !stagedTake.isAwaitingPreview else { return false }
+        if stagedTake.previewDraft?.released == false { return composedPreview != nil }
+        return stagedTake.runID != nil && (!stagedTake.complete || stagedTake.held) && !stagedTake.preview.isEmpty
+    }
+
+    var canComposePreview: Bool {
+        canSendPreview && !stagedTake.complete && stagedTake.inFlight == nil && stagedTake.previewDraft?.released != true
+    }
+
+    private var previewAnchor: KeyboardRequest.PreviewAnchor? {
+        guard let draft = composedPreview, !draft.sentByHost, let runID = stagedTake.runID, runID == liveSnapshot?.runID else { return nil }
+        return .init(runID: runID, unitID: draft.unitID)
+    }
+
+    private var previewHold: (request: KeyboardRequest.PreviewHold, documentID: String?)?
+    var isHoldingPreview: Bool { previewHold != nil }
+    var isPreviewInstructionReady: Bool {
+        guard let previewHold else { return false }
+        return dictationPresentation.previewInstructionReadyID == previewHold.request.id
+    }
+    var previewInstructionText: String {
+        guard let previewHold, let instruction = dictationPresentation.previewInstruction,
+              instruction.holdID == previewHold.request.id else { return "" }
+        return Self.previewTail(instruction.text)
+    }
+
+    func beginPreviewHold() -> Bool {
+        guard canComposePreview, let runID = stagedTake.runID else { return false }
+        let anchor = previewAnchor
+        guard composedPreview == nil || anchor != nil else { return false }
+        let hold = KeyboardRequest.PreviewHold(id: UUID().uuidString, runID: runID)
+        previewHold = (hold, document.documentID)
+        link.send(.beginPreviewHold, id: hold.id, preview: anchor, previewHold: hold)
+        return true
+    }
+
+    func endPreviewHold(apply: Bool) {
+        guard let hold = previewHold else { return }
+        previewHold = nil
+        let valid = apply && document.documentID == hold.documentID && stagedTake.runID == hold.request.runID
+        link.send(valid ? .releasePreviewHold : .cancelPreviewHold, id: UUID().uuidString, previewHold: hold.request)
+    }
+
+    /// A quick tap or an accessibility action composes the current draft without separate instructions.
+    func composePreviewWithoutInstructions() {
+        guard canComposePreview else { return }
+        let anchor = previewAnchor
+        guard composedPreview == nil || anchor != nil else { return }
+        link.send(.editPreview, id: UUID().uuidString, preview: anchor)
     }
 
     /// A swipe left on the preview clears what is still in it and not yet sent for cleanup: the open unit and the speaking head
     /// (`RequestCommand.discard`). The app keeps it for a short undo window (`undoDiscard`). Units already sent for cleanup,
     /// ready ones and the one being typed stay.
-    var canDiscardPreview: Bool { canSendPreview && stagedTake.hasDiscardable }
+    var canDiscardPreview: Bool { canSendPreview && (composedPreview != nil || stagedTake.hasDiscardable) }
 
     func discardPreview() {
         guard canDiscardPreview else { return }
+        if composedPreview != nil {
+            stagedTake.discardPreviewDraft()
+            acknowledgeStaged()
+            driveStaged()
+            syncRowTakeover()
+            return
+        }
         trace?("preview swiped left: discard")
         stagedTake.clearOpen()
         link.send(.discard, id: UUID().uuidString)
@@ -337,15 +390,31 @@ final class KeyboardController {
         link.send(.undoDiscard, id: UUID().uuidString)
     }
 
-    /// A swipe right on the preview row sends what is not typed yet as spoken, without cleanup (`RequestCommand.sendRaw`).
+    /// A swipe right inserts the composed draft or sends the pending speech without cleanup (`RequestCommand.sendRaw`).
     func previewSwiped() {
         guard canSendPreview else { return }
+        if composedPreview != nil {
+            guard !document.isSecureTextEntry, !draftEvidence.isPending else {
+                show("Return to the original text field to insert this draft.")
+                return
+            }
+            if stagedTake.hasPreviewContinuation || liveSnapshot?.paused == true, let anchor = previewAnchor {
+                stagedTake.resume()
+                link.send(.sendRaw, id: UUID().uuidString, preview: anchor)
+                return
+            }
+            stagedTake.resume()
+            stagedTake.releasePreview()
+            acknowledgeStaged()
+            driveStaged()
+            syncRowTakeover()
+            return
+        }
         trace?("preview swiped: send raw")
         sendPreview(.sendRaw)
     }
 
-    /// Held delivery (`holdStaged`) resumes here: the pending units go in at the caret as they stand. A take still running also
-    /// sends its words so far to the app (cleaned for a tap, raw for a swipe); a finished one has nothing more to ask.
+    /// Held delivery (`holdStaged`) resumes here. An active take also sends pending speech to the app as raw words.
     private func sendPreview(_ command: RequestCommand) {
         if stagedTake.held {
             stagedTake.resume()
@@ -491,6 +560,7 @@ final class KeyboardController {
     }
 
     func disappeared() {
+        endPreviewHold(apply: false)
         #if DEBUG || LEGATO_INTERNAL
         endFieldProbe()
         #endif
@@ -595,6 +665,7 @@ final class KeyboardController {
     }
 
     func documentDidChange(callback: Bool = false) {
+        if let previewHold, previewHold.documentID != document.documentID { endPreviewHold(apply: false) }
         #if DEBUG || LEGATO_INTERNAL
         if probeLease != nil, document.documentID != probeFieldID || document.isSecureTextEntry { endFieldProbe() }
         #endif
@@ -1245,6 +1316,7 @@ final class KeyboardController {
             return
         }
         if snapshot.staged == true, let current = stagedTake.runID, current != snapshot.runID, !stagedTake.held, stagedTake.hasUndelivered {
+            if composedPreview != nil { return }
             // The take before still has units to type. A finished one is typed first (the next poll takes this snapshot); one
             // whose end was never seen cannot be waited for: what is left of it stays in History.
             if stagedTake.complete {
@@ -1283,7 +1355,9 @@ final class KeyboardController {
         if !draftEvidence.isPending, document.documentID != liveDocumentID {
             // A late final or cleanup belongs to the field the take started in: it is recovered from History. A take
             // still going that typed nothing yet goes to the field the user is in now.
-            guard !liveTypedRunIDs.contains(snapshot.runID), !snapshot.complete else { return blockLiveRun(snapshot, reason: "field") }
+            guard stagedTake.previewDraft == nil, !liveTypedRunIDs.contains(snapshot.runID), !snapshot.complete else {
+                return blockLiveRun(snapshot, reason: "field")
+            }
             liveDocumentID = document.documentID
         }
         if snapshot.staged == true { return driveStaged() }
@@ -1312,7 +1386,9 @@ final class KeyboardController {
     /// Types the next ready unit into the field, once, at the caret, through the queue: one entrance burst, one check, one
     /// undo step. One unit at a time, in order; it never edits typed text. Called from each snapshot and the 100 ms poll.
     private func driveStaged() {
-        guard let runID = stagedTake.runID, runID == liveSnapshot?.runID else { return }
+        guard let runID = stagedTake.runID else { return }
+        let following = runID == liveSnapshot?.runID
+        guard following || stagedTake.previewDraft?.released == true else { return }
         if stagedTake.isFinished { return acknowledgeStaged() }
         if let began = stagedBegan, stagedTake.isStalled(inFlightMs: Self.milliseconds(ContinuousClock.now - stagedActivity),
                                                          unverifiedInput: queue.hasUnverifiedInput) {
@@ -1329,7 +1405,7 @@ final class KeyboardController {
         guard isVisible, !isTornDown, !document.isSecureTextEntry, let documentID = document.documentID, !draftEvidence.isPending else { return }
         if documentID != liveDocumentID {
             // A take that typed here stays with this field: the rest is held. One that typed nothing follows the user.
-            guard !liveTypedRunIDs.contains(runID) else { return holdStaged() }
+            guard unit.editPreview != true, !liveTypedRunIDs.contains(runID) else { return holdStaged() }
             liveDocumentID = documentID
         }
         syncQueueField()
@@ -1340,7 +1416,9 @@ final class KeyboardController {
         liveTypedRunIDs.insert(runID)
         let origin = draftID
         var edit = FieldQueue.Edit(kind: .typist, target: unit.text, atCursor: true, requiresVerifiedInsertion: true, isSpeech: true)
-        edit.unit = .init(text: unit.text, capitalization: autocapitalization, contextFallback: fallback)
+        if unit.editPreview != true {
+            edit.unit = .init(text: unit.text, capitalization: autocapitalization, contextFallback: fallback)
+        }
         stagedBegan = (edit.id, origin, ContinuousClock.now)
         stagedActivity = ContinuousClock.now
         enqueue(edit) { [weak self] event in self?.stagedUnitFinished(runID: runID, unit: unit.id, origin: origin, event: event) }

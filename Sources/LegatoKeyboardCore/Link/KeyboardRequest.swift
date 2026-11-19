@@ -4,6 +4,10 @@ public enum RequestCommand: String, Codable, Sendable, Equatable {
     case start, stop, endKeepAlive
     /// Send everything dictated so far to the field now; listening continues.
     case send
+    /// Compose the spoken unit and hold it in the keyboard preview until a swipe.
+    case editPreview
+    /// Boundaries of speech explicitly addressed to preview Magic.
+    case beginPreviewHold, releasePreviewHold, cancelPreviewHold
     /// Send everything dictated so far that is not typed yet as raw words, with no cleanup (a swipe right on the preview).
     case sendRaw
     /// Throw away what is still in the preview and not yet sent for cleanup: the open unit and the speaking head (a swipe left).
@@ -19,14 +23,37 @@ public enum RequestCommand: String, Codable, Sendable, Equatable {
 /// keyboard -> app (`link.request`): sent twice, as this value plus a Darwin note, and (when the app
 /// has to be opened) as the same id inside `KeyboardURL`. `RequestLedger` dedupes the copies.
 public struct KeyboardRequest: Codable, Sendable, Equatable {
+    public struct PreviewAnchor: Codable, Sendable, Equatable {
+        public let runID: String
+        public let unitID: Int
+
+        public init(runID: String, unitID: Int) {
+            self.runID = runID; self.unitID = unitID
+        }
+    }
+
     public var id: String
     public var command: RequestCommand
     public var at: Date
+    public var preview: PreviewAnchor?
+    public var previewHold: PreviewHold?
 
-    public init(id: String, command: RequestCommand, at: Date) {
+    public struct PreviewHold: Codable, Sendable, Equatable {
+        public let id: String
+        public let runID: String
+
+        public init(id: String, runID: String) {
+            self.id = id
+            self.runID = runID
+        }
+    }
+
+    public init(id: String, command: RequestCommand, at: Date, preview: PreviewAnchor? = nil, previewHold: PreviewHold? = nil) {
         self.id = id
         self.command = command
         self.at = at
+        self.preview = preview
+        self.previewHold = previewHold
     }
 }
 

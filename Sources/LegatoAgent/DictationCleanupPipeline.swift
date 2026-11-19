@@ -25,9 +25,8 @@ public struct DictationCleanedLine: Sendable, Equatable {
     }
 }
 
-/// Cheap sanity checks on a cleanup result. Cleanup only punctuates, recases, drops fillers and fixes sounds, so
-/// the result keeps the raw line's words in order; anything that looks like an answer, an expansion or a rewrite
-/// is dropped for the raw line.
+/// Sanity checks for conservative cleanup. Staged sends may compose or rewrite from spoken directions,
+/// so only the empty-result check applies to them.
 ///
 /// An empty result (nothing but whitespace) drops the line. It is accepted only for a line that can carry no
 /// meaning: every word a filler (`fillers`), or at most `droppableWords` words; a longer line that comes back empty
@@ -67,12 +66,11 @@ public enum DictationCleanupGuard {
         prepositionalUm(raw) == 0 || prepositionalUm(cleaned) > 0
     }
 
-    /// `style`: a `send` (#316) may reshape and lightly rephrase, so it is judged by `acceptsSend`; the rest is shared.
     public static func accepts(raw: String, cleaned: String, style: DictationCleanupStyle = .line) -> Bool {
+        if cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !cleaned.contains(where: \.isNewline) { return acceptsDrop(raw: raw) }
+        if style == .send { return true }
         let source = tokens(raw), result = tokens(cleaned)
         guard keepsPrepositions(raw: raw, cleaned: cleaned) else { return false }
-        if cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !cleaned.contains(where: \.isNewline) { return acceptsDrop(raw: raw) }
-        if style == .send { return acceptsSend(raw: raw, cleaned: cleaned, source: source, result: result) }
         guard !cleaned.isEmpty, cleaned.count <= max(48, raw.count * 3 / 2 + 24) else { return false }
         if result.isEmpty { return true } // a bare line break or punctuation from a spoken command
         // A few words: too few to count overlap, so the result must sound like them (an ASR fix) or share a word.
@@ -84,22 +82,6 @@ public enum DictationCleanupGuard {
         let said = Set(source)
         let known = result.filter { said.contains($0) }.count
         return known * 2 >= result.count
-    }
-    /// A send's text is the speaker's words made into written text: line breaks, list markers, a few words rephrased or
-    /// joined, filler, hesitations and retracted parts gone. Still most of its words are words the speaker said (an answer,
-    /// an email written for a request or a note about the text is not), it is not much longer, and it keeps at least
-    /// two fifths of the speaker's meaningful words (a summary or a stub does not).
-    private static func acceptsSend(raw: String, cleaned: String, source: [String], result: [String]) -> Bool {
-        guard cleaned.count <= max(64, raw.count * 2 + 32) else { return false }
-        if result.isEmpty { return true } // a bare line break or punctuation from a spoken command
-        guard source.count > 3 else {
-            return result.count <= source.count + 3 && (!Set(source).isDisjoint(with: result) || resembles(source.joined(), result.joined()))
-        }
-        let said = Set(source)
-        let meaningful = Set(source.filter { !fillers.contains($0) })
-        guard result.count <= source.count * 3 / 2 + 4,
-              result.filter({ said.contains($0) }).count * 2 >= result.count else { return false }
-        return meaningful.intersection(result).count * 5 >= meaningful.count * 2
     }
     static func tokens(_ text: String) -> [String] {
         text.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
@@ -126,7 +108,15 @@ public enum DictationCleanupGuard {
 /// A line whose call fails, is rejected by the guard or takes longer than `timeout` goes on raw: dictation never
 /// waits on the model beyond that.
 public actor DictationCleanupPipeline {
-    private struct Pending { let sequence: Int; let lineID: String; let raw: String; let textBefore: String; let allowsEmpty: Bool; let enqueued: ContinuousClock.Instant }
+    private struct Pending {
+        let sequence: Int
+        let lineID: String
+        let raw: String
+        let textBefore: String
+        let allowsEmpty: Bool
+        let instructions: String?
+        let enqueued: ContinuousClock.Instant
+    }
     /// A speculative request (`speculate`): the text it cleans, what stood before it, and its running task.
     private struct Speculation {
         let id: UUID; let raw: String; let textBefore: String
@@ -169,13 +159,15 @@ public actor DictationCleanupPipeline {
     /// `textBefore`: the field's text before the cursor now (`documentContextBeforeInput`). `allowsEmpty`: the caller
     /// can drop the line, so an empty result the guard accepts is delivered as cleaned empty text; otherwise an empty
     /// result is a failure (`invalidText`) and the raw line goes on.
-    public func submit(sequence: Int, lineID: String, raw: String, textBefore: String, allowsEmpty: Bool = false) async {
+    public func submit(sequence: Int, lineID: String, raw: String, textBefore: String, allowsEmpty: Bool = false,
+                       instructions: String? = nil) async {
         // Lines that never came here (another send mode took them) leave a gap: with nothing waiting, start at this one.
         if firstSequence == nil || (queue.isEmpty && inFlight.isEmpty && finished.isEmpty && sequence != nextDelivery) {
             firstSequence = firstSequence ?? sequence; nextDelivery = sequence
         }
         known[sequence] = raw
-        queue.append(Pending(sequence: sequence, lineID: lineID, raw: raw, textBefore: String(textBefore.suffix(600)), allowsEmpty: allowsEmpty, enqueued: .now))
+        queue.append(Pending(sequence: sequence, lineID: lineID, raw: raw, textBefore: String(textBefore.suffix(600)),
+                             allowsEmpty: allowsEmpty, instructions: instructions, enqueued: .now))
         queue.sort { $0.sequence < $1.sequence }
         pump()
     }
@@ -223,14 +215,18 @@ public actor DictationCleanupPipeline {
             let line = queue.removeFirst()
             inFlight.insert(line.sequence)
             let previous = known.filter { $0.key < line.sequence }.sorted { $0.key < $1.key }.map(\.value).filter { !$0.isEmpty }.suffix(2).map { $0 }
-            let context = DictationCleanupContext(previousLines: previous, textBeforeCursor: line.textBefore, style: style)
+            let context = DictationCleanupContext(previousLines: previous, textBeforeCursor: line.textBefore, style: style,
+                                                  instructions: line.instructions)
             let token = generation
             let waited = line.enqueued.duration(to: .now).components
             let queueWaitMs = Int(waited.seconds * 1000 + waited.attoseconds / 1_000_000_000_000_000)
             // A speculative request for exactly this text (and context) is this line's call; any other is stale.
             var spec: Speculation?
             if let held = speculation {
-                if held.raw == line.raw, held.textBefore == line.textBefore { spec = held; speculation = nil } else { cancelSpeculation() }
+                if line.instructions == nil, held.raw == line.raw, held.textBefore == line.textBefore {
+                    spec = held
+                    speculation = nil
+                } else { cancelSpeculation() }
             }
             let input = SentenceCleanupInput(sentenceID: line.lineID, sequence: line.sequence, text: line.raw, vocabulary: vocabulary, dictation: context)
             tasks[line.sequence] = Task { [cleaner, timeout, spec] in

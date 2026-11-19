@@ -16,6 +16,55 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
 }
 
 @Suite struct StagedDictationTests {
+    @Test func aSecondPassComposesTheVisibleDraftAndLeavesSpeechDuringCleanupAtTheEnd() throws {
+        var run = LiveDictationRun(staged: true, manual: true)
+        _ = run.addFinal(key: 0, text: "Write a note to Anna")
+        guard let open = run.flush() else { Issue.record("Expected spoken unit"); return }
+        let marked = run.markForPreview(key: open.key)
+        #expect(marked)
+        var take = StagedDictation()
+        take.receive(run.snapshot)
+        #expect(take.isAwaitingPreview)
+        #expect(take.nextReady == nil)
+
+        _ = run.setCleaned(key: open.key, text: "hi Anna")
+        take.receive(run.snapshot)
+        #expect(take.previewDraft?.original == "Write a note to Anna")
+        #expect(take.nextReady == nil)
+        _ = run.addFinal(key: 1, text: "add a time")
+        take.receive(run.snapshot)
+        #expect(take.preview == "hi Anna add a time")
+        #expect(take.hasPreviewContinuation)
+        let anchor = KeyboardRequest.PreviewAnchor(runID: run.runID, unitID: 0)
+        let merged = run.extendPreview(anchor, release: false)
+        let second = try #require(merged)
+        #expect(second.text == "hi Anna add a time")
+        take.receive(run.snapshot)
+        #expect(take.isAwaitingPreview)
+        #expect(take.preview == second.text)
+        _ = run.addFinal(key: 2, text: "see you there")
+        _ = run.setCleaned(key: second.key, text: "Hi Anna, see you at noon.")
+        take.receive(run.snapshot)
+        #expect(take.previewDraft?.original == second.text)
+        #expect(take.preview == "Hi Anna, see you at noon. see you there")
+        #expect(take.nextReady == nil)
+
+        let released = run.extendPreview(anchor, release: true)
+        #expect(released?.text == "Hi Anna, see you at noon. see you there")
+        take.receive(run.snapshot)
+        let ready = try #require(take.nextReady)
+        #expect(ready.text == released?.text)
+        take.begin(ready.id, typed: ready.text)
+        take.delivered(ready.id, typed: ready.text)
+        take.receive(run.snapshot)
+        #expect(take.previewDraft == nil)
+        #expect(take.nextReady == nil)
+        #expect(take.preview.isEmpty)
+        let repeated = run.extendPreview(anchor, release: true)
+        #expect(repeated == nil)
+        #expect(run.wholeRaw.text == "Write a note to Anna add a time see you there")
+    }
+
     @Test func aSnapshotSplitsIntoThePreviewAndTheUnitsReadyToType() {
         var take = StagedDictation()
         take.receive(snapshot(3, [unit(0, "Hello there.", ready: false), unit(1, "Second one.", ready: false)], head: "and more"))

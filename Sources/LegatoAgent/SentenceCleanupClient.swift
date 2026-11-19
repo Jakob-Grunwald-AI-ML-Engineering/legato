@@ -3,8 +3,8 @@ import LegatoClaude
 import LegatoRoom
 
 /// Which dictation prompt cleans a unit. `line`: the conservative cleanup (the Mac's live sentences; words kept as said).
-/// `send`: the iPhone's staged send (#316): the speech becomes the text the speaker means to write, lightly rephrased and
-/// shaped (an email gets its lines), spoken edits about the text applied. Each style has its own cached prompt prefix.
+/// `send`: the iPhone's staged send turns speech and spoken writing directions into the intended draft.
+/// Each style has its own cached prompt prefix.
 public enum DictationCleanupStyle: String, Sendable, Equatable {
     case line, send
 }
@@ -14,8 +14,11 @@ public struct DictationCleanupContext: Sendable, Equatable {
     public var previousLines: [String]
     public var textBeforeCursor: String
     public var style: DictationCleanupStyle
-    public init(previousLines: [String] = [], textBeforeCursor: String = "", style: DictationCleanupStyle = .line) {
+    public var instructions: String?
+    public init(previousLines: [String] = [], textBeforeCursor: String = "", style: DictationCleanupStyle = .line,
+                instructions: String? = nil) {
         self.previousLines = previousLines; self.textBeforeCursor = textBeforeCursor; self.style = style
+        self.instructions = instructions
     }
 }
 
@@ -134,6 +137,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
               input.sequence >= 0, input.sequence <= 9_007_199_254_740_991,
               !input.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               input.text.utf8.count <= Self.maximumTextBytes,
+              (input.dictation?.instructions?.utf8.count ?? 0) <= Self.maximumTextBytes,
               input.vocabulary.count <= 200,
               input.vocabulary.reduce(0, { $0 + $1.utf8.count }) <= 16_384 else { throw SentenceCleanupError.invalidInput }
         let chosen: ModelChoice = input.dictation == nil ? .haiku : model()
@@ -394,8 +398,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
     /// The prompt cache needs 512 tokens on Haiku 5.5 (prompt-caching docs); the prompt and tool are above it.
     private static let dictationPrompt: String = PromptLayers.dictationCleanup()
     private static let sendPrompt: String = PromptLayers.dictationSend()
-    /// The send style may reshape and lightly rephrase: its text field says what it must hold without "in order".
-    private static let sentTextDescription = "The complete written text the speaker meant, with all of its content, however long or unusual. Never a placeholder, stub, summary, answer or note."
+    private static let sentTextDescription = "The finished text the speaker intends, including the result of any spoken writing directions. Return only the text to insert."
     /// The system prompt and the tool's text description of a dictation style: both are in the cached prefix, fixed per style.
     static func dictationPrompt(_ style: DictationCleanupStyle) -> (system: String, textDescription: String) {
         switch style {
@@ -423,6 +426,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
         if let dictation = input.dictation {
             fields["previousLines"] = .array(dictation.previousLines.map(JSONValue.string))
             fields["textBeforeCursor"] = .string(dictation.textBeforeCursor)
+            if style == .send, let instructions = dictation.instructions { fields["instructions"] = .string(instructions) }
         }
         let source: JSONValue = .object(fields)
         let instruction = """
@@ -431,7 +435,8 @@ public struct SentenceCleanupClient: SentenceCleaning {
         Return only the locally corrected plain text through submit_sentence, copying the supplied sentenceID and sequence exactly. If no useful local improvement is needed, submit the same sentence. No acknowledgement, explanation, formatting wrapper or second call is needed.
         """
         let request: JSONValue = .object([
-            "model": .string(model.rawValue), "max_tokens": .number(Double(input.dictation == nil ? 1024 : Self.lineMaxTokens(characters: input.text.count, style: style))),
+            "model": .string(model.rawValue), "max_tokens": .number(Double(input.dictation == nil ? 1024 :
+                Self.lineMaxTokens(characters: input.text.count + (input.dictation?.instructions?.count ?? 0), style: style))),
             "stream": .bool(true), "thinking": Self.thinking(model),
             "system": input.dictation == nil ? .string(instruction)
                 : .array([.object(["type": .string("text"), "text": .string(prompt.system), "cache_control": dictationCache])]),

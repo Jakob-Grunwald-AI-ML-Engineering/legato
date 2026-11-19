@@ -73,6 +73,32 @@ private actor LiveHistory: HistoryStore {
 }
 
 @MainActor @Suite(.timeLimit(.minutes(1))) struct DictationPipelineTests {
+    @Test func heldInstructionsCanReviseAnExistingPreviewWithoutMoreDraftSpeech() async throws {
+        let cleaner = FnCleaner { $0.dictation?.instructions == "make it uppercase" ? $0.text.uppercased() : $0.text }
+        let pipeline = DictationPipeline(history: LiveHistory(), cleaner: cleaner, sendMode: { .live },
+                                        supportsLive: true, liveSend: { .manual }, stagedLive: true)
+        pipeline.beginTake()
+        await pipeline.receive(routeLine(0, "Meet by the ferry."))
+        let runID = try #require(pipeline.liveRun?.runID)
+        let first = KeyboardRequest.PreviewHold(id: "first", runID: runID)
+        #expect(pipeline.beginPreviewHold(first, anchor: nil))
+        pipeline.endPreviewHold(first, anchor: nil, instructions: "")
+        try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
+
+        let anchor = KeyboardRequest.PreviewAnchor(runID: runID, unitID: 0)
+        let second = KeyboardRequest.PreviewHold(id: "second", runID: runID)
+        #expect(pipeline.beginPreviewHold(second, anchor: anchor))
+        pipeline.endPreviewHold(second, anchor: anchor, instructions: "make it uppercase")
+        await pipeline.receive(routeLine(1, "bring a blue bag"))
+        try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
+
+        let inputs = cleaner.inputs.withLock { $0 }
+        #expect(inputs.count == 2)
+        #expect(inputs.last?.text == "Meet by the ferry.")
+        #expect(inputs.last?.dictation?.instructions == "make it uppercase")
+        #expect(pipeline.liveRun?.snapshot.segments.map(\.text) == ["MEET BY THE FERRY.", "bring a blue bag"])
+    }
+
     @Test func macLiveHistoryKeepsOneEntryForFinalSegmentsAndCleanup() async throws {
         let history = LiveHistory()
         let pipeline = DictationPipeline(history: history, cleaner: UnitCleaner(), sendMode: { .live },

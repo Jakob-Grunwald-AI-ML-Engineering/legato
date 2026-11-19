@@ -14,6 +14,8 @@ public enum LinkChannel {
         public static let host = "link.host"
         /// keyboard -> app: `KeyboardRequest`.
         public static let request = "link.request"
+        public static let previewHoldStart = "link.previewHoldStart"
+        public static let previewHoldEnd = "link.previewHoldEnd"
         /// app -> keyboard: `KeyboardAck`.
         public static let ack = "link.ack"
         /// keyboard -> app: `KeyboardPresence`.

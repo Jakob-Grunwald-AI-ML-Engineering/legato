@@ -2,7 +2,7 @@ import Foundation
 import LegatoKeyboardCore
 
 /// What speech on the dictation route is: words for the field, or an instruction about the field's text.
-public enum SpeechMode: String, Sendable, Equatable { case dictation, instruction }
+public enum SpeechMode: String, Sendable, Equatable { case dictation, instruction, previewInstruction }
 
 /// Tags speech with the mode active when it was spoken. The magic toggle changes the mode at once for new speech, but
 /// words spoken just before it are still on their way (Soniox finalizes a word seconds after it was said). So a toggle
@@ -56,6 +56,8 @@ public struct SpeechModeRouter: Sendable, Equatable {
     /// Instruction speech: a finalized line, and the live tail.
     var onInstructionLine: (@MainActor (DictationRouteLine) -> Void)?
     var onInstructionTail: (@MainActor (String) -> Void)?
+    var onPreviewInstructionLine: (@MainActor (DictationRouteLine) -> Void)?
+    var onPreviewInstructionTail: (@MainActor (String) -> Void)?
     /// The mode changed for the speech arriving now.
     var onTransition: (@MainActor (SpeechModeRouter.Transition) -> Void)?
 
@@ -69,7 +71,8 @@ public struct SpeechModeRouter: Sendable, Equatable {
     private func apply(_ transitions: [SpeechModeRouter.Transition]) { for transition in transitions { changed(transition) } }
     private func changed(_ transition: SpeechModeRouter.Transition) {
         // Words still showing as the field's speaking head are not dictation any more.
-        if transition.to == .instruction { dictation.tailChanged("") } else { onInstructionTail?("") }
+        if transition.from == .dictation { dictation.tailChanged("") }
+        if transition.from == .instruction { onInstructionTail?("") }
         onTransition?(transition)
     }
 
@@ -77,12 +80,14 @@ public struct SpeechModeRouter: Sendable, Equatable {
         switch router.current {
         case .dictation: await dictation.receive(line)
         case .instruction: onInstructionLine?(line)
+        case .previewInstruction: onPreviewInstructionLine?(line)
         }
     }
     func tailChanged(_ text: String) {
         switch router.current {
         case .dictation: dictation.tailChanged(text)
         case .instruction: onInstructionTail?(text)
+        case .previewInstruction: onPreviewInstructionTail?(text)
         }
     }
     func speechActivity() { if router.current == .dictation { dictation.speechActivity() } }
