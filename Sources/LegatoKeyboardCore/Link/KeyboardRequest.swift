@@ -21,14 +21,25 @@ public enum RequestCommand: String, Codable, Sendable, Equatable {
 /// keyboard -> app (`link.request`): sent twice, as this value plus a Darwin note, and (when the app
 /// has to be opened) as the same id inside `KeyboardURL`. `RequestLedger` dedupes the copies.
 public struct KeyboardRequest: Codable, Sendable, Equatable {
+    public struct PreviewAnchor: Codable, Sendable, Equatable {
+        public let runID: String
+        public let unitID: Int
+
+        public init(runID: String, unitID: Int) {
+            self.runID = runID; self.unitID = unitID
+        }
+    }
+
     public var id: String
     public var command: RequestCommand
     public var at: Date
+    public var preview: PreviewAnchor?
 
-    public init(id: String, command: RequestCommand, at: Date) {
+    public init(id: String, command: RequestCommand, at: Date, preview: PreviewAnchor? = nil) {
         self.id = id
         self.command = command
         self.at = at
+        self.preview = preview
     }
 }
 

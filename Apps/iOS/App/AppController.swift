@@ -100,9 +100,9 @@ final class AppController {
             case .start: await self.readyMicrophone()
             case .stop: await self.keyboardSession.closeGate()
             case .send: await self.keyboardSession.sendNow()
-            case .editPreview: await self.keyboardSession.sendNow(editPreview: true)
+            case .editPreview: await self.keyboardSession.sendNow(editPreview: true, preview: request.preview)
             // The preview's swipe right: the same, with the words as spoken (no cleanup).
-            case .sendRaw: await self.keyboardSession.sendRawNow()
+            case .sendRaw: await self.keyboardSession.sendRawNow(preview: request.preview)
             // The preview's swipe left: the words still in it are dropped for a short undo window.
             case .discard: await self.keyboardSession.discardNow()
             case .undoDiscard: await self.keyboardSession.undoDiscardNow()

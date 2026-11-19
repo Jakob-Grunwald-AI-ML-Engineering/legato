@@ -334,6 +334,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// `speculationMinWords` words; each costs one request that a miss wastes.
     private func speculateOpenUnit() {
         guard stagedLive, mode == .live, let run = liveRun, run.manual, !run.complete, sendCut == nil, let open = run.peekOpen(),
+              !run.hasPendingPreview(after: liveDeliveryAck?.deliveredThrough),
               open.text.split(whereSeparator: \.isWhitespace).count >= Self.speculationMinWords,
               liveSpeculation?.text != open.text || liveSpeculation?.runID != run.runID else { return }
         liveSpeculation = (run.runID, open.text)
@@ -354,7 +355,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// (`endLive`). The unit is not cut short by a forced split: those words wait in the head until their sentence ends.
     /// A manual run (#313) has no pauses to close at: only `sendNow()` and the stop close its unit.
     private func closeUnitAtPause() {
-        guard stagedLive, var run = liveRun, !run.complete, !run.manual, let open = run.flush() else { return }
+        guard stagedLive, var run = liveRun, !run.complete, !run.manual,
+              !run.hasPendingPreview(after: liveDeliveryAck?.deliveredThrough), let open = run.flush() else { return }
         liveRun = run
         Task { [weak self] in await self?.submitLive(open.text, key: open.key, run: run) }
     }
@@ -365,7 +367,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// A `sendNow()` cut in flight: the run it belongs to, when it began (on the pipeline's clock) and the fallback timer.
     /// `raw`: the user swiped (`sendRawNow()`): the unit stands as its raw words instead of going to cleanup.
     /// `discard`: the user swiped it away (`discardNow()`): the unit is kept for the undo window instead of being cleaned.
-    @ObservationIgnored private var sendCut: (runID: String, started: Duration, raw: Bool, discard: Bool, editPreview: Bool, timeout: Task<Void, Never>?)?
+    @ObservationIgnored private var sendCut: (runID: String, started: Duration, raw: Bool, discard: Bool, editPreview: Bool,
+                                               preview: KeyboardRequest.PreviewAnchor?, timeout: Task<Void, Never>?)?
     /// Cleanup sequences (`liveKeys`) whose unit a raw send already published: their results are ignored when they arrive.
     @ObservationIgnored private var rawSent: Set<Int> = []
     /// Cuts the recognizer without ending the take (`DictationEngine.finalizeChunk`); false when nothing would answer. Set by
@@ -376,12 +379,14 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// and listening continues. The recognizer is cut first so the words still in its head become final; the unit closes when
     /// the `finalize` boundary arrives, after `sendCutWait`, or at once when there is nothing to cut. Words spoken after the
     /// cut start the next unit. Ignored without a staged run in progress.
-    public func sendNow(editPreview: Bool = false) async { await send(raw: false, editPreview: editPreview) }
+    public func sendNow(editPreview: Bool = false, preview: KeyboardRequest.PreviewAnchor? = nil) async {
+        await send(raw: false, editPreview: editPreview, preview: preview)
+    }
 
     /// The user's swipe right on the preview: like `sendNow()`, but nothing is cleaned. The open unit and every closed unit still
     /// waiting for cleanup stand as their raw words now (they are history's uncleaned fallbacks), a speculative request is
     /// dropped, and a cleanup result that arrives later is ignored. A tap's cut already in flight becomes raw.
-    public func sendRawNow() async { await send(raw: true) }
+    public func sendRawNow(preview: KeyboardRequest.PreviewAnchor? = nil) async { await send(raw: true, preview: preview) }
 
     /// How long a discard can be taken back (`undoDiscardNow()`). An estimate, to be tuned on the phone.
     public static let discardUndoSeconds = 4.0
@@ -428,14 +433,16 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         Task { [weak self] in await self?.current().cancelSpeculation() }
     }
 
-    private func send(raw: Bool, discard: Bool = false, editPreview: Bool = false) async {
-        guard stagedLive, mode == .live, let run = liveRun, !run.complete else { return }
+    private func send(raw: Bool, discard: Bool = false, editPreview: Bool = false, preview: KeyboardRequest.PreviewAnchor? = nil) async {
+        guard stagedLive, mode == .live, let run = liveRun, !run.complete || (raw && preview != nil),
+              preview == nil || preview?.runID == run.runID else { return }
         if sendCut != nil {
             if raw, !discard, sendCut?.editPreview != true { sendCut?.raw = true }
             return
         }
         let runID = run.runID
-        sendCut = (runID, streamTime(), raw, discard, editPreview, nil)
+        sendCut = (runID, streamTime(), raw, discard, editPreview, preview, nil)
+        if run.complete { return sendCutThrough("complete") }
         // Paused (#313): no recognizer holds words back, so there is nothing to cut.
         if pausedRunID == runID { return sendCutThrough("paused") }
         let timeout = Task { [weak self, clock] in
@@ -454,7 +461,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         cut.timeout?.cancel()
         let waited = (streamTime() - cut.started).components
         let ms = Int(waited.seconds * 1000 + waited.attoseconds / 1_000_000_000_000_000)
-        guard var run = liveRun, run.runID == cut.runID, !run.complete else { return }
+        guard var run = liveRun, run.runID == cut.runID, !run.complete || (cut.raw && cut.preview != nil) else { return }
         let open = run.flush()
         if cut.discard {
             // The words are thrown away, not sent: a speculative cleanup of them is useless, and a paused run stays paused.
@@ -463,8 +470,19 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             if let open, run.discard(key: open.key) { publishLive(run); startDiscardWindow(runID: run.runID) } else { liveRun = run }
             return
         }
+        if let anchor = cut.preview {
+            guard anchor.unitID > (liveDeliveryAck?.deliveredThrough ?? -1), let draft = run.extendPreview(anchor, release: cut.raw) else { return }
+            let endsRun = pausedRunID == run.runID
+            if cut.raw, endsRun { pausedRunID = nil; liveTakeOpen = false; run.setPaused(false) }
+            publishLive(run)
+            Task { [weak self] in
+                if !cut.raw { await self?.submitLive(draft.text, key: draft.key, run: run) }
+                if cut.raw, endsRun { await self?.finishLive() }
+            }
+            return
+        }
         // A send from a paused run (#313) sends everything there is: the run ends like a Stop after a tap, once the unit is out.
-        let endsRun = pausedRunID == run.runID
+        let endsRun = pausedRunID == run.runID && !cut.editPreview
         if endsRun { pausedRunID = nil; liveTakeOpen = false; run.setPaused(false) }
         liveRun = run
         diagnostics?("live2.send", ["run": String(run.runID.prefix(8)), "via": via, "ms": ms, "sent": open != nil, "raw": cut.raw])
@@ -505,7 +523,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// sentence-end mode, nothing pending, a held run, another mode.
     public func pauseTake() async {
         guard stagedLive, mode == .live, held == nil, let run = liveRun, run.manual, !run.complete, !liveTakeEnding, run.runID != unfollowedRunID,
-              run.peekOpen() != nil || run.isSpeaking else { return await finishTake() }
+              run.peekOpen() != nil || run.isSpeaking || run.hasPendingPreview(after: liveDeliveryAck?.deliveredThrough) else { return await finishTake() }
         liveTakeOpen = false
         pausedRunID = run.runID
         var paused = run
@@ -890,7 +908,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     private func receiveLive(_ raw: String, sequence: Int, forced: Bool, remainingTail: String? = nil) async {
         setVoiceActive(true)
         var run = currentLiveRun()
-        let unit = run.addFinal(key: sequence, text: raw, closes: !forced)
+        let unit = run.addFinal(key: sequence, text: raw, closes: !forced,
+                                holdsForPreview: run.hasPendingPreview(after: liveDeliveryAck?.deliveredThrough))
         // Commit the final and the provider update's residual words in one publication. A segment
         // often finalizes only the first few words of the head the keyboard already shows.
         if let remainingTail { run.setHead(remainingTail) }

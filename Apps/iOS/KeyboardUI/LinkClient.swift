@@ -109,8 +109,8 @@ final class LinkClient {
         instruction?.acknowledge(ack)
     }
 
-    func send(_ command: RequestCommand, id: String) {
-        store?.write(KeyboardRequest(id: id, command: command, at: Date()), forKey: LinkChannel.Key.request)
+    func send(_ command: RequestCommand, id: String, preview: KeyboardRequest.PreviewAnchor? = nil) {
+        store?.write(KeyboardRequest(id: id, command: command, at: Date(), preview: preview), forKey: LinkChannel.Key.request)
         DarwinObserver.post(LinkChannel.Note.request)
     }
 

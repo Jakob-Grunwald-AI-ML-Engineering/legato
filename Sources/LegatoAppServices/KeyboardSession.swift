@@ -278,9 +278,9 @@ import LegatoVocabulary
 
     /// The keyboard's send (a tap on the preview): a staged take sends the words so far to the field now and keeps listening.
     /// Ignored without a take running; it needs no gate change, so it works from the background like Stop.
-    public func sendNow(editPreview: Bool = false) async {
+    public func sendNow(editPreview: Bool = false, preview: KeyboardRequest.PreviewAnchor? = nil) async {
         guard isOpen, canSend else { return }
-        await speechRoute.sendNow(editPreview: editPreview)
+        await speechRoute.sendNow(editPreview: editPreview, preview: preview)
     }
 
     /// A take is running, or a manual one is paused with words waiting (Stop keeps them pending, #313).
@@ -292,9 +292,9 @@ import LegatoVocabulary
     }
 
     /// The keyboard's raw send (a swipe right on the preview): like `sendNow()`, but the words are typed as spoken, uncleaned.
-    public func sendRawNow() async {
-        guard isOpen, canSend else { return }
-        await speechRoute.sendRawNow()
+    public func sendRawNow(preview: KeyboardRequest.PreviewAnchor? = nil) async {
+        guard isOpen, canSend || preview != nil else { return }
+        await speechRoute.sendRawNow(preview: preview)
     }
 
     /// The keyboard's clear (a swipe left on the preview): the words still in the preview are dropped, kept for a short undo.

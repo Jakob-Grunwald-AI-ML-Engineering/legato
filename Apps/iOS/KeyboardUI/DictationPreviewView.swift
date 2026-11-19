@@ -27,16 +27,17 @@ struct DictationPreviewView: View {
         let showsUndo = controller.canUndoDiscard
         let draft = controller.composedPreview
         ZStack(alignment: keySide == .right ? .bottomTrailing : .bottomLeading) {
-            PreviewRow(text: text, layout: controller.dictationPreviewLayout, draft: draft, canSend: controller.canSendPreview,
+            PreviewRow(text: text, layout: controller.dictationPreviewLayout, draft: draft,
+                       canCompose: controller.canComposePreview, canSend: controller.canSendPreview,
                        canDiscard: controller.canDiscardPreview, insets: insets, bandHeight: bandHeight, reservesChip: showsUndo,
                        onSend: { point in bloom = (point, Date()); controller.previewTapped() },
                        onSendRaw: { controller.previewSwiped() },
                        onDiscard: { controller.discardPreview() })
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(draft == nil ? text : "Dictation draft")
-                .accessibilityValue(draft?.text ?? "")
-                .accessibilityHint(draft != nil ? "Swipe right to insert, left to clear." : controller.canSendPreview ? "Tap to compose. Swipe right to insert as spoken, left to clear." : "")
-                .accessibilityAddTraits(controller.canSendPreview && draft == nil ? .isButton : [])
+                .accessibilityValue(draft == nil ? "" : text)
+                .accessibilityHint(controller.canComposePreview ? "Tap to compose. Swipe right to insert, left to clear." : draft != nil ? "Swipe right to insert, left to clear." : "")
+                .accessibilityAddTraits(controller.canComposePreview ? .isButton : [])
                 .accessibilityAction { controller.previewTapped() }
                 .accessibilityAction(named: draft == nil ? "Insert without cleanup" : "Insert draft") { if controller.canSendPreview { controller.previewSwiped() } }
                 .accessibilityAction(named: "Clear") { if controller.canDiscardPreview { controller.discardPreview() } }
@@ -339,6 +340,7 @@ private struct PreviewRow: View {
     let text: String
     let layout: StagedDictation.PreviewLayout?
     let draft: StagedDictation.PreviewDraft?
+    let canCompose: Bool
     let canSend: Bool
     let canDiscard: Bool
     /// The text's leading and trailing insets (`WordRowLayout.insets`).
@@ -412,7 +414,8 @@ private struct PreviewRow: View {
                     let _ = { if hadHidden && settled { Task { @MainActor in revealSettled.toggle() } } }()
                     ZStack(alignment: .bottomLeading) {
                         if let transition, !transition.removed.isEmpty || !transition.survivors.isEmpty {
-                            styled(marked(transition.original) { transition.removed.contains($0) ? .poof : .hidden }, size: size)
+                            let originalDisplay = transition.original + text.dropFirst(transition.target.count)
+                            styled(marked(originalDisplay) { transition.removed.contains($0) ? .poof : .hidden }, size: size)
                                 .textRenderer(PreviewRenderer(now: timeline.date, exits: [], shimmers: false, lifts: true,
                                                               probe: rewriteReference, rewrite: transition, capturesReference: true))
                                 .accessibilityHidden(true)
@@ -459,7 +462,7 @@ private struct PreviewRow: View {
             .background(Color.black.opacity(0.001))
             .contentShape(Rectangle())
             .onTapGesture(coordinateSpace: .local) { point in
-                guard draft == nil, canSend else { return }
+                guard canCompose else { return }
                 onSend(point)
             }
             // A drag never also taps: the tap fails once the finger has moved. Acts while moving, once per drag: a drag that

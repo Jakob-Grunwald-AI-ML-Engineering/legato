@@ -274,7 +274,7 @@ final class KeyboardController {
     /// Hands the row `Self.listening` when nothing is said yet.
     var dictationPreview: String? {
         if stagedTake.runID != nil, !stagedTake.isFinished {
-            if stagedTake.previewDraft?.released == false { return composedPreview?.text }
+            if stagedTake.previewDraft?.released == false { return composedPreview == nil ? nil : stagedTake.preview }
             let spoken = stagedTake.preview
             // A unit being typed keeps its start: the row anchors on the exit point, so its head is never cut away.
             let leaving = stagedTake.inFlight != nil
@@ -309,10 +309,22 @@ final class KeyboardController {
         return stagedTake.runID != nil && (!stagedTake.complete || stagedTake.held) && !stagedTake.preview.isEmpty
     }
 
+    var canComposePreview: Bool {
+        canSendPreview && !stagedTake.complete && stagedTake.inFlight == nil && stagedTake.previewDraft?.released != true
+            && (composedPreview == nil || stagedTake.hasPreviewContinuation)
+    }
+
+    private var previewAnchor: KeyboardRequest.PreviewAnchor? {
+        guard let draft = composedPreview, !draft.sentByHost, let runID = stagedTake.runID, runID == liveSnapshot?.runID else { return nil }
+        return .init(runID: runID, unitID: draft.unitID)
+    }
+
     func previewTapped() {
-        guard canSendPreview, composedPreview == nil, !stagedTake.complete else { return }
+        guard canComposePreview else { return }
+        let anchor = previewAnchor
+        guard composedPreview == nil || anchor != nil else { return }
         trace?("preview tapped: compose")
-        link.send(.editPreview, id: UUID().uuidString)
+        link.send(.editPreview, id: UUID().uuidString, preview: anchor)
     }
 
     /// A swipe left on the preview clears what is still in it and not yet sent for cleanup: the open unit and the speaking head
@@ -356,6 +368,11 @@ final class KeyboardController {
         if composedPreview != nil {
             guard !document.isSecureTextEntry, !draftEvidence.isPending else {
                 show("Return to the original text field to insert this draft.")
+                return
+            }
+            if stagedTake.hasPreviewContinuation || liveSnapshot?.paused == true, let anchor = previewAnchor {
+                stagedTake.resume()
+                link.send(.sendRaw, id: UUID().uuidString, preview: anchor)
                 return
             }
             stagedTake.resume()

@@ -36,18 +36,25 @@ public struct StagedDictation: Sendable, Equatable {
         public let unitID: Int
         public let original: String
         public let text: String
-        public fileprivate(set) var released = false
+        public let sentByHost: Bool
+        public fileprivate(set) var released: Bool
 
         fileprivate init(unit: LiveSegment) {
             unitID = unit.id
-            original = unit.raw ?? unit.text
+            original = unit.previewSource ?? unit.raw ?? unit.text
             text = unit.text
+            sentByHost = unit.previewReleased == true
+            released = sentByHost
         }
     }
 
     public private(set) var previewDraft: PreviewDraft?
     public var isAwaitingPreview: Bool {
         pending.first?.editPreview == true && previewDraft == nil
+    }
+
+    public var hasPreviewContinuation: Bool {
+        !head.isEmpty || pending.dropFirst().contains { $0.discarded != true && !$0.text.isEmpty }
     }
 
     public init() {}
@@ -130,10 +137,6 @@ public struct StagedDictation: Sendable, Equatable {
     /// parts the row animates. The one derivation of what the keyboard says while dictating.
     public var previewLayout: PreviewLayout {
         var layout = PreviewLayout()
-        if let draft = previewDraft, !draft.released {
-            layout.text = draft.text
-            return layout
-        }
         for unit in pending + [LiveSegment(id: -1, text: head, final: false)] {
             // A discarded unit is not shown (its undo window is open); it is not ready, so delivery waits for it. While the app
             // has not answered a clear, the open unit and the head are hidden the same way.
@@ -189,7 +192,7 @@ public struct StagedDictation: Sendable, Equatable {
     private mutating func skipEmpty() {
         // A unit cleanup dropped whole (all filler) has nothing to type.
         while inFlight == nil, let first = pending.first, first.ready == true, first.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if first.editPreview == true { break }
+            if first.editPreview == true, first.previewReleased != true { break }
             deliveredThrough = first.id
         }
     }
@@ -199,7 +202,10 @@ public struct StagedDictation: Sendable, Equatable {
             previewDraft = nil
             return
         }
-        if previewDraft?.unitID != first.id { previewDraft = PreviewDraft(unit: first) }
+        let next = PreviewDraft(unit: first)
+        if let current = previewDraft, current.unitID == next.unitID, current.original == next.original,
+           current.text == next.text, current.sentByHost == next.sentByHost { return }
+        previewDraft = next
     }
 
     public mutating func releasePreview() {
