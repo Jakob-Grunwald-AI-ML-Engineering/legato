@@ -15,6 +15,8 @@ struct DictationPreviewView: View {
     /// grow with the taller preview; more lines show instead.
     let bandHeight: Double
 
+    @State private var bloom: (point: CGPoint, start: Date)?
+    @State private var glowOrigin: CGPoint?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var insets: EdgeInsets {
@@ -29,7 +31,7 @@ struct DictationPreviewView: View {
             PreviewRow(text: text, layout: controller.dictationPreviewLayout, draft: draft,
                        canSend: controller.canSendPreview,
                        canDiscard: controller.canDiscardPreview, insets: insets, bandHeight: bandHeight, reservesChip: showsUndo,
-                       hold: PreviewHoldGesture(controller: controller),
+                       hold: PreviewHoldGesture(controller: controller, onBloom: showBloom),
                        onSendRaw: { controller.previewSwiped() },
                        onDiscard: { controller.discardPreview() })
                 .accessibilityElement(children: .ignore)
@@ -44,11 +46,17 @@ struct DictationPreviewView: View {
             if showsUndo { undoChip.transition(.opacity) }
         }
         .animation(reduceMotion ? nil : .easeOut(duration: Self.fadeSeconds), value: showsUndo)
-        .overlay { holdGlow }
+        .background { magicBackground }
+        .task(id: bloom?.start) {
+            guard let start = bloom?.start else { return }
+            try? await Task.sleep(for: .seconds(Self.bloomSeconds))
+            if !Task.isCancelled, bloom?.start == start { bloom = nil }
+        }
         .onDisappear { controller.endPreviewHold(apply: false) }
     }
 
     nonisolated static let fadeSeconds = 0.15
+    private static let bloomSeconds = 0.35
 
     /// "Undo" while the app keeps the cleared words (`KeyboardController.canUndoDiscard`), on the dictation key's side.
     private var undoChip: some View {
@@ -68,19 +76,64 @@ struct DictationPreviewView: View {
         .accessibilityIdentifier("keyboard.preview.undo")
     }
 
-    private var holdGlow: some View {
+    private func showBloom(at point: CGPoint) {
+        glowOrigin = point
+        bloom = (point, Date())
+    }
+
+    private var magicBackground: some View {
         let listening = controller.isPreviewInstructionReady
-        let rim = RoundedRectangle(cornerRadius: WordRowLayout.contentInset)
-            .strokeBorder(LinearGradient(colors: MagicGradient.colors, startPoint: .topLeading, endPoint: .bottomTrailing),
-                          lineWidth: 1.5)
-        return rim
-            .background { rim.blur(radius: 5) }
-            .padding(2)
-            .opacity(listening ? 0.9 : 0)
-            .scaleEffect(listening || reduceMotion ? 1 : 0.97)
-            .animation(reduceMotion ? nil : .smooth, value: listening)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
+        return ZStack {
+            // Keep the background's frame while the listening glow fades out.
+            Color.clear
+            if listening {
+                listeningGlow.transition(.opacity)
+            }
+            if let bloom {
+                TimelineView(.animation) { timeline in
+                    let duration = reduceMotion ? 0.2 : Self.bloomSeconds
+                    let age = timeline.date.timeIntervalSince(bloom.start)
+                    let progress = min(1, max(0, age / duration))
+                    Canvas { context, size in
+                        let bounds = Path(CGRect(origin: .zero, size: size))
+                        if reduceMotion {
+                            context.fill(bounds, with: .color(.primary.opacity(0.1 * (1 - progress))))
+                        } else {
+                            let remaining = 1 - progress
+                            let reach = hypot(max(bloom.point.x, size.width - bloom.point.x),
+                                              max(bloom.point.y, size.height - bloom.point.y))
+                            let radius = max(1, reach * (1 - remaining * remaining))
+                            let colors = MagicGradient.colors.map { $0.opacity(0.4 * remaining * remaining) }
+                            context.fill(bounds, with: .radialGradient(Gradient(colors: colors + [.clear]),
+                                                                      center: bloom.point, startRadius: 0, endRadius: radius))
+                        }
+                    }
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: WordRowLayout.contentInset))
+        .animation(reduceMotion ? nil : .smooth, value: listening)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder private var listeningGlow: some View {
+        if reduceMotion {
+            Color.primary.opacity(0.08)
+        } else {
+            TimelineView(.animation(minimumInterval: 1.0 / 30)) { timeline in
+                Canvas { context, size in
+                    let origin = glowOrigin ?? CGPoint(x: size.width / 2, y: size.height / 2)
+                    let phase = timeline.date.timeIntervalSinceReferenceDate * 2 * .pi / PreviewRenderer.shimmerPeriod
+                    let center = CGPoint(x: origin.x * 0.4 + size.width * (0.3 + 0.16 * sin(phase)),
+                                         y: size.height * (0.5 + 0.2 * cos(phase)))
+                    let colors = MagicGradient.colors.map { $0.opacity(0.16) }
+                    context.fill(Path(CGRect(origin: .zero, size: size)),
+                                 with: .radialGradient(Gradient(colors: colors + [.clear]), center: center,
+                                                       startRadius: 0, endRadius: max(1, size.width * 0.75)))
+                }
+            }
+        }
     }
 }
 
@@ -88,9 +141,10 @@ struct DictationPreviewView: View {
 /// a scrolling or swiping finger leave before the press is recognized.
 private struct PreviewHoldGesture: UIGestureRecognizerRepresentable {
     let controller: KeyboardController
+    let onBloom: (CGPoint) -> Void
 
     final class Recognizer: UILongPressGestureRecognizer {
-        var tapped: (() -> Void)?
+        var tapped: ((CGPoint) -> Void)?
         private var tapOrigin: CGPoint?
         private(set) var moved = false
 
@@ -107,8 +161,9 @@ private struct PreviewHoldGesture: UIGestureRecognizerRepresentable {
         override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
             if let touch = touches.first, exceededTapTravel(touch) { moved = true }
             let wasTap = state == .possible && !moved && touches.count == 1 && numberOfTouches == 1
+            let point = touches.first?.location(in: nil)
             super.touchesEnded(touches, with: event)
-            if wasTap { tapped?() }
+            if wasTap, let point { tapped?(point) }
         }
 
         override func reset() {
@@ -132,12 +187,18 @@ private struct PreviewHoldGesture: UIGestureRecognizerRepresentable {
     }
 
     func updateUIGestureRecognizer(_ recognizer: Recognizer, context: Context) {
-        recognizer.tapped = { [weak controller] in controller?.composePreviewWithoutInstructions() }
+        let coordinates = context.converter
+        recognizer.tapped = { [weak controller, onBloom] point in
+            guard let controller, controller.canComposePreview else { return }
+            onBloom(coordinates.convert(globalPoint: point))
+            controller.composePreviewWithoutInstructions()
+        }
     }
 
     func handleUIGestureRecognizerAction(_ recognizer: Recognizer, context: Context) {
         switch recognizer.state {
-        case .began where !recognizer.moved: _ = controller.beginPreviewHold()
+        case .began where !recognizer.moved:
+            if controller.beginPreviewHold() { onBloom(context.converter.localLocation) }
         case .changed where recognizer.moved: controller.endPreviewHold(apply: false)
         case .ended: controller.endPreviewHold(apply: !recognizer.moved)
         case .cancelled: controller.endPreviewHold(apply: false)
