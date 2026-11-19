@@ -1,15 +1,15 @@
 import LegatoKeyboardCore
 import SwiftUI
 
-/// The keyboard: the full layout (`TypingFallbackView`: the word row, the tool row and the native key grid) or
-/// the compact strip (`StripView`), switched by the chevron (`KeyboardController.toggleExpansion`).
+/// The keyboard: the full layout (`TypingFallbackView`: the top row and the native key grid) or the minimised one
+/// (`MinimisedKeyboardView`), switched by the dictation key's swipes (`KeyboardController.setMode`).
 struct KeyboardRootView: View {
     let controller: KeyboardController
 
     var body: some View {
         Group {
-            if controller.mode == .strip {
-                StripView(controller: controller)
+            if controller.mode == .minimised {
+                MinimisedKeyboardView(controller: controller)
             } else {
                 TypingFallbackView(controller: controller)
             }

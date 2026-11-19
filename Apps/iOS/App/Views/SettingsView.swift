@@ -4,6 +4,7 @@ import AVFAudio
 import LegatoClaude
 import LegatoAgent
 import LegatoAppServices
+import LegatoKeyboardCore
 
 struct SettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
@@ -19,6 +20,7 @@ struct SettingsView: View {
     @State private var keepMicrophoneActive = ComposerMicrophonePreference.keepActive()
     @State private var combineMicrophoneInputs = ComposerMicrophonePreference.combineInputs()
     @AppStorage(ShortcutActionSetting.key, store: AppGroup.defaults) private var shortcutAction = ShortcutActionSetting.Action.meeting.rawValue
+    @AppStorage(DictationKeySide.preferenceKey, store: AppGroup.defaults) private var dictationKeySide = DictationKeySide.standard
     @State private var haptics = Settings.keyboardHaptics
     @State private var clicks = Settings.keyboardClicks
     @State private var microphoneAllowed = AVAudioApplication.shared.recordPermission == .granted
@@ -109,11 +111,16 @@ struct SettingsView: View {
             } footer: { Text("Meeting starts or stops a recording. Dictation starts a take when the keyboard is open; otherwise it readies the microphone.") }
             Section {
                 NavigationLink("Practice keyboard") { KeyboardPracticeView() }
+                Picker("Dictation key", selection: $dictationKeySide) {
+                    Text("Left").tag(DictationKeySide.left)
+                    Text("Right").tag(DictationKeySide.right)
+                }
+                .accessibilityIdentifier("settings.dictationKeySide")
                 Toggle("Haptic feedback", isOn: $haptics)
                 Toggle("Key sounds", isOn: $clicks)
                 Button { openSettings() } label: { Label("Set up keyboard", systemImage: "keyboard") }
             } header: { Text("Keyboard") } footer: {
-                Text("In iOS Settings, open Keyboards, enable Legato and Allow Full Access. Then touch and hold the globe key in any text field to choose Legato. Haptics and sounds require Full Access.")
+                Text("In iOS Settings, open Keyboards, enable Legato and Allow Full Access. Then touch and hold the globe key in any text field to choose Legato. The dictation key sits beside the transcript: tap to dictate or pause, swipe down to shrink the keyboard and up to bring it back, swipe left to undo and right to redo. Haptics, sounds and the dictation key's side require Full Access.")
             }
             Section {
                 Toggle("Keep microphone active in background", isOn: $keepMicrophoneActive)

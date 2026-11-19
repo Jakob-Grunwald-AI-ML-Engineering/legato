@@ -2,16 +2,23 @@ import LegatoComposerUI
 import LegatoKeyboardCore
 import SwiftUI
 
-/// The word row: three slots with thin dividers, the best suggestion in the middle ("2 | 1 | 3", see
+/// The transcript beside the dictation key (#315): word slots with thin dividers ("2 | 1 | 3" or "1 | 2", see
 /// `WordRowLayout`), each a button that applies its word (`KeyboardController.suggestionTapped`). A hint, the
-/// meeting notice or the dictation status takes the row over while it is active, and the row shows no words then.
+/// meeting notice or the dictation status takes the area over while it is active, and it shows no words then.
 /// A slot's word changes as the system's bar does it: letter by letter (`MorphingWord`). While a slot is pressed a
-/// capsule fills it and its neighbouring dividers go. It fills the native prediction frame it is given.
+/// capsule fills it and its neighbouring dividers go. It fills the transcript frame it is given (`TopRowLayout`).
 struct WordRowView: View {
     let controller: KeyboardController
     /// How many slots the width allows (`WordRowLayout.visibleSlots`).
     let slots: Int
+    /// The dictation key's side: the text keeps the key's inset there and the rounded corner's on the other side.
+    let keySide: DictationKeySide
     var fontSize: CGFloat = 17
+
+    private var insets: EdgeInsets {
+        let i = WordRowLayout.insets(keySide: keySide)
+        return EdgeInsets(top: 0, leading: CGFloat(i.leading), bottom: 0, trailing: CGFloat(i.trailing))
+    }
 
     /// The slot being pressed (its position in the row), if any: its pill shows and the dividers beside it hide.
     @State private var pressed: Int?
@@ -38,13 +45,10 @@ struct WordRowView: View {
                         .accessibilityAddTraits(.isStaticText)
                     takeButton("Dismiss", id: "keyboard.liveRecovery.dismiss") { controller.dismissLiveRecovery() }
                 }
-                .padding(.horizontal, CGFloat(WordRowLayout.contentInset))
+                .padding(insets)
                 .accessibilityIdentifier("keyboard.liveRecovery")
             } else if controller.offersAutoFillSwitch, let target = controller.inputModeTarget {
                 AutoFillSwitchKey(target: target)
-            } else if controller.hint == nil, let presentation = controller.instructionPresentation {
-                InstructionRowView(controller: controller, presentation: presentation, fontSize: fontSize)
-                    .transition(.opacity)
             } else if let status = controller.statusText {
                 HStack(spacing: 8) {
                     if controller.isCleaningUp {
@@ -67,7 +71,7 @@ struct WordRowView: View {
                         takeButton("Insert as-is", id: "keyboard.take.insertRaw") { controller.insertTakeRaw() }
                     }
                 }
-                .padding(.horizontal, CGFloat(WordRowLayout.contentInset))
+                .padding(insets)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.black.opacity(0.001))
                 .contentShape(Rectangle())
@@ -126,7 +130,7 @@ struct WordRowView: View {
     /// top and nothing re-centres or jumps. The row keeps its height; the font is the largest that fits two lines with air
     /// between them and clear of the row's edges (`WordRowHeight`, an estimate to measure on the phone).
     private func previewRow(_ text: String) -> some View {
-        PreviewRow(text: text, layout: controller.dictationPreviewLayout, canSend: controller.canSendPreview,
+        PreviewRow(text: text, layout: controller.dictationPreviewLayout, canSend: controller.canSendPreview, insets: insets,
                    onSend: { point in bloom = (point, Date()); controller.previewTapped() },
                    onSendRaw: { controller.previewSwiped() })
         .accessibilityElement(children: .ignore)
@@ -553,6 +557,8 @@ private struct PreviewRow: View {
     let text: String
     let layout: StagedDictation.PreviewLayout?
     let canSend: Bool
+    /// The text's leading and trailing insets (`WordRowLayout.insets`).
+    let insets: EdgeInsets
     /// A tap that sends, at the touch point (the row's own coordinates).
     let onSend: (CGPoint) -> Void
     /// A swipe up: send without cleanup.
@@ -604,8 +610,9 @@ private struct PreviewRow: View {
             .onGeometryChange(for: Double.self) { Double($0.size.height) } action: { textHeight = $0 }
             .offset(x: settleOffset, y: swoosh ? -Self.swooshLift : 0)
             .opacity(swoosh ? 0.55 : 1)
-            .frame(width: max(proxy.size.width - 2 * CGFloat(WordRowLayout.previewInset), 0), alignment: .leading)
-            .padding(.horizontal, CGFloat(WordRowLayout.previewInset))
+            .frame(width: max(proxy.size.width - insets.leading - insets.trailing, 0), alignment: .leading)
+            .padding(.leading, insets.leading)
+            .padding(.trailing, insets.trailing)
             .padding(.bottom, single ? 0 : CGFloat(WordRowHeight.previewPadding(rowHeight: height, size: size)))
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: single ? .leading : .bottomLeading)
             .clipped()
@@ -613,7 +620,7 @@ private struct PreviewRow: View {
                 VStack(spacing: 0) {
                     // The first line's leading edge; the second line is solid.
                     HStack(spacing: 0) {
-                        Color.black.frame(width: CGFloat(WordRowLayout.previewInset))
+                        Color.black.frame(width: insets.leading)
                         LinearGradient(colors: [truncated ? .clear : .black, .black], startPoint: .leading, endPoint: .trailing)
                             .frame(width: CGFloat(WordRowHeight.previewFadeWidth))
                         Color.black

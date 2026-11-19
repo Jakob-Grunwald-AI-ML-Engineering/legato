@@ -62,7 +62,7 @@ final class KeyGridView: UIView {
         KeyGeometry(size: bounds.size, landscapeScreenWidth: KeyGeometry.screenWidth(in: window))
     }
 
-    /// The top bar (suggestions, mic pill) lies under this view; only the key rows take touches. A touch
+    /// The top row (the dictation key, the transcript) lies under this view; only the key rows take touches. A touch
     /// that began on a key keeps coming here wherever it moves (the popups reach into the bar).
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         point.y >= geometry.firstRowTop - geometry.gap && super.point(inside: point, with: event)
@@ -299,7 +299,9 @@ final class KeyGridView: UIView {
         let base = CGFloat(state.baseIndex) + 0.5
         var x = key.midX - Self.stripPad - base * Self.stripPitch
         x = min(max(x, Self.stripInset), bounds.width - Self.stripInset - width)
-        return CGRect(x: x, y: key.minY - 71.7, width: width, height: 66.7)
+        // The extension cannot draw above its view: the strip stays inside it (portrait it still ends above the key; landscape
+        // it covers the top row's keys).
+        return CGRect(x: x, y: max(0, key.minY - 71.7), width: width, height: 66.7)
     }
 
     private func cellRect(_ state: TouchState, _ index: Int) -> CGRect {

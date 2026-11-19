@@ -2,10 +2,9 @@ import LegatoKeyboardCore
 import SwiftUI
 import UIKit
 
-/// The ABC surface, which dictates into the target field: the word row (live words while dictating), the tool row
-/// (the collapse chevron, the magic key, the dictation mic, undo, redo) and the native key grid, at the pre-offshoot
-/// height (`KeyboardHeights.height`). Reuses the original keyboard's touch surface, repeat-delete, cursor pan,
-/// alternates and field traits. Geometry: `KeyboardMetrics.swift`.
+/// The ABC surface, which dictates into the target field: the top row (the dictation key beside the transcript, #315) and
+/// the native key grid, at `KeyboardHeights.height`. Reuses the original keyboard's touch surface, repeat-delete, cursor pan,
+/// alternates and field traits. Geometry: `KeyboardMetrics.swift`, `TopRowLayout`.
 struct TypingFallbackView: View {
     let controller: KeyboardController
 
@@ -24,17 +23,14 @@ struct TypingFallbackView: View {
                     KeyGrid(typing: controller.typing, layout: layout,
                             presentation: controller.typing.presentation, appearance: controller.appearance,
                             emojiSystemSwitcher: controller.emojiSystemSwitcher)
-                        .zIndex(1)  // Its popups reach over the word and tool rows; it takes no touches there.
+                        .zIndex(1)  // Its popups reach over the top row; it takes no touches there.
                     ForEach(frames.filter { $0.id == "globe" || ($0.id == "emoji" && controller.emojiSystemSwitcher) }, id: \.id) { frame in
                         place(frame.cgRect) { GlobeKey(target: controller.inputModeTarget, typing: controller.typing, emoji: frame.id == "emoji") }
                             .zIndex(2)
                     }
                 }
-                place(g.wordRowFrame) {
-                    WordRowView(controller: controller, slots: WordRowLayout.visibleSlots(width: Double(g.wordRowFrame.width)))
-                        .accessibilityIdentifier("typing.predictions")
-                }
-                place(g.toolRowFrame) { toolKeys(gap: g.gap) }
+                TopRowView(controller: controller, layout: g.topRow(mode: .full, side: controller.dictationKeySide))
+                    .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
             }
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
             .onAppear { controller.wordRow.contextChanged() }
@@ -45,33 +41,6 @@ struct TypingFallbackView: View {
             controller.typing.endDelete()
             controller.typing.cancelCursorPan()
         }
-    }
-
-    /// Left to right: the chevron that collapses to the strip, the magic key, the dictation mic, undo, redo; five equal keys.
-    private func toolKeys(gap: CGFloat) -> some View {
-        HStack(spacing: gap) {
-            ExpansionKey(controller: controller, symbol: "chevron.down")
-            MagicKey(controller: controller)
-            MicKey(controller: controller)
-            key("Undo", symbol: "arrow.uturn.backward", id: "keyboard.hotkey.undo", enabled: controller.canUndo, action: controller.undo)
-            key("Redo", symbol: "arrow.uturn.forward", id: "keyboard.hotkey.redo", enabled: controller.canRedo, action: controller.redo)
-        }
-    }
-
-    private func key(_ label: String, symbol: String, id: String, enabled: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 17))
-                .foregroundStyle(Color(uiColor: KeyColors.ink).opacity(enabled ? 1 : 0.35))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.black.opacity(0.001))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(KeyButtonStyle())
-        .disabled(!enabled)
-        
-        .accessibilityLabel(label)
-        .accessibilityIdentifier(id)
     }
 
     private func place<Content: View>(_ frame: CGRect, @ViewBuilder _ content: () -> Content) -> some View {

@@ -14,8 +14,6 @@ final class KeyboardViewController: UIInputViewController {
     private var controller: KeyboardController?
     private var heightConstraint: NSLayoutConstraint?
 
-    private static let portraitHeight = KeyGeometry.height(landscape: false)
-    private static let landscapeHeight = KeyGeometry.height(landscape: true)
     /// A height change animates over this.
     private static let resizeDuration = 0.28
 
@@ -66,18 +64,13 @@ final class KeyboardViewController: UIInputViewController {
         controller.onLayoutChange = { [weak self] reason in self?.layoutChanged(reason: reason) }
     }
 
-    /// The height the keyboard asks for: the pre-offshoot keyboard (word row, tool row, native grid), 297 pt in portrait,
-    /// or the strip's (word row plus one row of keys) while collapsed. By width, as
-    /// `KeyGeometry` does: a portrait keyboard (402 x 297) is wider than tall too.
+    /// The height the keyboard asks for (`KeyboardHeights.requested`): the top row and the native grid, 275 pt in portrait,
+    /// or the two minimised rows. By width, as `KeyGeometry` does: a portrait keyboard (402 x 275) is wider than tall too.
     private var requestedHeight: CGFloat {
-        let landscape = KeyGeometry.isLandscape(width: view.bounds.width)
-        if let controller, controller.mode == .strip {
-            return CGFloat(StripHeight.requested(row: controller.stripHeight, landscape: landscape))
-        }
-        return landscape ? Self.landscapeHeight : Self.portraitHeight
+        CGFloat(KeyboardHeights.requested(mode: controller?.mode ?? .full, landscape: KeyGeometry.isLandscape(width: view.bounds.width)))
     }
 
-    /// The layout changed (the chevron, the debug height): resize
+    /// The layout changed (the dictation key's swipe, a restored choice): resize
     /// with the content's cross-fade, and log the height asked for against the one laid out.
     private func layoutChanged(reason: String) {
         #if DEBUG
@@ -96,7 +89,7 @@ final class KeyboardViewController: UIInputViewController {
         #endif
     }
 
-    private var modeName: String { controller?.mode == .strip ? "strip" : "full" }
+    private var modeName: String { controller?.mode == .minimised ? "minimised" : "full" }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)

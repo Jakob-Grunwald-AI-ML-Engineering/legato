@@ -6,32 +6,32 @@ import LegatoKeyboardCore
 struct KeyboardPreferences: Equatable {
     static let hapticsKey = "keyboardHaptics"
     static let clicksKey = "keyboardClicks"
-    /// The height experiment's starting height (points). Read in DEBUG builds only.
-    static let stripHeightKey = "keyboardStripHeight"
 
     var haptics = true
     var clicks = true
     var automaticAutoFill = AutoFillHandoff.defaultEnabled
     var emojiSystemSwitcher = false
-    var stripHeight = StripHeight.standard
+    /// Settings > Keyboard > Dictation key (`DictationKeySide`); right by default.
+    var dictationKeySide = DictationKeySide.standard
 
-    /// The extension owns its last layout (strip or full). Local defaults work with or without Full Access.
+    /// The extension owns its last layout (minimised or full). Local defaults work with or without Full Access.
     /// Only a boolean is retained, never document text.
     static func expansionPersistence() -> KeyboardExpansionPersistence {
         KeyboardExpansionPersistence(defaults: .standard)
     }
 
+    /// The dictation key's hint counter, kept by the extension like its last layout.
+    static func dictationKeyHints() -> DictationKeyHints {
+        DictationKeyHints(defaults: .standard)
+    }
+
     static func load() -> KeyboardPreferences {
         guard let defaults = UserDefaults(suiteName: LinkChannel.appGroupID) else { return KeyboardPreferences() }
-        var stored: Double?
-        #if DEBUG
-        stored = defaults.object(forKey: stripHeightKey) as? Double
-        #endif
         return KeyboardPreferences(
             haptics: defaults.object(forKey: hapticsKey) as? Bool ?? true,
             clicks: defaults.object(forKey: clicksKey) as? Bool ?? true,
             automaticAutoFill: defaults.object(forKey: AutoFillHandoff.preferenceKey) as? Bool ?? AutoFillHandoff.defaultEnabled,
             emojiSystemSwitcher: EmojiKeyboardBehavior.usesSystemSwitcher(in: defaults),
-            stripHeight: StripHeight.resolve(stored: stored))
+            dictationKeySide: DictationKeySide.stored(in: defaults))
     }
 }

@@ -12,18 +12,6 @@ import Testing
         #expect(firstFaceTop + 3 * 54 + 43 == 796)
     }
 
-    @Test func portraitAddsOneNativeToolRowBelowNativePredictions() {
-        // iOS 26 adds 17 pt above the extension in portrait. Request the remaining 27 pt of the native 44 pt plus 3 pt of
-        // room for the two-line dictation preview (#313): 30 pt.
-        // Native Q starts 8 pt below the complete visible prediction row.
-        // The tools add one native 54 pt key pitch before the unchanged typing grid.
-        #expect(KeyboardHeights.wordRowHeight(landscape: false) == 30)
-        #expect(KeyboardHeights.pillHeight(landscape: false) == 43)
-        #expect(KeyboardHeights.pillGapToRow(landscape: false) == 11)
-        #expect(KeyboardHeights.firstRowTop(landscape: false) == 92)
-        #expect(KeyboardHeights.height(landscape: false) == 300)
-    }
-
     @Test func landscapeKeyRowsAlignWithTheNativeScreenBottom() {
         // iPhone 17 landscape: native first row y244, last face ends377; system area starts381.
         let firstFaceTop = 381 - KeyboardHeights.height(landscape: true)
@@ -32,34 +20,32 @@ import Testing
         #expect(abs(firstFaceTop + 3 * 35.33 + 27.33 - 377) <= 1)
     }
 
-    @Test func landscapeAddsOneNativeToolRowBelowNativePredictions() {
-        // Physical iPhone: predictions y194..238, first letter face y244.
-        #expect(KeyboardHeights.wordRowHeight(landscape: true) == 44)
-        #expect(KeyboardHeights.pillHeight(landscape: true) == 27.33)
-        #expect(KeyboardHeights.pillGapToRow(landscape: true) == 8)
-        #expect(abs(KeyboardHeights.firstRowTop(landscape: true) - 85.33) < 0.0001)
-        #expect(abs(KeyboardHeights.height(landscape: true) - 222.65) < 0.0001)
+    @Test func portraitIsOneTopRowAboveTheNativeGrid() {
+        // #315: the word row and the tool row became one row; the first grid row sits as high as its popups allow.
+        #expect(KeyboardHeights.firstRowTop(landscape: false) == 67)
+        #expect(KeyboardHeights.keyFaceTop(landscape: false) == 13)
+        #expect(KeyboardHeights.height(landscape: false) == 275)
+        #expect(KeyboardHeights.height(landscape: false) - KeyboardHeights.firstRowTop(landscape: false) == 3 * 54 + 43 + 3)
     }
 
-    @Test func compactLandscapeContainsPredictionsAndOneNativeLandscapeKeyRow() {
-        // Predictions 44, then 6 pt top gap, 27.33 pt face and 4 pt bottom gap.
-        #expect(abs(StripHeight.keyRowHeight(row: 54, landscape: true) - 37.33) < 0.0001)
-        #expect(abs(StripHeight.requested(row: 54, landscape: true) - 81.33) < 0.0001)
+    @Test func landscapeIsOneTopRowAboveTheNativeGrid() {
+        #expect(KeyboardHeights.firstRowTop(landscape: true) == 45)
+        #expect(abs(KeyboardHeights.keyFaceTop(landscape: true) - 9.67) < 0.0001)
+        #expect(abs(KeyboardHeights.height(landscape: true) - 182.32) < 0.0001)
     }
 
-    @Test func portraitPredictionContentExcludesTheSystemRoundedTopArea() {
-        // Retained before image: visible predictions 61 pt; native 44 pt. Public safe-area/style changes had no effect.
-        #expect(KeyboardHeights.height(landscape: false) - KeyboardHeights.firstRowTop(landscape: false) == 208)
-        #expect(KeyboardHeights.toolRowTop(landscape: false) == 38)
-        // The compositor supplies 17 pt; requesting 30 pt makes the visible row 47 pt (the native 44 pt plus the preview's room)
-        // and the typing grid keeps its place (the first-face test above).
-        #expect(KeyboardHeights.wordRowHeight(landscape: false) + 17 == 44 + WordRowHeight.portraitPreviewRoom)
-        #expect(KeyboardHeights.wordRowHeight(landscape: true) == 44)
+    @Test func theTopRowsPopupsStayInsideTheView() {
+        for landscape in [false, true] {
+            #expect(KeyboardHeights.firstRowTop(landscape: landscape) >= KeyboardHeights.popupReach(landscape: landscape))
+            #expect(KeyboardHeights.firstRowTop(landscape: landscape) - KeyboardHeights.popupReach(landscape: landscape) < 1)
+        }
     }
 
-    @Test func portraitRowsKeepNativePitchAndThreePointBottomGap() {
-        let rows = KeyboardHeights.height(landscape: false) - KeyboardHeights.firstRowTop(landscape: false)
-        #expect(rows == 3 * 54 + 43 + 3)
+    @Test func minimisedIsTwoRowsOfKeysWithTheirNativePitch() {
+        #expect(KeyboardHeights.minimisedHeight(landscape: false) == 13 + 54 + 43 + 3)
+        #expect(abs(KeyboardHeights.minimisedHeight(landscape: true) - (9.67 + 35.33 + 27.33 + 4)) < 0.0001)
+        #expect(KeyboardHeights.requested(mode: .minimised, landscape: false) == 113)
+        #expect(KeyboardHeights.requested(mode: .full, landscape: false) == 275)
     }
 
     @Test func landscapeSubtractsOnlyTheSystemProvidedSideInset() {
@@ -69,31 +55,17 @@ import Testing
         #expect(KeyboardSideMargins.landscape(contentWidth: 874, screenWidth: nil) == 79)
         #expect(KeyboardSideMargins.landscape(contentWidth: 874, screenWidth: 402) == 79)
     }
-
-    @Test func theStripGrowsByTheWordRow() {
-        #expect(WordRowHeight.strip == 30)
-        #expect(StripHeight.requested(row: 54) == 84)
-        #expect(StripHeight.resolve(stored: 56) == 54)
-        #expect(StripHeight.resolve(stored: 44) == 54)
-        #expect(StripHeight.requested(row: 30) == 60)
-    }
-
-    @Test func theDebugHeightsThatLeaveNothingToTouchStayAsRequested() {
-        #expect(StripHeight.requested(row: 0) == 0)
-        #expect(StripHeight.requested(row: 1) == 1)
-    }
 }
 
-@Test func thePreviewFontFitsTwoLinesInTheRowAsItIs() {
-    // Portrait: 30 pt holds two lines of 11 pt with air (26.4 + 1.1 spacing + 2 x 1 pt padding = 29.5; 12 pt needs 32);
-    // landscape's 44 pt holds 13 pt (31.2 + 1.3 + 2).
-    #expect(WordRowHeight.previewFontSize(rowHeight: WordRowHeight.content(landscape: false)) == 11)
-    #expect(WordRowHeight.previewFontSize(rowHeight: WordRowHeight.content(landscape: true)) == 13)
-    let size = WordRowHeight.previewFontSize(rowHeight: WordRowHeight.portrait)
-    let pad = WordRowHeight.previewPadding(rowHeight: WordRowHeight.portrait, size: size)
-    #expect(WordRowHeight.previewContentHeight(size: size) + 2 * pad <= WordRowHeight.portrait && pad >= WordRowHeight.previewMinPadding)
+@Test func thePreviewFontFitsTwoLinesInTheTranscriptAsItIs() {
+    // Portrait: the 43 pt top row holds two lines of 13 pt (31.2 + 1.3 spacing + 2 x 1 pt padding = 34.5). Landscape keys are
+    // 27.33 pt: the transcript keeps the 30 pt that holds 11 pt (26.4 + 1.1 + 2 = 29.5; 12 pt needs 32).
+    #expect(WordRowHeight.previewFontSize(rowHeight: 43) == 13)
+    #expect(WordRowHeight.previewFontSize(rowHeight: WordRowHeight.minimumRow) == 11)
+    let size = WordRowHeight.previewFontSize(rowHeight: WordRowHeight.minimumRow)
+    let pad = WordRowHeight.previewPadding(rowHeight: WordRowHeight.minimumRow, size: size)
+    #expect(WordRowHeight.previewContentHeight(size: size) + 2 * pad <= WordRowHeight.minimumRow && pad >= WordRowHeight.previewMinPadding)
     #expect(WordRowHeight.previewLineSpacing(size: size) > 0, "the two lines breathe")
-    #expect(WordRowHeight.portrait == 30, "27 pt native extension row plus 3 pt for the preview")
     #expect(WordRowHeight.previewIsSingleLine(textHeight: WordRowHeight.previewLineHeight(size: 11), size: 11))
     #expect(!WordRowHeight.previewIsSingleLine(textHeight: 2 * WordRowHeight.previewLineHeight(size: 11), size: 11))
     #expect(WordRowHeight.previewTruncated(textHeight: 40, rowHeight: 30, prefixed: false))

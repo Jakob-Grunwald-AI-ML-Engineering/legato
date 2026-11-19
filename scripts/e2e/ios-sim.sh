@@ -14,7 +14,7 @@
 # SpeechTranscriber, Soniox and Haiku are never called: the
 # dictation cleanup is a scripted streaming cleaner (dictation-debug-stream) that capitalizes the take in chunks
 # and can fail on cue. The scenarios are driven by `scripts/device/ctl.sh --target sim send <command>` (the bridge
-# in Apps/iOS/App/Debug/DebugBridge.swift) and assert on the bridge's replies (harness-state: the field, the held take, the instruction strip) and on the app's `e2e` os_log lines (subsystem de.gruenwald.legato).
+# in Apps/iOS/App/Debug/DebugBridge.swift) and assert on the bridge's replies (harness-state: the field and the held take) and on the app's `e2e` os_log lines (subsystem de.gruenwald.legato).
 #
 # Scenarios (names for LEGATO_E2E_ONLY): keyboard_session, take_stream, take_retry, take_insert_raw, take_fail_hook.
 #

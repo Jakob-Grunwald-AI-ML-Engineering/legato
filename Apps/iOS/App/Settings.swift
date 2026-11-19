@@ -106,13 +106,6 @@ enum Settings {
         set { EmojiKeyboardBehavior.setUsesSystemSwitcher(newValue, in: AppGroup.defaults) }
     }
 
-    /// Debug experiment: the height (points) a strip session starts with, one of `StripHeight.candidates`.
-    /// The keyboard honours it in DEBUG builds only (a long press on its status text steps through them).
-    static var keyboardStripHeight: Double {
-        get { StripHeight.resolve(stored: AppGroup.defaults.object(forKey: KeyboardPreferences.stripHeightKey) as? Double) }
-        set { AppGroup.defaults.set(newValue, forKey: KeyboardPreferences.stripHeightKey) }
-    }
-
     /// Debug experiment (background second-start failure): a normal stop leaves the audio session active
     /// instead of deactivating it, so the next run does not have to activate it from the background.
     /// Interruptions, media resets and lost inputs still deactivate. Default off.
