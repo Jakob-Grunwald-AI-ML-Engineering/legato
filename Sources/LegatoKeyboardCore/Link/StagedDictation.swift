@@ -75,7 +75,7 @@ public struct StagedDictation: Sendable, Equatable {
         /// The unit being typed (a prefix of `text`) and how many of its characters are in the field.
         public var leaving: Range<Int> = 0..<0
         public var exited = 0
-        /// Closed units whose cleanup has not landed: sent for cleanup, not yet typed.
+        /// Closed units whose cleanup has not landed: sent for cleanup, not yet typed ("thinking"). The open unit is not among them.
         public var waiting: [Range<Int>] = []
 
         /// The layout of the text without its first `count` characters (the row shows only the end of a long preview).
@@ -112,7 +112,7 @@ public struct StagedDictation: Sendable, Equatable {
             if unit.id == inFlight {
                 layout.leaving = range
                 layout.exited = min(exited, piece.count)
-            } else if unit.id >= 0, unit.ready != true {
+            } else if unit.id >= 0, unit.ready != true, unit.closed != false {
                 layout.waiting.append(range)
             }
         }

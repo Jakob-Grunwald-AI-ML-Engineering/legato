@@ -42,17 +42,66 @@ private func line(_ sequence: Int, _ text: String) -> DictationRouteLine {
         pipeline.cutRecognizer = { true }
         await pipeline.receive(line(0, "we should ship it on friday after the review."))
         pipeline.boundary("endpoint")
-        #expect(cleaner.inputs.withLock { $0.isEmpty }, "Neither a sentence end nor a pause sends in manual mode")
+        // A pause may start a speculative cleanup of the open unit, but nothing is sent or published by it.
+        #expect(pipeline.liveRun?.snapshot.segments.first?.ready == false, "Neither a sentence end nor a pause sends in manual mode")
         await pipeline.sendNow()
-        #expect(cleaner.inputs.withLock { $0.isEmpty }, "The unit waits for the finalize boundary")
+        #expect(pipeline.liveRun?.snapshot.segments.first?.ready == false, "The unit waits for the finalize boundary")
         // The words the cut made final arrive before the boundary and belong to the sent unit.
         await pipeline.receive(.init(sequence: 1, text: "and the budget", words: [], reason: "finalize"))
         pipeline.boundary("finalize")
         try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
-        #expect(cleaner.inputs.withLock { $0 } == ["we should ship it on friday after the review. and the budget"])
+        #expect(cleaner.inputs.withLock { $0.last } == "we should ship it on friday after the review. and the budget")
         // Words after the cut start the next unit.
         await pipeline.receive(line(2, "next thing"))
         #expect(pipeline.liveRun?.snapshot.segments.map(\.id) == [0, 2])
+        await pipeline.reset()
+    }
+
+    @Test func aSpeculativeCleanupAtAPauseIsReusedByTheTapWhenNothingWasAdded() async throws {
+        let cleaner = Upper()
+        let pipeline = manual(cleaner)
+        pipeline.cutRecognizer = { true }
+        var events: [(String, [String: Any])] = []
+        pipeline.diagnostics = { event, fields in events.append((event, fields)) }
+        await pipeline.receive(line(0, "we should ship it on friday."))
+        pipeline.boundary("endpoint")
+        try await until { cleaner.inputs.withLock { $0.count } == 1 }
+        #expect(pipeline.liveRun?.snapshot.segments.first?.ready == false, "Nothing is published by the speculation")
+        await pipeline.sendNow()
+        pipeline.boundary("finalize")
+        try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
+        #expect(cleaner.inputs.withLock { $0.count } == 1, "The tap reuses the request")
+        #expect(pipeline.liveRun?.snapshot.segments.first?.text == "We should ship it on friday.")
+        #expect(events.first { $0.0 == "live2.cleanup" }?.1["speculation"] as? String == "landed")
+        await pipeline.reset()
+    }
+
+    @Test func aSpeculativeCleanupIsDroppedWhenWordsWereAddedBeforeTheTap() async throws {
+        let cleaner = Upper()
+        let pipeline = manual(cleaner)
+        pipeline.cutRecognizer = { true }
+        var events: [(String, [String: Any])] = []
+        pipeline.diagnostics = { event, fields in events.append((event, fields)) }
+        await pipeline.receive(line(0, "we should ship it on friday."))
+        pipeline.boundary("endpoint")
+        try await until { cleaner.inputs.withLock { $0.count } == 1 }
+        await pipeline.receive(line(1, "and the budget"))
+        await pipeline.sendNow()
+        pipeline.boundary("finalize")
+        try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
+        #expect(cleaner.inputs.withLock { $0 } == ["we should ship it on friday.", "we should ship it on friday. and the budget"])
+        #expect(pipeline.liveRun?.snapshot.segments.first?.text == "We should ship it on friday. and the budget")
+        #expect(events.first { $0.0 == "live2.cleanup" }?.1["speculation"] as? String == "grew")
+        await pipeline.reset()
+    }
+
+    @Test func shortUnitsAndAutoRunsStartNoSpeculation() async throws {
+        let cleaner = Upper()
+        let pipeline = manual(cleaner)
+        await pipeline.receive(line(0, "ship it friday"))
+        pipeline.boundary("endpoint")
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(cleaner.inputs.withLock { $0.isEmpty })
         await pipeline.reset()
     }
 
@@ -93,7 +142,7 @@ private func line(_ sequence: Int, _ text: String) -> DictationRouteLine {
         try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
         let snapshot = try #require(pipeline.liveRun?.snapshot)
         #expect(snapshot.staged == true && !snapshot.complete)
-        #expect(snapshot.segments.first == .init(id: 0, text: "Ship it friday", cleaned: true, final: true, ready: true))
+        #expect(snapshot.segments.first == .init(id: 0, text: "Ship it friday", cleaned: true, final: true, ready: true, closed: true))
         // The next words open a new unit.
         await pipeline.receive(line(1, "and the budget"))
         #expect(pipeline.liveRun?.snapshot.segments.map(\.id) == [0, 1])

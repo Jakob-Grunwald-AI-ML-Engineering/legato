@@ -316,6 +316,36 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         if cleanupDuringPauses { fieldCleanup?.request() }
         if cleanupSentences { scheduleWholePause() }
         closeUnitAtPause()
+        speculateOpenUnit()
+    }
+
+    /// Fewer words than this are not worth a speculative request: a short unit is cheap to clean at the tap.
+    public static let speculationMinWords = 4
+    /// The text of the speculative request started for the open unit, and the start in progress (`submitLive` waits for it,
+    /// so a tap right after the pause finds the request registered).
+    @ObservationIgnored private var liveSpeculation: (runID: String, text: String)?
+    @ObservationIgnored private var speculationStart: Task<Void, Never>?
+
+    /// Speculative cleanup (#313, the voice agents' "speculative turn"): at an admitted pause of a manual run the open unit's
+    /// text so far is cleaned now, without closing the unit or publishing anything. If the user taps with the same text the
+    /// result is reused (already landed: instant; running: awaited); if words were added, it is dropped and the whole text
+    /// is cleaned afresh. At most one speculative request is in flight (the newest wins) and none for fewer than
+    /// `speculationMinWords` words; each costs one request that a miss wastes.
+    private func speculateOpenUnit() {
+        guard stagedLive, mode == .live, let run = liveRun, run.manual, !run.complete, sendCut == nil, let open = run.peekOpen(),
+              open.text.split(whereSeparator: \.isWhitespace).count >= Self.speculationMinWords,
+              liveSpeculation?.text != open.text || liveSpeculation?.runID != run.runID else { return }
+        liveSpeculation = (run.runID, open.text)
+        let id = liveCleanupSequence
+        let previous = speculationStart
+        speculationStart = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            let before = self.textBeforeUnit(key: open.key, run: run)
+            let pipeline = await self.current()
+            await pipeline.speculate(lineID: "\(self.sessionID)-\(open.key)", sequence: id, raw: open.text, textBefore: before)
+            self.diagnostics?("live2.speculate", ["run": String(run.runID.prefix(8)), "rawChars": open.text.count])
+        }
     }
 
     /// An admitted pause (`DictationActivity`: an endpoint, then 200 ms at -55 dBFS or below) closes the open unit of a staged
@@ -423,6 +453,20 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// Debug bridge: when set, take cleanups stream from this scripted cleaner instead of the provider.
     @ObservationIgnored public var debugStreamCleaner: DebugStreamingCleaner?
     #endif
+    /// Set where the take's first cleanup must not pay for a cold start (the iPhone app): at the start of a staged run the
+    /// connection is re-established if it has been idle (`connectionWarmer`, a credential-free request on the shared
+    /// session) and the dictation prompt is written to the provider's cache if `warm()` has not done so lately. Off in tests.
+    @ObservationIgnored public var connectionWarmer: (@Sendable () async -> Void)?
+    @ObservationIgnored private var lastConnectionWarm: Date?
+    private static let connectionWarmInterval: TimeInterval = 20
+    private func warmForRun() {
+        guard let connectionWarmer else { return }
+        if lastConnectionWarm.map({ Date().timeIntervalSince($0) >= Self.connectionWarmInterval }) ?? true {
+            lastConnectionWarm = Date()
+            Task.detached { await connectionWarmer() }
+        }
+        Task { [weak self] in await self?.warm() }
+    }
     /// The prompt cache lives 5 minutes after its last use.
     private static let warmInterval: TimeInterval = 240
 
@@ -438,6 +482,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
                   sendMode: { DictationSendSetting.mode(in: defaults) }, pauseSeconds: { DictationSendSetting.pause(in: defaults) },
                   supportsLive: supportsLive, liveSend: { DictationSendSetting.liveSend(in: defaults) },
                   groupsLiveHistory: groupsLiveHistory, stagedLive: stagedLive)
+        if stagedLive { connectionWarmer = { await KeyboardSession.warmClaudeConnection() } }
     }
     public init(recentTakes: RecentTakesStore = RecentTakesStore(), history: (any HistoryStore)? = nil, cleaner: any SentenceCleaning, vocabulary: @escaping @Sendable () async -> [String] = { [] },
                 timeout: Duration = .milliseconds(2500),
@@ -732,6 +777,18 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         }
     }
 
+    /// What stands before a unit if the run were typed clean: the text before the run, then the sentences so far.
+    /// A sentence the segmenter closed is a sentence even when its raw words carry no final punctuation yet (they are
+    /// still in cleanup): the cleaner must not take it for an unfinished one and continue in lowercase.
+    private func textBeforeUnit(key sequence: Int, run: LiveDictationRun) -> String {
+        var prior = run.text(before: sequence)
+        if let last = prior.last, last.isLetter || last.isNumber { prior += "." }
+        return [liveAnchor, prior].filter { !$0.isEmpty }.joined(separator: liveAnchor.last?.isWhitespace == true ? "" : " ")
+    }
+    /// Per cleanup sequence: whether a speculative request existed for the unit when it was sent (`match`: same text, `grew`:
+    /// words were added since, `none`), for the diagnostic; the pipeline says whether the result was actually used.
+    @ObservationIgnored private var liveSpecState: [Int: String] = [:]
+
     /// Sends a closed unit (`key`: its last segment) to cleanup, against the text before the run and the units so far.
     private func submitLive(_ unit: String, key sequence: Int, run: LiveDictationRun) async {
         let id = liveCleanupSequence
@@ -739,13 +796,13 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         liveKeys[id] = (sequence, run.unitRange(key: sequence))
         pending += 1
         liveSubmitted[id] = .now
-        // What stands before this sentence if the run were typed clean: the text before the run, then the sentences so far.
-        // A sentence the segmenter closed is a sentence even when its raw words carry no final punctuation yet (they are
-        // still in cleanup): the cleaner must not take it for an unfinished one and continue in lowercase.
-        var prior = run.text(before: sequence)
-        if let last = prior.last, last.isLetter || last.isNumber { prior += "." }
-        let before = [liveAnchor, prior].filter { !$0.isEmpty }.joined(separator: liveAnchor.last?.isWhitespace == true ? "" : " ")
+        let before = textBeforeUnit(key: sequence, run: run)
+        // A speculative request for this unit has been started by now; the pipeline takes it when the text is the same.
+        await speculationStart?.value
         let pipeline = await current()
+        let speculated = liveSpeculation.flatMap { $0.runID == run.runID ? ($0.text == unit ? "match" : "grew") : nil } ?? "none"
+        liveSpeculation = nil
+        liveSpecState[id] = speculated
         await pipeline.submit(sequence: id, lineID: "\(sessionID)-\(sequence)", raw: unit, textBefore: before, allowsEmpty: true)
     }
 
@@ -831,6 +888,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             _ = await settle(timeout: liveTimeout + .seconds(1))
         }
         let wholeText = await wholeTask?.value
+        liveSpeculation = nil
+        await pipeline?.cancelSpeculation()
         guard var run = liveRun, !run.complete else { return }
         if let wholeText, !run.isSplit, !run.staged {
             let before = liveAnchor
@@ -881,6 +940,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             let parts = start.duration(to: .now).components
             return Int(parts.seconds * 1000 + parts.attoseconds / 1_000_000_000_000_000)
         }
+        let specState = liveSpecState.removeValue(forKey: line.sequence)
         guard var run = liveRun, let (key, range) = liveKeys.removeValue(forKey: line.sequence) else { return }
         if run.runID == sealedLiveRunID {
             diagnostics?("live2.cleanup", ["landed": false, "reason": "sealed", "rawChars": line.raw.count, "ms": ms as Any])
@@ -899,15 +959,33 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             let shown = run.setCleaned(key: key, text: text)
             // `changed`: the cleaned unit differs from its raw words (held or not); `shown`: the target changed now.
             diagnostics?("live2.cleanup", ["landed": true, "changed": text != line.raw, "dropped": text.isEmpty, "shown": shown, "held": !run.complete,
-                                           "segments": segments, "rawChars": line.raw.count, "chars": text.count, "ms": ms as Any])
+                                           "segments": segments, "rawChars": line.raw.count, "chars": text.count, "ms": ms as Any]
+                .merging(Self.cleanupTiming(line, speculation: specState)) { $1 })
             if shown { publishLive(run) } else { liveRun = run }
         } else {
             // A staged unit whose cleanup failed or ran out of time is typed as its raw words.
             let shown = run.setRaw(key: key)
             diagnostics?("live2.cleanup", ["landed": false, "reason": line.reason ?? "raw", "detail": line.detail ?? "", "rawChars": line.raw.count,
-                                           "ms": ms as Any, "raw": shown])
+                                           "ms": ms as Any, "raw": shown].merging(Self.cleanupTiming(line, speculation: specState)) { $1 })
             if shown { publishLive(run) } else { liveRun = run }
         }
+    }
+
+    /// The `live2.cleanup` fields that say where the time went. `ms` (submit to landed) = `queueMs` (waited for a free slot)
+    /// + the request (`firstEventMs`: connection, upload and the model's prefill until the first stream event; `firstTextMs`:
+    /// until the first character of the cleaned text; `requestMs`: all of it) + delivery order waits. `speculation`: `landed`
+    /// or `inflight` (a speculative request was reused, finished or running when the unit was sent; its own timings are
+    /// reported), `grew` (words were added since, cleaned afresh), `unused` (same text, other context), `none`.
+    /// Token counts are the provider's; absent means unavailable, not zero.
+    private static func cleanupTiming(_ line: DictationCleanedLine, speculation: String?) -> [String: Any] {
+        var fields: [String: Any] = ["queueMs": line.queueWaitMs as Any,
+            "speculation": line.speculation ?? (speculation == "match" ? "unused" : speculation ?? "none")]
+        if let m = line.metrics {
+            fields["model"] = m.model; fields["firstEventMs"] = m.firstEventMs as Any; fields["firstTextMs"] = m.firstTextMs as Any
+            fields["requestMs"] = m.totalMs; fields["inTokens"] = m.inputTokens as Any; fields["outTokens"] = m.outputTokens as Any
+            fields["cacheRead"] = m.cacheReadTokens as Any; fields["cacheCreate"] = m.cacheCreationTokens as Any
+        }
+        return fields
     }
 
     /// The run in progress, or a new one when none runs or the last is complete.
@@ -922,6 +1000,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         liveRun = run
         liveAnchor = String(contextBefore().suffix(600))
         diagnostics?("live2.run.start", ["run": String(run.runID.prefix(8))])
+        if stagedLive { warmForRun() }
         return run
     }
 

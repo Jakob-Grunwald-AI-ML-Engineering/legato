@@ -449,7 +449,8 @@ private enum PreviewRole: TextAttribute { case leaving, waiting }
 
 /// Draws the preview with per-glyph effects, by role, and leaves every glyph in its place so nothing reflows:
 /// - leaving glyphs lift `lift` and fade over `fadeSeconds` from their own exit time (the unit's letters, as the field types them);
-/// - waiting glyphs carry a slow magic-coloured shimmer.
+/// - waiting glyphs (closed units whose cleanup has not landed: "thinking") carry a slow magic-coloured shimmer, the only use
+///   of the magic colours here; words entering are plain (`hidden`: the glyphs not typed in yet are not drawn).
 /// The lift, fade length and shimmer period are estimates, to tune on the phone.
 /// The preview's vertical window while a unit leaves: the lines the text has been moved up by, animated between whole lines.
 /// Drawing keeps this clock because the line the letters leave from is only known from the laid-out text.
@@ -469,6 +470,45 @@ private final class ExitScroll {
     }
 }
 
+/// The plain typewriter reveal of words entering the preview: how many trailing characters of the text are still hidden. Growth
+/// (new words appended, the head possibly cut off at the front) types in at `TypewriterDrain`'s pace; any other change shows at
+/// once. No colour: revealed glyphs are drawn like all the rest. Drawing keeps this clock, like `ExitScroll`.
+private final class PreviewReveal {
+    private var text = ""
+    private var last = Date.distantPast
+    private(set) var hidden = 0
+
+    private static func body(_ text: String) -> String { text.hasPrefix("…") ? String(text.dropFirst()) : text }
+
+    /// The text of this frame: what it adds to the previous one is hidden from the end. The `placeholder` is not words: it
+    /// shows at once and the first words after it type in from nothing.
+    func update(text newText: String, placeholder: String, enabled: Bool) {
+        guard newText != text else { return }
+        let old = text == placeholder ? "" : text
+        defer { text = newText }
+        let new = Self.body(newText), prior = Self.body(old)
+        guard enabled, newText != placeholder, !new.isEmpty else { hidden = 0; return }
+        guard !prior.isEmpty else { hidden = new.count; return }
+        // The old text, minus a head the preview cut off, is the start of the new one.
+        let oldChars = Array(prior), newChars = Array(new)
+        for cut in 0..<oldChars.count where newChars.starts(with: oldChars[cut...]) {
+            hidden = min(newChars.count, hidden + newChars.count - (oldChars.count - cut))
+            return
+        }
+        hidden = 0
+    }
+
+    /// Hides fewer characters as time passes; true once everything is shown.
+    func advance(now: Date, total: Int) -> Bool {
+        let dt = min(100, max(0, now.timeIntervalSince(last) * 1000))
+        last = now
+        guard hidden > 0 else { return true }
+        let revealed = TypewriterDrain.step(revealed: max(0, total - hidden), target: total, dtMs: dt)
+        hidden = max(0, total - revealed)
+        return hidden == 0
+    }
+}
+
 private struct PreviewRenderer: TextRenderer {
     /// The clock of this frame.
     var now: Date
@@ -477,6 +517,8 @@ private struct PreviewRenderer: TextRenderer {
     var shimmers: Bool
     var lifts: Bool
     var scroll: ExitScroll
+    /// Trailing glyphs not typed in yet (`PreviewReveal`): laid out, not drawn.
+    var hidden = 0
     /// Lines drawn below the text's own bounds while it is moved down to the exit line (the row clips them).
     var displayPadding = EdgeInsets(top: 0, leading: 0, bottom: 600, trailing: 0)
 
@@ -506,10 +548,23 @@ private struct PreviewRenderer: TextRenderer {
         }
         var glyph = 0
         var waiting: [Text.Layout.RunSlice] = []
+        let total = layout.reduce(0) { $0 + $1.reduce(0) { $0 + $1.count } }
+        let visible = total - hidden
+        var position = 0
+        func drawPlain(_ run: Text.Layout.Run, in context: inout GraphicsContext) -> [Text.Layout.RunSlice] {
+            guard hidden > 0 else { position += run.count; context.draw(run); return Array(run) }
+            var shown: [Text.Layout.RunSlice] = []
+            for slice in run {
+                if position < visible { context.draw(slice); shown.append(slice) }
+                position += 1
+            }
+            return shown
+        }
         for line in layout {
             for run in line {
                 switch run[PreviewRole.self] {
                 case .leaving?:
+                    position += run.count
                     for slice in run {
                         let progress = glyph < exits.count ? min(1, max(0, now.timeIntervalSince(exits[glyph]) / Self.fadeSeconds)) : 0
                         glyph += 1
@@ -520,10 +575,10 @@ private struct PreviewRenderer: TextRenderer {
                         copy.draw(slice)
                     }
                 case .waiting?:
-                    context.draw(run)
-                    if shimmers { waiting.append(contentsOf: run) }
+                    let shown = drawPlain(run, in: &context)
+                    if shimmers { waiting.append(contentsOf: shown) }
                 case nil:
-                    context.draw(run)
+                    _ = drawPlain(run, in: &context)
                 }
             }
         }
@@ -552,6 +607,9 @@ private struct PreviewRow: View {
     /// A tap that sends, at the touch point (the row's own coordinates).
     let onSend: (CGPoint) -> Void
     @State private var scroll = ExitScroll()
+    @State private var reveal = PreviewReveal()
+    /// Flips when a reveal finishes, so the timeline pauses again.
+    @State private var revealSettled = false
     @State private var textHeight = 0.0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// When each letter of the leaving unit went into the field (`PreviewRenderer.exits`).
@@ -572,15 +630,20 @@ private struct PreviewRow: View {
             let size = WordRowHeight.previewFontSize(rowHeight: height)
             let single = WordRowHeight.previewIsSingleLine(textHeight: textHeight, size: size)
             let truncated = WordRowHeight.previewTruncated(textHeight: textHeight, rowHeight: height, prefixed: text.hasPrefix("…")) && (layout?.leaving.isEmpty ?? true)
-            let animating = exits.contains { Date().timeIntervalSince($0) < PreviewRenderer.fadeSeconds + 0.1 }
+            let _ = revealSettled
+            let _ = reveal.update(text: text, placeholder: KeyboardController.listening, enabled: !reduceMotion)
+            let animating = exits.contains { Date().timeIntervalSince($0) < PreviewRenderer.fadeSeconds + 0.1 } || reveal.hidden > 0
             let shimmers = !reduceMotion && !(layout?.waiting.isEmpty ?? true)
             TimelineView(.animation(minimumInterval: 1.0 / 60, paused: !animating && !shimmers)) { timeline in
+                let hadHidden = reveal.hidden > 0
+                let settled = reveal.advance(now: timeline.date, total: text.count)
+                let _ = { if hadHidden && settled { Task { @MainActor in revealSettled.toggle() } } }()
                 composed
                     .font(.system(size: CGFloat(size)))
                     .lineSpacing(CGFloat(WordRowHeight.previewLineSpacing(size: size)))
                     .foregroundStyle(Color(uiColor: .secondaryLabel))
                     .multilineTextAlignment(.leading)
-                    .textRenderer(PreviewRenderer(now: timeline.date, exits: exits, shimmers: shimmers, lifts: !reduceMotion, scroll: scroll))
+                    .textRenderer(PreviewRenderer(now: timeline.date, exits: exits, shimmers: shimmers, lifts: !reduceMotion, scroll: scroll, hidden: reveal.hidden))
             }
             .fixedSize(horizontal: false, vertical: true)
             .onGeometryChange(for: Double.self) { Double($0.size.height) } action: { textHeight = $0 }

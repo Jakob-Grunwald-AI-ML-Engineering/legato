@@ -26,6 +26,20 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         #expect(take.nextReady?.text == "Hello there!")
     }
 
+    /// #313: the magic shimmer means "thinking": a closed unit waiting for cleanup, never the open unit still collecting words.
+    @Test func onlyAClosedUnitAwaitingCleanupIsWaiting() {
+        var take = StagedDictation()
+        let open = LiveSegment(id: 1, text: "Open words", final: true, ready: false, closed: false)
+        let closed = LiveSegment(id: 0, text: "Sent.", final: true, ready: false, closed: true)
+        take.receive(snapshot(1, [closed, open], head: "head"))
+        #expect(take.previewLayout.waiting == [0..<5], "only the closed unit")
+        var run = LiveDictationRun(staged: true, manual: true)
+        _ = run.addFinal(key: 0, text: "Hello there my friend how are you.")
+        #expect(run.snapshot.segments.first?.closed == false, "manual: the open unit stays open past a sentence end")
+        _ = run.flush()
+        #expect(run.snapshot.segments.first?.closed == true)
+    }
+
     /// #313: how much of the unit's own text is in the field drives the row's exit; the separator is not the unit's.
     @Test func exitProgressCountsTheUnitsOwnGraphemesAndNotItsSeparator() {
         var take = StagedDictation()
@@ -208,7 +222,7 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         let shown = run.setCleaned(key: 0, text: "We should ship it on Friday.")
         #expect(shown, "Published at once, the take still going")
         let segments = run.snapshot.segments
-        #expect(segments.first == .init(id: 0, text: "We should ship it on Friday.", cleaned: true, final: true, ready: true))
+        #expect(segments.first == .init(id: 0, text: "We should ship it on Friday.", cleaned: true, final: true, ready: true, closed: true))
         #expect(run.snapshot.staged == true && !run.snapshot.complete)
     }
 

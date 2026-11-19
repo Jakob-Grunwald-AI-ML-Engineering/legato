@@ -17,8 +17,13 @@ public struct LiveSegment: Codable, Equatable, Sendable {
     /// Staged takes only (`LiveDictationSnapshot.staged`): the segment is a cleanup unit and its text is final, cleaned or
     /// (cleanup failed or ran out of time) the raw words. A segment that is not ready shows its raw words in the preview.
     public var ready: Bool?
-    public init(id: Int, text: String, cleaned: Bool = false, final: Bool, unit: Int? = nil, raw: String? = nil, ready: Bool? = nil) {
+    /// Staged takes only: the unit is closed, sent for cleanup. The open unit (still collecting words) is not; only a closed
+    /// unit that is not ready is "thinking". Nil (older snapshots) counts as closed.
+    public var closed: Bool?
+    public init(id: Int, text: String, cleaned: Bool = false, final: Bool, unit: Int? = nil, raw: String? = nil, ready: Bool? = nil,
+                closed: Bool? = nil) {
         self.id = id; self.text = text; self.cleaned = cleaned; self.final = final; self.unit = unit; self.raw = raw; self.ready = ready
+        self.closed = closed
     }
 
     /// Pieces of a take's text joined as a reader expects: trimmed, a space between them, none before closing
@@ -272,7 +277,8 @@ public struct LiveDictationRun: Sendable, Equatable {
     /// The units in speaking order (the open one too, not ready), then the speaking head.
     private var stagedSnapshot: LiveDictationSnapshot {
         var segments = units.indices.map { index in
-            LiveSegment(id: units[index].lowerBound, text: shownText(index), cleaned: cleaned[index] != nil, final: true, ready: ready.contains(index))
+            LiveSegment(id: units[index].lowerBound, text: shownText(index), cleaned: cleaned[index] != nil, final: true, ready: ready.contains(index),
+                        closed: !(openUnit && index == units.count - 1))
         }
         let speaking = LiveSegment.joined(open + [head])
         if !speaking.isEmpty { segments.append(.init(id: finals.count, text: speaking, final: false)) }
@@ -316,8 +322,16 @@ public struct LiveDictationRun: Sendable, Equatable {
     /// Closes the open unit (the take ends): its text and the key of its last segment, the cleanup's key. Nil when
     /// no unit is open. The target does not change.
     public mutating func flush() -> (key: Int, text: String)? {
-        guard openUnit, let range = units.last else { return nil }
+        guard openUnit else { return nil }
         openUnit = false
+        return peekOpenUnit()
+    }
+
+    /// What `flush()` would return, without closing the unit: the open unit's cleanup key and raw text (a speculative cleanup
+    /// reads it). Nil when no unit is open.
+    public func peekOpen() -> (key: Int, text: String)? { openUnit ? peekOpenUnit() : nil }
+    private func peekOpenUnit() -> (key: Int, text: String)? {
+        guard let range = units.last else { return nil }
         guard let key = keys.filter({ $0.value == range.upperBound - 1 }).map(\.key).max() else { return nil }
         return (key, rawText(units.count - 1))
     }
