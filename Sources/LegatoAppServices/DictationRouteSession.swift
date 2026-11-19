@@ -64,6 +64,17 @@ import LegatoSoniox
         await pipeline?.sendRawNow()
     }
 
+    /// The user's swipe left (`DictationPipeline.discardNow`) and its undo. Dictation only.
+    func discardNow() async {
+        guard modeSink.target == .dictation else { return }
+        await pipeline?.discardNow()
+    }
+
+    func undoDiscardNow() async {
+        guard modeSink.target == .dictation else { return }
+        await pipeline?.undoDiscardNow()
+    }
+
     /// Whether audio is still arriving is a host fact (including replay); cut ordering is shared.
     func setMagic(_ enabled: Bool, cut: Bool) {
         let mode: SpeechMode = enabled ? .instruction : .dictation

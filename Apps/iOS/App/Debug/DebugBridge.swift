@@ -109,6 +109,15 @@ import UIKit
             await AppController.shared.keyboardSession.sendRawNow()
             return AppController.shared.dictation.takeState
         }
+        // The preview's swipe left: the words still in it are dropped, kept for the undo window.
+        harness.register("dictation-debug-discard") { _ in
+            await AppController.shared.keyboardSession.discardNow()
+            return AppController.shared.dictation.takeState
+        }
+        harness.register("dictation-debug-undo-discard") { _ in
+            await AppController.shared.keyboardSession.undoDiscardNow()
+            return AppController.shared.dictation.takeState
+        }
         // The cleanup model of the sentence/line cleanup (App Group): `haiku` or `sonnet`.
         harness.register("dictation-debug-model") { command in
             guard command.args.count == 1, let model = ModelChoice(settingValue: command.args[0]) else { throw Usage.invalid }

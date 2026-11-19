@@ -106,6 +106,8 @@ public struct StagedDictation: Sendable, Equatable {
     public var previewLayout: PreviewLayout {
         var layout = PreviewLayout()
         for unit in pending + [LiveSegment(id: -1, text: head, final: false)] {
+            // A discarded unit is not shown (its undo window is open); it is not ready, so delivery waits for it.
+            guard unit.discarded != true else { continue }
             let piece = unit.text.trimmingCharacters(in: .whitespaces)
             guard !piece.isEmpty else { continue }
             layout.text = LiveSegment.joined([layout.text, piece])
@@ -122,6 +124,9 @@ public struct StagedDictation: Sendable, Equatable {
 
     /// What the preview shows (`previewLayout`).
     public var preview: String { previewLayout.text }
+
+    /// A unit the person discarded is waiting out its undo window in the app: the preview hides it and later units wait behind it.
+    public var hasDiscarded: Bool { pending.contains { $0.discarded == true } }
 
     /// Words are waiting to be typed or still being spoken.
     public var hasUndelivered: Bool { !pending.isEmpty || inFlight != nil }

@@ -364,7 +364,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     public static let sendCutWait = Duration.milliseconds(1500)
     /// A `sendNow()` cut in flight: the run it belongs to, when it began (on the pipeline's clock) and the fallback timer.
     /// `raw`: the user swiped (`sendRawNow()`): the unit stands as its raw words instead of going to cleanup.
-    @ObservationIgnored private var sendCut: (runID: String, started: Duration, raw: Bool, timeout: Task<Void, Never>?)?
+    /// `discard`: the user swiped it away (`discardNow()`): the unit is kept for the undo window instead of being cleaned.
+    @ObservationIgnored private var sendCut: (runID: String, started: Duration, raw: Bool, discard: Bool, timeout: Task<Void, Never>?)?
     /// Cleanup sequences (`liveKeys`) whose unit a raw send already published: their results are ignored when they arrive.
     @ObservationIgnored private var rawSent: Set<Int> = []
     /// Cuts the recognizer without ending the take (`DictationEngine.finalizeChunk`); false when nothing would answer. Set by
@@ -382,14 +383,59 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// dropped, and a cleanup result that arrives later is ignored. A tap's cut already in flight becomes raw.
     public func sendRawNow() async { await send(raw: true) }
 
-    private func send(raw: Bool) async {
+    /// How long a discard can be taken back (`undoDiscardNow()`). An estimate, to be tuned on the phone.
+    public static let discardUndoSeconds = 4.0
+    @ObservationIgnored private var discardTimer: Task<Void, Never>?
+
+    /// The user's swipe left on the preview: what is still in it and not yet sent for cleanup (the open unit and the speaking
+    /// head) is thrown away. Like `sendNow()` it cuts the recognizer so the head closes out and flushes the open unit, but the
+    /// unit is only marked discarded (published closed and not ready, text kept) and nothing is cleaned. Units already sent for
+    /// cleanup, ready ones and the one being typed are untouched. For `discardUndoSeconds` the keyboard can take it back
+    /// (`undoDiscardNow()`); then it becomes empty text. Ignored without a staged run in progress or when nothing would be discarded.
+    public func discardNow() async { await send(raw: false, discard: true) }
+
+    /// Takes back the discard while its window is open: the words go to cleanup as a normal closed unit.
+    public func undoDiscardNow() async {
+        guard var run = liveRun, run.hasDiscarded, !run.complete else { return }
+        discardTimer?.cancel(); discardTimer = nil
+        let restored = run.restoreDiscarded()
+        publishLive(run)
+        diagnostics?("live2.discard.undo", ["run": String(run.runID.prefix(8)), "units": restored.count])
+        for unit in restored { await submitLive(unit.text, key: unit.key, run: run) }
+    }
+
+    /// The window ended (or the run did): the discarded units become empty.
+    private func expireDiscard() {
+        discardTimer?.cancel(); discardTimer = nil
+        guard var run = liveRun, run.expireDiscarded() else { return }
+        publishLive(run)
+        diagnostics?("live2.discard.expire", ["run": String(run.runID.prefix(8))])
+    }
+
+    private func startDiscardWindow(runID: String) {
+        discardTimer?.cancel()
+        discardTimer = Task { [weak self, clock] in
+            do { try await clock.sleep(for: .seconds(Self.discardUndoSeconds)) } catch { return }
+            guard let self, !Task.isCancelled, self.liveRun?.runID == runID else { return }
+            self.expireDiscard()
+        }
+    }
+
+    /// Drops the speculative request for the open unit (its words are sent raw or thrown away).
+    private func dropSpeculation() {
+        liveSpeculation = nil
+        speculationStart?.cancel()
+        Task { [weak self] in await self?.current().cancelSpeculation() }
+    }
+
+    private func send(raw: Bool, discard: Bool = false) async {
         guard stagedLive, mode == .live, let run = liveRun, !run.complete else { return }
         if sendCut != nil {
-            if raw { sendCut?.raw = true }
+            if raw, !discard { sendCut?.raw = true }
             return
         }
         let runID = run.runID
-        sendCut = (runID, streamTime(), raw, nil)
+        sendCut = (runID, streamTime(), raw, discard, nil)
         // Paused (#313): no recognizer holds words back, so there is nothing to cut.
         if pausedRunID == runID { return sendCutThrough("paused") }
         let timeout = Task { [weak self, clock] in
@@ -410,6 +456,13 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         let ms = Int(waited.seconds * 1000 + waited.attoseconds / 1_000_000_000_000_000)
         guard var run = liveRun, run.runID == cut.runID, !run.complete else { return }
         let open = run.flush()
+        if cut.discard {
+            // The words are thrown away, not sent: a speculative cleanup of them is useless, and a paused run stays paused.
+            dropSpeculation()
+            diagnostics?("live2.discard", ["run": String(run.runID.prefix(8)), "via": via, "ms": ms, "discarded": open != nil])
+            if let open, run.discard(key: open.key) { publishLive(run); startDiscardWindow(runID: run.runID) } else { liveRun = run }
+            return
+        }
         // A send from a paused run (#313) sends everything there is: the run ends like a Stop after a tap, once the unit is out.
         let endsRun = pausedRunID == run.runID
         if endsRun { pausedRunID = nil; liveTakeOpen = false; run.setPaused(false) }
@@ -480,9 +533,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
 
     /// Raw send: the open unit (just flushed) and the closed units still in cleanup stand as raw words. True when the run changed.
     private func standRaw(_ run: inout LiveDictationRun, open: (key: Int, text: String)?) -> Bool {
-        liveSpeculation = nil
-        speculationStart?.cancel()
-        Task { [weak self] in await self?.current().cancelSpeculation() }
+        dropSpeculation()
         var changed = false
         if let open, run.setRaw(key: open.key) {
             liveHistoryFallbacks.insert(-1 - open.key)
@@ -950,6 +1001,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
 
     private func endLive() async {
         pausedRunID = nil
+        // A discard is final once the take ends, whatever is left of its undo window.
+        expireDiscard()
         let stoppedAt = ContinuousClock.now
         // The keyboard holds the user's keys until the take is complete (its final words, still on their way, first).
         if var run = liveRun, run.stop() { publishLive(run) }
@@ -1158,6 +1211,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
                                             "paused": pausedRunID == run.runID, "ending": liveFinishing != nil])
         }
         wholePause?.cancel(); wholePause = nil
+        discardTimer?.cancel(); discardTimer = nil
         liveSubmitted = [:]; liveKeys = [:]; rawSent = []; liveFinishedAt = nil
         held = nil; heldAwaitsStop = false; liveTakeOpen = false; pausedRunID = nil
         let waiting = stopWaiters; stopWaiters = []

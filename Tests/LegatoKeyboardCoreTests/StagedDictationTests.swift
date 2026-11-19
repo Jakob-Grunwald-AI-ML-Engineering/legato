@@ -40,6 +40,34 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         #expect(run.snapshot.segments.first?.closed == true)
     }
 
+    /// A discarded unit is hidden at once and holds later units back until its window ends; an undo brings it back.
+    @Test func aDiscardedUnitIsHiddenBlocksLaterDeliveryUntilItExpiresAndTheUndoRestoresIt() {
+        var run = LiveDictationRun(staged: true, manual: true)
+        _ = run.addFinal(key: 0, text: "Throw this away please now.")
+        let open = run.flush()!
+        let marked = run.discard(key: open.key)
+        #expect(marked && run.hasDiscarded)
+        _ = run.addFinal(key: 1, text: "Keep this")
+        _ = run.flush()
+        _ = run.setRaw(key: 1)
+        var take = StagedDictation()
+        take.receive(run.snapshot)
+        #expect(take.hasDiscarded && take.preview == "Keep this", "The discarded words are not shown")
+        #expect(take.nextReady == nil, "The discarded unit is not ready, so the unit behind it waits")
+        // Undo: the app cleans the unit again as a normal closed unit.
+        var undone = run
+        let restored = undone.restoreDiscarded()
+        #expect(restored.map(\.text) == ["Throw this away please now."] && !undone.hasDiscarded)
+        take.receive(undone.snapshot)
+        #expect(!take.hasDiscarded && take.preview == "Throw this away please now. Keep this")
+        // Expiry: the unit is empty and ready, so the keyboard passes it.
+        let expired = run.expireDiscarded()
+        #expect(expired)
+        take.receive(run.snapshot)
+        #expect(!take.hasDiscarded && take.nextReady?.text == "Keep this" && take.deliveredThrough == 0)
+        #expect(take.preview == "Keep this")
+    }
+
     /// #313: how much of the unit's own text is in the field drives the row's exit; the separator is not the unit's.
     @Test func exitProgressCountsTheUnitsOwnGraphemesAndNotItsSeparator() {
         var take = StagedDictation()
