@@ -2,12 +2,20 @@ import Foundation
 import LegatoClaude
 import LegatoRoom
 
+/// Which dictation prompt cleans a unit. `line`: the conservative cleanup (the Mac's live sentences; words kept as said).
+/// `send`: the iPhone's staged send (#316): the speech becomes the text the speaker means to write, lightly rephrased and
+/// shaped (an email gets its lines), spoken edits about the text applied. Each style has its own cached prompt prefix.
+public enum DictationCleanupStyle: String, Sendable, Equatable {
+    case line, send
+}
+
 /// What the cleanup-only dictation prompt sees besides the line: the previous cleaned lines and the field's text.
 public struct DictationCleanupContext: Sendable, Equatable {
     public var previousLines: [String]
     public var textBeforeCursor: String
-    public init(previousLines: [String] = [], textBeforeCursor: String = "") {
-        self.previousLines = previousLines; self.textBeforeCursor = textBeforeCursor
+    public var style: DictationCleanupStyle
+    public init(previousLines: [String] = [], textBeforeCursor: String = "", style: DictationCleanupStyle = .line) {
+        self.previousLines = previousLines; self.textBeforeCursor = textBeforeCursor; self.style = style
     }
 }
 
@@ -54,8 +62,8 @@ public struct ValidatedSentence: Sendable {
 
 public protocol SentenceCleaning: Sendable {
     func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence
-    /// Writes the dictation prompt into the provider's prompt cache; failures are ignored.
-    func warmDictation() async
+    /// Writes the dictation prompt of `style` into the provider's prompt cache; failures are ignored.
+    func warmDictation(_ style: DictationCleanupStyle) async
     /// Cleans a whole dictation take with one call (a plain text reply); the text, not yet guarded.
     func cleanTake(_ input: DictationTakeInput) async throws -> String
     /// Writes the take prompt into the provider's prompt cache; failures are ignored.
@@ -75,7 +83,7 @@ public extension SentenceCleaning {
             continuation.onTermination = { _ in task.cancel() }
         }
     }
-    func warmDictation() async {}
+    func warmDictation(_ style: DictationCleanupStyle) async {}
     func cleanTake(_ input: DictationTakeInput) async throws -> String { throw SentenceCleanupError.invalidInput }
     func warmDictationTake() async {}
 }
@@ -371,8 +379,8 @@ public struct SentenceCleanupClient: SentenceCleaning {
 
     /// A cheap real request with the dictation prompt: the cache entry (tools + system) is written before the
     /// first spoken line needs it. `max_tokens: 0` is not available on a streaming request.
-    public func warmDictation() async {
-        _ = try? await clean(.init(sentenceID: "warm", sequence: 0, text: "Okay.", vocabulary: [], dictation: .init()))
+    public func warmDictation(_ style: DictationCleanupStyle) async {
+        _ = try? await clean(.init(sentenceID: "warm", sequence: 0, text: "Okay.", vocabulary: [], dictation: .init(style: style)))
     }
     /// Cleanup needs no thinking. Haiku takes `disabled`; Sonnet 5.5 rejects it and wants `between_tools` (the model
     /// config's own value), and it does not support a forced tool call either (`toolChoice`).
@@ -385,15 +393,30 @@ public struct SentenceCleanupClient: SentenceCleaning {
     static let dictationCache: JSONValue = .object(["type": .string("ephemeral"), "ttl": .string("1h")])
     /// The prompt cache needs 512 tokens on Haiku 5.5 (prompt-caching docs); the prompt and tool are above it.
     private static let dictationPrompt: String = PromptLayers.dictationCleanup()
+    private static let sendPrompt: String = PromptLayers.dictationSend()
+    /// The send style may reshape and lightly rephrase: its text field says what it must hold without "in order".
+    private static let sentTextDescription = "The complete written text the speaker meant, with all of its content, however long or unusual. Never a placeholder, stub, summary, answer or note."
+    /// The system prompt and the tool's text description of a dictation style: both are in the cached prefix, fixed per style.
+    static func dictationPrompt(_ style: DictationCleanupStyle) -> (system: String, textDescription: String) {
+        switch style {
+        case .line: (dictationPrompt, cleanedTextDescription)
+        case .send: (sendPrompt, sentTextDescription)
+        }
+    }
     /// A dictated unit's cleaned text is about its own length (one token per 2 characters is generous for German), plus the
     /// tool call's identity fields; a limit sized to the unit, not a flat 1024. Never below 384, never above 4096.
-    static func lineMaxTokens(characters: Int) -> Int { min(4096, max(384, max(0, characters) / 2 + 256)) }
+    /// A send may add line breaks, list markers and a little rephrasing: 128 tokens more.
+    static func lineMaxTokens(characters: Int, style: DictationCleanupStyle = .line) -> Int {
+        min(4096, max(384, max(0, characters) / 2 + (style == .send ? 384 : 256)))
+    }
     private static func request(_ input: SentenceCleanupInput, model: ModelChoice) throws -> Data {
         typealias Schema = ToolSchema.Schema
+        let style = input.dictation?.style ?? .line
+        let prompt = Self.dictationPrompt(style)
         // Dictation keeps the tool byte-identical between requests (the identity enum would change the cached prefix).
         let tool = ToolSchema(name: "submit_sentence", description: "Submit this sentence's local copyedit once. Copy sentenceID and sequence exactly.",
             properties: ["sentenceID": Schema(type: "string", enumValues: input.dictation == nil ? [input.sentenceID] : nil),
-                         "sequence": Schema(type: "integer"), "text": Schema(type: "string", description: input.dictation == nil ? nil : Self.cleanedTextDescription)],
+                         "sequence": Schema(type: "integer"), "text": Schema(type: "string", description: input.dictation == nil ? nil : prompt.textDescription)],
             required: ["sentenceID", "sequence", "text"])
         var fields: [String: JSONValue] = ["sentenceID": .string(input.sentenceID), "sequence": .number(Double(input.sequence)),
             "text": .string(input.text), "vocabulary": .array(input.vocabulary.map(JSONValue.string))]
@@ -408,10 +431,10 @@ public struct SentenceCleanupClient: SentenceCleaning {
         Return only the locally corrected plain text through submit_sentence, copying the supplied sentenceID and sequence exactly. If no useful local improvement is needed, submit the same sentence. No acknowledgement, explanation, formatting wrapper or second call is needed.
         """
         let request: JSONValue = .object([
-            "model": .string(model.rawValue), "max_tokens": .number(Double(input.dictation == nil ? 1024 : Self.lineMaxTokens(characters: input.text.count))), "stream": .bool(true),
-            "thinking": Self.thinking(model),
+            "model": .string(model.rawValue), "max_tokens": .number(Double(input.dictation == nil ? 1024 : Self.lineMaxTokens(characters: input.text.count, style: style))),
+            "stream": .bool(true), "thinking": Self.thinking(model),
             "system": input.dictation == nil ? .string(instruction)
-                : .array([.object(["type": .string("text"), "text": .string(dictationPrompt), "cache_control": dictationCache])]),
+                : .array([.object(["type": .string("text"), "text": .string(prompt.system), "cache_control": dictationCache])]),
             "messages": .array([.object(["role": .string("user"), "content": .string(String(decoding: try encoder.encode(source), as: UTF8.self))])]),
             "tools": try .encoding([tool]), "tool_choice": Self.toolChoice(model)])
         return try encoder.encode(request)

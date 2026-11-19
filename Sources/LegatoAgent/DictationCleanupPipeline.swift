@@ -67,10 +67,12 @@ public enum DictationCleanupGuard {
         prepositionalUm(raw) == 0 || prepositionalUm(cleaned) > 0
     }
 
-    public static func accepts(raw: String, cleaned: String) -> Bool {
+    /// `style`: a `send` (#316) may reshape and lightly rephrase, so it is judged by `acceptsSend`; the rest is shared.
+    public static func accepts(raw: String, cleaned: String, style: DictationCleanupStyle = .line) -> Bool {
         let source = tokens(raw), result = tokens(cleaned)
         guard keepsPrepositions(raw: raw, cleaned: cleaned) else { return false }
         if cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !cleaned.contains(where: \.isNewline) { return acceptsDrop(raw: raw) }
+        if style == .send { return acceptsSend(raw: raw, cleaned: cleaned, source: source, result: result) }
         guard !cleaned.isEmpty, cleaned.count <= max(48, raw.count * 3 / 2 + 24) else { return false }
         if result.isEmpty { return true } // a bare line break or punctuation from a spoken command
         // A few words: too few to count overlap, so the result must sound like them (an ASR fix) or share a word.
@@ -82,6 +84,22 @@ public enum DictationCleanupGuard {
         let said = Set(source)
         let known = result.filter { said.contains($0) }.count
         return known * 2 >= result.count
+    }
+    /// A send's text is the speaker's words made into written text: line breaks, list markers, a few words rephrased or
+    /// joined, filler, hesitations and retracted parts gone. Still most of its words are words the speaker said (an answer,
+    /// an email written for a request or a note about the text is not), it is not much longer, and it keeps at least
+    /// two fifths of the speaker's meaningful words (a summary or a stub does not).
+    private static func acceptsSend(raw: String, cleaned: String, source: [String], result: [String]) -> Bool {
+        guard cleaned.count <= max(64, raw.count * 2 + 32) else { return false }
+        if result.isEmpty { return true } // a bare line break or punctuation from a spoken command
+        guard source.count > 3 else {
+            return result.count <= source.count + 3 && (!Set(source).isDisjoint(with: result) || resembles(source.joined(), result.joined()))
+        }
+        let said = Set(source)
+        let meaningful = Set(source.filter { !fillers.contains($0) })
+        guard result.count <= source.count * 3 / 2 + 4,
+              result.filter({ said.contains($0) }).count * 2 >= result.count else { return false }
+        return meaningful.intersection(result).count * 5 >= meaningful.count * 2
     }
     static func tokens(_ text: String) -> [String] {
         text.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
@@ -121,6 +139,8 @@ public actor DictationCleanupPipeline {
     public static let maxConcurrency = 6
     private let cleaner: any SentenceCleaning
     private let vocabulary: [String]
+    /// The prompt every unit of this pipeline is cleaned with (`DictationCleanupStyle`); the guard judges by it too.
+    public nonisolated let style: DictationCleanupStyle
     private let timeout: Duration
     private let concurrency: Int
     private let deliver: @Sendable (DictationCleanedLine) async -> Void
@@ -135,16 +155,16 @@ public actor DictationCleanupPipeline {
     private var generation = UUID()
     private var tasks: [Int: Task<Void, Never>] = [:]
 
-    public init(cleaner: any SentenceCleaning, vocabulary: [String] = [], timeout: Duration = .milliseconds(2500), concurrency: Int = 4,
-                deliver: @escaping @Sendable (DictationCleanedLine) async -> Void) {
-        self.cleaner = cleaner
+    public init(cleaner: any SentenceCleaning, vocabulary: [String] = [], style: DictationCleanupStyle = .line, timeout: Duration = .milliseconds(2500),
+                concurrency: Int = 4, deliver: @escaping @Sendable (DictationCleanedLine) async -> Void) {
+        self.cleaner = cleaner; self.style = style
         self.vocabulary = Array(vocabulary.prefix(200))
         self.timeout = timeout; self.concurrency = max(1, min(Self.maxConcurrency, concurrency)); self.deliver = deliver
     }
 
     public var inFlightCount: Int { inFlight.count }
 
-    public func warm() async { await cleaner.warmDictation() }
+    public func warm() async { await cleaner.warmDictation(style) }
 
     /// `textBefore`: the field's text before the cursor now (`documentContextBeforeInput`). `allowsEmpty`: the caller
     /// can drop the line, so an empty result the guard accepts is delivered as cleaned empty text; otherwise an empty
@@ -171,7 +191,7 @@ public actor DictationCleanupPipeline {
         speculation?.task.cancel()
         let previous = known.filter { $0.key < sequence }.sorted { $0.key < $1.key }.map(\.value).filter { !$0.isEmpty }.suffix(2).map { $0 }
         let input = SentenceCleanupInput(sentenceID: lineID, sequence: sequence, text: raw, vocabulary: vocabulary,
-                                         dictation: .init(previousLines: previous, textBeforeCursor: before))
+                                         dictation: .init(previousLines: previous, textBeforeCursor: before, style: style))
         let id = UUID()
         let task = Task<ValidatedSentence, any Error> { [weak self, cleaner] in
             do {
@@ -201,7 +221,7 @@ public actor DictationCleanupPipeline {
             let line = queue.removeFirst()
             inFlight.insert(line.sequence)
             let previous = known.filter { $0.key < line.sequence }.sorted { $0.key < $1.key }.map(\.value).filter { !$0.isEmpty }.suffix(2).map { $0 }
-            let context = DictationCleanupContext(previousLines: previous, textBeforeCursor: line.textBefore)
+            let context = DictationCleanupContext(previousLines: previous, textBeforeCursor: line.textBefore, style: style)
             let token = generation
             let waited = line.enqueued.duration(to: .now).components
             let queueWaitMs = Int(waited.seconds * 1000 + waited.attoseconds / 1_000_000_000_000_000)
@@ -256,7 +276,7 @@ public actor DictationCleanupPipeline {
         switch outcome {
         case .cleaned(let text, _) where !line.allowsEmpty && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !text.contains(where: \.isNewline):
             result = .init(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: line.raw, status: .raw, reason: "failed", detail: "\(SentenceCleanupError.invalidText)")
-        case .cleaned(let text, _) where DictationCleanupGuard.accepts(raw: line.raw, cleaned: text):
+        case .cleaned(let text, _) where DictationCleanupGuard.accepts(raw: line.raw, cleaned: text, style: style):
             let text = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !text.contains(where: \.isNewline) ? "" : text
             result = .init(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: text, status: .cleaned, reason: nil)
         case .cleaned: result = .init(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: line.raw, status: .raw, reason: "rejected")
