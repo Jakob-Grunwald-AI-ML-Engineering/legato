@@ -123,7 +123,7 @@ import Testing
         #expect(own.last!.text.count > 50, "the rest of the burst went as one write: \(own.last!.text.count)")
         #expect(own.last!.ms <= asked + 2 * rig.tickMs + 1 && key.ms >= own.last!.ms, "key waited \(key.ms - asked) ms")
         // The burst would have taken 600+ ms more; the key goes after the host's usual check wait for one write.
-        #expect(key.ms - asked < 500 && Double(text.count) * ChunkEntrance.typewriterGapMs > 2_000)
+        #expect(key.ms - asked < 500 && Double(text.count) * ChunkEntrance.typewriterGapMs > 1_000)
         #expect(rig.field.string == text + "!" && rig.queue.modelText == rig.field.string && rig.drops.isEmpty)
     }
 }

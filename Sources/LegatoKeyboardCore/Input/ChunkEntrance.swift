@@ -22,10 +22,10 @@ public enum ChunkEntrance {
     /// The iPhone staged units' typewriter gap (#313): one grapheme per piece at this pace, however long the unit. An
     /// estimate, to tune on the phone with the preview's exit animation, which follows the pieces. The Mac and every other
     /// chunk keep the frame pace and cap above.
-    public static let typewriterGapMs = 35.0
+    public static let typewriterGapMs = 14.0
     /// The longest a staged unit takes to type (an estimate, to tune on the phone): a longer unit goes in groups of graphemes
     /// at the same gap, so the whole unit still ends within it.
-    public static let typewriterCapMs = 4_000.0
+    public static let typewriterCapMs = 2_000.0
 
     public struct Plan: Sendable, Equatable {
         /// The insert's pieces in order; joined they are exactly the text.

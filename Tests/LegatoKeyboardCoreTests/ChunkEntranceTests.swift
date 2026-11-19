@@ -63,18 +63,18 @@ import Testing
         #expect(ChunkEntrance.plan("").pieces.isEmpty)
     }
 
-    /// #313: the iPhone staged units type at 35 ms (an estimate), one grapheme per piece, however long the text.
+    /// #313: the iPhone staged units type at `typewriterGapMs` (14 ms, an estimate; 35 ms was too slow on the phone), one grapheme per piece, however long the text.
     @Test func theStagedTypewriterIsOneGraphemePerPieceAtItsOwnPaceWithoutACap() {
         let family = "👨‍👩‍👧‍👦", accent = "e\u{301}"
         let plan = ChunkEntrance.typewriterPlan("ab" + family + accent + "\r\n")
         #expect(plan.pieces == ["a", "b", family, accent, "\r\n"] && plan.gapMs == ChunkEntrance.typewriterGapMs)
         let long = String(repeating: "word ", count: 20)
         let burst = ChunkEntrance.typewriterPlan(long)
-        #expect(burst.pieces.count == long.count && burst.durationMs == Double(long.count - 1) * 35 && burst.durationMs > ChunkEntrance.capMs)
+        #expect(burst.pieces.count == long.count && burst.durationMs == Double(long.count - 1) * ChunkEntrance.typewriterGapMs && burst.durationMs > ChunkEntrance.capMs)
         // A very long unit groups graphemes at the same gap and ends within the typing cap, never splitting a cluster.
         let huge = String(repeating: "word 👨‍👩‍👧‍👦 e\u{301} ", count: 200)
         let capped = ChunkEntrance.typewriterPlan(huge)
-        #expect(capped.gapMs == 35 && capped.durationMs <= ChunkEntrance.typewriterCapMs && capped.pieces.joined() == huge)
+        #expect(capped.gapMs == ChunkEntrance.typewriterGapMs && capped.durationMs <= ChunkEntrance.typewriterCapMs && capped.pieces.joined() == huge)
         #expect(capped.pieces.count < Array(huge).count && capped.pieces.allSatisfy { Array($0).count >= 1 })
         var index = 0
         let clusters = Array(huge)
