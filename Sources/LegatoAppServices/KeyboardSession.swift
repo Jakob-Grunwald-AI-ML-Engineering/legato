@@ -71,6 +71,9 @@ import LegatoVocabulary
     @ObservationIgnored private var routeClosedAt: Double?
     /// Waits for the stopped take's last words, then has the sink clean and write the take once.
     @ObservationIgnored private var takeFinish: Task<Void, Never>?
+    /// The last close's take end and pipeline reset, running in the background.
+    @ObservationIgnored private var pipelineFinish: Task<Void, Never>?
+    @ObservationIgnored private var sessionNumber = 0
     /// Counts session closes: a take end still on its way from before one does nothing.
     @ObservationIgnored private var takeGeneration = 0
     #if DEBUG || LEGATO_INTERNAL
@@ -143,7 +146,7 @@ import LegatoVocabulary
     }
 
     private func open(surface: AudioRoute) async {
-        isOpen = true
+        isOpen = true; sessionNumber += 1
         gate = AudioGate(surface: surface); probe.cancel(); routeClosedAt = nil
         microphone.dictationAudio = { [weak self] pcm in await self?.sendDictation(pcm) }
         let warmConnection = self.warmConnection
@@ -174,14 +177,22 @@ import LegatoVocabulary
         // background, so its final words are cleaned and written to History. Closing
         // used to cancel the end and leave the run open for good, and nothing of it was recorded past its first words.
         let earlierFinish = takeFinish; takeFinish = nil; takeGeneration += 1
-        let sink = self.sink
-        Task { await earlierFinish?.value; await sink.finishTake() }
+        let sink = self.sink, closedSession = sessionNumber
+        // The pipeline is reset only after this finish completed (bounded by the pipeline's own cleanup timeouts): a reset
+        // first dropped the open run uncleaned. A keyboard that opened meanwhile owns the pipeline: it is not reset under
+        // it, and its take waits behind the ending run like any take (`DictationPipeline.beginTake`).
+        pipelineFinish = Task { [weak self] in
+            await earlierFinish?.value
+            await sink.finishTake()
+            guard let self, !self.isOpen, self.sessionNumber == closedSession else { return }
+            await self.speechRoute.resetPipeline()
+        }
         #if DEBUG || LEGATO_INTERNAL
         debugTakeOpen = false
         #endif
         reportedMagic = .off
         await closeDictation()
-        await speechRoute.reset()
+        speechRoute.resetRouting()
         dictation.resetSequence()
         microphone.dictationAudio = nil
         await microphone.endKeyboardSession()

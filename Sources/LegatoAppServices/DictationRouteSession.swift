@@ -91,11 +91,20 @@ import LegatoSoniox
     }
 
     func reset() async {
+        resetRouting()
+        await resetPipeline()
+    }
+
+    /// The session's routing (mode, cut, instruction); the pipeline keeps its run, which may still be ending.
+    func resetRouting() {
         cancelCut()
         finishingDictation?.cancel(); finishingDictation = nil
-        await modeSink.reset()
+        modeSink.resetRouter()
         instruction.reset()
     }
+
+    /// The pipeline's session: drops the outbox and any run that never ended.
+    func resetPipeline() async { await modeSink.dictation.reset() }
 
     private func cancelCut() {
         cutGeneration += 1

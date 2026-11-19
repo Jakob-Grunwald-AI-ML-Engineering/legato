@@ -535,6 +535,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     @ObservationIgnored private var liveTakeOpen = false
     /// The stop of the run that `held` waits for is still to come: the next `finishTake` is that run's.
     @ObservationIgnored private var heldAwaitsStop = false
+    /// Callers of `finishTake` whose stop waits in `held`, in order; resumed once that stop's end completed (or the run was dropped).
+    @ObservationIgnored private var stopWaiters: [CheckedContinuation<Void, Never>] = []
     @ObservationIgnored private var liveCleanupSequence = 0
     /// When the run's take ended: a segment or cleanup that arrives within `liveStragglerGrace` still belongs to it.
     @ObservationIgnored private var liveFinishedAt: ContinuousClock.Instant?
@@ -744,7 +746,13 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             // Stops come in take order: while later takes wait, a stop is the waited-for run's when that one's is still to
             // come, else a waiting take's (it ends once its speech went in).
             if held != nil {
-                guard heldAwaitsStop else { held?.append(.stop); return }
+                // The take waits behind a run that still ends: its stop is handled when that run is complete, and this
+                // returns only then (a session reset after it must not drop the take's open run).
+                guard heldAwaitsStop else {
+                    held?.append(.stop)
+                    await withCheckedContinuation { stopWaiters.append($0) }
+                    return
+                }
                 heldAwaitsStop = false
             } else {
                 liveTakeOpen = false
@@ -814,7 +822,9 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             case .stop:
                 liveTakeOpen = false
                 if held?.isEmpty == true { held = nil }
-                return await finishLive()
+                await finishLive()
+                if !stopWaiters.isEmpty { stopWaiters.removeFirst().resume() }
+                return
             }
         }
         held = nil
@@ -1148,6 +1158,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         wholePause?.cancel(); wholePause = nil
         liveSubmitted = [:]; liveKeys = [:]; rawSent = []; liveFinishedAt = nil
         held = nil; heldAwaitsStop = false; liveTakeOpen = false; pausedRunID = nil
+        let waiting = stopWaiters; stopWaiters = []
+        for waiter in waiting { waiter.resume() }
         guard liveRun != nil else { return }
         liveRun = nil; liveDeliveryAck = nil
         onLiveChange?(nil)
