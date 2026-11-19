@@ -278,13 +278,18 @@ import LegatoVocabulary
 
     /// The keyboard's send (a tap on the preview): a staged take sends the words so far to the field now and keeps listening.
     /// Ignored without a take running; it needs no gate change, so it works from the background like Stop.
-    public func sendNow() async {
+    public func sendNow(editPreview: Bool = false) async {
         guard isOpen, canSend else { return }
-        await speechRoute.sendNow()
+        await speechRoute.sendNow(editPreview: editPreview)
     }
 
     /// A take is running, or a manual one is paused with words waiting (Stop keeps them pending, #313).
-    private var canSend: Bool { gate.route == .dictation || dictation.hasActiveTake || dictation.isReplaying || speechRoute.isPaused }
+    private var canSend: Bool {
+        #if DEBUG || LEGATO_INTERNAL
+        if debugTakeOpen { return true }
+        #endif
+        return gate.route == .dictation || dictation.hasActiveTake || dictation.isReplaying || speechRoute.isPaused
+    }
 
     /// The keyboard's raw send (a swipe right on the preview): like `sendNow()`, but the words are typed as spoken, uncleaned.
     public func sendRawNow() async {

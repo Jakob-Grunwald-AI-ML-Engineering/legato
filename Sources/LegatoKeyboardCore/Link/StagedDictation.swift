@@ -32,6 +32,44 @@ public struct StagedDictation: Sendable, Equatable {
     /// clear feels instant. It ends when a snapshot carries the discarded unit (`receive`) or at `endClear`.
     public private(set) var clearing = false
 
+    public struct PreviewDraft: Sendable, Equatable {
+        public let unitID: Int
+        public let original: String
+        public private(set) var text: String
+        public private(set) var caret: Int
+        public fileprivate(set) var released = false
+
+        fileprivate init(unit: LiveSegment) {
+            unitID = unit.id
+            original = unit.raw ?? unit.text
+            text = unit.text
+            caret = text.count
+        }
+
+        public var beforeCaret: String { String(text.prefix(caret)) }
+
+        fileprivate mutating func insert(_ addition: String) {
+            let prefix = beforeCaret + addition
+            text = prefix + text.dropFirst(caret)
+            // Adjacent code points can join into one grapheme at the seam.
+            caret = min(prefix.count, text.count)
+        }
+
+        fileprivate mutating func deleteBackward() {
+            guard caret > 0 else { return }
+            let prefix = String(text.prefix(caret - 1))
+            text = prefix + text.dropFirst(caret)
+            caret = min(prefix.count, text.count)
+        }
+
+        fileprivate mutating func moveCaret(to position: Int) { caret = min(text.count, max(0, position)) }
+    }
+
+    public private(set) var previewDraft: PreviewDraft?
+    public var isAwaitingPreview: Bool {
+        pending.first?.editPreview == true && previewDraft == nil
+    }
+
     public init() {}
 
     /// How much of the record's end the field's context must show for the proxy to count as agreeing with the take.
@@ -65,6 +103,7 @@ public struct StagedDictation: Sendable, Equatable {
         complete = snapshot.complete
         if units.contains(where: { $0.discarded == true }) { clearing = false }
         if !held { skipEmpty() }
+        preparePreviewDraft()
     }
 
     /// A run this keyboard first sees mid-take (an earlier appearance of the keyboard followed it): the units that appearance
@@ -74,6 +113,7 @@ public struct StagedDictation: Sendable, Equatable {
         guard let ack, ack.runID == runID, inFlight == nil else { return }
         if let through = ack.deliveredThrough, through > (deliveredThrough ?? -1) { deliveredThrough = through }
         if ack.ended == true || ack.delivered == false { hold() } else if !held { skipEmpty() }
+        preparePreviewDraft()
     }
 
     /// The preview as one text, with where its parts are (character offsets into `text`).
@@ -84,6 +124,8 @@ public struct StagedDictation: Sendable, Equatable {
         public var exited = 0
         /// Closed units whose cleanup has not landed: sent for cleanup, not yet typed ("thinking"). The open unit is not among them.
         public var waiting: [Range<Int>] = []
+        /// The editable view shows just the reviewed unit. Later speech remains in the run below it.
+        public var caret: Int?
 
         /// The layout of the text without its first `count` characters (the row shows only the end of a long preview).
         public func dropping(_ count: Int) -> PreviewLayout {
@@ -97,26 +139,41 @@ public struct StagedDictation: Sendable, Equatable {
             result.leaving = shifted(leaving) ?? 0..<0
             result.exited = max(0, exited - count)
             result.waiting = waiting.compactMap(shifted)
+            result.caret = caret.map { max(0, $0 - count) }
             return result
         }
     }
 
     /// The units not typed yet, in order (raw words until their cleanup landed).
     public var pending: [LiveSegment] {
-        units.filter { $0.id > (deliveredThrough ?? -1) }
+        var pending = units.filter { $0.id > (deliveredThrough ?? -1) }
+        if let draft = previewDraft, draft.released, pending.first?.id == draft.unitID {
+            pending[0].text = draft.text
+        }
+        return pending
     }
 
     /// The undelivered text the preview shows: units (cleaned text replaces raw in place), then the speaking head, with the
     /// parts the row animates. The one derivation of what the keyboard says while dictating.
     public var previewLayout: PreviewLayout {
         var layout = PreviewLayout()
+        if let draft = previewDraft, !draft.released {
+            layout.text = draft.text
+            layout.caret = draft.caret
+            return layout
+        }
         for unit in pending + [LiveSegment(id: -1, text: head, final: false)] {
             // A discarded unit is not shown (its undo window is open); it is not ready, so delivery waits for it. While the app
             // has not answered a clear, the open unit and the head are hidden the same way.
             guard unit.discarded != true, !(clearing && (unit.id < 0 || unit.closed == false)) else { continue }
-            let piece = unit.text.trimmingCharacters(in: .whitespaces)
+            let piece = unit.editPreview == true ? unit.text : unit.text.trimmingCharacters(in: .whitespaces)
             guard !piece.isEmpty else { continue }
-            layout.text = LiveSegment.joined([layout.text, piece])
+            if unit.editPreview == true {
+                if let first = unit.text.first, LiveSegment.spaced(layout.text.last, first) { layout.text += " " }
+                layout.text += unit.text
+            } else {
+                layout.text = LiveSegment.joined([layout.text, piece])
+            }
             let range = (layout.text.count - piece.count)..<layout.text.count
             if unit.id == inFlight {
                 layout.leaving = range
@@ -153,14 +210,50 @@ public struct StagedDictation: Sendable, Equatable {
     /// The first undelivered unit when its text is final and none is being typed.
     public var nextReady: LiveSegment? {
         guard !held, inFlight == nil, let first = pending.first, first.ready == true, !first.text.isEmpty else { return nil }
+        if first.editPreview == true, previewDraft?.released != true { return nil }
         return first
     }
 
     private mutating func skipEmpty() {
         // A unit cleanup dropped whole (all filler) has nothing to type.
         while inFlight == nil, let first = pending.first, first.ready == true, first.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if first.editPreview == true { break }
             deliveredThrough = first.id
         }
+    }
+
+    private mutating func preparePreviewDraft() {
+        guard let first = units.first(where: { $0.id > (deliveredThrough ?? -1) }), first.editPreview == true, first.ready == true else {
+            previewDraft = nil
+            return
+        }
+        if previewDraft?.unitID != first.id { previewDraft = PreviewDraft(unit: first) }
+    }
+
+    public mutating func insertInPreview(_ text: String) {
+        if previewDraft?.released == false { previewDraft?.insert(text) }
+    }
+    public mutating func deleteInPreview() {
+        if previewDraft?.released == false { previewDraft?.deleteBackward() }
+    }
+    public mutating func movePreviewCaret(to position: Int) {
+        if previewDraft?.released == false { previewDraft?.moveCaret(to: position) }
+    }
+
+    public mutating func releasePreview() {
+        guard let draft = previewDraft, !draft.released else { return }
+        if draft.text.isEmpty {
+            discardPreviewDraft()
+        } else {
+            previewDraft?.released = true
+        }
+    }
+
+    public mutating func discardPreviewDraft() {
+        guard let draft = previewDraft, !draft.released else { return }
+        deliveredThrough = draft.unitID
+        skipEmpty()
+        preparePreviewDraft()
     }
 
     // MARK: Delivery
@@ -179,10 +272,10 @@ public struct StagedDictation: Sendable, Equatable {
     /// A piece of the in-flight unit went into the field. Its leading separator is not the unit's own text; every grapheme after
     /// it counts (the capital replaces a letter and adds none; the trailing separator is past the unit's end and is clamped).
     public mutating func sent(_ piece: String) {
-        guard inFlight != nil else { return }
+        guard let inFlight else { return }
         started = true
         for character in piece {
-            if exited == 0, character.isWhitespace { continue }
+            if previewDraft?.unitID != inFlight, exited == 0, character.isWhitespace { continue }
             exited += 1
         }
     }
@@ -198,11 +291,13 @@ public struct StagedDictation: Sendable, Equatable {
         if record.count > Self.recordCharacters { record = String(record.suffix(Self.recordCharacters)) }
         inFlightText = ""
         skipEmpty()
+        preparePreviewDraft()
     }
 
     /// Stops delivery: nothing more is typed. The units not in the field (the one being typed included, it may not have landed)
     /// stay pending, so the preview shows them and `resume` can send them again.
     public mutating func hold() {
+        previewDraft?.released = false
         guard !held else { return }
         held = true
         inFlight = nil; inFlightText = ""
@@ -214,6 +309,7 @@ public struct StagedDictation: Sendable, Equatable {
         guard held else { return }
         held = false
         skipEmpty()
+        preparePreviewDraft()
     }
 
     /// A unit the queue dropped may still be in the field (a key, a tap or a late report spoiled its check after the text went

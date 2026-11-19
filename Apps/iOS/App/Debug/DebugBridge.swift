@@ -209,6 +209,8 @@ import UIKit
         }
         // The in-app keyboard (the real KeyboardController over a text view): what the field and the keys show.
         harness.register("harness-state") { _ in KeyboardHarnessModel.shared.state }
+        harness.register("harness-preview-tap") { _ in KeyboardHarnessModel.shared.press { $0.previewTapped() } }
+        harness.register("harness-preview-swipe") { _ in KeyboardHarnessModel.shared.press { $0.previewSwiped() } }
         // The keyboard comes on screen / leaves it, as the extension's viewWillAppear / viewDidDisappear.
         harness.register("harness-visible") { _ in KeyboardHarnessModel.shared.setVisible(true) }
         harness.register("harness-hidden") { _ in KeyboardHarnessModel.shared.setVisible(false) }

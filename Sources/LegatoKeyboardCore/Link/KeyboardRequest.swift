@@ -4,6 +4,8 @@ public enum RequestCommand: String, Codable, Sendable, Equatable {
     case start, stop, endKeepAlive
     /// Send everything dictated so far to the field now; listening continues.
     case send
+    /// Clean the spoken unit and leave it in the keyboard preview for editing.
+    case editPreview
     /// Send everything dictated so far that is not typed yet as raw words, with no cleanup (a swipe right on the preview).
     case sendRaw
     /// Throw away what is still in the preview and not yet sent for cleanup: the open unit and the speaking head (a swipe left).

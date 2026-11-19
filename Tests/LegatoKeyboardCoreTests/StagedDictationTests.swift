@@ -16,6 +16,39 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
 }
 
 @Suite struct StagedDictationTests {
+    @Test func reviewedTextWaitsForReleaseAndKeepsEditsAcrossSnapshots() {
+        var run = LiveDictationRun(staged: true, manual: true)
+        _ = run.addFinal(key: 0, text: "Write a note to Anna")
+        guard let open = run.flush() else { Issue.record("Expected spoken unit"); return }
+        let marked = run.markForPreview(key: open.key)
+        #expect(marked)
+        var take = StagedDictation()
+        take.receive(run.snapshot)
+        #expect(take.isAwaitingPreview)
+        #expect(take.nextReady == nil)
+
+        _ = run.setCleaned(key: open.key, text: "hi Anna")
+        take.receive(run.snapshot)
+        #expect(take.previewDraft?.original == "Write a note to Anna")
+        #expect(take.nextReady == nil)
+        take.movePreviewCaret(to: 2)
+        take.insertInPreview(" 👋🏽")
+        take.deleteInPreview()
+        take.insertInPreview("!")
+        _ = run.addFinal(key: 1, text: "later speech")
+        take.receive(run.snapshot)
+        #expect(take.preview == "hi ! Anna")
+
+        take.releasePreview()
+        #expect(take.nextReady?.text == "hi ! Anna")
+        take.begin(0, typed: "hi ! Anna")
+        take.delivered(0, typed: "hi ! Anna")
+        take.receive(run.snapshot)
+        #expect(take.previewDraft == nil)
+        #expect(take.nextReady == nil)
+        #expect(take.preview == "later speech")
+    }
+
     @Test func aSnapshotSplitsIntoThePreviewAndTheUnitsReadyToType() {
         var take = StagedDictation()
         take.receive(snapshot(3, [unit(0, "Hello there.", ready: false), unit(1, "Second one.", ready: false)], head: "and more"))

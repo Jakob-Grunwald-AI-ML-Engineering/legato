@@ -50,7 +50,8 @@ final class AppController {
         if UserDefaults.standard.bool(forKey: "LegatoOfflineFixture") {
             dictation = DictationPipeline(recentTakes: RecentTakesStore(fileURL: root.appending(path: "recent-takes.json")),
                                           history: history, cleaner: DebugStreamingCleaner(chunkMilliseconds: 0),
-                                          sendMode: { DictationSendSetting.mode(in: AppGroup.defaults) }, supportsLive: true, groupsLiveHistory: true, stagedLive: true)
+                                          sendMode: { DictationSendSetting.mode(in: AppGroup.defaults) }, supportsLive: true,
+                                          liveSend: { DictationSendSetting.liveSend(in: AppGroup.defaults) }, groupsLiveHistory: true, stagedLive: true)
             keyboardSession = KeyboardSession.offlineFixture(microphone: microphone, sink: dictation,
                                                              instruction: InstructionSession(runner: IOSOfflineInstructionRunner(), history: history))
         } else {
@@ -98,8 +99,8 @@ final class AppController {
             case .stop where self.keyboardSession.isOpen: await self.keyboardSession.closeGate()
             case .start: await self.readyMicrophone()
             case .stop: await self.keyboardSession.closeGate()
-            // The preview's tap: a staged take sends its words so far, with no hop and no change to the microphone.
             case .send: await self.keyboardSession.sendNow()
+            case .editPreview: await self.keyboardSession.sendNow(editPreview: true)
             // The preview's swipe right: the same, with the words as spoken (no cleanup).
             case .sendRaw: await self.keyboardSession.sendRawNow()
             // The preview's swipe left: the words still in it are dropped for a short undo window.

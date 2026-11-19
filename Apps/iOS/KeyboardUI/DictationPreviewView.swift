@@ -4,7 +4,7 @@ import SwiftUI
 
 /// The dictation preview in its own frame (`TopRowLayout.preview`, taller than the transcript band): the words not in the field
 /// yet, scrollable with no scrollbar and anchored on the newest words, with the touch bloom and the undo chip over it.
-/// Tap sends (cleaned), a swipe right sends raw, a swipe left clears what is still in it (`PreviewScroll.swipe`).
+/// Tap opens a cleaned draft, a swipe right inserts the draft (or raw speech), and a swipe left clears.
 struct DictationPreviewView: View {
     let controller: KeyboardController
     let text: String
@@ -25,18 +25,20 @@ struct DictationPreviewView: View {
 
     var body: some View {
         let showsUndo = controller.canUndoDiscard
+        let draft = controller.editablePreview
         ZStack(alignment: keySide == .right ? .bottomTrailing : .bottomLeading) {
-            PreviewRow(text: text, layout: controller.dictationPreviewLayout, canSend: controller.canSendPreview,
+            PreviewRow(text: text, layout: controller.dictationPreviewLayout, draft: draft, canSend: controller.canSendPreview,
                        canDiscard: controller.canDiscardPreview, insets: insets, bandHeight: bandHeight, reservesChip: showsUndo,
                        onSend: { point in bloom = (point, Date()); controller.previewTapped() },
                        onSendRaw: { controller.previewSwiped() },
-                       onDiscard: { controller.discardPreview() })
+                       onDiscard: { controller.discardPreview() }, onMoveCaret: { controller.movePreviewCaret(to: $0) })
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel(text)
-                .accessibilityHint(controller.canSendPreview ? "Tap to send what you have said so far. Swipe right to send it as spoken, left to clear." : "")
-                .accessibilityAddTraits(controller.canSendPreview ? .isButton : [])
+                .accessibilityLabel(draft == nil ? text : "Dictation draft")
+                .accessibilityValue(draft?.text ?? "")
+                .accessibilityHint(draft != nil ? "Edit with the keyboard. Swipe right to insert." : controller.canSendPreview ? "Tap to clean up and edit. Swipe right to insert as spoken, left to clear." : "")
+                .accessibilityAddTraits(controller.canSendPreview && draft == nil ? .isButton : [])
                 .accessibilityAction { if controller.canSendPreview { controller.previewTapped() } }
-                .accessibilityAction(named: "Insert without cleanup") { if controller.canSendPreview { controller.previewSwiped() } }
+                .accessibilityAction(named: draft == nil ? "Insert without cleanup" : "Insert draft") { if controller.canSendPreview { controller.previewSwiped() } }
                 .accessibilityAction(named: "Clear") { if controller.canDiscardPreview { controller.discardPreview() } }
                 .accessibilityIdentifier("keyboard.hint")
             if showsUndo { undoChip.transition(.opacity) }
@@ -52,7 +54,7 @@ struct DictationPreviewView: View {
         }
     }
 
-    static let fadeSeconds = 0.15
+    nonisolated static let fadeSeconds = 0.15
     private static let bloomSeconds = 0.35
 
     /// "Undo" while the app keeps the cleared words (`KeyboardController.canUndoDiscard`), on the dictation key's side.
@@ -102,13 +104,72 @@ struct DictationPreviewView: View {
 
 /// How a run of the preview text is drawn (`PreviewRenderer`): the unit being typed into the field, or closed words waiting
 /// for their cleanup.
-private enum PreviewRole: TextAttribute { case leaving, waiting }
+private enum PreviewRole: TextAttribute, Equatable { case leaving, waiting, entering, poof, hidden }
 
 /// Where the line the next letter leaves from sits in the laid-out text (the renderer writes it while drawing), so the scroll
 /// view can keep it in view. Drawing keeps this, like `PreviewReveal`.
 private final class ExitProbe {
     /// The line's top and bottom in the text's own coordinates; nil while nothing leaves.
     var line: (minY: CGFloat, maxY: CGFloat)?
+    var glyphs: [CGRect] = []
+
+    func caret(at point: CGPoint, in text: String) -> Int {
+        guard !glyphs.isEmpty else { return 0 }
+        let index = glyphs.indices.min { lhs, rhs in
+            let l = glyphs[lhs], r = glyphs[rhs]
+            return abs(l.midY - point.y) == abs(r.midY - point.y)
+                ? abs(l.midX - point.x) < abs(r.midX - point.x)
+                : abs(l.midY - point.y) < abs(r.midY - point.y)
+        } ?? 0
+        return min(text.count, index + (point.x >= glyphs[index].midX ? 1 : 0))
+    }
+}
+
+/// A single cleanup result. Keep the shared grapheme diff for small changes, and poof as a group
+/// when most of the draft is new or the diff would be too costly to run on the keyboard's main thread.
+private struct PreviewRewrite: Equatable {
+    let original: String
+    let target: String
+    let removed: Set<Int>
+    let inserted: Set<Int>
+    let survivors: [Int: Int]
+    let start: Date
+    let manual: Bool
+
+    var duration: Double { manual ? DictationPreviewView.fadeSeconds : PreviewRenderer.fadeSeconds / 2 + ChunkEntrance.capMs / 1000 + DictationPreviewView.fadeSeconds }
+    var delayPerPiece: Double { manual ? 0 : ChunkEntrance.gapMs / 1000 }
+    var glyphsPerPiece: Int { max(1, (inserted.count + pieceLimit - 1) / pieceLimit) }
+    private var pieceLimit: Int { Int(ChunkEntrance.capMs / ChunkEntrance.gapMs) + 1 }
+
+    init(original: String, target: String, start: Date, manual: Bool = false) {
+        self.original = original
+        self.target = target
+        self.start = start
+        self.manual = manual
+        let before = Array(original), after = Array(target)
+        if before.count <= 600, after.count <= 600 {
+            let changes = ShadowEditPlanner.changes(from: before, to: after)
+            var removed: Set<Int> = [], inserted: Set<Int> = []
+            var shift = 0
+            for change in changes {
+                removed.formUnion(change.start..<change.end)
+                let next = change.start + shift
+                inserted.formUnion(next..<(next + change.text.count))
+                shift += change.text.count - (change.end - change.start)
+            }
+            let kept = before.count - removed.count
+            if manual || kept * 2 >= max(before.count, after.count) {
+                self.removed = removed
+                self.inserted = inserted
+                survivors = Dictionary(uniqueKeysWithValues: zip(after.indices.filter { !inserted.contains($0) },
+                                                                  before.indices.filter { !removed.contains($0) }))
+                return
+            }
+        }
+        removed = Set(before.indices)
+        inserted = Set(after.indices)
+        survivors = [:]
+    }
 }
 
 /// The plain typewriter reveal of words entering the preview: how many trailing characters of the text are still hidden. Growth
@@ -163,6 +224,10 @@ private struct PreviewRenderer: TextRenderer {
     var shimmers: Bool
     var lifts: Bool
     var probe: ExitProbe
+    var caret: Int? = nil
+    var rewrite: PreviewRewrite? = nil
+    var reference: ExitProbe? = nil
+    var capturesReference = false
     /// Trailing glyphs not typed in yet (`PreviewReveal`): laid out, not drawn.
     var hidden = 0
     /// Room above the text for the leaving letters' lift (the scroll view clips the rest).
@@ -187,21 +252,41 @@ private struct PreviewRenderer: TextRenderer {
         let lines = Array(layout)
         probe.line = exitLine.map { (lines[$0].typographicBounds.rect.minY, lines[$0].typographicBounds.rect.maxY) }
         var glyph = 0
+        var entrance = 0
+        var glyphRects: [CGRect] = []
         var waiting: [Text.Layout.RunSlice] = []
         let total = layout.reduce(0) { $0 + $1.reduce(0) { $0 + $1.count } }
         let visible = total - hidden
         var position = 0
+        let elapsed = rewrite.map { now.timeIntervalSince($0.start) } ?? 0
+        let manual = rewrite?.manual == true
+        let poof = min(1, max(0, elapsed / (manual ? DictationPreviewView.fadeSeconds : Self.fadeSeconds)))
+        let entranceGap = rewrite?.delayPerPiece ?? 0
+        let glyphsPerPiece = rewrite?.glyphsPerPiece ?? 1
         func drawPlain(_ run: Text.Layout.Run, in context: inout GraphicsContext) -> [Text.Layout.RunSlice] {
-            guard hidden > 0 else { position += run.count; context.draw(run); return Array(run) }
+            guard hidden > 0 || reference != nil else { position += run.count; context.draw(run); return Array(run) }
             var shown: [Text.Layout.RunSlice] = []
             for slice in run {
-                if position < visible { context.draw(slice); shown.append(slice) }
+                if position < visible {
+                    var copy = context
+                    if let reference, let oldIndex = rewrite?.survivors[position], reference.glyphs.indices.contains(oldIndex) {
+                        let old = reference.glyphs[oldIndex], current = slice.typographicBounds.rect
+                        let oldBottom = reference.glyphs.last?.maxY ?? old.maxY
+                        let newBottom = lines.last?.typographicBounds.rect.maxY ?? current.maxY
+                        let remainder = CGFloat((1 - poof) * (1 - poof))
+                        copy.translateBy(x: (old.minX - current.minX) * remainder,
+                                         y: (old.minY - oldBottom - current.minY + newBottom) * remainder)
+                    }
+                    copy.draw(slice)
+                    shown.append(slice)
+                }
                 position += 1
             }
             return shown
         }
         for line in layout {
             for run in line {
+                if caret != nil || capturesReference { glyphRects.append(contentsOf: run.map { $0.typographicBounds.rect }) }
                 switch run[PreviewRole.self] {
                 case .leaving?:
                     position += run.count
@@ -217,9 +302,44 @@ private struct PreviewRenderer: TextRenderer {
                 case .waiting?:
                     let shown = drawPlain(run, in: &context)
                     if shimmers { waiting.append(contentsOf: shown) }
+                case .poof?:
+                    position += run.count
+                    guard poof < 1 else { continue }
+                    var copy = context
+                    copy.translateBy(x: 0, y: -(manual ? 1 : Self.lift) * CGFloat(poof))
+                    copy.opacity = 1 - poof
+                    if !manual { copy.addFilter(.blur(radius: 4 * poof)) }
+                    copy.draw(run)
+                case .entering?:
+                    for slice in run {
+                        position += 1
+                        let delay = Double(entrance / glyphsPerPiece) * entranceGap
+                        entrance += 1
+                        let reveal = min(1, max(0, (elapsed - (manual ? 0 : Self.fadeSeconds / 2) - delay) / DictationPreviewView.fadeSeconds))
+                        guard reveal > 0 else { continue }
+                        var copy = context
+                        copy.opacity = manual ? 0.7 + 0.3 * reveal : reveal
+                        copy.translateBy(x: 0, y: (manual ? 1 : Self.lift) * CGFloat(1 - reveal))
+                        copy.draw(slice)
+                    }
+                case .hidden?:
+                    position += run.count
                 case nil:
                     _ = drawPlain(run, in: &context)
                 }
+            }
+        }
+        if capturesReference { probe.glyphs = glyphRects }
+        if let caret {
+            probe.glyphs = glyphRects
+            let sweepingRewrite = rewrite.map { !$0.manual && $0.survivors.isEmpty } ?? false
+            if !sweepingRewrite {
+                let before = glyphRects.indices.contains(caret - 1) ? glyphRects[caret - 1] : nil
+                let after = glyphRects.indices.contains(caret) ? glyphRects[caret] : nil
+                let rect = after ?? before ?? CGRect(x: 0, y: 0, width: 0, height: 17)
+                let x = after == nil ? rect.maxX : rect.minX
+                let bar = CGRect(x: x, y: rect.minY, width: 1.5, height: rect.height)
+                context.fill(Path(roundedRect: bar, cornerRadius: 0.75), with: .color(.accentColor))
             }
         }
         guard !waiting.isEmpty else { return }
@@ -246,6 +366,7 @@ private struct PreviewRenderer: TextRenderer {
 private struct PreviewRow: View {
     let text: String
     let layout: StagedDictation.PreviewLayout?
+    let draft: StagedDictation.PreviewDraft?
     let canSend: Bool
     let canDiscard: Bool
     /// The text's leading and trailing insets (`WordRowLayout.insets`).
@@ -259,6 +380,7 @@ private struct PreviewRow: View {
     let onSendRaw: () -> Void
     /// A swipe left: clear what is still in the preview.
     let onDiscard: () -> Void
+    let onMoveCaret: (Int) -> Void
 
     /// Whether the current drag already acted. Resets when the drag ends or is cancelled (iOS may cancel a drag that leaves a
     /// short view).
@@ -267,6 +389,9 @@ private struct PreviewRow: View {
     @State private var swoosh = false
     @State private var reveal = PreviewReveal()
     @State private var probe = ExitProbe()
+    @State private var rewriteReference = ExitProbe()
+    @State private var rewrite: PreviewRewrite?
+    @State private var textFrame = CGRect.zero
     /// Flips when a reveal finishes, so the timeline pauses again.
     @State private var revealSettled = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -295,6 +420,7 @@ private struct PreviewRow: View {
 
     /// The words a clear would take: the text after the last part the app keeps (the unit being typed, units in cleanup).
     private var clearableText: String {
+        if let draft { return draft.text }
         guard let layout else { return "" }
         let kept = ([layout.leaving.upperBound] + layout.waiting.map(\.upperBound)).max() ?? 0
         return String(Array(layout.text).dropFirst(min(kept, layout.text.count))).trimmingCharacters(in: .whitespaces)
@@ -304,8 +430,9 @@ private struct PreviewRow: View {
         GeometryReader { proxy in
             let size = WordRowHeight.previewFontSize(rowHeight: bandHeight)
             let _ = revealSettled
-            let _ = reveal.update(text: text, placeholders: [KeyboardController.listening, KeyboardController.cleared], enabled: !reduceMotion)
-            let animating = exits.contains { Date().timeIntervalSince($0) < PreviewRenderer.fadeSeconds + 0.1 } || reveal.hidden > 0
+            let _ = reveal.update(text: text, placeholders: [KeyboardController.listening, KeyboardController.cleared], enabled: !reduceMotion && draft == nil)
+            let transition = draft?.text == rewrite?.target && !reduceMotion ? rewrite : nil
+            let animating = transition != nil || exits.contains { Date().timeIntervalSince($0) < PreviewRenderer.fadeSeconds + 0.1 } || reveal.hidden > 0
             let shimmers = !reduceMotion && !(layout?.waiting.isEmpty ?? true)
             let bottomPadding = reservesChip ? PreviewScroll.undoChipHeight + 4 : 2
             ScrollView(.vertical) {
@@ -313,13 +440,22 @@ private struct PreviewRow: View {
                     let hadHidden = reveal.hidden > 0
                     let settled = reveal.advance(now: timeline.date, total: text.count)
                     let _ = { if hadHidden && settled { Task { @MainActor in revealSettled.toggle() } } }()
-                    composed
-                        .font(.system(size: CGFloat(size)))
-                        .lineSpacing(CGFloat(WordRowHeight.previewLineSpacing(size: size)))
-                        .foregroundStyle(Color(uiColor: .secondaryLabel))
-                        .multilineTextAlignment(.leading)
-                        .textRenderer(PreviewRenderer(now: timeline.date, exits: exits, shimmers: shimmers, lifts: !reduceMotion,
-                                                      probe: probe, hidden: reveal.hidden))
+                    ZStack(alignment: .bottomLeading) {
+                        if let transition, !transition.removed.isEmpty || !transition.survivors.isEmpty {
+                            styled(marked(transition.original) { transition.removed.contains($0) ? .poof : .hidden }, size: size)
+                                .textRenderer(PreviewRenderer(now: timeline.date, exits: [], shimmers: false, lifts: true,
+                                                              probe: rewriteReference, rewrite: transition, capturesReference: true))
+                                .accessibilityHidden(true)
+                                .allowsHitTesting(false)
+                        }
+                        styled(transition.map { change in marked(text) { change.inserted.contains($0) ? .entering : nil } } ?? composed, size: size)
+                            .textRenderer(PreviewRenderer(now: timeline.date, exits: exits, shimmers: shimmers, lifts: !reduceMotion,
+                                                          probe: probe, caret: draft?.caret, rewrite: transition,
+                                                          reference: transition == nil ? nil : rewriteReference, hidden: reveal.hidden))
+                            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("dictationPreview")) } action: { textFrame = $0 }
+                    }
+                    .lineSpacing(CGFloat(WordRowHeight.previewLineSpacing(size: size)))
+                    .multilineTextAlignment(.leading)
                 }
                 .offset(x: settleOffset + (swoosh ? Self.swooshSlide : 0))
                 .opacity(swoosh ? 0.55 : 1)
@@ -353,9 +489,14 @@ private struct PreviewRow: View {
             // Fully clear areas get no touches in a keyboard extension.
             .background(Color.black.opacity(0.001))
             .contentShape(Rectangle())
+            .coordinateSpace(.named("dictationPreview"))
             .onTapGesture(coordinateSpace: .local) { point in
-                guard canSend else { return }
-                onSend(point)
+                if draft != nil {
+                    let relative = CGPoint(x: point.x - textFrame.minX, y: point.y - textFrame.minY)
+                    onMoveCaret(probe.caret(at: relative, in: text))
+                } else if canSend {
+                    onSend(point)
+                }
             }
             // A drag never also taps: the tap fails once the finger has moved. Acts while moving, once per drag: a drag that
             // leaves a short view gets cancelled, so waiting for its end would lose it. Vertical drags still scroll.
@@ -381,6 +522,19 @@ private struct PreviewRow: View {
             .onChange(of: exited) { old, new in
                 if new > old { exits.append(contentsOf: Array(repeating: Date(), count: new - old)) } else { exits = [] }
                 keepExitInView()
+            }
+            .onChange(of: draft) { old, draft in
+                guard let draft, !reduceMotion else { rewrite = nil; return }
+                let manual = old?.unitID == draft.unitID
+                let original = manual ? (old?.text ?? draft.original) : draft.original
+                guard original != draft.text, !manual || max(original.count, draft.text.count) <= 600 else { return }
+                rewriteReference.glyphs = []
+                let transition = PreviewRewrite(original: original, target: draft.text, start: Date(), manual: manual)
+                rewrite = transition
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(transition.duration))
+                    if rewrite?.start == transition.start { rewrite = nil }
+                }
             }
             .onChange(of: leavingText) { old, new in
                 if new.isEmpty {
@@ -429,13 +583,25 @@ private struct PreviewRow: View {
 
     /// The text with its roles marked (`PreviewRole`); a plain text when no staged take owns it.
     private var composed: Text {
+        if draft != nil { return Text(text.isEmpty ? "\u{200B}" : text) }
         let prefix = text.hasPrefix("…") ? "…" : ""
         guard let layout, layout.text == String(text.dropFirst(prefix.count)) else { return Text(text) }
         let body = Array(layout.text)
         var roles = [PreviewRole?](repeating: nil, count: body.count)
         for range in layout.waiting { for index in range.clamped(to: 0..<body.count) { roles[index] = .waiting } }
         for index in layout.leaving.clamped(to: 0..<body.count) { roles[index] = .leaving }
-        var result = Text(prefix)
+        return Text("\(Text(prefix))\(marked(layout.text) { roles[$0] })")
+    }
+
+    private func styled(_ text: Text, size: Double) -> Text {
+        text.font(.system(size: CGFloat(size)))
+            .foregroundStyle(Color(uiColor: .secondaryLabel))
+    }
+
+    private func marked(_ text: String, role: (Int) -> PreviewRole?) -> Text {
+        let body = Array(text)
+        let roles = body.indices.map(role)
+        var result = Text("")
         var start = 0
         while start < body.count {
             var end = start + 1

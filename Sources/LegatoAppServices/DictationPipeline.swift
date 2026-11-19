@@ -365,7 +365,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// A `sendNow()` cut in flight: the run it belongs to, when it began (on the pipeline's clock) and the fallback timer.
     /// `raw`: the user swiped (`sendRawNow()`): the unit stands as its raw words instead of going to cleanup.
     /// `discard`: the user swiped it away (`discardNow()`): the unit is kept for the undo window instead of being cleaned.
-    @ObservationIgnored private var sendCut: (runID: String, started: Duration, raw: Bool, discard: Bool, timeout: Task<Void, Never>?)?
+    @ObservationIgnored private var sendCut: (runID: String, started: Duration, raw: Bool, discard: Bool, editPreview: Bool, timeout: Task<Void, Never>?)?
     /// Cleanup sequences (`liveKeys`) whose unit a raw send already published: their results are ignored when they arrive.
     @ObservationIgnored private var rawSent: Set<Int> = []
     /// Cuts the recognizer without ending the take (`DictationEngine.finalizeChunk`); false when nothing would answer. Set by
@@ -376,7 +376,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// and listening continues. The recognizer is cut first so the words still in its head become final; the unit closes when
     /// the `finalize` boundary arrives, after `sendCutWait`, or at once when there is nothing to cut. Words spoken after the
     /// cut start the next unit. Ignored without a staged run in progress.
-    public func sendNow() async { await send(raw: false) }
+    public func sendNow(editPreview: Bool = false) async { await send(raw: false, editPreview: editPreview) }
 
     /// The user's swipe right on the preview: like `sendNow()`, but nothing is cleaned. The open unit and every closed unit still
     /// waiting for cleanup stand as their raw words now (they are history's uncleaned fallbacks), a speculative request is
@@ -428,14 +428,14 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         Task { [weak self] in await self?.current().cancelSpeculation() }
     }
 
-    private func send(raw: Bool, discard: Bool = false) async {
+    private func send(raw: Bool, discard: Bool = false, editPreview: Bool = false) async {
         guard stagedLive, mode == .live, let run = liveRun, !run.complete else { return }
         if sendCut != nil {
-            if raw, !discard { sendCut?.raw = true }
+            if raw, !discard, sendCut?.editPreview != true { sendCut?.raw = true }
             return
         }
         let runID = run.runID
-        sendCut = (runID, streamTime(), raw, discard, nil)
+        sendCut = (runID, streamTime(), raw, discard, editPreview, nil)
         // Paused (#313): no recognizer holds words back, so there is nothing to cut.
         if pausedRunID == runID { return sendCutThrough("paused") }
         let timeout = Task { [weak self, clock] in
@@ -477,6 +477,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             if endsRun { Task { [weak self] in await self?.finishLive() } }
             return
         }
+        if cut.editPreview, run.markForPreview(key: open.key) { publishLive(run) }
         Task { [weak self] in
             await self?.submitLive(open.text, key: open.key, run: run)
             if endsRun { await self?.finishLive() }
@@ -539,7 +540,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             liveHistoryFallbacks.insert(-1 - open.key)
             changed = true
         }
-        for (id, unit) in liveKeys where run.setRaw(key: unit.key) {
+        for (id, unit) in liveKeys where !run.isMarkedForPreview(key: unit.key) && run.setRaw(key: unit.key) {
             rawSent.insert(id)
             liveHistoryFallbacks.insert(id)
             changed = true

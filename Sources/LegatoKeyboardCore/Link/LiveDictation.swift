@@ -24,10 +24,12 @@ public struct LiveSegment: Codable, Equatable, Sendable {
     /// The unit is closed and not ready, its text kept for the undo; the keyboard hides it and waits. When the window ends it
     /// becomes empty text and ready (nothing to type). Nil: not discarded.
     public var discarded: Bool?
+    /// Cleanup of this unit returns to the keyboard preview. Only an explicit swipe may insert it.
+    public var editPreview: Bool?
     public init(id: Int, text: String, cleaned: Bool = false, final: Bool, unit: Int? = nil, raw: String? = nil, ready: Bool? = nil,
-                closed: Bool? = nil, discarded: Bool? = nil) {
+                closed: Bool? = nil, discarded: Bool? = nil, editPreview: Bool? = nil) {
         self.id = id; self.text = text; self.cleaned = cleaned; self.final = final; self.unit = unit; self.raw = raw; self.ready = ready
-        self.closed = closed; self.discarded = discarded
+        self.closed = closed; self.discarded = discarded; self.editPreview = editPreview
     }
 
     /// Pieces of a take's text joined as a reader expects: trimmed, a space between them, none before closing
@@ -274,6 +276,8 @@ public struct LiveDictationRun: Sendable, Equatable {
     private var ready: Set<Int> = []
     /// Closed units (by index) the person discarded and whose undo window is open: kept as raw text, never cleaned or ready.
     private var discarded: Set<Int> = []
+    /// First segment ids, which stay stable if a unit elsewhere in the run splits.
+    private var previewStarts: Set<Int> = []
     public var hasDiscarded: Bool { !discarded.isEmpty }
 
     /// Only `flush()` closes a unit: `addFinal` never does (not at a sentence end, not at `maxUnitWords`). Fixed for the run.
@@ -324,9 +328,12 @@ public struct LiveDictationRun: Sendable, Equatable {
     /// The units in speaking order (the open one too, not ready), then the speaking head.
     private var stagedSnapshot: LiveDictationSnapshot {
         var segments = units.indices.map { index in
-            LiveSegment(id: units[index].lowerBound, text: discarded.contains(index) ? rawText(index) : shownText(index), cleaned: cleaned[index] != nil,
-                        final: true, ready: ready.contains(index), closed: !(openUnit && index == units.count - 1),
-                        discarded: discarded.contains(index) ? true : nil)
+            let id = units[index].lowerBound
+            let editing = previewStarts.contains(id)
+            return LiveSegment(id: id, text: discarded.contains(index) ? rawText(index) : shownText(index), cleaned: cleaned[index] != nil,
+                               final: true, raw: editing ? rawText(index) : nil, ready: ready.contains(index),
+                               closed: !(openUnit && index == units.count - 1), discarded: discarded.contains(index) ? true : nil,
+                               editPreview: editing ? true : nil)
         }
         let speaking = LiveSegment.joined(open + [head])
         if !speaking.isEmpty { segments.append(.init(id: finals.count, text: speaking, final: false)) }
@@ -373,6 +380,17 @@ public struct LiveDictationRun: Sendable, Equatable {
         guard openUnit else { return nil }
         openUnit = false
         return peekOpenUnit()
+    }
+
+    @discardableResult
+    public mutating func markForPreview(key: Int) -> Bool {
+        guard staged, let unit = unitIndex(ofKey: key), previewStarts.insert(units[unit].lowerBound).inserted else { return false }
+        version += 1
+        return true
+    }
+
+    public func isMarkedForPreview(key: Int) -> Bool {
+        unitIndex(ofKey: key).map { previewStarts.contains(units[$0].lowerBound) } ?? false
     }
 
     /// The person discarded the unit `key` belongs to (just flushed, never sent for cleanup): its text stays for the undo and it
