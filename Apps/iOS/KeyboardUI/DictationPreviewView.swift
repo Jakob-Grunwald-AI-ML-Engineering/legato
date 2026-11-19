@@ -91,11 +91,36 @@ private struct PreviewHoldGesture: UIGestureRecognizerRepresentable {
 
     final class Recognizer: UILongPressGestureRecognizer {
         var tapped: (() -> Void)?
+        private var tapOrigin: CGPoint?
+        private(set) var moved = false
+
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+            if tapOrigin == nil, touches.count == 1 { tapOrigin = touches.first?.location(in: nil) }
+            super.touchesBegan(touches, with: event)
+        }
+
+        override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+            if let touch = touches.first, exceededTapTravel(touch) { moved = true }
+            super.touchesMoved(touches, with: event)
+        }
 
         override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
-            let wasTap = state == .possible && touches.count == 1 && numberOfTouches == 1
+            if let touch = touches.first, exceededTapTravel(touch) { moved = true }
+            let wasTap = state == .possible && !moved && touches.count == 1 && numberOfTouches == 1
             super.touchesEnded(touches, with: event)
             if wasTap { tapped?() }
+        }
+
+        override func reset() {
+            super.reset()
+            tapOrigin = nil
+            moved = false
+        }
+
+        private func exceededTapTravel(_ touch: UITouch) -> Bool {
+            guard let tapOrigin else { return true }
+            let point = touch.location(in: nil)
+            return hypot(point.x - tapOrigin.x, point.y - tapOrigin.y) > allowableMovement
         }
     }
 
@@ -112,8 +137,9 @@ private struct PreviewHoldGesture: UIGestureRecognizerRepresentable {
 
     func handleUIGestureRecognizerAction(_ recognizer: Recognizer, context: Context) {
         switch recognizer.state {
-        case .began: _ = controller.beginPreviewHold()
-        case .ended: controller.endPreviewHold(apply: true)
+        case .began where !recognizer.moved: _ = controller.beginPreviewHold()
+        case .changed where recognizer.moved: controller.endPreviewHold(apply: false)
+        case .ended: controller.endPreviewHold(apply: !recognizer.moved)
         case .cancelled: controller.endPreviewHold(apply: false)
         default: break
         }
