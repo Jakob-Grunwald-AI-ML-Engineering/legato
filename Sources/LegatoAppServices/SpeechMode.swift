@@ -92,11 +92,14 @@ public struct SpeechModeRouter: Sendable, Equatable {
     }
     /// A new keyboard session starts in dictation mode.
     func reset() async {
-        router = SpeechModeRouter()
+        resetRouter()
         await dictation.reset()
     }
+    /// The routing alone (mode, cuts); the dictation sink keeps its run.
+    func resetRouter() { router = SpeechModeRouter() }
     func warm() async { await dictation.warm() }
     func beginTake() { dictation.beginTake() }
     func finishTake() async { await dictation.finishTake() }
+    func pauseTake() async { await dictation.pauseTake() }
     var backgroundText: String { dictation.backgroundText }
 }

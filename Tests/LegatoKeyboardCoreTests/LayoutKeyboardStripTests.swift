@@ -80,20 +80,4 @@ import Testing
         #expect(StripHeight.resolve(stored: 1) == 1)
         #expect(StripHeight.resolve(stored: 0) == 0)
     }
-
-    @Test func aSwipeUpOnTheStripExpandsAndASwipeDownOnTheFullKeyboardCollapses() {
-        var expansion = KeyboardExpansion()
-        #expect(expansion.swipeToggles(dx: -4, dy: 40))
-        expansion.toggle()
-        #expect(expansion.swipeToggles(dx: 4, dy: -40))
-    }
-
-    @Test func aSwipeTheOtherWayShortOrSidewaysDoesNothing() {
-        var expansion = KeyboardExpansion()
-        #expect(!expansion.swipeToggles(dx: 0, dy: -40))
-        #expect(!expansion.swipeToggles(dx: 0, dy: 10))
-        #expect(!expansion.swipeToggles(dx: 60, dy: 40))
-        expansion.toggle()
-        #expect(!expansion.swipeToggles(dx: 0, dy: 40))
-    }
 }

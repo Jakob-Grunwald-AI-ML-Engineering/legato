@@ -24,12 +24,31 @@ public struct SentenceCleanupInput: Sendable {
     }
 }
 
+/// How one cleanup request went, for diagnostics (no text). Times are milliseconds from sending the request.
+public struct CleanupMetrics: Sendable, Equatable {
+    public var model: String
+    /// The first stream event of any kind (connection, TLS, request upload, time to first byte of the reply and the
+    /// model's prefill); nil when none arrived.
+    public var firstEventMs: Int?
+    /// The first character of the tool input's `text` value: the model has begun the cleaned text.
+    public var firstTextMs: Int?
+    public var totalMs: Int
+    public var inputTokens: Int?, outputTokens: Int?, cacheReadTokens: Int?, cacheCreationTokens: Int?
+    public init(model: String, firstEventMs: Int? = nil, firstTextMs: Int? = nil, totalMs: Int = 0, inputTokens: Int? = nil,
+                outputTokens: Int? = nil, cacheReadTokens: Int? = nil, cacheCreationTokens: Int? = nil) {
+        self.model = model; self.firstEventMs = firstEventMs; self.firstTextMs = firstTextMs; self.totalMs = totalMs
+        self.inputTokens = inputTokens; self.outputTokens = outputTokens
+        self.cacheReadTokens = cacheReadTokens; self.cacheCreationTokens = cacheCreationTokens
+    }
+}
+
 public struct ValidatedSentence: Sendable {
     public let sentenceID: String
     public let sequence: Int
     public let text: String
-    public init(sentenceID: String, sequence: Int, text: String) {
-        self.sentenceID = sentenceID; self.sequence = sequence; self.text = text
+    public let metrics: CleanupMetrics?
+    public init(sentenceID: String, sequence: Int, text: String, metrics: CleanupMetrics? = nil) {
+        self.sentenceID = sentenceID; self.sequence = sequence; self.text = text; self.metrics = metrics
     }
 }
 
@@ -109,8 +128,9 @@ public struct SentenceCleanupClient: SentenceCleaning {
               input.text.utf8.count <= Self.maximumTextBytes,
               input.vocabulary.count <= 200,
               input.vocabulary.reduce(0, { $0 + $1.utf8.count }) <= 16_384 else { throw SentenceCleanupError.invalidInput }
-        let submitted = try await submission(of: try Self.request(input, model: input.dictation == nil ? .haiku : model()), tool: "submit_sentence", maxToolBytes: Self.maximumToolBytes,
-                                             usageID: input.sentenceID, usageSequence: input.sequence)
+        let chosen: ModelChoice = input.dictation == nil ? .haiku : model()
+        let (submitted, metrics) = try await submission(of: try Self.request(input, model: chosen), tool: "submit_sentence", maxToolBytes: Self.maximumToolBytes,
+                                                        usageID: input.sentenceID, usageSequence: input.sequence, model: chosen.rawValue)
         guard case .object(let fields) = submitted,
               Set(fields.keys) == ["sentenceID", "sequence", "text"],
               case .string(let sentenceID) = fields["sentenceID"],
@@ -124,11 +144,14 @@ public struct SentenceCleanupClient: SentenceCleaning {
               text.unicodeScalars.allSatisfy({ $0.properties.generalCategory != .control || $0 == "\n" || $0 == "\t" }) else {
             throw SentenceCleanupError.invalidText
         }
-        return .init(sentenceID: sentenceID, sequence: sequence, text: text)
+        return .init(sentenceID: sentenceID, sequence: sequence, text: text, metrics: metrics)
     }
     /// Streams one forced tool call and returns its validated-shape input object (event discipline shared by every tool).
-    private func submission(of request: Data, tool: String, maxToolBytes: Int, usageID: String, usageSequence: Int,
-                            onFragment: ((String) async -> Void)? = nil) async throws -> JSONValue {
+    private func submission(of request: Data, tool: String, maxToolBytes: Int, usageID: String, usageSequence: Int, model: String,
+                            onFragment: ((String) async -> Void)? = nil) async throws -> (JSONValue, CleanupMetrics) {
+        let clock = ContinuousClock(), began = clock.now
+        func elapsed() -> Int { let c = began.duration(to: clock.now).components; return Int(c.seconds * 1000 + c.attoseconds / 1_000_000_000_000_000) }
+        var firstEventMs: Int?, firstTextMs: Int?
         var index: Int?, initial: JSONValue?, fragments = "", closed = false, stopped = false
         // Blocks that are not the tool call (a model that cannot be forced to call the tool may write a short
         // text or thinking block first): their events are skipped.
@@ -137,6 +160,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
         do {
             for try await event in client.stream(request: request) {
                 try Task.checkCancellation()
+                if firstEventMs == nil { firstEventMs = elapsed() }
                 if stopped { throw SentenceCleanupError.unexpectedResponse }
                 if event.event == "error" { throw SentenceCleanupError.providerError }
                 guard event.data.utf8.count <= maxToolBytes,
@@ -165,6 +189,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
                           case .string(let fragment) = value["delta"]?["partial_json"],
                           fragments.utf8.count + fragment.utf8.count <= maxToolBytes else { throw SentenceCleanupError.unexpectedResponse }
                     fragments += fragment
+                    if firstTextMs == nil, Self.hasBegunText(fragments) { firstTextMs = elapsed() }
                     if let onFragment { await onFragment(fragment) }
                 case "content_block_stop":
                     guard !closed, let index, Self.blockIndex(value) == index else { throw SentenceCleanupError.unexpectedResponse }
@@ -199,7 +224,18 @@ public struct SentenceCleanupClient: SentenceCleaning {
             }
             submitted = parsed
         }
-        return submitted
+        return (submitted, Self.metrics(model: model, usage: usageFields, firstEventMs: firstEventMs, firstTextMs: firstTextMs, totalMs: elapsed()))
+    }
+    /// Whether the streamed tool input has reached the first character of its `text` value.
+    static func hasBegunText(_ fragments: String) -> Bool {
+        guard let key = fragments.range(of: "\"text\"") else { return false }
+        let rest = fragments[key.upperBound...].drop { $0 == ":" || $0 == " " || $0 == "\n" }
+        return rest.first == "\"" && rest.dropFirst().first != nil
+    }
+    static func metrics(model: String, usage: [String: JSONValue], firstEventMs: Int?, firstTextMs: Int?, totalMs: Int) -> CleanupMetrics {
+        func count(_ key: String) -> Int? { if case .number(let n) = usage[key] { return Int(n) }; return nil }
+        return .init(model: model, firstEventMs: firstEventMs, firstTextMs: firstTextMs, totalMs: totalMs, inputTokens: count("input_tokens"),
+                     outputTokens: count("output_tokens"), cacheReadTokens: count("cache_read_input_tokens"), cacheCreationTokens: count("cache_creation_input_tokens"))
     }
     private static func collectUsage(_ value: JSONValue, into fields: inout [String: JSONValue]) {
         guard case .object(let usage) = value["usage"] ?? value["message"]?["usage"] else { return }
@@ -349,6 +385,9 @@ public struct SentenceCleanupClient: SentenceCleaning {
     static let dictationCache: JSONValue = .object(["type": .string("ephemeral"), "ttl": .string("1h")])
     /// The prompt cache needs 512 tokens on Haiku 5.5 (prompt-caching docs); the prompt and tool are above it.
     private static let dictationPrompt: String = PromptLayers.dictationCleanup()
+    /// A dictated unit's cleaned text is about its own length (one token per 2 characters is generous for German), plus the
+    /// tool call's identity fields; a limit sized to the unit, not a flat 1024. Never below 384, never above 4096.
+    static func lineMaxTokens(characters: Int) -> Int { min(4096, max(384, max(0, characters) / 2 + 256)) }
     private static func request(_ input: SentenceCleanupInput, model: ModelChoice) throws -> Data {
         typealias Schema = ToolSchema.Schema
         // Dictation keeps the tool byte-identical between requests (the identity enum would change the cached prefix).
@@ -369,7 +408,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
         Return only the locally corrected plain text through submit_sentence, copying the supplied sentenceID and sequence exactly. If no useful local improvement is needed, submit the same sentence. No acknowledgement, explanation, formatting wrapper or second call is needed.
         """
         let request: JSONValue = .object([
-            "model": .string(model.rawValue), "max_tokens": .number(1024), "stream": .bool(true),
+            "model": .string(model.rawValue), "max_tokens": .number(Double(input.dictation == nil ? 1024 : Self.lineMaxTokens(characters: input.text.count))), "stream": .bool(true),
             "thinking": Self.thinking(model),
             "system": input.dictation == nil ? .string(instruction)
                 : .array([.object(["type": .string("text"), "text": .string(dictationPrompt), "cache_control": dictationCache])]),

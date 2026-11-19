@@ -23,6 +23,7 @@ import LegatoSoniox
         modeSink = SpeechModeSink(dictation: sink)
         engine = DictationEngine(sink: modeSink, sonioxKey: sonioxKey, makeSocket: makeSocket,
                                  vocabularyURL: vocabularyURL, now: now)
+        pipeline?.cutRecognizer = { [engine] in await engine.finalizeChunk() }
         modeSink.onInstructionLine = { instruction.hear($0) }
         modeSink.onInstructionTail = { instruction.hearTail($0) }
         modeSink.onTransition = { [weak self] transition in
@@ -47,6 +48,21 @@ import LegatoSoniox
     }
 
     func beginTake() { modeSink.beginTake() }
+
+    /// A manual take is paused with words pending (`DictationPipeline.pauseTake`): a send still works without a take running.
+    var isPaused: Bool { pipeline?.isPaused ?? false }
+
+    /// The user's send of a staged take: the words so far go to the field now (`DictationPipeline.sendNow`). Dictation only.
+    func sendNow() async {
+        guard modeSink.target == .dictation else { return }
+        await pipeline?.sendNow()
+    }
+
+    /// The user's raw send (`DictationPipeline.sendRawNow`): the same, with no cleanup. Dictation only.
+    func sendRawNow() async {
+        guard modeSink.target == .dictation else { return }
+        await pipeline?.sendRawNow()
+    }
 
     /// Whether audio is still arriving is a host fact (including replay); cut ordering is shared.
     func setMagic(_ enabled: Bool, cut: Bool) {
@@ -75,11 +91,20 @@ import LegatoSoniox
     }
 
     func reset() async {
+        resetRouting()
+        await resetPipeline()
+    }
+
+    /// The session's routing (mode, cut, instruction); the pipeline keeps its run, which may still be ending.
+    func resetRouting() {
         cancelCut()
         finishingDictation?.cancel(); finishingDictation = nil
-        await modeSink.reset()
+        modeSink.resetRouter()
         instruction.reset()
     }
+
+    /// The pipeline's session: drops the outbox and any run that never ended.
+    func resetPipeline() async { await modeSink.dictation.reset() }
 
     private func cancelCut() {
         cutGeneration += 1

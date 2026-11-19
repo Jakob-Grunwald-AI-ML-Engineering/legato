@@ -15,14 +15,16 @@ struct WordRowView: View {
 
     /// The slot being pressed (its position in the row), if any: its pill shows and the dividers beside it hide.
     @State private var pressed: Int?
+    /// The preview's touch bloom, kept here: the row's content changes under it (the preview gives way to a cleanup status and
+    /// back), and the bloom runs its whole duration across the row, whichever it shows.
+    @State private var bloom: (point: CGPoint, start: Date)?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Group {
             if controller.isShowingPreview, let preview = controller.statusText {
-                // A take in progress owns the row; kept text (an earlier one or this take's own) returns when it ends.
+                // A take in progress owns the row.
                 previewRow(preview)
-            } else if let kept = controller.keptText, kept.isShowable {
-                keptRow(kept)
             } else if let recovery = controller.liveRecoveryNotice {
                 HStack(spacing: 8) {
                     // Plain text (nothing to tap but Dismiss); it fits in two lines, shrinking rather than cutting off.
@@ -81,6 +83,42 @@ struct WordRowView: View {
         }
         // The status (or a hint) takes the row over and gives it back with a plain short fade.
         .animation(controller.isShowingPreview ? nil : .easeOut(duration: 0.12), value: controller.statusText)
+        .overlay { bloomOverlay }
+        .onChange(of: bloom?.start) { _, start in
+            guard let start else { return }
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(Int(Self.bloomSeconds * 1000) + 100))
+                if bloom?.start == start { bloom = nil }
+            }
+        }
+    }
+
+    private static let bloomSeconds = 0.35
+
+    /// A soft bloom of the magic colours growing from the touch point across the whole row (350 ms, low opacity); with Reduce
+    /// Motion a brief plain highlight.
+    @ViewBuilder
+    private var bloomOverlay: some View {
+        if let bloom {
+            TimelineView(.animation) { timeline in
+                let t = min(1, max(0, timeline.date.timeIntervalSince(bloom.start) / (reduceMotion ? 0.2 : Self.bloomSeconds)))
+                Canvas { context, canvas in
+                    let whole = Path(CGRect(origin: .zero, size: canvas))
+                    if reduceMotion {
+                        context.fill(whole, with: .color(Color.primary.opacity(0.1 * (1 - t))))
+                        return
+                    }
+                    let reach = max(hypot(bloom.point.x, bloom.point.y), hypot(canvas.width - bloom.point.x, bloom.point.y),
+                                    hypot(bloom.point.x, canvas.height - bloom.point.y), hypot(canvas.width - bloom.point.x, canvas.height - bloom.point.y))
+                    let radius = max(1, reach * (1 - (1 - t) * (1 - t)))
+                    // Soft: it peaks early and is gone by the end.
+                    let colors = MagicGradient.colors.map { $0.opacity(0.4 * (1 - t) * (1 - t)) }
+                    context.fill(whole, with: .radialGradient(Gradient(colors: colors + [.clear]), center: bloom.point,
+                                                              startRadius: 0, endRadius: radius))
+                }
+            }
+            .allowsHitTesting(false)
+        }
     }
 
     /// The dictation preview (#312): the words not in the field yet, left aligned, two lines, anchored on the newest words. The
@@ -88,9 +126,15 @@ struct WordRowView: View {
     /// top and nothing re-centres or jumps. The row keeps its height; the font is the largest that fits two lines with air
     /// between them and clear of the row's edges (`WordRowHeight`, an estimate to measure on the phone).
     private func previewRow(_ text: String) -> some View {
-        PreviewRow(text: text)
+        PreviewRow(text: text, layout: controller.dictationPreviewLayout, canSend: controller.canSendPreview,
+                   onSend: { point in bloom = (point, Date()); controller.previewTapped() },
+                   onSendRaw: { controller.previewSwiped() })
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(text)
+        .accessibilityHint(controller.canSendPreview ? "Tap to send what you have said so far." : "")
+        .accessibilityAddTraits(controller.canSendPreview ? .isButton : [])
+        .accessibilityAction { if controller.canSendPreview { controller.previewTapped() } }
+        .accessibilityAction(named: "Insert without cleanup") { if controller.canSendPreview { controller.previewSwiped() } }
         .accessibilityIdentifier("keyboard.hint")
         .transition(.identity)
     }
@@ -106,58 +150,6 @@ struct WordRowView: View {
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.5)
         .accessibilityIdentifier(id)
-    }
-
-    /// Text the keyboard could not place: its end, then Insert and Copy (Copy needs Full Access), and a small close.
-    private func keptRow(_ kept: KeptText) -> some View {
-        HStack(spacing: 8) {
-            if let notice = controller.keptInsertNotice {
-                // Short and readable; it gives the sentence's place back after a moment.
-                Text(notice)
-                    .font(.system(size: fontSize - 4, weight: .medium))
-                    .foregroundStyle(Color(uiColor: KeyColors.suggestion))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("keyboard.kept.notice")
-            } else {
-                // Unsent dictation: a quiet cue, then the start of the sentence so it is recognisable.
-                Image(systemName: "waveform")
-                    .font(.system(size: fontSize - 6, weight: .medium))
-                    .foregroundStyle(Color(uiColor: KeyColors.suggestion).opacity(0.7))
-                    .accessibilityHidden(true)
-                Text(kept.preview(maxCharacters: 120))
-                    .font(.system(size: fontSize - 4))
-                    .foregroundStyle(Color(uiColor: KeyColors.suggestion))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityLabel("Unsent dictation: \(kept.preview(maxCharacters: 120))")
-                    .accessibilityIdentifier("keyboard.kept.text")
-            }
-            if kept.offersInsertion, kept.insertion == nil || controller.insertingKeptText {
-                takeButton(controller.insertingKeptText ? "Inserting…" : "Insert", id: "keyboard.kept.insert",
-                           enabled: controller.canInsertKeptText) { controller.insertKeptText() }
-                    .accessibilityLabel("Insert at cursor")
-            } else if kept.offersInsertion {
-                Text("Check the field").font(.system(size: fontSize - 5))
-                    .accessibilityLabel("Previous insertion could not be confirmed. You can still copy or dismiss the recovery text.")
-            }
-            if controller.fullAccess, controller.keptInsertNotice == nil {
-                takeButton("Copy", id: "keyboard.kept.copy") { controller.copyKeptText() }
-            }
-            Button { controller.dismissKeptText() } label: {
-                Image(systemName: "xmark").font(.system(size: fontSize - 6, weight: .semibold))
-                    .foregroundStyle(Color(uiColor: KeyColors.suggestion).opacity(0.7))
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Discard kept text")
-            .accessibilityIdentifier("keyboard.kept.dismiss")
-        }
-        .padding(.horizontal, CGFloat(WordRowLayout.contentInset))
-        .accessibilityIdentifier("keyboard.kept")
     }
 
     private var row: some View {
@@ -399,43 +391,313 @@ private struct AutoFillSwitchKey: UIViewRepresentable {
     func updateUIView(_ button: UIButton, context: Context) {}
 }
 
+/// How a run of the preview text is drawn (`PreviewRenderer`): the unit being typed into the field, or closed words waiting
+/// for their cleanup.
+private enum PreviewRole: TextAttribute { case leaving, waiting }
+
+/// Draws the preview with per-glyph effects, by role, and leaves every glyph in its place so nothing reflows:
+/// - leaving glyphs lift `lift` and fade over `fadeSeconds` from their own exit time (the unit's letters, as the field types them);
+/// - waiting glyphs (closed units whose cleanup has not landed: "thinking") carry a slow magic-coloured shimmer, the only use
+///   of the magic colours here; words entering are plain (`hidden`: the glyphs not typed in yet are not drawn).
+/// The lift, fade length and shimmer period are estimates, to tune on the phone.
+/// The preview's vertical window while a unit leaves: the lines the text has been moved up by, animated between whole lines.
+/// Drawing keeps this clock because the line the letters leave from is only known from the laid-out text.
+private final class ExitScroll {
+    private var from = 0.0, target = 0.0, since = Date.distantPast
+    static let seconds = 0.25
+
+    func value(toward newTarget: Double, at now: Date) -> Double {
+        let current = self.current(at: now)
+        if newTarget != target { from = current; target = newTarget; since = now }
+        return self.current(at: now)
+    }
+
+    private func current(at now: Date) -> Double {
+        let t = min(1, max(0, now.timeIntervalSince(since) / Self.seconds))
+        return from + (target - from) * (1 - (1 - t) * (1 - t))
+    }
+}
+
+/// The plain typewriter reveal of words entering the preview: how many trailing characters of the text are still hidden. Growth
+/// (new words appended, the head possibly cut off at the front) types in at `TypewriterDrain`'s pace; any other change shows at
+/// once. No colour: revealed glyphs are drawn like all the rest. Drawing keeps this clock, like `ExitScroll`.
+private final class PreviewReveal {
+    private var text = ""
+    private var last = Date.distantPast
+    private(set) var hidden = 0
+
+    private static func body(_ text: String) -> String { text.hasPrefix("…") ? String(text.dropFirst()) : text }
+
+    /// The text of this frame: what it adds to the previous one is hidden from the end. The `placeholder` is not words: it
+    /// shows at once and the first words after it type in from nothing.
+    func update(text newText: String, placeholder: String, enabled: Bool) {
+        guard newText != text else { return }
+        let old = text == placeholder ? "" : text
+        defer { text = newText }
+        let new = Self.body(newText), prior = Self.body(old)
+        guard enabled, newText != placeholder, !new.isEmpty else { hidden = 0; return }
+        guard !prior.isEmpty else { hidden = new.count; return }
+        // The old text, minus a head the preview cut off, is the start of the new one.
+        let oldChars = Array(prior), newChars = Array(new)
+        for cut in 0..<oldChars.count where newChars.starts(with: oldChars[cut...]) {
+            hidden = min(newChars.count, hidden + newChars.count - (oldChars.count - cut))
+            return
+        }
+        hidden = 0
+    }
+
+    /// Hides fewer characters as time passes; true once everything is shown.
+    func advance(now: Date, total: Int) -> Bool {
+        let dt = min(100, max(0, now.timeIntervalSince(last) * 1000))
+        last = now
+        guard hidden > 0 else { return true }
+        let revealed = TypewriterDrain.step(revealed: max(0, total - hidden), target: total, dtMs: dt)
+        hidden = max(0, total - revealed)
+        return hidden == 0
+    }
+}
+
+private struct PreviewRenderer: TextRenderer {
+    /// The clock of this frame.
+    var now: Date
+    /// When each leaving glyph (in order) went into the field; glyphs past the end have not.
+    var exits: [Date]
+    var shimmers: Bool
+    var lifts: Bool
+    var scroll: ExitScroll
+    /// Trailing glyphs not typed in yet (`PreviewReveal`): laid out, not drawn.
+    var hidden = 0
+    /// Lines drawn below the text's own bounds while it is moved down to the exit line (the row clips them).
+    var displayPadding = EdgeInsets(top: 0, leading: 0, bottom: 600, trailing: 0)
+
+    static let lift: CGFloat = 6
+    static let fadeSeconds = 0.22
+    static let shimmerPeriod = 3.2
+
+    func draw(layout: Text.Layout, in context: inout GraphicsContext) {
+        // The exit point: the line of the next letter to leave (the last one that left, when all have). The window starts there,
+        // so the leaving letters are always in view; with nothing leaving, or the text fitting two lines, it is the newest words.
+        var exitLine: Int?
+        var count = 0
+        for (index, line) in layout.enumerated() {
+            for run in line where run[PreviewRole.self] == .leaving {
+                for _ in run {
+                    if count <= exits.count { exitLine = index }
+                    count += 1
+                }
+            }
+        }
+        let lines = Array(layout)
+        var shift = 0.0
+        if let exitLine { shift = Double(max(0, lines.count - 2 - min(exitLine, max(0, lines.count - 2)))) }
+        let animated = scroll.value(toward: shift, at: now)
+        if animated != 0, lines.count > 1 {
+            context.translateBy(x: 0, y: CGFloat(animated) * (lines[1].origin.y - lines[0].origin.y))
+        }
+        var glyph = 0
+        var waiting: [Text.Layout.RunSlice] = []
+        let total = layout.reduce(0) { $0 + $1.reduce(0) { $0 + $1.count } }
+        let visible = total - hidden
+        var position = 0
+        func drawPlain(_ run: Text.Layout.Run, in context: inout GraphicsContext) -> [Text.Layout.RunSlice] {
+            guard hidden > 0 else { position += run.count; context.draw(run); return Array(run) }
+            var shown: [Text.Layout.RunSlice] = []
+            for slice in run {
+                if position < visible { context.draw(slice); shown.append(slice) }
+                position += 1
+            }
+            return shown
+        }
+        for line in layout {
+            for run in line {
+                switch run[PreviewRole.self] {
+                case .leaving?:
+                    position += run.count
+                    for slice in run {
+                        let progress = glyph < exits.count ? min(1, max(0, now.timeIntervalSince(exits[glyph]) / Self.fadeSeconds)) : 0
+                        glyph += 1
+                        guard progress < 1 else { continue }
+                        var copy = context
+                        copy.opacity = 1 - progress
+                        if lifts { copy.translateBy(x: 0, y: -Self.lift * CGFloat(1 - (1 - progress) * (1 - progress))) }
+                        copy.draw(slice)
+                    }
+                case .waiting?:
+                    let shown = drawPlain(run, in: &context)
+                    if shimmers { waiting.append(contentsOf: shown) }
+                case nil:
+                    _ = drawPlain(run, in: &context)
+                }
+            }
+        }
+        guard !waiting.isEmpty else { return }
+        // The waiting glyphs once more, filled with a magic gradient that drifts across the row.
+        let bounds = layout.reduce(CGRect.null) { $0.union($1.typographicBounds.rect) }
+        let phase = now.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: Self.shimmerPeriod) / Self.shimmerPeriod
+        var overlay = context
+        overlay.opacity = 0.6
+        overlay.clipToLayer { mask in for slice in waiting { mask.draw(slice) } }
+        let width = max(bounds.width, 1)
+        overlay.fill(Path(bounds), with: .linearGradient(Gradient(colors: MagicGradient.colors),
+                                                         startPoint: CGPoint(x: bounds.minX - width + 2 * width * phase, y: bounds.midY),
+                                                         endPoint: CGPoint(x: bounds.minX + 2 * width * phase, y: bounds.midY)))
+    }
+}
+
 /// The dictation preview text: a clearly readable secondary colour, one line centred vertically, two lines filling the row, and
-/// a soft fade at the first line's leading edge when the head of the text is cut off.
+/// a soft fade at the first line's leading edge when the head of the text is cut off. While a staged take shows it: the unit
+/// being typed leaves letter by letter, words waiting for cleanup shimmer, and a tap (which sends them) blooms from the
+/// touch point (`canSend`; a tap on nothing to send does nothing). A swipe up sends the words as spoken, and the text swooshes
+/// up once (no colours, no bloom; none with Reduce Motion).
 private struct PreviewRow: View {
     let text: String
+    let layout: StagedDictation.PreviewLayout?
+    let canSend: Bool
+    /// A tap that sends, at the touch point (the row's own coordinates).
+    let onSend: (CGPoint) -> Void
+    /// A swipe up: send without cleanup.
+    let onSendRaw: () -> Void
+    /// Whether the current drag already sent; resets when the drag ends or is cancelled (iOS may cancel an upward touch at once).
+    @GestureState private var swipeFired = false
+    /// The swoosh: the text lifts and dims a little, then settles back.
+    @State private var swoosh = false
+    @State private var scroll = ExitScroll()
+    @State private var reveal = PreviewReveal()
+    /// Flips when a reveal finishes, so the timeline pauses again.
+    @State private var revealSettled = false
     @State private var textHeight = 0.0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// When each letter of the leaving unit went into the field (`PreviewRenderer.exits`).
+    @State private var exits: [Date] = []
+    /// The unit that just left, so the rest can settle into its place.
+    @State private var lastLeaving = ""
+    @State private var settleOffset: CGFloat = 0
+
+    private var leavingText: String {
+        guard let layout else { return "" }
+        return String(Array(layout.text)[layout.leaving.clamped(to: 0..<layout.text.count)])
+    }
+    private var exited: Int { layout?.exited ?? 0 }
 
     var body: some View {
         GeometryReader { proxy in
             let height = Double(proxy.size.height)
             let size = WordRowHeight.previewFontSize(rowHeight: height)
             let single = WordRowHeight.previewIsSingleLine(textHeight: textHeight, size: size)
-            let truncated = WordRowHeight.previewTruncated(textHeight: textHeight, rowHeight: height, prefixed: text.hasPrefix("…"))
-            Text(text)
-                .font(.system(size: CGFloat(size)))
-                .lineSpacing(CGFloat(WordRowHeight.previewLineSpacing(size: size)))
-                .foregroundStyle(Color(uiColor: .secondaryLabel))
-                .multilineTextAlignment(.leading)
-                .fixedSize(horizontal: false, vertical: true)
-                .onGeometryChange(for: Double.self) { Double($0.size.height) } action: { textHeight = $0 }
-                .frame(width: max(proxy.size.width - 2 * CGFloat(WordRowLayout.previewInset), 0), alignment: .leading)
-                .padding(.horizontal, CGFloat(WordRowLayout.previewInset))
-                .padding(.bottom, single ? 0 : CGFloat(WordRowHeight.previewPadding(rowHeight: height, size: size)))
-                .frame(width: proxy.size.width, height: proxy.size.height, alignment: single ? .leading : .bottomLeading)
-                .clipped()
-                .mask {
-                    VStack(spacing: 0) {
-                        // The first line's leading edge; the second line is solid.
-                        HStack(spacing: 0) {
-                            Color.black.frame(width: CGFloat(WordRowLayout.previewInset))
-                            LinearGradient(colors: [truncated ? .clear : .black, .black], startPoint: .leading, endPoint: .trailing)
-                                .frame(width: CGFloat(WordRowHeight.previewFadeWidth))
-                            Color.black
-                        }
-                        .frame(height: proxy.size.height / 2)
+            let truncated = WordRowHeight.previewTruncated(textHeight: textHeight, rowHeight: height, prefixed: text.hasPrefix("…")) && (layout?.leaving.isEmpty ?? true)
+            let _ = revealSettled
+            let _ = reveal.update(text: text, placeholder: KeyboardController.listening, enabled: !reduceMotion)
+            let animating = exits.contains { Date().timeIntervalSince($0) < PreviewRenderer.fadeSeconds + 0.1 } || reveal.hidden > 0
+            let shimmers = !reduceMotion && !(layout?.waiting.isEmpty ?? true)
+            TimelineView(.animation(minimumInterval: 1.0 / 60, paused: !animating && !shimmers)) { timeline in
+                let hadHidden = reveal.hidden > 0
+                let settled = reveal.advance(now: timeline.date, total: text.count)
+                let _ = { if hadHidden && settled { Task { @MainActor in revealSettled.toggle() } } }()
+                composed
+                    .font(.system(size: CGFloat(size)))
+                    .lineSpacing(CGFloat(WordRowHeight.previewLineSpacing(size: size)))
+                    .foregroundStyle(Color(uiColor: .secondaryLabel))
+                    .multilineTextAlignment(.leading)
+                    .textRenderer(PreviewRenderer(now: timeline.date, exits: exits, shimmers: shimmers, lifts: !reduceMotion, scroll: scroll, hidden: reveal.hidden))
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .onGeometryChange(for: Double.self) { Double($0.size.height) } action: { textHeight = $0 }
+            .offset(x: settleOffset, y: swoosh ? -Self.swooshLift : 0)
+            .opacity(swoosh ? 0.55 : 1)
+            .frame(width: max(proxy.size.width - 2 * CGFloat(WordRowLayout.previewInset), 0), alignment: .leading)
+            .padding(.horizontal, CGFloat(WordRowLayout.previewInset))
+            .padding(.bottom, single ? 0 : CGFloat(WordRowHeight.previewPadding(rowHeight: height, size: size)))
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: single ? .leading : .bottomLeading)
+            .clipped()
+            .mask {
+                VStack(spacing: 0) {
+                    // The first line's leading edge; the second line is solid.
+                    HStack(spacing: 0) {
+                        Color.black.frame(width: CGFloat(WordRowLayout.previewInset))
+                        LinearGradient(colors: [truncated ? .clear : .black, .black], startPoint: .leading, endPoint: .trailing)
+                            .frame(width: CGFloat(WordRowHeight.previewFadeWidth))
                         Color.black
                     }
+                    .frame(height: proxy.size.height / 2)
+                    Color.black
                 }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture(coordinateSpace: .local) { point in
+                guard canSend else { return }
+                onSend(point)
+            }
+            // A drag never also taps: the tap fails once the finger has moved. It fires while moving, once per drag.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: Self.swipeDistance, coordinateSpace: .local)
+                    .updating($swipeFired) { value, fired, _ in
+                        guard !fired, canSend else { return }
+                        let dx = value.translation.width, dy = value.translation.height
+                        guard dy <= -Self.swipeDistance, abs(dy) > 2 * abs(dx) else { return }
+                        fired = true
+                        Task { @MainActor in
+                            onSendRaw()
+                            playSwoosh()
+                        }
+                    })
+            .onChange(of: exited) { old, new in
+                if new > old { exits.append(contentsOf: Array(repeating: Date(), count: new - old)) } else { exits = [] }
+            }
+            .onChange(of: leavingText) { old, new in
+                if new.isEmpty {
+                    exits = []
+                    settle(after: old, fontSize: CGFloat(size), width: proxy.size.width)
+                }
+            }
+        }
+    }
+
+    /// The text with its roles marked (`PreviewRole`); a plain text when no staged take owns it.
+    private var composed: Text {
+        let prefix = text.hasPrefix("…") ? "…" : ""
+        guard let layout, layout.text == String(text.dropFirst(prefix.count)) else { return Text(text) }
+        let body = Array(layout.text)
+        var roles = [PreviewRole?](repeating: nil, count: body.count)
+        for range in layout.waiting { for index in range.clamped(to: 0..<body.count) { roles[index] = .waiting } }
+        for index in layout.leaving.clamped(to: 0..<body.count) { roles[index] = .leaving }
+        var result = Text(prefix)
+        var start = 0
+        while start < body.count {
+            var end = start + 1
+            while end < body.count, roles[end] == roles[start] { end += 1 }
+            var piece = Text(String(body[start..<end]))
+            if let role = roles[start] { piece = piece.customAttribute(role) }
+            result = Text("\(result)\(piece)")
+            start = end
+        }
+        return result
+    }
+
+    /// The least upward travel, in points, that is a swipe (an estimate to tune on the phone).
+    private static let swipeDistance: CGFloat = 20
+    private static let swooshLift: CGFloat = 10
+
+    /// A brief upward lift of the text, dimmed, then back; the letters leave as they type, as for a tap. Reduce Motion: none.
+    private func playSwoosh() {
+        guard !reduceMotion else { return }
+        withAnimation(.easeOut(duration: 0.12)) { swoosh = true }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            withAnimation(.easeIn(duration: 0.2)) { swoosh = false }
+        }
+    }
+
+    /// The unit has left: the rest was laid out behind it and now starts where the unit did, so it slides from where it stood
+    /// (a short move; the distance is the unit's width, at most `maxSettle`, an estimate). Reduce Motion: no move.
+    private static let maxSettle: CGFloat = 48
+    private func settle(after unit: String, fontSize: CGFloat, width: CGFloat) {
+        guard !reduceMotion, !unit.isEmpty else { return }
+        let measured = unit.size(withAttributes: [.font: UIFont.systemFont(ofSize: fontSize)]).width
+        var instant = Transaction(animation: nil)
+        instant.disablesAnimations = true
+        withTransaction(instant) { settleOffset = min(Self.maxSettle, measured) }
+        Task { @MainActor in
+            withAnimation(.easeOut(duration: 0.22)) { settleOffset = 0 }
         }
     }
 }

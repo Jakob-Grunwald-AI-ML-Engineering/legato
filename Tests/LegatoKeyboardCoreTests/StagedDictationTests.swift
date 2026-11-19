@@ -26,6 +26,51 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         #expect(take.nextReady?.text == "Hello there!")
     }
 
+    /// #313: the magic shimmer means "thinking": a closed unit waiting for cleanup, never the open unit still collecting words.
+    @Test func onlyAClosedUnitAwaitingCleanupIsWaiting() {
+        var take = StagedDictation()
+        let open = LiveSegment(id: 1, text: "Open words", final: true, ready: false, closed: false)
+        let closed = LiveSegment(id: 0, text: "Sent.", final: true, ready: false, closed: true)
+        take.receive(snapshot(1, [closed, open], head: "head"))
+        #expect(take.previewLayout.waiting == [0..<5], "only the closed unit")
+        var run = LiveDictationRun(staged: true, manual: true)
+        _ = run.addFinal(key: 0, text: "Hello there my friend how are you.")
+        #expect(run.snapshot.segments.first?.closed == false, "manual: the open unit stays open past a sentence end")
+        _ = run.flush()
+        #expect(run.snapshot.segments.first?.closed == true)
+    }
+
+    /// #313: how much of the unit's own text is in the field drives the row's exit; the separator is not the unit's.
+    @Test func exitProgressCountsTheUnitsOwnGraphemesAndNotItsSeparator() {
+        var take = StagedDictation()
+        take.receive(snapshot(1, [unit(0, "One two."), unit(1, "Next.", ready: false)], head: "more"))
+        #expect(take.previewLayout.leaving == 0..<0 && take.previewLayout.waiting == [9..<14])
+        take.begin(0, typed: " One two.")
+        take.sent(" ")
+        #expect(take.exited == 0 && take.started)
+        take.sent("O"); take.sent("n")
+        var layout = take.previewLayout
+        #expect(layout.text == "One two. Next. more" && layout.leaving == 0..<8 && layout.exited == 2 && layout.waiting == [9..<14])
+        take.sent("e two.") // a flushed rest, then the trailing separator past the unit's end
+        take.sent(" ")
+        layout = take.previewLayout
+        #expect(layout.exited == 8 && take.preview == layout.text)
+        #expect(layout.dropping(4).leaving == 0..<4 && layout.dropping(4).exited == 4 && layout.dropping(4).text == "two. Next. more")
+        take.delivered(0)
+        #expect(take.exited == 0 && !take.started && take.previewLayout.leaving == 0..<0 && take.preview == "Next. more")
+    }
+
+    @Test func aLongBurstNeverStallsAndTheUnverifiedBoundCountsOnlyBeforeTheUnitStarts() {
+        var take = StagedDictation()
+        take.receive(snapshot(1, [unit(0, "A long unit.")], complete: true))
+        take.begin(0, typed: "A long unit.")
+        #expect(take.isStalled(inFlightMs: 2_000, unverifiedInput: true), "Not started: the unverified bound holds")
+        take.sent("A")
+        // The caller counts from the latest piece: a burst of any length keeps resetting it, and once started the short bound is gone.
+        #expect(!take.isStalled(inFlightMs: 35, unverifiedInput: false) && !take.isStalled(inFlightMs: 9_999, unverifiedInput: true))
+        #expect(take.isStalled(inFlightMs: StagedDictation.stallMs, unverifiedInput: false))
+    }
+
     @Test func unitsAreTypedInOrderAndLeaveThePreviewOnceInTheField() throws {
         var take = StagedDictation()
         // Unit 1 is ready before unit 0: it waits behind it.
@@ -58,21 +103,23 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         #expect(take.deliveredThrough == 0 && take.nextReady?.id == 1)
     }
 
-    @Test func aFieldChangeHoldsTheRestForRecoveryAndKeepsLaterUnitsToo() {
+    @Test func aFieldChangeHoldsDeliveryAndTheRestStaysInThePreviewUntilResumed() {
         var take = StagedDictation()
         take.receive(snapshot(1, [unit(0, "One."), unit(1, "Two.", ready: false), unit(2, "Three.", ready: false)], head: "four"))
         take.begin(0, typed: "One.")
         take.delivered(0)
         take.begin(1, typed: " Two.")
-        // The insert of unit 1 did not stand: it may not have landed, so it is kept with the rest (raw where no cleanup came).
-        #expect(take.hold() == "Two. Three.")
+        // The insert of unit 1 did not stand: it may not have landed, so it stays pending with the rest (raw where no cleanup came).
+        take.hold()
         #expect(take.held && take.nextReady == nil && take.inFlight == nil)
-        #expect(take.preview == "four", "Only the head is still being spoken")
-        // A unit that becomes ready after the hold joins what is kept; the unit that was kept raw does not come again.
-        let more = take.receive(snapshot(2, [unit(0, "One."), unit(1, "Two."), unit(2, "Three."), unit(3, "Four.")], complete: true))
-        #expect(more == "Two. Three. Four.")
-        #expect(take.kept == "Two. Three. Four.")
-        #expect(take.receive(snapshot(2, [unit(0, "One.")])) == nil, "An older snapshot changes nothing")
+        #expect(take.preview == "Two. Three. four", "Back in the preview as pending, nothing typed")
+        // A unit that becomes ready after the hold joins them; an older snapshot changes nothing.
+        take.receive(snapshot(2, [unit(0, "One."), unit(1, "Two."), unit(2, "Three."), unit(3, "Four.")], complete: true))
+        take.receive(snapshot(1, [unit(0, "One.")]))
+        #expect(take.preview == "Two. Three. Four." && take.nextReady == nil)
+        // Sent again by the person: delivery resumes with the first unit not in the field.
+        take.resume()
+        #expect(!take.held && take.nextReady?.id == 1)
     }
 
     @Test func aStagedUnitIsTypedAsSpeechWhileInputIsUnverified() {
@@ -91,7 +138,7 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         #expect(applied, "Confirmed, so the take records it as delivered")
     }
 
-    @Test func aUnitTheQueueHoldsOnUnverifiedInputIsKeptAfterABoundAndTheNextTakeIsNotBlocked() {
+    @Test func aUnitTheQueueHoldsOnUnverifiedInputIsHeldAfterABoundAndTheNextTakeIsNotBlocked() {
         // A unit that is not speech (or any unit the queue cannot place) stays queued under unverified input: the bound keeps it.
         var queue = FieldQueue()
         let report = FieldQueue.Report(before: "If the weather holds.")
@@ -111,13 +158,13 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         queue.cancelEdit(edit.id)
         let dropped = queue.drainEvents().contains { if case .dropped(let drop) = $0 { drop.id == edit.id } else { false } }
         #expect(dropped)
-        #expect(take.hold() == "The plan. Then coffee.")
-        #expect(!take.hasUndelivered && take.nextReady == nil && !take.isStalled(inFlightMs: 60_000, unverifiedInput: true))
+        take.hold()
+        #expect(take.hasUndelivered && take.preview == "The plan. Then coffee." && take.nextReady == nil && !take.isStalled(inFlightMs: 60_000, unverifiedInput: true))
         take.receive(snapshot(1, [unit(0, "Fresh start.")], complete: true, run: "next"))
         #expect(!take.held && take.nextReady?.text == "Fresh start.")
     }
 
-    @Test func keptTextInsertsWithTheSeparatorOfTheFieldAtTheCaret() {
+    @Test func aUnitInsertedAtTheCaretTakesTheSeparatorOfTheFieldThere() {
         // The field says "...simple." with the caret right after it: the space comes from the shared rule.
         #expect(FieldInsertion.prepare("I think so.", contextBefore: "It is simple.", capitalization: .none) == " I think so.")
         #expect(FieldInsertion.prepare("I think so.", contextBefore: "It is simple. ", capitalization: .none) == "I think so.")
@@ -177,7 +224,7 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         let shown = run.setCleaned(key: 0, text: "We should ship it on Friday.")
         #expect(shown, "Published at once, the take still going")
         let segments = run.snapshot.segments
-        #expect(segments.first == .init(id: 0, text: "We should ship it on Friday.", cleaned: true, final: true, ready: true))
+        #expect(segments.first == .init(id: 0, text: "We should ship it on Friday.", cleaned: true, final: true, ready: true, closed: true))
         #expect(run.snapshot.staged == true && !run.snapshot.complete)
     }
 
@@ -205,5 +252,55 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         #expect(segment.ready == true && segment.cleaned == false && segment.text == "this is raw but long enough to close.")
         let twice = run.setRaw(key: 0)
         #expect(!twice)
+    }
+
+    @Test func aCleanupResultThatArrivesAfterTheRawWordsStoodChangesNothing() {
+        var run = LiveDictationRun(runID: "r", staged: true, manual: true)
+        run.addFinal(key: 0, text: "send this raw please")
+        let open = run.flush()
+        #expect(open != nil && run.setRaw(key: open!.key))
+        let version = run.version
+        let late = run.setCleaned(key: 0, text: "Send this, raw please.")
+        #expect(!late)
+        #expect(run.version == version && run.snapshot.segments[0].text == "send this raw please")
+    }
+}
+
+/// A take the keyboard did not see begin (it appeared, or its view was recreated, while the app kept the take going).
+@Suite struct StagedAppearanceTests {
+    @Test func aRunStillSpokenAfterTheAppearanceContinuesAndAnEndedOneDoesNot() {
+        let seen = snapshot(4, [unit(0, "Hello.", ready: false)], head: "and")
+        #expect(snapshot(5, [unit(0, "Hello.", ready: false)], head: "and more").continues(seen), "a later version, still spoken")
+        #expect(!seen.continues(seen), "the version seen at the appearance itself")
+        #expect(!snapshot(5, [unit(0, "Hello.")], head: "", run: "other").continues(seen), "another run")
+        var stopped = snapshot(5, [unit(0, "Hello.")]); stopped.stopped = true
+        var paused = snapshot(5, [unit(0, "Hello.")]); paused.paused = true
+        #expect(!stopped.continues(seen) && !paused.continues(seen) && !snapshot(6, [unit(0, "Hello.")], complete: true).continues(seen),
+                "hiding ended a stopped, paused or complete run: it stays in History")
+        #expect(paused.isCapturing == false && snapshot(1, []).isCapturing)
+    }
+
+    @Test func adoptingARunSkipsTheUnitsAnEarlierAppearanceTypedAndKeepsAHeldRunHeld() {
+        var take = StagedDictation()
+        take.receive(snapshot(7, [unit(0, "One."), unit(1, "Two."), unit(2, "Three.", ready: false)], head: "four"))
+        take.adopt(.init(runID: "take", version: 6, stats: .init(), delivered: true, deliveredThrough: 0))
+        #expect(take.deliveredThrough == 0 && take.nextReady?.text == "Two." && take.preview == "Two. Three. four")
+
+        var held = StagedDictation()
+        held.receive(snapshot(7, [unit(0, "One."), unit(1, "Two.")]))
+        held.adopt(.init(runID: "take", version: 6, stats: .init(), delivered: false, deliveredThrough: 0, ended: true))
+        #expect(held.held && held.nextReady == nil && held.preview == "Two.", "pending for the person's tap, never retyped on its own")
+
+        var fresh = StagedDictation()
+        fresh.receive(snapshot(2, [unit(0, "One.")]))
+        fresh.adopt(.init(runID: "other", version: 9, stats: .init(), delivered: false, deliveredThrough: 3, ended: true))
+        #expect(!fresh.held && fresh.deliveredThrough == nil, "another run's receipt changes nothing")
+    }
+
+    @Test func theLinkKeepsTheLastNotesInOrder() {
+        let link = LiveDictationLink(store: LinkStore(MemoryLinkStore()))
+        for i in 0..<(LiveDictationLink.noteLimit + 3) { link.note(.init(runID: "r", event: "e\(i)", version: i)) }
+        let notes = link.notes()
+        #expect(notes.count == LiveDictationLink.noteLimit && notes.first?.event == "e3" && notes.last?.version == LiveDictationLink.noteLimit + 2)
     }
 }

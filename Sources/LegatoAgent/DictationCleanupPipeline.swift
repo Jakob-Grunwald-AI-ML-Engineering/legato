@@ -12,6 +12,17 @@ public struct DictationCleanedLine: Sendable, Equatable {
     public let reason: String?
     /// What failed, for diagnostics (an error case or type name, never text); nil when cleaned or timed out.
     public var detail: String? = nil
+    /// How the request went (nil when none finished, or for a speculative result reused: those are the speculation's own).
+    public var metrics: CleanupMetrics? = nil
+    /// Milliseconds the line waited for a free slot before its request began (nil when not measured).
+    public var queueWaitMs: Int? = nil
+    /// Whether the result came from a speculative request (`speculate`): `landed` was already done when the line began
+    /// cleaning, `inflight` it was still running and was awaited, nil: no speculation was used.
+    public var speculation: String? = nil
+    public static func == (a: Self, b: Self) -> Bool {
+        a.sequence == b.sequence && a.lineID == b.lineID && a.raw == b.raw && a.text == b.text && a.status == b.status
+            && a.reason == b.reason && a.detail == b.detail
+    }
 }
 
 /// Cheap sanity checks on a cleanup result. Cleanup only punctuates, recases, drops fillers and fixes sounds, so
@@ -92,11 +103,22 @@ public enum DictationCleanupGuard {
     }
 }
 
-/// Cleans dictated lines one call each, at most two in flight, and hands them on strictly in speaking order.
+/// Cleans dictated lines one call each, up to `maxConcurrency` in flight at once, and hands them on strictly in speaking order
+/// (a later line that finishes first waits for the earlier ones).
 /// A line whose call fails, is rejected by the guard or takes longer than `timeout` goes on raw: dictation never
 /// waits on the model beyond that.
 public actor DictationCleanupPipeline {
-    private struct Pending { let sequence: Int; let lineID: String; let raw: String; let textBefore: String; let allowsEmpty: Bool }
+    private struct Pending { let sequence: Int; let lineID: String; let raw: String; let textBefore: String; let allowsEmpty: Bool; let enqueued: ContinuousClock.Instant }
+    /// A speculative request (`speculate`): the text it cleans, what stood before it, and its running task.
+    private struct Speculation {
+        let id: UUID; let raw: String; let textBefore: String
+        let task: Task<ValidatedSentence, any Error>
+        var settled = false
+    }
+    private var speculation: Speculation?
+    /// Lines cleaned at once. Units are independent requests; delivery order is kept by sequence below, so more slots only
+    /// remove queueing (two slots made units wait behind each other).
+    public static let maxConcurrency = 6
     private let cleaner: any SentenceCleaning
     private let vocabulary: [String]
     private let timeout: Duration
@@ -113,11 +135,11 @@ public actor DictationCleanupPipeline {
     private var generation = UUID()
     private var tasks: [Int: Task<Void, Never>] = [:]
 
-    public init(cleaner: any SentenceCleaning, vocabulary: [String] = [], timeout: Duration = .milliseconds(2500), concurrency: Int = 2,
+    public init(cleaner: any SentenceCleaning, vocabulary: [String] = [], timeout: Duration = .milliseconds(2500), concurrency: Int = 4,
                 deliver: @escaping @Sendable (DictationCleanedLine) async -> Void) {
         self.cleaner = cleaner
         self.vocabulary = Array(vocabulary.prefix(200))
-        self.timeout = timeout; self.concurrency = max(1, min(2, concurrency)); self.deliver = deliver
+        self.timeout = timeout; self.concurrency = max(1, min(Self.maxConcurrency, concurrency)); self.deliver = deliver
     }
 
     public var inFlightCount: Int { inFlight.count }
@@ -133,13 +155,42 @@ public actor DictationCleanupPipeline {
             firstSequence = firstSequence ?? sequence; nextDelivery = sequence
         }
         known[sequence] = raw
-        queue.append(Pending(sequence: sequence, lineID: lineID, raw: raw, textBefore: String(textBefore.suffix(600)), allowsEmpty: allowsEmpty))
+        queue.append(Pending(sequence: sequence, lineID: lineID, raw: raw, textBefore: String(textBefore.suffix(600)), allowsEmpty: allowsEmpty, enqueued: .now))
         queue.sort { $0.sequence < $1.sequence }
         pump()
     }
 
+    /// Starts cleaning `raw` before its unit is sent (the voice agents' speculative turn): nothing is delivered. When a line
+    /// with exactly this text (and `textBefore`) is submitted later, it takes this result (waiting for it if still running);
+    /// any other line, or `cancelSpeculation()`, drops it. One speculative request at a time: a newer one cancels the older.
+    /// Returns false when this exact text is already being cleaned speculatively.
+    @discardableResult
+    public func speculate(lineID: String, sequence: Int, raw: String, textBefore: String) -> Bool {
+        let before = String(textBefore.suffix(600))
+        if let current = speculation, current.raw == raw, current.textBefore == before { return false }
+        speculation?.task.cancel()
+        let previous = known.filter { $0.key < sequence }.sorted { $0.key < $1.key }.map(\.value).filter { !$0.isEmpty }.suffix(2).map { $0 }
+        let input = SentenceCleanupInput(sentenceID: lineID, sequence: sequence, text: raw, vocabulary: vocabulary,
+                                         dictation: .init(previousLines: previous, textBeforeCursor: before))
+        let id = UUID()
+        let task = Task<ValidatedSentence, any Error> { [weak self, cleaner] in
+            do {
+                let sentence = try await cleaner.clean(input)
+                await self?.settle(speculation: id)
+                return sentence
+            } catch { await self?.settle(speculation: id); throw error }
+        }
+        speculation = Speculation(id: id, raw: raw, textBefore: before, task: task)
+        return true
+    }
+    private func settle(speculation id: UUID) { if speculation?.id == id { speculation?.settled = true } }
+    /// The speculative request's raw text, while one is running or landed and unused.
+    public var speculativeText: String? { speculation?.raw }
+    public func cancelSpeculation() { speculation?.task.cancel(); speculation = nil }
+
     /// Drops everything pending: a new keyboard session starts with no context.
     public func reset() {
+        cancelSpeculation()
         generation = UUID()
         for task in tasks.values { task.cancel() }
         tasks = [:]; delivering = false; queue = []; inFlight = []; finished = [:]; known = [:]; firstSequence = nil; nextDelivery = 0
@@ -152,23 +203,41 @@ public actor DictationCleanupPipeline {
             let previous = known.filter { $0.key < line.sequence }.sorted { $0.key < $1.key }.map(\.value).filter { !$0.isEmpty }.suffix(2).map { $0 }
             let context = DictationCleanupContext(previousLines: previous, textBeforeCursor: line.textBefore)
             let token = generation
-            tasks[line.sequence] = Task { [cleaner, vocabulary, timeout] in
-                let outcome = await Self.race(cleaner: cleaner, timeout: timeout, input: .init(
-                    sentenceID: line.lineID, sequence: line.sequence, text: line.raw, vocabulary: vocabulary, dictation: context))
-                await self.complete(line, outcome: outcome, generation: token)
+            let waited = line.enqueued.duration(to: .now).components
+            let queueWaitMs = Int(waited.seconds * 1000 + waited.attoseconds / 1_000_000_000_000_000)
+            // A speculative request for exactly this text (and context) is this line's call; any other is stale.
+            var spec: Speculation?
+            if let held = speculation {
+                if held.raw == line.raw, held.textBefore == line.textBefore { spec = held; speculation = nil } else { cancelSpeculation() }
+            }
+            let input = SentenceCleanupInput(sentenceID: line.lineID, sequence: line.sequence, text: line.raw, vocabulary: vocabulary, dictation: context)
+            tasks[line.sequence] = Task { [cleaner, timeout, spec] in
+                let outcome = await Self.race(cleaner: cleaner, timeout: timeout, input: input, speculative: spec?.task)
+                await self.complete(line, outcome: outcome, generation: token, queueWaitMs: queueWaitMs,
+                                    speculation: spec.map { $0.settled ? "landed" : "inflight" })
             }
         }
     }
 
-    private enum Outcome { case cleaned(String), failed(String), timedOut }
+    private enum Outcome { case cleaned(String, CleanupMetrics?), failed(String), timedOut }
     private static func describe(_ error: any Error) -> String {
         if let known = error as? SentenceCleanupError { return "\(known)" }
         return String(describing: type(of: error)) + ((error as NSError).code != 0 ? "#\((error as NSError).code)" : "")
     }
-    private static func race(cleaner: any SentenceCleaning, timeout: Duration, input: SentenceCleanupInput) async -> Outcome {
+    private static func race(cleaner: any SentenceCleaning, timeout: Duration, input: SentenceCleanupInput,
+                             speculative: Task<ValidatedSentence, any Error>? = nil) async -> Outcome {
         await withTaskGroup(of: Outcome.self) { group in
             group.addTask {
-                do { return .cleaned(try await cleaner.clean(input).text) } catch { return .failed(Self.describe(error)) }
+                do {
+                    if let speculative {
+                        // The speculative request is awaited, not restarted; if it failed the line is cleaned afresh.
+                        let result = await withTaskCancellationHandler { await speculative.result } onCancel: { speculative.cancel() }
+                        if case .success(let sentence) = result { return .cleaned(sentence.text, sentence.metrics) }
+                        try Task.checkCancellation()
+                    }
+                    let sentence = try await cleaner.clean(input)
+                    return .cleaned(sentence.text, sentence.metrics)
+                } catch { return .failed(Self.describe(error)) }
             }
             group.addTask {
                 try? await Task.sleep(for: timeout)
@@ -180,20 +249,22 @@ public actor DictationCleanupPipeline {
         }
     }
 
-    private func complete(_ line: Pending, outcome: Outcome, generation token: UUID) async {
+    private func complete(_ line: Pending, outcome: Outcome, generation token: UUID, queueWaitMs: Int? = nil, speculation: String? = nil) async {
         guard token == generation else { return }
         tasks[line.sequence] = nil; inFlight.remove(line.sequence)
         var result = DictationCleanedLine(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: line.raw, status: .raw, reason: nil)
         switch outcome {
-        case .cleaned(let text) where !line.allowsEmpty && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !text.contains(where: \.isNewline):
+        case .cleaned(let text, _) where !line.allowsEmpty && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !text.contains(where: \.isNewline):
             result = .init(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: line.raw, status: .raw, reason: "failed", detail: "\(SentenceCleanupError.invalidText)")
-        case .cleaned(let text) where DictationCleanupGuard.accepts(raw: line.raw, cleaned: text):
+        case .cleaned(let text, _) where DictationCleanupGuard.accepts(raw: line.raw, cleaned: text):
             let text = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !text.contains(where: \.isNewline) ? "" : text
             result = .init(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: text, status: .cleaned, reason: nil)
         case .cleaned: result = .init(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: line.raw, status: .raw, reason: "rejected")
         case .timedOut: result = .init(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: line.raw, status: .raw, reason: "timeout")
         case .failed(let detail): result = .init(sequence: line.sequence, lineID: line.lineID, raw: line.raw, text: line.raw, status: .raw, reason: "failed", detail: detail)
         }
+        if case .cleaned(_, let metrics) = outcome { result.metrics = metrics }
+        result.queueWaitMs = queueWaitMs; result.speculation = speculation
         known[line.sequence] = result.text
         finished[line.sequence] = result
         pump()

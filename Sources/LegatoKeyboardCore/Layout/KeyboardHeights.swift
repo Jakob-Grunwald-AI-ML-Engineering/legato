@@ -7,19 +7,22 @@ import Foundation
 public enum WordRowHeight {
     public static let visible = 44.0
     public static let portraitSystemTop = 17.0
-    public static let portrait = visible - portraitSystemTop
+    /// Room added to the portrait row beyond the native prediction row (#313), so the two-line dictation preview breathes. The
+    /// whole keyboard grows by it: the row sits above the tool row and the typing grid keeps its place on the screen.
+    public static let portraitPreviewRoom = 3.0
+    public static let portrait = visible - portraitSystemTop + portraitPreviewRoom
     public static let strip = portrait
 
     public static func content(landscape: Bool) -> Double { landscape ? visible : portrait }
 
     /// Two lines of the dictation preview (#312) must fit the row as it is: the row never grows or shrinks for a take (the
-    /// compact strip stays reachable, and the native prediction frame is its size). The largest size whose two lines and the
-    /// padding fit; 11 pt in portrait (27 pt row), which is the readable floor: lines touch with no extra spacing and the
-    /// remaining fraction of a point is the padding. The line height is an ESTIMATE (1.2 x the size, SF's usual), not measured.
+    /// compact strip stays reachable). The largest size whose two lines, a line spacing of 0.1 x the size and `previewMinPadding`
+    /// above and below fit: 11 pt in portrait (30 pt row: 26.4 + 1.1 + 2 x 1.25 pt of air; 12 pt would need 32 pt), 13 pt in
+    /// landscape (44 pt row). The line height is an ESTIMATE (1.2 x the size, SF's usual), not measured.
     public static let previewSizes: [Double] = [13, 12, 11]
     public static func previewLineHeight(size: Double) -> Double { size * 1.2 }
-    public static func previewLineSpacing(size: Double) -> Double { 0 }
-    public static let previewMinPadding = 0.0
+    public static func previewLineSpacing(size: Double) -> Double { 0.1 * size }
+    public static let previewMinPadding = 1.0
     public static func previewContentHeight(size: Double) -> Double { 2 * previewLineHeight(size: size) + previewLineSpacing(size: size) }
     public static func previewFontSize(rowHeight: Double) -> Double {
         previewSizes.first { previewContentHeight(size: $0) + 2 * previewMinPadding <= rowHeight } ?? previewSizes[previewSizes.count - 1]

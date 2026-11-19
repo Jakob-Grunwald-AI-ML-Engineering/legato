@@ -8,6 +8,11 @@ import LegatoAgent
 public enum DictationSendSetting {
     public enum Mode: String, CaseIterable, Sendable { case onStop, afterPause, live }
     public static let modeKey = "dictation.send"
+    /// What sends the words of an "As you speak" take on the iPhone (#313): the user's tap on the preview (`manual`) or each
+    /// finished sentence (`sentence`). Read once when a run starts.
+    public enum LiveSend: String, CaseIterable, Sendable { case manual, sentence }
+    public static let liveSendKey = "dictation.liveSend"
+    public static let defaultLiveSend = LiveSend.manual
     /// Which model cleans each finished sentence in `live` (`haiku`, `sonnet`).
     public static let cleanupModelKey = "dictation.cleanupModel"
     public static let pauseKey = "dictation.pause"
@@ -25,6 +30,9 @@ public enum DictationSendSetting {
     }
     public static func mode(in defaults: UserDefaults = .standard) -> Mode {
         Mode(rawValue: defaults.string(forKey: modeKey) ?? "") ?? defaultMode
+    }
+    public static func liveSend(in defaults: UserDefaults = .standard) -> LiveSend {
+        LiveSend(rawValue: defaults.string(forKey: liveSendKey) ?? "") ?? defaultLiveSend
     }
     /// Haiku or Sonnet; anything else (a stale or unknown value) is the default.
     public static func cleanupModel(in defaults: UserDefaults = .standard) -> ModelChoice {

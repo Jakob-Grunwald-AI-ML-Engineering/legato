@@ -4,7 +4,7 @@ import SwiftUI
 /// The compact layout: the word row (live words, dictation and instruction status) above one row of keys, as
 /// high as `KeyboardController.stripHeight`: chevron (open the full keyboard), the globe key (when iOS asks for
 /// it), magic, mic, undo, redo, delete, return. `StripRow` decides the slots and widths for the keyboard width and the
-/// touch areas that tile the row; `StripGeometry` the heights. A swipe up expands.
+/// touch areas that tile the row; `StripGeometry` the heights.
 struct StripView: View {
     let controller: KeyboardController
 
@@ -34,7 +34,6 @@ struct StripView: View {
             .accessibilityIdentifier("typing.predictions")
             // Not clear: the keyboard gets no touches on fully clear pixels.
             .background(Color.black.opacity(0.001))
-            .expansionSwipe(controller)
             #if DEBUG
             .simultaneousGesture(LongPressGesture(minimumDuration: 0.8).onEnded { _ in controller.cycleStripHeight() })
             #endif
@@ -73,13 +72,9 @@ struct StripView: View {
                         StripReturnKey(typing: typing, insets: insets)
                     }
                 }
-                // Each key takes the swipe itself, beside its tap; the gaps and margins take it below.
-                .expansionSwipe(controller)
                 .frame(width: cell.hitWidth, height: g.rowHeight)
             }
         }
         .frame(width: width, height: g.rowHeight, alignment: .leading)
-        // Not `Color.clear`: the keyboard gets no touches on fully clear pixels.
-        .background(Color.black.opacity(0.001).expansionSwipe(controller))
     }
 }

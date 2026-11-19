@@ -17,8 +17,13 @@ public struct LiveSegment: Codable, Equatable, Sendable {
     /// Staged takes only (`LiveDictationSnapshot.staged`): the segment is a cleanup unit and its text is final, cleaned or
     /// (cleanup failed or ran out of time) the raw words. A segment that is not ready shows its raw words in the preview.
     public var ready: Bool?
-    public init(id: Int, text: String, cleaned: Bool = false, final: Bool, unit: Int? = nil, raw: String? = nil, ready: Bool? = nil) {
+    /// Staged takes only: the unit is closed, sent for cleanup. The open unit (still collecting words) is not; only a closed
+    /// unit that is not ready is "thinking". Nil (older snapshots) counts as closed.
+    public var closed: Bool?
+    public init(id: Int, text: String, cleaned: Bool = false, final: Bool, unit: Int? = nil, raw: String? = nil, ready: Bool? = nil,
+                closed: Bool? = nil) {
         self.id = id; self.text = text; self.cleaned = cleaned; self.final = final; self.unit = unit; self.raw = raw; self.ready = ready
+        self.closed = closed
     }
 
     /// Pieces of a take's text joined as a reader expects: trimmed, a space between them, none before closing
@@ -64,13 +69,16 @@ public struct LiveDictationSnapshot: Codable, Equatable, Sendable {
     /// ones whose text is final) and the speaking head. The keyboard shows them in its preview and types each ready unit into
     /// the field once, in order; it never edits typed text. Nil: the snapshot is the whole text the keyboard types and edits.
     public var staged: Bool?
+    /// A manual staged take (#313) whose mic key was pressed to pause: nothing is listening, the words wait in the preview and
+    /// a send or the next start goes on with this run. Nil: not paused.
+    public var paused: Bool?
     public init(runID: String, version: Int, segments: [LiveSegment], complete: Bool = false, stopped: Bool? = nil, rawText: String? = nil,
-                shadowAsk: String? = nil, staged: Bool? = nil) {
+                shadowAsk: String? = nil, staged: Bool? = nil, paused: Bool? = nil) {
         self.runID = runID; self.version = version; self.segments = segments; self.complete = complete; self.stopped = stopped
         self.rawText = rawText ?? LiveSegment.joined(segments.map { $0.raw ?? $0.text }); self.text = LiveSegment.joined(segments.map(\.text))
-        self.shadowAsk = shadowAsk; self.staged = staged
+        self.shadowAsk = shadowAsk; self.staged = staged; self.paused = paused
     }
-    private enum CodingKeys: String, CodingKey { case runID, version, text, segments, complete, stopped, rawText, shadowAsk, staged }
+    private enum CodingKeys: String, CodingKey { case runID, version, text, segments, complete, stopped, rawText, shadowAsk, staged, paused }
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         runID = try values.decode(String.self, forKey: .runID)
@@ -82,6 +90,33 @@ public struct LiveDictationSnapshot: Codable, Equatable, Sendable {
         rawText = try values.decodeIfPresent(String.self, forKey: .rawText)
         shadowAsk = try values.decodeIfPresent(String.self, forKey: .shadowAsk)
         staged = try values.decodeIfPresent(Bool.self, forKey: .staged)
+        paused = try values.decodeIfPresent(Bool.self, forKey: .paused)
+    }
+}
+
+extension LiveDictationSnapshot {
+    /// The take is still being spoken into: not stopped, complete or paused.
+    public var isCapturing: Bool { !complete && stopped != true && paused != true }
+
+    /// The keyboard leaves the run published when it appears (`seen`) alone: hiding ended that take and it is in History. A later
+    /// version of the same run that is still being spoken shows the app kept the take going across the appearance (it never saw
+    /// the keyboard go, or the keyboard's view was recreated mid-take): the person is speaking into it now, so the keyboard follows it.
+    public func continues(_ seen: LiveDictationSnapshot) -> Bool {
+        runID == seen.runID && version > seen.version && isCapturing
+    }
+}
+
+/// keyboard -> app (`link.dictation.live.notes`, internal builds): why the keyboard does not show or follow a run, and when its
+/// preview first shows words. Reasons and versions only, never text. The last `LiveDictationLink.noteLimit` stay; the app logs each once.
+public struct LiveDictationNote: Codable, Equatable, Sendable {
+    public var id: String
+    public var runID: String
+    public var event: String
+    public var detail: String?
+    public var version: Int?
+    public var at: Date
+    public init(id: String = UUID().uuidString, runID: String, event: String, detail: String? = nil, version: Int? = nil, at: Date = Date()) {
+        self.id = id; self.runID = runID; self.event = event; self.detail = detail; self.version = version; self.at = at
     }
 }
 
@@ -151,10 +186,13 @@ public struct LiveDictationAck: Codable, Equatable, Sendable {
     /// Staged takes: the id of the last segment the keyboard typed into the field (segments go in order, so every earlier one
     /// is in). Nil: none yet, or not a staged take.
     public var deliveredThrough: Int?
+    /// Staged takes: the keyboard no longer follows this run (it went to another field, the draft was cleared mid-take): nothing more
+    /// of it is typed or shown. A manual take that is paused never resumes such a run; its next start is a new one (#313).
+    public var ended: Bool?
     public init(runID: String, version: Int?, complete: Bool = false, stats: LiveDictationStats, pieces: [Int]? = nil, delivered: Bool? = nil,
-                deliveredThrough: Int? = nil) {
+                deliveredThrough: Int? = nil, ended: Bool? = nil) {
         self.runID = runID; self.version = version; self.complete = complete; self.stats = stats; self.pieces = pieces; self.delivered = delivered
-        self.deliveredThrough = deliveredThrough
+        self.deliveredThrough = deliveredThrough; self.ended = ended
     }
 }
 
@@ -166,6 +204,13 @@ public struct LiveDictationLink: Sendable {
     public func read() -> LiveDictationSnapshot? { store.read(LiveDictationSnapshot.self, forKey: LinkChannel.Key.dictationLive) }
     public func acknowledge(_ ack: LiveDictationAck) { store.write(ack, forKey: LinkChannel.Key.dictationLiveAck) }
     public func acknowledged() -> LiveDictationAck? { store.read(LiveDictationAck.self, forKey: LinkChannel.Key.dictationLiveAck) }
+
+    /// How many keyboard notes the link keeps (the app reads them every 100 ms while it runs).
+    public static let noteLimit = 16
+    public func note(_ value: LiveDictationNote) {
+        store.write(Array((notes() + [value]).suffix(Self.noteLimit)), forKey: LinkChannel.Key.dictationLiveNotes)
+    }
+    public func notes() -> [LiveDictationNote] { store.read([LiveDictationNote].self, forKey: LinkChannel.Key.dictationLiveNotes) ?? [] }
 }
 
 /// The app's model of one live run: the finished segments and the speaking head, as the target the keyboard
@@ -186,7 +231,8 @@ public struct LiveDictationLink: Sendable {
 /// A *staged* run (iPhone, #312) publishes its units instead: each unit is a segment that is `ready` once its cleanup
 /// landed (or failed: the raw words stand), at once and not at the end. The keyboard shows the units that are not typed yet
 /// in its preview and types each ready one into the field once, in order. An admitted pause or the stop closes the open unit
-/// early (`flush()`); `finish()` makes every unit ready.
+/// early (`flush()`); `finish()` makes every unit ready. A *manual* staged run (#313) never closes a unit by itself: the open
+/// unit grows across sentences, pauses and any length, and only `flush()` (the user's send, the stop) closes it.
 public struct LiveDictationRun: Sendable, Equatable {
     /// A unit ends a sentence only with this many words; shorter ones ("Um.", "Yeah.", "I think.") join the next.
     public static let minUnitWords = 6
@@ -223,7 +269,12 @@ public struct LiveDictationRun: Sendable, Equatable {
     /// Units (by index) whose text is final in a staged run: cleaned, or cleanup failed and the raw words stand.
     private var ready: Set<Int> = []
 
-    public init(runID: String = UUID().uuidString, staged: Bool = false) { self.runID = runID; self.staged = staged }
+    /// Only `flush()` closes a unit: `addFinal` never does (not at a sentence end, not at `maxUnitWords`). Fixed for the run.
+    public let manual: Bool
+
+    public init(runID: String = UUID().uuidString, staged: Bool = false, manual: Bool = false) {
+        self.runID = runID; self.staged = staged; self.manual = manual
+    }
 
     /// The cleanup pass waiting for the field's text (`LiveDictationSnapshot.shadowAsk`).
     public private(set) var shadowAsk: String?
@@ -266,12 +317,13 @@ public struct LiveDictationRun: Sendable, Equatable {
     /// The units in speaking order (the open one too, not ready), then the speaking head.
     private var stagedSnapshot: LiveDictationSnapshot {
         var segments = units.indices.map { index in
-            LiveSegment(id: units[index].lowerBound, text: shownText(index), cleaned: cleaned[index] != nil, final: true, ready: ready.contains(index))
+            LiveSegment(id: units[index].lowerBound, text: shownText(index), cleaned: cleaned[index] != nil, final: true, ready: ready.contains(index),
+                        closed: !(openUnit && index == units.count - 1))
         }
         let speaking = LiveSegment.joined(open + [head])
         if !speaking.isEmpty { segments.append(.init(id: finals.count, text: speaking, final: false)) }
         return .init(runID: runID, version: version, segments: segments, complete: complete, stopped: stopped && !complete ? true : nil,
-                     rawText: complete ? LiveSegment.joined(finals.map(\.text)) : nil, staged: true)
+                     rawText: complete ? LiveSegment.joined(finals.map(\.text)) : nil, staged: true, paused: paused && !complete ? true : nil)
     }
     public var isEmpty: Bool { finals.isEmpty && head.isEmpty && open.isEmpty }
     public var finalCount: Int { finals.count }
@@ -302,7 +354,7 @@ public struct LiveDictationRun: Sendable, Equatable {
         if openUnit, let last = units.last { units[units.count - 1] = last.lowerBound..<finals.count }
         else { units.append((finals.count - 1)..<finals.count); openUnit = true }
         let unit = rawText(units.count - 1)
-        guard complete || Self.endsUnit(unit) else { return nil }
+        guard complete || (!manual && Self.endsUnit(unit)) else { return nil }
         openUnit = false
         return unit
     }
@@ -310,8 +362,16 @@ public struct LiveDictationRun: Sendable, Equatable {
     /// Closes the open unit (the take ends): its text and the key of its last segment, the cleanup's key. Nil when
     /// no unit is open. The target does not change.
     public mutating func flush() -> (key: Int, text: String)? {
-        guard openUnit, let range = units.last else { return nil }
+        guard openUnit else { return nil }
         openUnit = false
+        return peekOpenUnit()
+    }
+
+    /// What `flush()` would return, without closing the unit: the open unit's cleanup key and raw text (a speculative cleanup
+    /// reads it). Nil when no unit is open.
+    public func peekOpen() -> (key: Int, text: String)? { openUnit ? peekOpenUnit() : nil }
+    private func peekOpenUnit() -> (key: Int, text: String)? {
+        guard let range = units.last else { return nil }
         guard let key = keys.filter({ $0.value == range.upperBound - 1 }).map(\.key).max() else { return nil }
         return (key, rawText(units.count - 1))
     }
@@ -401,10 +461,10 @@ public struct LiveDictationRun: Sendable, Equatable {
         let text = text.trimmingCharacters(in: .whitespaces)
         guard let unit = unitIndex(ofKey: key) else { return false }
         let shown = shownText(unit)
+        // A staged unit is published the moment its cleanup lands (or its raw words stand), and not changed again.
+        if staged, ready.contains(unit) { return false }
         cleaned[unit] = text
         if staged {
-            // A staged unit is published the moment its cleanup lands, and not changed again.
-            guard !ready.contains(unit) else { return false }
             ready.insert(unit); version += 1
             return true
         }
@@ -435,6 +495,14 @@ public struct LiveDictationRun: Sendable, Equatable {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !complete, text != head else { return }
         head = text
+        version += 1
+    }
+
+    /// A manual run whose mic key paused it (#313): see `LiveDictationSnapshot.paused`. Published, so the keyboard knows.
+    public private(set) var paused = false
+    public mutating func setPaused(_ value: Bool) {
+        guard !complete, paused != value else { return }
+        paused = value
         version += 1
     }
 

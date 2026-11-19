@@ -24,6 +24,9 @@ import LegatoVocabulary
         await serial { [self] in
             if gate.route != .idle { await perform(gate.close()) }
             await takeFinish?.value
+            // A paused manual take ends here: the microphone is leaving.
+            finishDictationTake(waitingForWords: false)
+            await takeFinish?.value
             await closeDictation()
             isOpen = false
             microphone.dictationAudio = nil
@@ -68,6 +71,9 @@ import LegatoVocabulary
     @ObservationIgnored private var routeClosedAt: Double?
     /// Waits for the stopped take's last words, then has the sink clean and write the take once.
     @ObservationIgnored private var takeFinish: Task<Void, Never>?
+    /// The last close's take end and pipeline reset, running in the background.
+    @ObservationIgnored private var pipelineFinish: Task<Void, Never>?
+    @ObservationIgnored private var sessionNumber = 0
     /// Counts session closes: a take end still on its way from before one does nothing.
     @ObservationIgnored private var takeGeneration = 0
     #if DEBUG || LEGATO_INTERNAL
@@ -140,7 +146,7 @@ import LegatoVocabulary
     }
 
     private func open(surface: AudioRoute) async {
-        isOpen = true
+        isOpen = true; sessionNumber += 1
         gate = AudioGate(surface: surface); probe.cancel(); routeClosedAt = nil
         microphone.dictationAudio = { [weak self] pcm in await self?.sendDictation(pcm) }
         let warmConnection = self.warmConnection
@@ -168,17 +174,25 @@ import LegatoVocabulary
         if let action = gate.abandon() { await perform(action) }
         isOpen = false; probe.cancel()
         // The take is the keyboard appearance's: it ends as a stop would, in the
-        // background, so its final words are cleaned, written to History and offered to the keyboard's kept-text row. Closing
+        // background, so its final words are cleaned and written to History. Closing
         // used to cancel the end and leave the run open for good, and nothing of it was recorded past its first words.
         let earlierFinish = takeFinish; takeFinish = nil; takeGeneration += 1
-        let sink = self.sink
-        Task { await earlierFinish?.value; await sink.finishTake() }
+        let sink = self.sink, closedSession = sessionNumber
+        // The pipeline is reset only after this finish completed (bounded by the pipeline's own cleanup timeouts): a reset
+        // first dropped the open run uncleaned. A keyboard that opened meanwhile owns the pipeline: it is not reset under
+        // it, and its take waits behind the ending run like any take (`DictationPipeline.beginTake`).
+        pipelineFinish = Task { [weak self] in
+            await earlierFinish?.value
+            await sink.finishTake()
+            guard let self, !self.isOpen, self.sessionNumber == closedSession else { return }
+            await self.speechRoute.resetPipeline()
+        }
         #if DEBUG || LEGATO_INTERNAL
         debugTakeOpen = false
         #endif
         reportedMagic = .off
         await closeDictation()
-        await speechRoute.reset()
+        speechRoute.resetRouting()
         dictation.resetSequence()
         microphone.dictationAudio = nil
         await microphone.endKeyboardSession()
@@ -262,6 +276,22 @@ import LegatoVocabulary
         }
     }
 
+    /// The keyboard's send (a tap on the preview): a staged take sends the words so far to the field now and keeps listening.
+    /// Ignored without a take running; it needs no gate change, so it works from the background like Stop.
+    public func sendNow() async {
+        guard isOpen, canSend else { return }
+        await speechRoute.sendNow()
+    }
+
+    /// A take is running, or a manual one is paused with words waiting (Stop keeps them pending, #313).
+    private var canSend: Bool { gate.route == .dictation || dictation.hasActiveTake || dictation.isReplaying || speechRoute.isPaused }
+
+    /// The keyboard's raw send (a swipe up on the preview): like `sendNow()`, but the words are typed as spoken, uncleaned.
+    public func sendRawNow() async {
+        guard isOpen, canSend else { return }
+        await speechRoute.sendRawNow()
+    }
+
     private func perform(_ action: AudioGate.Action) async {
         routeClosedAt = now()
         switch action {
@@ -269,7 +299,7 @@ import LegatoVocabulary
         case .finalize(.dictation):
             microphone.setRoute(.idle)
             await dictation.finalizeTake()
-            finishDictationTake(waitingForWords: true)
+            finishDictationTake(waitingForWords: true, pausing: true)
         case .abandon(.dictation):
             microphone.setRoute(.idle)
             // Drop half-spoken words: close without finalizing. Delivered lines stay with the sink.
@@ -306,14 +336,15 @@ import LegatoVocabulary
     private func openDictation() { dictation.open() }
     /// Ends a take: after its last words (bounded), the sink cleans and writes it. Ends run in take order, and a later
     /// stop never cancels an earlier take's end (that take would never complete); only closing the session does.
-    private func finishDictationTake(waitingForWords: Bool) {
+    /// `pausing`: the mic key's Stop; a manual take with words waiting stays open (`DictationRouteSink.pauseTake`).
+    private func finishDictationTake(waitingForWords: Bool, pausing: Bool = false) {
         let dictation = self.dictation, sink = self.sink
         let previous = takeFinish, generation = takeGeneration
         takeFinish = Task { [weak self] in
             if waitingForWords { await dictation.waitForFinish(timeout: Self.takeEndWait) }
             await previous?.value
             guard !Task.isCancelled, self?.takeGeneration == generation else { return }
-            await sink.finishTake()
+            if pausing { await sink.pauseTake() } else { await sink.finishTake() }
         }
     }
     private func closeDictation() async { await dictation.close() }

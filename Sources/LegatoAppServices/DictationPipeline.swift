@@ -69,6 +69,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         return snapshot
     }
     public func acknowledgeDelivery(_ ack: LiveDictationAck) {
+        if ack.ended == true, ack.runID == liveRun?.runID { keyboardLeftRun(ack.runID) }
         if ack.runID == liveRun?.runID, ack.delivered != nil, let version = ack.version,
            version >= (liveDeliveryAck?.version ?? -1) { liveDeliveryAck = ack }
         guard ack.complete, let first = outbox.first, first.lineID == ack.runID,
@@ -129,6 +130,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     @ObservationIgnored private var terms: [String]?
     @ObservationIgnored private var lastWarm: Date?
     @ObservationIgnored private let sendMode: @MainActor () -> DictationSendSetting.Mode
+    /// What sends a staged run's words (#313), read when the run starts: its unit rules stay fixed for the run.
+    @ObservationIgnored private let liveSend: @MainActor () -> DictationSendSetting.LiveSend
     @ObservationIgnored private let pauseSeconds: @MainActor () -> Double
     @ObservationIgnored private let clock: any Clock<Duration>
     @ObservationIgnored private let takeTimeout: (@Sendable (Int) -> Duration)?
@@ -308,20 +311,189 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     }
 
     public func boundary(_ reason: String) {
+        if reason == "finalize" { sendCutThrough("finalize") }
         guard mode == .live, reason == "endpoint" else { return }
         setVoiceActive(false)
         if cleanupDuringPauses { fieldCleanup?.request() }
         if cleanupSentences { scheduleWholePause() }
         closeUnitAtPause()
+        speculateOpenUnit()
+    }
+
+    /// Fewer words than this are not worth a speculative request: a short unit is cheap to clean at the tap.
+    public static let speculationMinWords = 4
+    /// The text of the speculative request started for the open unit, and the start in progress (`submitLive` waits for it,
+    /// so a tap right after the pause finds the request registered).
+    @ObservationIgnored private var liveSpeculation: (runID: String, text: String)?
+    @ObservationIgnored private var speculationStart: Task<Void, Never>?
+
+    /// Speculative cleanup (#313, the voice agents' "speculative turn"): at an admitted pause of a manual run the open unit's
+    /// text so far is cleaned now, without closing the unit or publishing anything. If the user taps with the same text the
+    /// result is reused (already landed: instant; running: awaited); if words were added, it is dropped and the whole text
+    /// is cleaned afresh. At most one speculative request is in flight (the newest wins) and none for fewer than
+    /// `speculationMinWords` words; each costs one request that a miss wastes.
+    private func speculateOpenUnit() {
+        guard stagedLive, mode == .live, let run = liveRun, run.manual, !run.complete, sendCut == nil, let open = run.peekOpen(),
+              open.text.split(whereSeparator: \.isWhitespace).count >= Self.speculationMinWords,
+              liveSpeculation?.text != open.text || liveSpeculation?.runID != run.runID else { return }
+        liveSpeculation = (run.runID, open.text)
+        let id = liveCleanupSequence
+        let previous = speculationStart
+        speculationStart = Task { [weak self] in
+            await previous?.value
+            guard let self, !Task.isCancelled else { return }
+            let before = self.textBeforeUnit(key: open.key, run: run)
+            let pipeline = await self.current()
+            await pipeline.speculate(lineID: "\(self.sessionID)-\(open.key)", sequence: id, raw: open.text, textBefore: before)
+            self.diagnostics?("live2.speculate", ["run": String(run.runID.prefix(8)), "rawChars": open.text.count])
+        }
     }
 
     /// An admitted pause (`DictationActivity`: an endpoint, then 200 ms at -55 dBFS or below) closes the open unit of a staged
     /// run, whatever its length, and cleans it now, so the keyboard types what was said before the pause. Stop closes it too
     /// (`endLive`). The unit is not cut short by a forced split: those words wait in the head until their sentence ends.
+    /// A manual run (#313) has no pauses to close at: only `sendNow()` and the stop close its unit.
     private func closeUnitAtPause() {
-        guard stagedLive, var run = liveRun, !run.complete, let open = run.flush() else { return }
+        guard stagedLive, var run = liveRun, !run.complete, !run.manual, let open = run.flush() else { return }
         liveRun = run
         Task { [weak self] in await self?.submitLive(open.text, key: open.key, run: run) }
+    }
+
+    /// How long `sendNow()` waits for the recognizer's `finalize` boundary before it sends what it has. An estimate: the
+    /// latency is logged (`live2.send`) to be measured on the phone.
+    public static let sendCutWait = Duration.milliseconds(1500)
+    /// A `sendNow()` cut in flight: the run it belongs to, when it began (on the pipeline's clock) and the fallback timer.
+    /// `raw`: the user swiped (`sendRawNow()`): the unit stands as its raw words instead of going to cleanup.
+    @ObservationIgnored private var sendCut: (runID: String, started: Duration, raw: Bool, timeout: Task<Void, Never>?)?
+    /// Cleanup sequences (`liveKeys`) whose unit a raw send already published: their results are ignored when they arrive.
+    @ObservationIgnored private var rawSent: Set<Int> = []
+    /// Cuts the recognizer without ending the take (`DictationEngine.finalizeChunk`); false when nothing would answer. Set by
+    /// the route session that owns the engine.
+    @ObservationIgnored public var cutRecognizer: (@MainActor () async -> Bool)?
+
+    /// The user's send (a tap on the preview): everything spoken so far goes to cleanup as one unit and then to the field,
+    /// and listening continues. The recognizer is cut first so the words still in its head become final; the unit closes when
+    /// the `finalize` boundary arrives, after `sendCutWait`, or at once when there is nothing to cut. Words spoken after the
+    /// cut start the next unit. Ignored without a staged run in progress.
+    public func sendNow() async { await send(raw: false) }
+
+    /// The user's swipe up on the preview: like `sendNow()`, but nothing is cleaned. The open unit and every closed unit still
+    /// waiting for cleanup stand as their raw words now (they are history's uncleaned fallbacks), a speculative request is
+    /// dropped, and a cleanup result that arrives later is ignored. A tap's cut already in flight becomes raw.
+    public func sendRawNow() async { await send(raw: true) }
+
+    private func send(raw: Bool) async {
+        guard stagedLive, mode == .live, let run = liveRun, !run.complete else { return }
+        if sendCut != nil {
+            if raw { sendCut?.raw = true }
+            return
+        }
+        let runID = run.runID
+        sendCut = (runID, streamTime(), raw, nil)
+        // Paused (#313): no recognizer holds words back, so there is nothing to cut.
+        if pausedRunID == runID { return sendCutThrough("paused") }
+        let timeout = Task { [weak self, clock] in
+            do { try await clock.sleep(for: Self.sendCutWait) } catch { return }
+            self?.sendCutThrough("timeout")
+        }
+        sendCut?.timeout = timeout
+        let cut = await cutRecognizer?() ?? false
+        if !cut { sendCutThrough("nocut") }
+    }
+
+    /// The cut is through (or gave up): the open unit closes and is cleaned. One call per `sendNow()`.
+    private func sendCutThrough(_ via: String) {
+        guard let cut = sendCut else { return }
+        sendCut = nil
+        cut.timeout?.cancel()
+        let waited = (streamTime() - cut.started).components
+        let ms = Int(waited.seconds * 1000 + waited.attoseconds / 1_000_000_000_000_000)
+        guard var run = liveRun, run.runID == cut.runID, !run.complete else { return }
+        let open = run.flush()
+        // A send from a paused run (#313) sends everything there is: the run ends like a Stop after a tap, once the unit is out.
+        let endsRun = pausedRunID == run.runID
+        if endsRun { pausedRunID = nil; liveTakeOpen = false; run.setPaused(false) }
+        liveRun = run
+        diagnostics?("live2.send", ["run": String(run.runID.prefix(8)), "via": via, "ms": ms, "sent": open != nil, "raw": cut.raw])
+        if cut.raw {
+            if standRaw(&run, open: open) { publishLive(run) } else { liveRun = run }
+            if endsRun { Task { [weak self] in await self?.finishLive() } }
+            return
+        }
+        guard let open else {
+            if endsRun { Task { [weak self] in await self?.finishLive() } }
+            return
+        }
+        Task { [weak self] in
+            await self?.submitLive(open.text, key: open.key, run: run)
+            if endsRun { await self?.finishLive() }
+        }
+    }
+
+    /// The run a manual Stop left open (#313): its words wait in the keyboard's preview. Words after the next start append to
+    /// its open unit. It ends at a send that empties it, at the session's end or when an instruction needs the field.
+    @ObservationIgnored private var pausedRunID: String?
+    /// The keyboard stopped following this run (`LiveDictationAck.ended`): it is never paused or resumed, so the next start is a new
+    /// run the keyboard shows. A paused run ends now (open unit cleaned, History).
+    @ObservationIgnored private var unfollowedRunID: String?
+    private func keyboardLeftRun(_ runID: String) {
+        unfollowedRunID = runID
+        guard pausedRunID == runID else { return }
+        pausedRunID = nil
+        liveTakeOpen = false
+        Task { [weak self] in await self?.finishLive() }
+    }
+    /// A manual run is paused with words pending (`pauseTake()`).
+    public var isPaused: Bool { pausedRunID != nil && liveRun?.runID == pausedRunID && liveRun?.complete == false }
+
+    /// The mic key's Stop. A manual staged run with words waiting does not end: nothing is cleaned or sent, the words stay
+    /// pending in the preview and the next `beginTake()` continues the same run. Any other take ends as `finishTake()` does:
+    /// sentence-end mode, nothing pending, a held run, another mode.
+    public func pauseTake() async {
+        guard stagedLive, mode == .live, held == nil, let run = liveRun, run.manual, !run.complete, !liveTakeEnding, run.runID != unfollowedRunID,
+              run.peekOpen() != nil || run.isSpeaking else { return await finishTake() }
+        liveTakeOpen = false
+        pausedRunID = run.runID
+        var paused = run
+        paused.setPaused(true)
+        publishLive(paused)
+        setVoiceActive(false)
+        diagnostics?("live2.run.pause", ["run": String(run.runID.prefix(8))])
+        // Cleaned while paused, so a tap later finds the result (the pause may be long; an unchanged text is reused).
+        speculateOpenUnit()
+    }
+    private var liveTakeEnding: Bool { liveFinishing != nil }
+
+    /// The next start continues the paused run. False: nothing paused (or it ended meanwhile), a new take begins as usual.
+    private func resumePausedRun() -> Bool {
+        guard let id = pausedRunID else { return false }
+        pausedRunID = nil
+        guard held == nil, var run = liveRun, run.runID == id, !run.complete, !liveTakeEnding else { return false }
+        run.setPaused(false)
+        publishLive(run)
+        setVoiceActive(true)
+        liveTakeOpen = true
+        liveFinishedAt = nil
+        diagnostics?("live2.run.resume", ["run": String(id.prefix(8))])
+        return true
+    }
+
+    /// Raw send: the open unit (just flushed) and the closed units still in cleanup stand as raw words. True when the run changed.
+    private func standRaw(_ run: inout LiveDictationRun, open: (key: Int, text: String)?) -> Bool {
+        liveSpeculation = nil
+        speculationStart?.cancel()
+        Task { [weak self] in await self?.current().cancelSpeculation() }
+        var changed = false
+        if let open, run.setRaw(key: open.key) {
+            liveHistoryFallbacks.insert(-1 - open.key)
+            changed = true
+        }
+        for (id, unit) in liveKeys where run.setRaw(key: unit.key) {
+            rawSent.insert(id)
+            liveHistoryFallbacks.insert(id)
+            changed = true
+        }
+        return changed
     }
 
     /// A pause this long after an endpoint runs the whole-take pass with the raw words, as the stop does. Unmeasured: a
@@ -363,6 +535,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     @ObservationIgnored private var liveTakeOpen = false
     /// The stop of the run that `held` waits for is still to come: the next `finishTake` is that run's.
     @ObservationIgnored private var heldAwaitsStop = false
+    /// Callers of `finishTake` whose stop waits in `held`, in order; resumed once that stop's end completed (or the run was dropped).
+    @ObservationIgnored private var stopWaiters: [CheckedContinuation<Void, Never>] = []
     @ObservationIgnored private var liveCleanupSequence = 0
     /// When the run's take ended: a segment or cleanup that arrives within `liveStragglerGrace` still belongs to it.
     @ObservationIgnored private var liveFinishedAt: ContinuousClock.Instant?
@@ -378,6 +552,20 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// Debug bridge: when set, take cleanups stream from this scripted cleaner instead of the provider.
     @ObservationIgnored public var debugStreamCleaner: DebugStreamingCleaner?
     #endif
+    /// Set where the take's first cleanup must not pay for a cold start (the iPhone app): at the start of a staged run the
+    /// connection is re-established if it has been idle (`connectionWarmer`, a credential-free request on the shared
+    /// session) and the dictation prompt is written to the provider's cache if `warm()` has not done so lately. Off in tests.
+    @ObservationIgnored public var connectionWarmer: (@Sendable () async -> Void)?
+    @ObservationIgnored private var lastConnectionWarm: Date?
+    private static let connectionWarmInterval: TimeInterval = 20
+    private func warmForRun() {
+        guard let connectionWarmer else { return }
+        if lastConnectionWarm.map({ Date().timeIntervalSince($0) >= Self.connectionWarmInterval }) ?? true {
+            lastConnectionWarm = Date()
+            Task.detached { await connectionWarmer() }
+        }
+        Task { [weak self] in await self?.warm() }
+    }
     /// The prompt cache lives 5 minutes after its last use.
     private static let warmInterval: TimeInterval = 240
 
@@ -391,7 +579,9 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
                   cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore()), model: { DictationSendSetting.cleanupModel(in: store) }),
                   vocabulary: { (try? await VocabularyStore(fileURL: vocabularyURL).snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? [] },
                   sendMode: { DictationSendSetting.mode(in: defaults) }, pauseSeconds: { DictationSendSetting.pause(in: defaults) },
-                  supportsLive: supportsLive, groupsLiveHistory: groupsLiveHistory, stagedLive: stagedLive)
+                  supportsLive: supportsLive, liveSend: { DictationSendSetting.liveSend(in: defaults) },
+                  groupsLiveHistory: groupsLiveHistory, stagedLive: stagedLive)
+        if stagedLive { connectionWarmer = { await KeyboardSession.warmClaudeConnection() } }
     }
     public init(recentTakes: RecentTakesStore = RecentTakesStore(), history: (any HistoryStore)? = nil, cleaner: any SentenceCleaning, vocabulary: @escaping @Sendable () async -> [String] = { [] },
                 timeout: Duration = .milliseconds(2500),
@@ -400,7 +590,9 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
                 clock: any Clock<Duration> = ContinuousClock(),
                 takeTimeout: (@Sendable (Int) -> Duration)? = nil,
                 supportsLive: Bool = false,
+                liveSend: @escaping @MainActor () -> DictationSendSetting.LiveSend = { .sentence },
                 liveTimeout: Duration = .seconds(6), groupsLiveHistory: Bool = false, stagedLive: Bool = false) {
+        self.liveSend = liveSend
         self.groupsLiveHistory = groupsLiveHistory
         self.stagedLive = stagedLive
         self.supportsLive = supportsLive; self.liveTimeout = liveTimeout
@@ -554,7 +746,13 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             // Stops come in take order: while later takes wait, a stop is the waited-for run's when that one's is still to
             // come, else a waiting take's (it ends once its speech went in).
             if held != nil {
-                guard heldAwaitsStop else { held?.append(.stop); return }
+                // The take waits behind a run that still ends: its stop is handled when that run is complete, and this
+                // returns only then (a session reset after it must not drop the take's open run).
+                guard heldAwaitsStop else {
+                    held?.append(.stop)
+                    await withCheckedContinuation { stopWaiters.append($0) }
+                    return
+                }
                 heldAwaitsStop = false
             } else {
                 liveTakeOpen = false
@@ -590,6 +788,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// still ends (its stop waits for its last words and cleanup) has the new take's speech wait until it is complete.
     public func beginTake() {
         guard mode == .live else { return }
+        if resumePausedRun() { return }
         setVoiceActive(true)
         if held != nil { held?.append(.begin); return }
         let stopComing = liveTakeOpen
@@ -623,7 +822,9 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             case .stop:
                 liveTakeOpen = false
                 if held?.isEmpty == true { held = nil }
-                return await finishLive()
+                await finishLive()
+                if !stopWaiters.isEmpty { stopWaiters.removeFirst().resume() }
+                return
             }
         }
         held = nil
@@ -684,6 +885,18 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         }
     }
 
+    /// What stands before a unit if the run were typed clean: the text before the run, then the sentences so far.
+    /// A sentence the segmenter closed is a sentence even when its raw words carry no final punctuation yet (they are
+    /// still in cleanup): the cleaner must not take it for an unfinished one and continue in lowercase.
+    private func textBeforeUnit(key sequence: Int, run: LiveDictationRun) -> String {
+        var prior = run.text(before: sequence)
+        if let last = prior.last, last.isLetter || last.isNumber { prior += "." }
+        return [liveAnchor, prior].filter { !$0.isEmpty }.joined(separator: liveAnchor.last?.isWhitespace == true ? "" : " ")
+    }
+    /// Per cleanup sequence: whether a speculative request existed for the unit when it was sent (`match`: same text, `grew`:
+    /// words were added since, `none`), for the diagnostic; the pipeline says whether the result was actually used.
+    @ObservationIgnored private var liveSpecState: [Int: String] = [:]
+
     /// Sends a closed unit (`key`: its last segment) to cleanup, against the text before the run and the units so far.
     private func submitLive(_ unit: String, key sequence: Int, run: LiveDictationRun) async {
         let id = liveCleanupSequence
@@ -691,13 +904,13 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         liveKeys[id] = (sequence, run.unitRange(key: sequence))
         pending += 1
         liveSubmitted[id] = .now
-        // What stands before this sentence if the run were typed clean: the text before the run, then the sentences so far.
-        // A sentence the segmenter closed is a sentence even when its raw words carry no final punctuation yet (they are
-        // still in cleanup): the cleaner must not take it for an unfinished one and continue in lowercase.
-        var prior = run.text(before: sequence)
-        if let last = prior.last, last.isLetter || last.isNumber { prior += "." }
-        let before = [liveAnchor, prior].filter { !$0.isEmpty }.joined(separator: liveAnchor.last?.isWhitespace == true ? "" : " ")
+        let before = textBeforeUnit(key: sequence, run: run)
+        // A speculative request for this unit has been started by now; the pipeline takes it when the text is the same.
+        await speculationStart?.value
         let pipeline = await current()
+        let speculated = liveSpeculation.flatMap { $0.runID == run.runID ? ($0.text == unit ? "match" : "grew") : nil } ?? "none"
+        liveSpeculation = nil
+        liveSpecState[id] = speculated
         await pipeline.submit(sequence: id, lineID: "\(sessionID)-\(sequence)", raw: unit, textBefore: before, allowsEmpty: true)
     }
 
@@ -734,6 +947,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     }
 
     private func endLive() async {
+        pausedRunID = nil
         let stoppedAt = ContinuousClock.now
         // The keyboard holds the user's keys until the take is complete (its final words, still on their way, first).
         if var run = liveRun, run.stop() { publishLive(run) }
@@ -783,6 +997,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             _ = await settle(timeout: liveTimeout + .seconds(1))
         }
         let wholeText = await wholeTask?.value
+        liveSpeculation = nil
+        await pipeline?.cancelSpeculation()
         guard var run = liveRun, !run.complete else { return }
         if let wholeText, !run.isSplit, !run.staged {
             let before = liveAnchor
@@ -833,7 +1049,13 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             let parts = start.duration(to: .now).components
             return Int(parts.seconds * 1000 + parts.attoseconds / 1_000_000_000_000_000)
         }
+        let specState = liveSpecState.removeValue(forKey: line.sequence)
         guard var run = liveRun, let (key, range) = liveKeys.removeValue(forKey: line.sequence) else { return }
+        // The user swiped: this unit already stands as its raw words.
+        if rawSent.contains(line.sequence) {
+            diagnostics?("live2.cleanup", ["landed": false, "reason": "rawSent", "rawChars": line.raw.count, "ms": ms as Any])
+            return
+        }
         if run.runID == sealedLiveRunID {
             diagnostics?("live2.cleanup", ["landed": false, "reason": "sealed", "rawChars": line.raw.count, "ms": ms as Any])
             return
@@ -851,15 +1073,33 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             let shown = run.setCleaned(key: key, text: text)
             // `changed`: the cleaned unit differs from its raw words (held or not); `shown`: the target changed now.
             diagnostics?("live2.cleanup", ["landed": true, "changed": text != line.raw, "dropped": text.isEmpty, "shown": shown, "held": !run.complete,
-                                           "segments": segments, "rawChars": line.raw.count, "chars": text.count, "ms": ms as Any])
+                                           "segments": segments, "rawChars": line.raw.count, "chars": text.count, "ms": ms as Any]
+                .merging(Self.cleanupTiming(line, speculation: specState)) { $1 })
             if shown { publishLive(run) } else { liveRun = run }
         } else {
             // A staged unit whose cleanup failed or ran out of time is typed as its raw words.
             let shown = run.setRaw(key: key)
             diagnostics?("live2.cleanup", ["landed": false, "reason": line.reason ?? "raw", "detail": line.detail ?? "", "rawChars": line.raw.count,
-                                           "ms": ms as Any, "raw": shown])
+                                           "ms": ms as Any, "raw": shown].merging(Self.cleanupTiming(line, speculation: specState)) { $1 })
             if shown { publishLive(run) } else { liveRun = run }
         }
+    }
+
+    /// The `live2.cleanup` fields that say where the time went. `ms` (submit to landed) = `queueMs` (waited for a free slot)
+    /// + the request (`firstEventMs`: connection, upload and the model's prefill until the first stream event; `firstTextMs`:
+    /// until the first character of the cleaned text; `requestMs`: all of it) + delivery order waits. `speculation`: `landed`
+    /// or `inflight` (a speculative request was reused, finished or running when the unit was sent; its own timings are
+    /// reported), `grew` (words were added since, cleaned afresh), `unused` (same text, other context), `none`.
+    /// Token counts are the provider's; absent means unavailable, not zero.
+    private static func cleanupTiming(_ line: DictationCleanedLine, speculation: String?) -> [String: Any] {
+        var fields: [String: Any] = ["queueMs": line.queueWaitMs as Any,
+            "speculation": line.speculation ?? (speculation == "match" ? "unused" : speculation ?? "none")]
+        if let m = line.metrics {
+            fields["model"] = m.model; fields["firstEventMs"] = m.firstEventMs as Any; fields["firstTextMs"] = m.firstTextMs as Any
+            fields["requestMs"] = m.totalMs; fields["inTokens"] = m.inputTokens as Any; fields["outTokens"] = m.outputTokens as Any
+            fields["cacheRead"] = m.cacheReadTokens as Any; fields["cacheCreate"] = m.cacheCreationTokens as Any
+        }
+        return fields
     }
 
     /// The run in progress, or a new one when none runs or the last is complete.
@@ -869,11 +1109,12 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         if let run = liveRun, !run.complete || late { return run }
         fieldCleanup?.reset()
         liveHistoryFallbacks = []
-        let run = LiveDictationRun(staged: stagedLive)
+        let run = LiveDictationRun(staged: stagedLive, manual: stagedLive && liveSend() == .manual)
         liveDeliveryAck = nil
         liveRun = run
         liveAnchor = String(contextBefore().suffix(600))
         diagnostics?("live2.run.start", ["run": String(run.runID.prefix(8))])
+        if stagedLive { warmForRun() }
         return run
     }
 
@@ -909,9 +1150,16 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     func settleHistory() async { await liveHistoryWrite?.value }
 
     private func endLiveRun() {
+        if let run = liveRun, !run.complete {
+            // A session reset drops a run that never ended (no `live2.run.end`): its open unit is not cleaned; History keeps the raw finals.
+            diagnostics?("live2.run.drop", ["run": String(run.runID.prefix(8)), "sentences": run.finalCount, "units": run.unitCount,
+                                            "paused": pausedRunID == run.runID, "ending": liveFinishing != nil])
+        }
         wholePause?.cancel(); wholePause = nil
-        liveSubmitted = [:]; liveKeys = [:]; liveFinishedAt = nil
-        held = nil; heldAwaitsStop = false; liveTakeOpen = false
+        liveSubmitted = [:]; liveKeys = [:]; rawSent = []; liveFinishedAt = nil
+        held = nil; heldAwaitsStop = false; liveTakeOpen = false; pausedRunID = nil
+        let waiting = stopWaiters; stopWaiters = []
+        for waiter in waiting { waiter.resume() }
         guard liveRun != nil else { return }
         liveRun = nil; liveDeliveryAck = nil
         onLiveChange?(nil)
@@ -1128,9 +1376,12 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         pending = max(0, pending - 1)
         if mode == .live {
             landLive(line)
+            let rawAlready = rawSent.remove(line.sequence) != nil
             if let reason = line.reason { fallbacks.append(reason); if fallbacks.count > 20 { fallbacks.removeFirst() } }
             if groupsLiveHistory {
-                if line.reason != nil { liveHistoryFallbacks.insert(line.sequence) }
+                if rawAlready {
+                    // A raw send already recorded this unit as uncleaned; its late result changes nothing.
+                } else if line.reason != nil { liveHistoryFallbacks.insert(line.sequence) }
                 else { liveHistoryFallbacks.remove(line.sequence) }
                 if let run = liveRun { checkpointLiveHistory(run) }
             } else {

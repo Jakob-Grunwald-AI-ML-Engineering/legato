@@ -2,6 +2,10 @@ import Foundation
 
 public enum RequestCommand: String, Codable, Sendable, Equatable {
     case start, stop, endKeepAlive
+    /// Send everything dictated so far to the field now; listening continues.
+    case send
+    /// Send everything dictated so far that is not typed yet as raw words, with no cleanup (a swipe up on the preview).
+    case sendRaw
     /// Ready the microphone (a lease, no run) with the app in front: what the keyboard asks when it has to
     /// open the app. The app can't act on it from the background, so it is only ever acted on through the URL.
     case arm

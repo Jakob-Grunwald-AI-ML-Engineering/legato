@@ -47,14 +47,51 @@ private func waitFor(_ count: Int, _ collected: Collected) async throws {
     #expect(out.all.allSatisfy { $0.status == .cleaned })
 }
 
-@Test func atMostTwoCleanupCallsAreInFlight() async throws {
+@Test func unitsAreCleanedConcurrentlyUpToTheLimitAndDeliveredInOrder() async throws {
     let out = Collected()
-    let cleaner = ScriptedCleaner(delays: Dictionary(uniqueKeysWithValues: (0..<6).map { ($0, Duration.milliseconds(30)) }))
+    // Earlier units are slower: a later unit must neither wait for a slot nor overtake in delivery.
+    let cleaner = ScriptedCleaner(delays: Dictionary(uniqueKeysWithValues: (0..<8).map { ($0, Duration.milliseconds(120 - 10 * $0)) }))
     let pipeline = DictationCleanupPipeline(cleaner: cleaner, timeout: .seconds(2)) { out.add($0) }
-    for i in 0..<6 { await pipeline.submit(sequence: i, lineID: "l\(i)", raw: "w\(i)", textBefore: "") }
-    try await waitFor(6, out)
-    #expect(cleaner.peak.withLock { $0 } == 2)
-    #expect(out.all.map(\.sequence) == Array(0..<6))
+    for i in 0..<8 { await pipeline.submit(sequence: i, lineID: "l\(i)", raw: "w\(i)", textBefore: "") }
+    try await waitFor(8, out)
+    #expect(cleaner.peak.withLock { $0 } == 4, "The default is four requests at once")
+    #expect(out.all.map(\.sequence) == Array(0..<8))
+    #expect(out.all.dropFirst(4).allSatisfy { ($0.queueWaitMs ?? 0) > 0 }, "Units beyond the limit report their wait")
+}
+
+@Test func aSpeculativeResultIsReusedWhenTheSameTextIsSubmitted() async throws {
+    let out = Collected()
+    let cleaner = ScriptedCleaner(delays: [5: .milliseconds(80)])
+    let pipeline = DictationCleanupPipeline(cleaner: cleaner, timeout: .seconds(2)) { out.add($0) }
+    await pipeline.speculate(lineID: "l", sequence: 5, raw: "ship it on friday", textBefore: "Hi.")
+    // Still running when the unit is sent: it is awaited, not asked again.
+    await pipeline.submit(sequence: 5, lineID: "l", raw: "ship it on friday", textBefore: "Hi.")
+    try await waitFor(1, out)
+    #expect(cleaner.calls.withLock { $0.count } == 1)
+    #expect(out.all[0].text == "SHIP IT ON FRIDAY" && out.all[0].speculation == "inflight")
+    // Landed before the send: instant.
+    await pipeline.speculate(lineID: "l", sequence: 6, raw: "and the budget too", textBefore: "")
+    try await Task.sleep(for: .milliseconds(40))
+    await pipeline.submit(sequence: 6, lineID: "l", raw: "and the budget too", textBefore: "")
+    try await waitFor(2, out)
+    #expect(cleaner.calls.withLock { $0.count } == 2)
+    #expect(out.all[1].speculation == "landed")
+}
+
+@Test func aSpeculativeResultIsDiscardedWhenTheTextGrewOrAnotherSpeculationStarted() async throws {
+    let out = Collected()
+    let cleaner = ScriptedCleaner(delays: [0: .milliseconds(200)])
+    let pipeline = DictationCleanupPipeline(cleaner: cleaner, timeout: .seconds(2)) { out.add($0) }
+    await pipeline.speculate(lineID: "l", sequence: 0, raw: "ship it on friday", textBefore: "")
+    await pipeline.speculate(lineID: "l", sequence: 0, raw: "ship it on friday after lunch", textBefore: "")
+    #expect(await pipeline.speculativeText == "ship it on friday after lunch", "The newest speculation wins")
+    await pipeline.submit(sequence: 0, lineID: "l", raw: "ship it on friday after lunch and more", textBefore: "")
+    try await waitFor(1, out)
+    #expect(out.all[0].text == "SHIP IT ON FRIDAY AFTER LUNCH AND MORE" && out.all[0].speculation == nil)
+    #expect(await pipeline.speculativeText == nil)
+    // The same text asked twice is one request.
+    #expect(await pipeline.speculate(lineID: "l", sequence: 1, raw: "a b c d e", textBefore: ""))
+    #expect(await !pipeline.speculate(lineID: "l", sequence: 1, raw: "a b c d e", textBefore: ""))
 }
 
 @Test func aFailedCallAndASlowCallBothInsertTheRawLineWithoutBlockingTheRest() async throws {
@@ -224,4 +261,16 @@ private final class CapturingMessages: MessagesStreaming {
     #expect(!DictationCleanupGuard.accepts(raw: "um 10 Uhr", cleaned: ""), "Never dropped whole")
     #expect(!DictationTakeGuard.accepts(raw: Array(repeating: "wir kommen um 10 Uhr", count: 4).joined(separator: " "),
                                         cleaned: Array(repeating: "Wir kommen 10 Uhr.", count: 4).joined(separator: " ")))
+}
+
+@Test func aLineRequestSizesItsOutputLimitToTheUnitAndMetricsReadTheStream() {
+    #expect(SentenceCleanupClient.lineMaxTokens(characters: 20) == 384)
+    #expect(SentenceCleanupClient.lineMaxTokens(characters: 2000) == 1256)
+    #expect(SentenceCleanupClient.lineMaxTokens(characters: 100_000) == 4096)
+    #expect(!SentenceCleanupClient.hasBegunText("{\"sentenceID\":\"a\",\"sequence\":1,\"te"))
+    #expect(!SentenceCleanupClient.hasBegunText("{\"sentenceID\":\"a\",\"sequence\":1,\"text\":\""))
+    #expect(SentenceCleanupClient.hasBegunText("{\"sentenceID\":\"a\",\"sequence\":1,\"text\":\"Ship"))
+    let m = SentenceCleanupClient.metrics(model: "m", usage: ["input_tokens": .number(12), "cache_read_input_tokens": .number(900)],
+                                          firstEventMs: 700, firstTextMs: 900, totalMs: 1100)
+    #expect(m.inputTokens == 12 && m.cacheReadTokens == 900 && m.cacheCreationTokens == nil && m.outputTokens == nil)
 }

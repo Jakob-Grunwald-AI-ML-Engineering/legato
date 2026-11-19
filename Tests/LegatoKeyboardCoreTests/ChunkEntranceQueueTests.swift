@@ -72,7 +72,8 @@ import Testing
 
     @Test func aKeyDuringABurstWaitsOnlyForTheBurst() {
         let whole = keyDelay(entrance: false), burst = keyDelay(entrance: true)
-        #expect(burst.burstLeft > 100 && burst.burstLeft <= ChunkEntrance.capMs + 8, "the burst ran \(burst.burstLeft) ms")
+        // A key queued during the burst lands the rest of it as one write (#313), so the burst never outlasts the cap.
+        #expect(burst.burstLeft <= ChunkEntrance.capMs + 8, "the burst ran \(burst.burstLeft) ms")
         // After the burst the key goes as it would after a whole insert: no extra wait from the entrance.
         #expect(burst.afterLastPiece <= whole.afterLastPiece + 2 * 4, "after the burst \(burst.afterLastPiece) ms, whole \(whole.afterLastPiece) ms")
         #expect(burst.sinceAsked <= ChunkEntrance.capMs + whole.afterLastPiece + 2 * 4, "waited \(burst.sinceAsked) ms")
@@ -90,5 +91,39 @@ import Testing
         flush.drain()
         #expect(inserts(flush).map(\.text).joined() == "hello brave new world" && flush.field.string == "hello brave new world")
         #expect(inserts(flush).count == 1, "\(inserts(flush).map(\.text))")
+    }
+
+    private func stagedUnit(_ text: String) -> FieldQueue.Edit {
+        var edit = FieldQueue.Edit(kind: .typist, target: text, atCursor: true, requiresVerifiedInsertion: true, isSpeech: true)
+        edit.unit = .init(text: text, capitalization: .none, contextFallback: "")
+        return edit
+    }
+
+    /// #313: a staged unit types at the typewriter pace; a key typed during it lands the rest of the burst as one write and
+    /// goes in right after, so the key waits for one write, not for the burst.
+    @Test func aStagedUnitTypesAtTheTypewriterPaceAndAKeyFlushesTheRestOfItsBurst() {
+        let text = String(repeating: "word ", count: 20) + "end"
+        var paced = rig()
+        paced.queue.enqueue(stagedUnit(text))
+        paced.drain()
+        let pieces = inserts(paced)
+        #expect(pieces.map(\.text).joined() == text && pieces.count == text.count)
+        #expect(pieces.last!.ms - pieces.first!.ms >= Double(pieces.count - 1) * ChunkEntrance.typewriterGapMs - 1e-9)
+        #expect(paced.field.string == text)
+
+        var rig = rig()
+        rig.queue.enqueue(stagedUnit(text))
+        while inserts(rig).count < 10 { rig.tick() }
+        let asked = rig.clockMs
+        rig.queue.enqueue(.insert("!"))
+        rig.drain()
+        let all = inserts(rig), key = all.first { $0.text == "!" }!
+        let own = all.filter { $0.text != "!" }
+        #expect(own.map(\.text).joined() == text)
+        #expect(own.last!.text.count > 50, "the rest of the burst went as one write: \(own.last!.text.count)")
+        #expect(own.last!.ms <= asked + 2 * rig.tickMs + 1 && key.ms >= own.last!.ms, "key waited \(key.ms - asked) ms")
+        // The burst would have taken 600+ ms more; the key goes after the host's usual check wait for one write.
+        #expect(key.ms - asked < 500 && Double(text.count) * ChunkEntrance.typewriterGapMs > 1_000)
+        #expect(rig.field.string == text + "!" && rig.queue.modelText == rig.field.string && rig.drops.isEmpty)
     }
 }

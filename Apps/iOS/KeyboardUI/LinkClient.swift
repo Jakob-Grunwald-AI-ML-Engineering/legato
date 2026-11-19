@@ -76,6 +76,15 @@ final class LinkClient {
         guard let store else { return }
         LiveDictationLink(store: store).acknowledge(ack)
     }
+    /// The last receipt any keyboard appearance wrote (a recreated keyboard picks up a run where the one before left it).
+    func readLiveDictationAck() -> LiveDictationAck? { store.map { LiveDictationLink(store: $0).acknowledged() } ?? nil }
+    /// Why a run is not shown or followed, for the app's diagnostics (`live2.kbd`). Internal builds only; no note follows.
+    func writeLiveDictationNote(_ note: LiveDictationNote) {
+        #if DEBUG || LEGATO_INTERNAL
+        guard let store else { return }
+        LiveDictationLink(store: store).note(note)
+        #endif
+    }
 
     #if DEBUG || LEGATO_INTERNAL
     func takeFieldProbe() -> FieldProbeRequest? { store.map { FieldProbeLink(store: $0).takeRequest() } ?? nil }

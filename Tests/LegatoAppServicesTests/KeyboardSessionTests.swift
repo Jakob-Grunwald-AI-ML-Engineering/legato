@@ -1,6 +1,7 @@
 import Foundation
 import Synchronization
 import Testing
+import LegatoAgent
 import LegatoCore
 import LegatoSoniox
 @testable import LegatoAppServices
@@ -143,6 +144,24 @@ import LegatoSoniox
         }
         try await until { sink.finishes == 2 }
         #expect(sink.begins == 2)
+    }
+
+    /// Manual send (#313): the mic key's Stop is a pause for the sink, and only the keyboard going away ends the take.
+    @Test func stopPausesTheTakeAndOnlyHidingTheKeyboardEndsIt() async throws {
+        sink.keepsPausedTake = true
+        let (_, keyboard) = try await openOnTyping()
+        let socket = try #require(sockets.last)
+        #expect(await keyboard.openGate())
+        await mic.emit()
+        await keyboard.closeGate()
+        try await until { await socket.sent.contains(.text(#"{"type":"finalize"}"#)) }
+        await socket.feed(#"{"tokens":[{"text":"<fin>","is_final":true}]}"#)
+        await socket.feed(#"{"finished":true}"#)
+        try await until { sink.pauses == 1 }
+        #expect(sink.finishes == 0, "A paused take stays open")
+        keyboard.update(visible: false, surface: .dictation)
+        await keyboard.settle()
+        try await until { sink.finishes == 1 }
     }
 
     @Test func aTapWithoutSonioxKeyStaysClosedAndSaysWhy() async throws {
@@ -306,10 +325,14 @@ import LegatoSoniox
     var warms = 0
     var begins = 0
     var finishes = 0
+    var pauses = 0
+    /// The sink keeps a paused take open (the iPhone's manual send): Stop does not end it.
+    var keepsPausedTake = false
     func reset() async { resets += 1 }
     func warm() async { warms += 1 }
     func beginTake() { begins += 1 }
     func finishTake() async { finishes += 1 }
+    func pauseTake() async { pauses += 1; if !keepsPausedTake { await finishTake() } }
 }
 
 actor GateMicrophone: AudioSource {
@@ -375,4 +398,96 @@ actor TestSocket: SonioxSocket {
         if let waiter { self.waiter = nil; waiter.resume(returning: .text(text)) } else { inbox.append(.text(text)) }
     }
     func drop() { dropped = true; waiter?.resume(throwing: SonioxError.network); waiter = nil }
+}
+
+private final class LogBox: Sendable {
+    private let events = Mutex<[String]>([])
+    func add(_ event: String) { events.withLock { $0.append(event) } }
+    func has(_ event: String) -> Bool { events.withLock { $0.contains(event) } }
+}
+
+private actor CloseHistory: HistoryStore {
+    private var entries: [DictationEntry] = []
+    func append(_ entry: DictationEntry) { entries.append(entry) }
+    func upsert(_ entry: DictationEntry) { entries.removeAll { $0.id == entry.id }; entries.append(entry) }
+    func recent(limit: Int) -> [DictationEntry] { Array(entries.suffix(limit)) }
+    func delete(id: UUID) { entries.removeAll { $0.id == id } }
+}
+
+/// Uppercases the first letter; the first request can be held until the test opens the gate.
+private final class HeldCleaner: SentenceCleaning {
+    let gate: ConnectGate?
+    private let first = Mutex(true)
+    init(holdFirst: ConnectGate? = nil) { gate = holdFirst }
+    func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence {
+        if first.withLock({ let was = $0; $0 = false; return was }) { await gate?.wait() }
+        return .init(sentenceID: input.sentenceID, sequence: input.sequence, text: input.text.prefix(1).uppercased() + input.text.dropFirst())
+    }
+}
+
+/// Hiding the keyboard with a take open ends it like Stop: the open unit is cleaned and the take goes to History cleaned.
+@MainActor @Suite(.timeLimit(.minutes(1))) struct KeyboardHideFinishesTakeTests {
+    let mic = GateMicrophone()
+    let sockets = SocketBox()
+    fileprivate let history = CloseHistory()
+    fileprivate let logged = LogBox()
+
+    private func session(_ cleaner: any SentenceCleaning, manual: Bool) async throws -> (DictationPipeline, KeyboardSession) {
+        let pipeline = DictationPipeline(history: history, cleaner: cleaner, sendMode: { .live }, supportsLive: true,
+                                         liveSend: { manual ? .manual : .sentence }, liveTimeout: .milliseconds(500),
+                                         groupsLiveHistory: true, stagedLive: true)
+        let logged = self.logged
+        pipeline.diagnostics = { event, _ in logged.add(event) }
+        let composer = MicrophoneHost(microphone: mic, activateAudioSession: {})
+        await composer.arm()
+        let sockets = self.sockets
+        let keyboard = KeyboardSession(microphone: composer, sink: pipeline, sonioxKey: { "test" },
+                                       makeSocket: { sockets.make() }, warmConnection: {})
+        keyboard.update(visible: true, surface: .dictation)
+        await keyboard.settle()
+        try await until { keyboard.diagnostics["dictationStreamLive"] as? Bool == true }
+        return (pipeline, keyboard)
+    }
+
+    private func cleanedHistory(_ expected: String) async throws {
+        try await until {
+            await self.history.recent(limit: 10).contains { $0.text == expected }
+        }
+    }
+
+    @Test(arguments: [true, false]) func hidingMidTakeCleansTheOpenUnitIntoHistory(manual: Bool) async throws {
+        let (_, keyboard) = try await session(HeldCleaner(), manual: manual)
+        try await keyboard.debugDictationLine("we should ship it on friday")
+        keyboard.update(visible: false, surface: .dictation); await keyboard.settle()
+        try await cleanedHistory("We should ship it on friday")
+        try await until { self.logged.has("live2.run.end") }
+        #expect(!logged.has("live2.run.drop"))
+    }
+
+    @Test(arguments: [true, false]) func hidingAPausedOrListeningTakeCleansItToo(manual: Bool) async throws {
+        let (pipeline, keyboard) = try await session(HeldCleaner(), manual: manual)
+        try await keyboard.debugDictationLine("bring the laptop")
+        try keyboard.debugDictationStop()
+        await pipeline.pauseTake()
+        keyboard.update(visible: false, surface: .dictation); await keyboard.settle()
+        try await cleanedHistory("Bring the laptop")
+        try await until { self.logged.has("live2.run.end") }
+    }
+
+    @Test(arguments: [true, false]) func reopeningAtOnceKeepsTheNewTakeApartAndTheOldOneLandsInHistory(manual: Bool) async throws {
+        let held = ConnectGate()
+        let (pipeline, keyboard) = try await session(HeldCleaner(holdFirst: held), manual: manual)
+        try await keyboard.debugDictationLine("the old take")
+        keyboard.update(visible: false, surface: .dictation); await keyboard.settle()
+        // The old take's cleanup is still running while the keyboard comes back.
+        keyboard.update(visible: true, surface: .dictation); await keyboard.settle()
+        #expect(keyboard.isOpen)
+        try await keyboard.debugDictationLine("the new take and more")
+        held.open()
+        try await cleanedHistory("The old take")
+        keyboard.update(visible: false, surface: .dictation); await keyboard.settle()
+        try await cleanedHistory("The new take and more")
+        let texts = await history.recent(limit: 10).map(\.text)
+        #expect(texts.contains("The old take"))
+    }
 }
