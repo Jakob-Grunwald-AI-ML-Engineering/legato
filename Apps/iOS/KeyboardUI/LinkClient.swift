@@ -71,8 +71,6 @@ final class LinkClient {
 
     /// The cleaned dictation lines the app has not yet had acknowledged (`link.dictation`).
     func readLiveDictation() -> LiveDictationSnapshot? { store.map { LiveDictationLink(store: $0).read() } ?? nil }
-    /// The keyboard's last receipt for the live run (what it typed or kept, `StagedDictation.handledThrough`).
-    func readLiveDictationAck() -> LiveDictationAck? { store.map { LiveDictationLink(store: $0).acknowledged() } ?? nil }
     /// What the keyboard applied of the live run. The app only logs it, so no note follows.
     func writeLiveDictationAck(_ ack: LiveDictationAck) {
         guard let store else { return }

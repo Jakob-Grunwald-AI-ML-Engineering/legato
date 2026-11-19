@@ -468,13 +468,9 @@ final class KeyboardController {
                 try? await Task.sleep(for: .milliseconds(100))
             }
         }
-        // A live run that began before this appearance is not this keyboard's to type.
-        let earlier = link.readLiveDictation()
-        if let earlier, earlier.staged == true, earlier.runID != stagedTake.runID, earlier.runID != blockedLiveRunID {
-            adoptStagedTake(earlier)
-        } else {
-            ignoredLiveRunID = earlier?.runID
-        }
+        // A live run that began before this appearance is not this keyboard's to type, and not offered back: hiding the
+        // keyboard ended it and it is in History (Jakob, 2026-11-19).
+        ignoredLiveRunID = link.readLiveDictation()?.runID
         // A return from the app is a new attempt, even before the previous tap's URL-settle timer.
         openAppRequestID = UUID().uuidString
         refreshPreferences()
@@ -1385,21 +1381,6 @@ final class KeyboardController {
         if stagedTake.isFinished { liveAckedVersion = snapshot.version }
         link.writeLiveDictationAck(.init(runID: snapshot.runID, version: snapshot.version, complete: snapshot.complete && finished, stats: liveStats,
                                          delivered: !stagedTake.held, deliveredThrough: stagedTake.handledThrough))
-    }
-
-    /// A staged take that ran while no keyboard saw it (the keyboard was hidden or released): what it typed stays, the rest of
-    /// it (what its units hold now, and what becomes ready later) goes to the kept-text row. Never typed into this field.
-    private func adoptStagedTake(_ snapshot: LiveDictationSnapshot) {
-        let ack = link.readLiveDictationAck()
-        let handled = ack?.runID == snapshot.runID ? ack?.deliveredThrough : nil
-        blockedLiveRunID = snapshot.runID
-        blockedLiveCompleted = snapshot.complete
-        liveSeen = snapshot
-        keepStaged(stagedTake.adopt(snapshot, handledThrough: handled))
-        link.writeLiveDictationAck(.init(runID: snapshot.runID, version: snapshot.version, complete: snapshot.complete, stats: liveStats,
-                                         delivered: false, deliveredThrough: stagedTake.handledThrough))
-        liveRecoveryDismissed = false
-        syncRowTakeover()
     }
 
     /// The run stops here: what it typed stays, nothing more of it is typed, and the take is recovered from History.

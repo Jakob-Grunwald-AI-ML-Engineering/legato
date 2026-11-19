@@ -5,6 +5,14 @@ public enum WordRowLayout {
     /// The horizontal inset of the word row's content (status, kept text, preview), in points.
     public static let contentInset = 8.0
 
+    /// The radius of the keyboard's rounded top corners, in points. An estimate of the system keyboard container's corner on
+    /// current iPhones, not measured; the preview's first line sits right under it.
+    public static let keyboardCornerRadius = 20.0
+
+    /// The horizontal inset of the dictation preview: clear of the rounded top corners (0.8 of the radius is enough for a line
+    /// 8 pt below the top edge), never less than ``contentInset``.
+    public static let previewInset = max(contentInset, 0.8 * keyboardCornerRadius)
+
     /// The narrowest a slot may be and still show a word.
     public static let minSlotWidth = 70.0
 

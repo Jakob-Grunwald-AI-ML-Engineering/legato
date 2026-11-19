@@ -418,8 +418,8 @@ private struct PreviewRow: View {
                 .multilineTextAlignment(.leading)
                 .fixedSize(horizontal: false, vertical: true)
                 .onGeometryChange(for: Double.self) { Double($0.size.height) } action: { textHeight = $0 }
-                .frame(width: max(proxy.size.width - 2 * CGFloat(WordRowLayout.contentInset), 0), alignment: .leading)
-                .padding(.horizontal, CGFloat(WordRowLayout.contentInset))
+                .frame(width: max(proxy.size.width - 2 * CGFloat(WordRowLayout.previewInset), 0), alignment: .leading)
+                .padding(.horizontal, CGFloat(WordRowLayout.previewInset))
                 .padding(.bottom, single ? 0 : CGFloat(WordRowHeight.previewPadding(rowHeight: height, size: size)))
                 .frame(width: proxy.size.width, height: proxy.size.height, alignment: single ? .leading : .bottomLeading)
                 .clipped()
@@ -427,6 +427,7 @@ private struct PreviewRow: View {
                     VStack(spacing: 0) {
                         // The first line's leading edge; the second line is solid.
                         HStack(spacing: 0) {
+                            Color.black.frame(width: CGFloat(WordRowLayout.previewInset))
                             LinearGradient(colors: [truncated ? .clear : .black, .black], startPoint: .leading, endPoint: .trailing)
                                 .frame(width: CGFloat(WordRowHeight.previewFadeWidth))
                             Color.black

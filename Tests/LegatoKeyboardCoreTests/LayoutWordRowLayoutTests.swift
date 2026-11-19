@@ -17,4 +17,9 @@ import Testing
         #expect(WordRowLayout.ranks(visibleSlots: 3) == [1, 0, 2])
         #expect(WordRowLayout.ranks(visibleSlots: 1) == [0])
     }
+
+    @Test func thePreviewClearsTheKeyboardsRoundedTopCorners() {
+        #expect(WordRowLayout.previewInset >= WordRowLayout.contentInset)
+        #expect(WordRowLayout.previewInset == 16)
+    }
 }
