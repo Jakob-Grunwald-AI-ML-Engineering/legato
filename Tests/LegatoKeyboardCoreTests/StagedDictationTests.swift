@@ -68,6 +68,29 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         #expect(take.preview == "Keep this")
     }
 
+    /// A clear hides the open unit and the head at once, before the app answers; waiting and ready units stay.
+    @Test func aClearHidesTheOpenUnitAndTheHeadUntilTheAppAnswers() {
+        var take = StagedDictation()
+        let sent = LiveSegment(id: 0, text: "Sent.", final: true, ready: false, closed: true)
+        let open = LiveSegment(id: 1, text: "Open words", final: true, ready: false, closed: false)
+        take.receive(snapshot(1, [sent, open], head: "head"))
+        #expect(take.hasDiscardable)
+        take.clearOpen()
+        #expect(take.preview == "Sent." && !take.hasDiscardable, "Units already sent for cleanup stay")
+        take.receive(snapshot(2, [sent, open], head: "head more"))
+        #expect(take.preview == "Sent.", "A snapshot before the app's answer keeps them hidden")
+        let discarded = LiveSegment(id: 1, text: "Open words head more", final: true, ready: false, closed: true, discarded: true)
+        take.receive(snapshot(3, [sent, discarded]))
+        #expect(!take.clearing && take.preview == "Sent." && take.hasDiscarded)
+        take.receive(snapshot(4, [sent, discarded], head: "new words"))
+        #expect(take.preview == "Sent. new words")
+        var unanswered = StagedDictation()
+        unanswered.receive(snapshot(1, [open], head: "head"))
+        unanswered.clearOpen()
+        unanswered.endClear()
+        #expect(unanswered.preview == "Open words head")
+    }
+
     /// #313: how much of the unit's own text is in the field drives the row's exit; the separator is not the unit's.
     @Test func exitProgressCountsTheUnitsOwnGraphemesAndNotItsSeparator() {
         var take = StagedDictation()
