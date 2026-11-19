@@ -23,6 +23,9 @@ public enum ChunkEntrance {
     /// estimate, to tune on the phone with the preview's exit animation, which follows the pieces. The Mac and every other
     /// chunk keep the frame pace and cap above.
     public static let typewriterGapMs = 35.0
+    /// The longest a staged unit takes to type (an estimate, to tune on the phone): a longer unit goes in groups of graphemes
+    /// at the same gap, so the whole unit still ends within it.
+    public static let typewriterCapMs = 4_000.0
 
     public struct Plan: Sendable, Equatable {
         /// The insert's pieces in order; joined they are exactly the text.
@@ -45,12 +48,15 @@ public enum ChunkEntrance {
         return Plan(pieces: pieces, gapMs: gap)
     }
 
-    /// The staged typewriter pace (`typewriterGapMs`): one grapheme per piece, no cap, so the burst lasts as long as the text
-    /// takes. Disabled (Reduce Motion), the insert is one piece with no gap, as in `plan`.
+    /// The staged typewriter pace (`typewriterGapMs`): one grapheme per piece up to `typewriterCapMs` of typing; a longer text
+    /// groups graphemes (never inside a cluster) into pieces at the same gap, so the burst never outlasts the cap. Disabled
+    /// (Reduce Motion), the insert is one piece with no gap, as in `plan`.
     public static func typewriterPlan(_ text: String, enabled: Bool = true) -> Plan {
         let graphemes = Array(text)
         guard enabled, graphemes.count > 1 else { return Plan(pieces: text.isEmpty ? [] : [text], gapMs: 0) }
-        return Plan(pieces: graphemes.map(String.init), gapMs: typewriterGapMs)
+        let fitting = Int(typewriterCapMs / typewriterGapMs) + 1
+        guard graphemes.count > fitting else { return Plan(pieces: graphemes.map(String.init), gapMs: typewriterGapMs) }
+        return Plan(pieces: group(graphemes, into: fitting), gapMs: typewriterGapMs)
     }
 
     /// `graphemes` in `count` even groups (the first `n % count` carry one more), in order, never inside a cluster.

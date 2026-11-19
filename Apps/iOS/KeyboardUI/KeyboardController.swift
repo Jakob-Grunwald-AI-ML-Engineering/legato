@@ -361,7 +361,9 @@ final class KeyboardController {
     var dictationPreview: String? {
         if stagedTake.runID != nil, !stagedTake.isFinished {
             let spoken = stagedTake.preview
-            return spoken.isEmpty ? (routeOpen ? Self.listening : nil) : Self.previewTail(spoken)
+            // A unit being typed keeps its start: the row anchors on the exit point, so its head is never cut away.
+            let leaving = stagedTake.inFlight != nil
+            return spoken.isEmpty ? (routeOpen ? Self.listening : nil) : (leaving ? spoken : Self.previewTail(spoken))
         }
         guard routeOpen else { return nil }
         let tail = (dictationPresentation.dictationTail ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
