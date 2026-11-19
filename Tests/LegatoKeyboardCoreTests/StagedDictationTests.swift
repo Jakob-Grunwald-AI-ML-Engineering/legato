@@ -265,3 +265,42 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         #expect(run.version == version && run.snapshot.segments[0].text == "send this raw please")
     }
 }
+
+/// A take the keyboard did not see begin (it appeared, or its view was recreated, while the app kept the take going).
+@Suite struct StagedAppearanceTests {
+    @Test func aRunStillSpokenAfterTheAppearanceContinuesAndAnEndedOneDoesNot() {
+        let seen = snapshot(4, [unit(0, "Hello.", ready: false)], head: "and")
+        #expect(snapshot(5, [unit(0, "Hello.", ready: false)], head: "and more").continues(seen), "a later version, still spoken")
+        #expect(!seen.continues(seen), "the version seen at the appearance itself")
+        #expect(!snapshot(5, [unit(0, "Hello.")], head: "", run: "other").continues(seen), "another run")
+        var stopped = snapshot(5, [unit(0, "Hello.")]); stopped.stopped = true
+        var paused = snapshot(5, [unit(0, "Hello.")]); paused.paused = true
+        #expect(!stopped.continues(seen) && !paused.continues(seen) && !snapshot(6, [unit(0, "Hello.")], complete: true).continues(seen),
+                "hiding ended a stopped, paused or complete run: it stays in History")
+        #expect(paused.isCapturing == false && snapshot(1, []).isCapturing)
+    }
+
+    @Test func adoptingARunSkipsTheUnitsAnEarlierAppearanceTypedAndKeepsAHeldRunHeld() {
+        var take = StagedDictation()
+        take.receive(snapshot(7, [unit(0, "One."), unit(1, "Two."), unit(2, "Three.", ready: false)], head: "four"))
+        take.adopt(.init(runID: "take", version: 6, stats: .init(), delivered: true, deliveredThrough: 0))
+        #expect(take.deliveredThrough == 0 && take.nextReady?.text == "Two." && take.preview == "Two. Three. four")
+
+        var held = StagedDictation()
+        held.receive(snapshot(7, [unit(0, "One."), unit(1, "Two.")]))
+        held.adopt(.init(runID: "take", version: 6, stats: .init(), delivered: false, deliveredThrough: 0, ended: true))
+        #expect(held.held && held.nextReady == nil && held.preview == "Two.", "pending for the person's tap, never retyped on its own")
+
+        var fresh = StagedDictation()
+        fresh.receive(snapshot(2, [unit(0, "One.")]))
+        fresh.adopt(.init(runID: "other", version: 9, stats: .init(), delivered: false, deliveredThrough: 3, ended: true))
+        #expect(!fresh.held && fresh.deliveredThrough == nil, "another run's receipt changes nothing")
+    }
+
+    @Test func theLinkKeepsTheLastNotesInOrder() {
+        let link = LiveDictationLink(store: LinkStore(MemoryLinkStore()))
+        for i in 0..<(LiveDictationLink.noteLimit + 3) { link.note(.init(runID: "r", event: "e\(i)", version: i)) }
+        let notes = link.notes()
+        #expect(notes.count == LiveDictationLink.noteLimit && notes.first?.event == "e3" && notes.last?.version == LiveDictationLink.noteLimit + 2)
+    }
+}

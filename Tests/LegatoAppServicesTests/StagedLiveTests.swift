@@ -326,4 +326,21 @@ private func line(_ sequence: Int, _ text: String) -> DictationRouteLine {
         #expect(pipeline.liveRun?.runID != second)
         await pipeline.reset()
     }
+
+    /// A session reset that drops a run before it ended says so (`live2.run.drop`): otherwise the run just has no `live2.run.end`.
+    @Test func aResetThatDropsAnUnfinishedRunIsLogged() async throws {
+        let pipeline = manual(Upper())
+        var drops: [[String: Any]] = []
+        pipeline.diagnostics = { event, fields in if event == "live2.run.drop" { drops.append(fields) } }
+        pipeline.beginTake()
+        await pipeline.receive(line(0, "words that wait"))
+        await pipeline.pauseTake()
+        await pipeline.reset()
+        #expect(drops.count == 1 && drops.first?["paused"] as? Bool == true && drops.first?["sentences"] as? Int == 1)
+        pipeline.beginTake()
+        await pipeline.receive(line(1, "a take that ends"))
+        await pipeline.finishTake()
+        await pipeline.reset()
+        #expect(drops.count == 1, "a run that ended is not dropped")
+    }
 }

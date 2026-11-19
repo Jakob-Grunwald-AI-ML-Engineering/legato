@@ -1140,6 +1140,11 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     func settleHistory() async { await liveHistoryWrite?.value }
 
     private func endLiveRun() {
+        if let run = liveRun, !run.complete {
+            // A session reset drops a run that never ended (no `live2.run.end`): its open unit is not cleaned; History keeps the raw finals.
+            diagnostics?("live2.run.drop", ["run": String(run.runID.prefix(8)), "sentences": run.finalCount, "units": run.unitCount,
+                                            "paused": pausedRunID == run.runID, "ending": liveFinishing != nil])
+        }
         wholePause?.cancel(); wholePause = nil
         liveSubmitted = [:]; liveKeys = [:]; rawSent = []; liveFinishedAt = nil
         held = nil; heldAwaitsStop = false; liveTakeOpen = false; pausedRunID = nil

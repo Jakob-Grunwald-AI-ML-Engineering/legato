@@ -62,6 +62,15 @@ public struct StagedDictation: Sendable, Equatable {
         if !held { skipEmpty() }
     }
 
+    /// A run this keyboard first sees mid-take (an earlier appearance of the keyboard followed it): the units that appearance
+    /// typed (its last receipt, `LiveDictationAck.deliveredThrough`) are not typed again, and a run it held or left stays held, so
+    /// its pending units wait for the person's tap and are never retyped on their own. Another run's receipt changes nothing.
+    public mutating func adopt(_ ack: LiveDictationAck?) {
+        guard let ack, ack.runID == runID, inFlight == nil else { return }
+        if let through = ack.deliveredThrough, through > (deliveredThrough ?? -1) { deliveredThrough = through }
+        if ack.ended == true || ack.delivered == false { hold() } else if !held { skipEmpty() }
+    }
+
     /// The preview as one text, with where its parts are (character offsets into `text`).
     public struct PreviewLayout: Sendable, Equatable {
         public var text = ""

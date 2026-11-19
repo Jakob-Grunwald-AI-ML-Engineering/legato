@@ -69,6 +69,7 @@ final class KeyboardLinkHost {
                     let liveAck = liveChannel.acknowledged()
                     if let liveAck { dictation.acknowledgeDelivery(liveAck) }
                     self.logLiveAck(liveAck, diagnostics: dictation.diagnostics)
+                    self.logLiveNotes(liveChannel.notes(), diagnostics: dictation.diagnostics)
                     publishDictation()
                 }
                 for intent in channel.drainIntents() {
@@ -149,6 +150,9 @@ final class KeyboardLinkHost {
         if let cause = ack.stats.lastFreeze { fields["lastFreeze"] = cause }
         if let drift = ack.stats.lastDrift { fields["drift"] = drift }
         if let start = ack.stats.lastStart { fields["start"] = start }
+        if let delivered = ack.delivered { fields["delivered"] = delivered }
+        if let through = ack.deliveredThrough { fields["through"] = through }
+        if ack.ended == true { fields["ended"] = true }
         if let version = ack.version {
             fields["v"] = version
             if let at = liveVersionTimes[version] {
@@ -157,6 +161,21 @@ final class KeyboardLinkHost {
             }
         }
         diagnostics?("live2.ack", fields)
+    }
+
+    /// The keyboard's notes (`LiveDictationNote`: why it does not show or follow a run, when its preview first shows words), each
+    /// logged once as `live2.kbd`. `ageMs`: how long before this read the keyboard wrote it (the app may have been suspended).
+    private var liveNotesSeen: Set<String> = []
+    private func logLiveNotes(_ notes: [LiveDictationNote], diagnostics: (@MainActor (String, [String: Any]) -> Void)?) {
+        guard let diagnostics else { return }
+        for note in notes where !liveNotesSeen.contains(note.id) {
+            var fields: [String: Any] = ["run": String(note.runID.prefix(8)), "what": note.event,
+                                         "ageMs": Int(Date().timeIntervalSince(note.at) * 1000)]
+            if let detail = note.detail { fields["detail"] = detail }
+            if let version = note.version { fields["v"] = version }
+            diagnostics("live2.kbd", fields)
+        }
+        liveNotesSeen = Set(notes.map(\.id))
     }
 
     /// nil when the App Group is unavailable (misconfigured signing): the keyboard link is then off.

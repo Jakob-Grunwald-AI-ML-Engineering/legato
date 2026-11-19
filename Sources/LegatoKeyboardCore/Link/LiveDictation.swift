@@ -94,6 +94,32 @@ public struct LiveDictationSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+extension LiveDictationSnapshot {
+    /// The take is still being spoken into: not stopped, complete or paused.
+    public var isCapturing: Bool { !complete && stopped != true && paused != true }
+
+    /// The keyboard leaves the run published when it appears (`seen`) alone: hiding ended that take and it is in History. A later
+    /// version of the same run that is still being spoken shows the app kept the take going across the appearance (it never saw
+    /// the keyboard go, or the keyboard's view was recreated mid-take): the person is speaking into it now, so the keyboard follows it.
+    public func continues(_ seen: LiveDictationSnapshot) -> Bool {
+        runID == seen.runID && version > seen.version && isCapturing
+    }
+}
+
+/// keyboard -> app (`link.dictation.live.notes`, internal builds): why the keyboard does not show or follow a run, and when its
+/// preview first shows words. Reasons and versions only, never text. The last `LiveDictationLink.noteLimit` stay; the app logs each once.
+public struct LiveDictationNote: Codable, Equatable, Sendable {
+    public var id: String
+    public var runID: String
+    public var event: String
+    public var detail: String?
+    public var version: Int?
+    public var at: Date
+    public init(id: String = UUID().uuidString, runID: String, event: String, detail: String? = nil, version: Int? = nil, at: Date = Date()) {
+        self.id = id; self.runID = runID; self.event = event; self.detail = detail; self.version = version; self.at = at
+    }
+}
+
 /// The field as a cleanup pass sees it (`LiveDictationSnapshot.shadowAsk`): the Mac's field editor answers the ask with it.
 /// The iPhone keyboard no longer answers (staged delivery, #312).
 public struct FieldShadow: Codable, Sendable, Equatable {
@@ -178,6 +204,13 @@ public struct LiveDictationLink: Sendable {
     public func read() -> LiveDictationSnapshot? { store.read(LiveDictationSnapshot.self, forKey: LinkChannel.Key.dictationLive) }
     public func acknowledge(_ ack: LiveDictationAck) { store.write(ack, forKey: LinkChannel.Key.dictationLiveAck) }
     public func acknowledged() -> LiveDictationAck? { store.read(LiveDictationAck.self, forKey: LinkChannel.Key.dictationLiveAck) }
+
+    /// How many keyboard notes the link keeps (the app reads them every 100 ms while it runs).
+    public static let noteLimit = 16
+    public func note(_ value: LiveDictationNote) {
+        store.write(Array((notes() + [value]).suffix(Self.noteLimit)), forKey: LinkChannel.Key.dictationLiveNotes)
+    }
+    public func notes() -> [LiveDictationNote] { store.read([LiveDictationNote].self, forKey: LinkChannel.Key.dictationLiveNotes) ?? [] }
 }
 
 /// The app's model of one live run: the finished segments and the speaking head, as the target the keyboard

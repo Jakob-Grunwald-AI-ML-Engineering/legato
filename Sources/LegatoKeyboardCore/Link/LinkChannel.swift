@@ -30,6 +30,8 @@ public enum LinkChannel {
         public static let dictationLive = "link.dictation.live"
         /// keyboard -> app: `LiveDictationAck`.
         public static let dictationLiveAck = "link.dictation.live.ack"
+        /// keyboard -> app: `[LiveDictationNote]`, internal builds' diagnostics (no note follows; the app polls).
+        public static let dictationLiveNotes = "link.dictation.live.notes"
         /// app -> keyboard: `InstructionStrip` (instruction mode's strip).
         public static let instruction = "link.instruction"
         /// keyboard -> app: one `InstructionIntent` per tap, `link.instruction.intent.<uuid>` (the app removes each once read).
