@@ -10,3 +10,6 @@ build/
 Apps/iOS/Gen/
 Apps/iOS/*.xcodeproj
 __pycache__/
+
+# Local build output (scripts/dev/prune-build-caches.sh)
+/derived/
