@@ -57,6 +57,7 @@ public struct SpeechModeRouter: Sendable, Equatable {
     var onInstructionLine: (@MainActor (DictationRouteLine) -> Void)?
     var onInstructionTail: (@MainActor (String) -> Void)?
     var onPreviewInstructionLine: (@MainActor (DictationRouteLine) -> Void)?
+    var onPreviewInstructionTail: (@MainActor (String) -> Void)?
     /// The mode changed for the speech arriving now.
     var onTransition: (@MainActor (SpeechModeRouter.Transition) -> Void)?
 
@@ -86,7 +87,7 @@ public struct SpeechModeRouter: Sendable, Equatable {
         switch router.current {
         case .dictation: dictation.tailChanged(text)
         case .instruction: onInstructionTail?(text)
-        case .previewInstruction: break
+        case .previewInstruction: onPreviewInstructionTail?(text)
         }
     }
     func speechActivity() { if router.current == .dictation { dictation.speechActivity() } }

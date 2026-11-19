@@ -17,12 +17,18 @@ import LegatoSoniox
         let hold: KeyboardRequest.PreviewHold
         let anchor: KeyboardRequest.PreviewAnchor?
         var lines: [String] = []
+        var tail = ""
         var apply = false
     }
     private var previewCapture: PreviewCapture?
     var afterDictationSettled: @MainActor () async -> Void = {}
     var speechMode: SpeechMode { modeSink.target }
     var isFinishingPreviewHold: Bool { previewCapture != nil && modeSink.target == .dictation }
+    var previewInstruction: DictationStatus.PreviewInstruction? {
+        guard let capture = previewCapture else { return nil }
+        let text = LiveSegment.joined(capture.lines + [capture.tail])
+        return text.isEmpty ? nil : .init(holdID: capture.hold.id, text: text)
+    }
 
     init(sink: any DictationRouteSink, instruction: InstructionSession,
          sonioxKey: @escaping @MainActor () -> String,
@@ -36,7 +42,11 @@ import LegatoSoniox
         pipeline?.cutRecognizer = { [engine] in await engine.finalizeChunk() }
         modeSink.onInstructionLine = { instruction.hear($0) }
         modeSink.onInstructionTail = { instruction.hearTail($0) }
-        modeSink.onPreviewInstructionLine = { [weak self] line in self?.previewCapture?.lines.append(line.text) }
+        modeSink.onPreviewInstructionLine = { [weak self] line in
+            self?.previewCapture?.lines.append(line.text)
+            self?.previewCapture?.tail = line.remainingTail ?? ""
+        }
+        modeSink.onPreviewInstructionTail = { [weak self] tail in self?.previewCapture?.tail = tail }
         modeSink.onTransition = { [weak self] transition in
             guard let self else { return }
             if transition.from == .previewInstruction {

@@ -324,6 +324,11 @@ final class KeyboardController {
         guard let previewHold else { return false }
         return dictationPresentation.previewInstructionReadyID == previewHold.request.id
     }
+    var previewInstructionText: String {
+        guard let previewHold, let instruction = dictationPresentation.previewInstruction,
+              instruction.holdID == previewHold.request.id else { return "" }
+        return Self.previewTail(instruction.text)
+    }
 
     func beginPreviewHold() -> Bool {
         guard canComposePreview, let runID = stagedTake.runID else { return false }

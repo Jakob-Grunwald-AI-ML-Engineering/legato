@@ -94,6 +94,7 @@ final class KeyboardLinkHost {
                 value.dictationNotice = self.keyboardSession?.dictationNotice
                 value.dictationNoticeID = self.keyboardSession?.dictationNoticeID
                 value.previewInstructionReadyID = self.keyboardSession?.previewInstructionReadyID
+                value.previewInstruction = self.keyboardSession?.previewInstruction
                 value.error = microphone.error
                 if value != self.publishedStatus {
                     channel.publish(value)

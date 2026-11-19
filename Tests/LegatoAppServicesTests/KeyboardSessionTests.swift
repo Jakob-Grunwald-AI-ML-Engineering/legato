@@ -477,6 +477,9 @@ private final class HeldCleaner: SentenceCleaning {
         let instructionStream = try #require(sockets.at(1))
         await mic.emit()
         try await until { await instructionStream.audioFrames == 1 }
+        await instructionStream.feed(#"{"tokens":[{"text":"upper","is_final":false}]}"#)
+        try await until { keyboard.previewInstruction == .init(holdID: hold.id, text: "upper") }
+        #expect(pipeline.liveRun?.snapshot.text == "meet at the ferry")
         keyboard.handlePreviewHold(.init(id: "release", command: .releasePreviewHold, at: Date(), previewHold: hold))
         await keyboard.settle()
         #expect(keyboard.route == .idle && keyboard.previewInstructionReadyID == nil)
@@ -484,6 +487,7 @@ private final class HeldCleaner: SentenceCleaning {
         await instructionStream.feed(#"{"tokens":[{"text":"uppercase","is_final":true},{"text":"<fin>","is_final":true}]}"#)
         await instructionStream.feed(#"{"finished":true}"#)
         try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
+        #expect(keyboard.previewInstruction == nil)
         #expect(pipeline.isPaused && pipeline.liveRun?.runID == runID)
         #expect(pipeline.liveRun?.snapshot.text == "MEET AT THE FERRY")
         #expect(pipeline.liveRun?.wholeRaw.text == "meet at the ferry")

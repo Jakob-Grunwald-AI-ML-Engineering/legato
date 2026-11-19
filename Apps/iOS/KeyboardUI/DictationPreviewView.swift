@@ -27,8 +27,9 @@ struct DictationPreviewView: View {
     var body: some View {
         let showsUndo = controller.canUndoDiscard
         let draft = controller.composedPreview
+        let instruction = controller.previewInstructionText
         ZStack(alignment: keySide == .right ? .bottomTrailing : .bottomLeading) {
-            PreviewRow(text: text, layout: controller.dictationPreviewLayout, draft: draft,
+            PreviewRow(text: text, instruction: instruction, layout: controller.dictationPreviewLayout, draft: draft,
                        canSend: controller.canSendPreview,
                        canDiscard: controller.canDiscardPreview, insets: insets, bandHeight: bandHeight, reservesChip: showsUndo,
                        hold: PreviewHoldGesture(controller: controller, onBloom: showBloom),
@@ -36,7 +37,8 @@ struct DictationPreviewView: View {
                        onDiscard: { controller.discardPreview() })
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(draft == nil ? text : "Dictation draft")
-                .accessibilityValue(draft == nil ? "" : text)
+                .accessibilityValue(instruction.isEmpty ? (draft == nil ? "" : text) :
+                                    (draft == nil ? instruction : "\(text). \(instruction)"))
                 .accessibilityHint(controller.canComposePreview ? "Tap to clean up. Press to speak Magic instructions. Swipe right to insert, left to clear." : draft != nil ? "Swipe right to insert, left to clear." : "")
                 .accessibilityAddTraits(controller.canComposePreview ? .isButton : [])
                 .accessibilityAction(named: "Compose draft") { controller.composePreviewWithoutInstructions() }
@@ -441,6 +443,7 @@ private struct PreviewRenderer: TextRenderer {
 /// clears the preview with a fade. Reduce Motion skips those effects.
 private struct PreviewRow: View {
     let text: String
+    let instruction: String
     let layout: StagedDictation.PreviewLayout?
     let draft: StagedDictation.PreviewDraft?
     let canSend: Bool
@@ -503,15 +506,18 @@ private struct PreviewRow: View {
         GeometryReader { proxy in
             let size = WordRowHeight.previewFontSize(rowHeight: bandHeight)
             let _ = revealSettled
-            let _ = reveal.update(text: text, placeholders: [KeyboardController.listening, KeyboardController.cleared], enabled: !reduceMotion && draft == nil)
-            let transition = draft?.text == rewrite?.target && !reduceMotion ? rewrite : nil
+            let instructionSuffix = instruction.isEmpty ? "" : " " + instruction
+            let visibleText = text + instructionSuffix
+            let _ = reveal.update(text: visibleText, placeholders: [KeyboardController.listening, KeyboardController.cleared],
+                                  enabled: !reduceMotion && (draft == nil || !instruction.isEmpty))
+            let transition = draft?.text == rewrite?.target && !reduceMotion && instruction.isEmpty ? rewrite : nil
             let animating = transition != nil || exits.contains { Date().timeIntervalSince($0) < PreviewRenderer.fadeSeconds + 0.1 } || reveal.hidden > 0
             let shimmers = !reduceMotion && !(layout?.waiting.isEmpty ?? true)
             let bottomPadding = reservesChip ? PreviewScroll.undoChipHeight + 4 : 2
             ScrollView(.vertical) {
                 TimelineView(.animation(minimumInterval: 1.0 / 60, paused: !animating && !shimmers)) { timeline in
                     let hadHidden = reveal.hidden > 0
-                    let settled = reveal.advance(now: timeline.date, total: text.count)
+                    let settled = reveal.advance(now: timeline.date, total: visibleText.count)
                     let _ = { if hadHidden && settled { Task { @MainActor in revealSettled.toggle() } } }()
                     ZStack(alignment: .bottomLeading) {
                         if let transition, !transition.removed.isEmpty || !transition.survivors.isEmpty {
@@ -522,7 +528,11 @@ private struct PreviewRow: View {
                                 .accessibilityHidden(true)
                                 .allowsHitTesting(false)
                         }
-                        styled(transition.map { change in marked(text) { change.inserted.contains($0) ? .entering : nil } } ?? composed, size: size)
+                        let body = styled(transition.map { change in marked(text) { change.inserted.contains($0) ? .entering : nil } } ?? composed, size: size)
+                        let directions = Text(verbatim: instructionSuffix)
+                            .font(.system(size: CGFloat(size)))
+                            .foregroundStyle(Color(uiColor: .systemPurple))
+                        Text("\(body)\(directions)")
                             .textRenderer(PreviewRenderer(now: timeline.date, exits: exits, shimmers: shimmers, lifts: !reduceMotion,
                                                           probe: probe, rewrite: transition,
                                                           reference: transition == nil ? nil : rewriteReference, hidden: reveal.hidden))

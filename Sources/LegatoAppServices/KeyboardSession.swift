@@ -46,6 +46,7 @@ import LegatoVocabulary
     public private(set) var dictationNotice: String?
     public private(set) var dictationNoticeID = 0
     public private(set) var previewInstructionReadyID: String?
+    public var previewInstruction: DictationStatus.PreviewInstruction? { speechRoute.previewInstruction }
     @ObservationIgnored private var temporaryPreviewMic: KeyboardRequest.PreviewHold?
     /// Mic tap → first live tail, newest last (bounded).
     public private(set) var probes: [TapLatencyProbe.Result] = []
