@@ -333,7 +333,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// is cleaned afresh. At most one speculative request is in flight (the newest wins) and none for fewer than
     /// `speculationMinWords` words; each costs one request that a miss wastes.
     private func speculateOpenUnit() {
-        guard stagedLive, mode == .live, let run = liveRun, run.manual, !run.complete, sendCut == nil, let open = run.peekOpen(),
+        guard stagedLive, mode == .live, let run = liveRun, run.manual, !run.complete, sendCut == nil, previewHoldRunID == nil, let open = run.peekOpen(),
               !run.hasPendingPreview(after: liveDeliveryAck?.deliveredThrough),
               open.text.split(whereSeparator: \.isWhitespace).count >= Self.speculationMinWords,
               liveSpeculation?.text != open.text || liveSpeculation?.runID != run.runID else { return }
@@ -356,6 +356,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// A manual run (#313) has no pauses to close at: only `sendNow()` and the stop close its unit.
     private func closeUnitAtPause() {
         guard stagedLive, var run = liveRun, !run.complete, !run.manual,
+              previewHoldRunID == nil,
               !run.hasPendingPreview(after: liveDeliveryAck?.deliveredThrough), let open = run.flush() else { return }
         liveRun = run
         Task { [weak self] in await self?.submitLive(open.text, key: open.key, run: run) }
@@ -374,6 +375,25 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// Cuts the recognizer without ending the take (`DictationEngine.finalizeChunk`); false when nothing would answer. Set by
     /// the route session that owns the engine.
     @ObservationIgnored public var cutRecognizer: (@MainActor () async -> Bool)?
+    @ObservationIgnored private var previewHoldRunID: String?
+
+    func beginPreviewHold(_ hold: KeyboardRequest.PreviewHold, anchor: KeyboardRequest.PreviewAnchor?) -> Bool {
+        guard stagedLive, mode == .live, sendCut == nil, let run = liveRun, run.runID == hold.runID,
+              run.runID != unfollowedRunID, !run.complete, !run.isEmpty
+        else { return false }
+        if let anchor, anchor.runID != run.runID || anchor.unitID <= (liveDeliveryAck?.deliveredThrough ?? -1) { return false }
+        previewHoldRunID = run.runID
+        return true
+    }
+
+    func endPreviewHold(_ hold: KeyboardRequest.PreviewHold, anchor: KeyboardRequest.PreviewAnchor?, instructions: String?) {
+        guard previewHoldRunID == hold.runID else { return }
+        previewHoldRunID = nil
+        guard let instructions, let run = liveRun, run.runID == hold.runID, run.runID != unfollowedRunID,
+              !run.complete, sendCut == nil else { return }
+        sendCut = (run.runID, streamTime(), false, false, true, anchor, nil)
+        sendCutThrough("previewHold", instructions: instructions.isEmpty ? nil : instructions)
+    }
 
     /// The user's send (a tap on the preview): everything spoken so far goes to cleanup as one unit and then to the field,
     /// and listening continues. The recognizer is cut first so the words still in its head become final; the unit closes when
@@ -455,7 +475,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     }
 
     /// The cut is through (or gave up): the open unit closes and is cleaned. One call per `sendNow()`.
-    private func sendCutThrough(_ via: String) {
+    private func sendCutThrough(_ via: String, instructions: String? = nil) {
         guard let cut = sendCut else { return }
         sendCut = nil
         cut.timeout?.cancel()
@@ -471,12 +491,13 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             return
         }
         if let anchor = cut.preview {
-            guard anchor.unitID > (liveDeliveryAck?.deliveredThrough ?? -1), let draft = run.extendPreview(anchor, release: cut.raw) else { return }
+            guard anchor.unitID > (liveDeliveryAck?.deliveredThrough ?? -1),
+                  let draft = run.extendPreview(anchor, release: cut.raw, allowsUnchangedSource: cut.editPreview) else { return }
             let endsRun = pausedRunID == run.runID
             if cut.raw, endsRun { pausedRunID = nil; liveTakeOpen = false; run.setPaused(false) }
             publishLive(run)
             Task { [weak self] in
-                if !cut.raw { await self?.submitLive(draft.text, key: draft.key, run: run) }
+                if !cut.raw { await self?.submitLive(draft.text, key: draft.key, run: run, instructions: instructions) }
                 if cut.raw, endsRun { await self?.finishLive() }
             }
             return
@@ -497,7 +518,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         }
         if cut.editPreview, run.markForPreview(key: open.key) { publishLive(run) }
         Task { [weak self] in
-            await self?.submitLive(open.text, key: open.key, run: run)
+            await self?.submitLive(open.text, key: open.key, run: run, instructions: instructions)
             if endsRun { await self?.finishLive() }
         }
     }
@@ -909,7 +930,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         setVoiceActive(true)
         var run = currentLiveRun()
         let unit = run.addFinal(key: sequence, text: raw, closes: !forced,
-                                holdsForPreview: run.hasPendingPreview(after: liveDeliveryAck?.deliveredThrough))
+                                holdsForPreview: previewHoldRunID == run.runID || run.hasPendingPreview(after: liveDeliveryAck?.deliveredThrough))
         // Commit the final and the provider update's residual words in one publication. A segment
         // often finalizes only the first few words of the head the keyboard already shows.
         if let remainingTail { run.setHead(remainingTail) }
@@ -971,7 +992,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     @ObservationIgnored private var liveSpecState: [Int: String] = [:]
 
     /// Sends a closed unit (`key`: its last segment) to cleanup, against the text before the run and the units so far.
-    private func submitLive(_ unit: String, key sequence: Int, run: LiveDictationRun) async {
+    private func submitLive(_ unit: String, key sequence: Int, run: LiveDictationRun, instructions: String? = nil) async {
         let id = liveCleanupSequence
         liveCleanupSequence += 1
         liveKeys[id] = (sequence, run.unitRange(key: sequence))
@@ -981,10 +1002,13 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         // A speculative request for this unit has been started by now; the pipeline takes it when the text is the same.
         await speculationStart?.value
         let pipeline = await current()
-        let speculated = liveSpeculation.flatMap { $0.runID == run.runID ? ($0.text == unit ? "match" : "grew") : nil } ?? "none"
+        let speculated = instructions == nil
+            ? liveSpeculation.flatMap { $0.runID == run.runID ? ($0.text == unit ? "match" : "grew") : nil } ?? "none"
+            : "none"
         liveSpeculation = nil
         liveSpecState[id] = speculated
-        await pipeline.submit(sequence: id, lineID: "\(sessionID)-\(sequence)", raw: unit, textBefore: before, allowsEmpty: true)
+        await pipeline.submit(sequence: id, lineID: "\(sessionID)-\(sequence)", raw: unit, textBefore: before,
+                              allowsEmpty: true, instructions: instructions)
     }
 
     /// An instruction is about to read the field: a live run's held cleanup lands now, whole-take pass and the wait for
@@ -1232,6 +1256,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         }
         wholePause?.cancel(); wholePause = nil
         discardTimer?.cancel(); discardTimer = nil
+        previewHoldRunID = nil
         liveSubmitted = [:]; liveKeys = [:]; rawSent = []; liveFinishedAt = nil
         held = nil; heldAwaitsStop = false; liveTakeOpen = false; pausedRunID = nil
         let waiting = stopWaiters; stopWaiters = []

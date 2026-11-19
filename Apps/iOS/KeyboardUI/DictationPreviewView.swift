@@ -1,10 +1,11 @@
 import LegatoComposerUI
 import LegatoKeyboardCore
 import SwiftUI
+import UIKit
 
 /// The dictation preview in its own frame (`TopRowLayout.preview`, taller than the transcript band): the words not in the field
-/// yet, scrollable with no scrollbar and anchored on the newest words, with the touch bloom and the undo chip over it.
-/// Tap composes a draft, a swipe right inserts the draft (or raw speech), and a swipe left clears.
+/// yet, scrollable with no scrollbar and anchored on the newest words, with the Magic glow and the undo chip over it.
+/// Hold to speak composition instructions, swipe right to insert, or swipe left to clear.
 struct DictationPreviewView: View {
     let controller: KeyboardController
     let text: String
@@ -14,8 +15,6 @@ struct DictationPreviewView: View {
     /// grow with the taller preview; more lines show instead.
     let bandHeight: Double
 
-    /// The touch bloom across the preview, from the touch point (the preview's own coordinates).
-    @State private var bloom: (point: CGPoint, start: Date)?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var insets: EdgeInsets {
@@ -28,35 +27,28 @@ struct DictationPreviewView: View {
         let draft = controller.composedPreview
         ZStack(alignment: keySide == .right ? .bottomTrailing : .bottomLeading) {
             PreviewRow(text: text, layout: controller.dictationPreviewLayout, draft: draft,
-                       canCompose: controller.canComposePreview, canSend: controller.canSendPreview,
+                       canSend: controller.canSendPreview,
                        canDiscard: controller.canDiscardPreview, insets: insets, bandHeight: bandHeight, reservesChip: showsUndo,
-                       onSend: { point in bloom = (point, Date()); controller.previewTapped() },
+                       hold: PreviewHoldGesture(controller: controller),
                        onSendRaw: { controller.previewSwiped() },
                        onDiscard: { controller.discardPreview() })
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(draft == nil ? text : "Dictation draft")
                 .accessibilityValue(draft == nil ? "" : text)
-                .accessibilityHint(controller.canComposePreview ? "Tap to compose. Swipe right to insert, left to clear." : draft != nil ? "Swipe right to insert, left to clear." : "")
+                .accessibilityHint(controller.canComposePreview ? "Hold to speak Magic instructions. Swipe right to insert, left to clear." : draft != nil ? "Swipe right to insert, left to clear." : "")
                 .accessibilityAddTraits(controller.canComposePreview ? .isButton : [])
-                .accessibilityAction { controller.previewTapped() }
+                .accessibilityAction(named: "Compose draft") { controller.composePreviewWithoutInstructions() }
                 .accessibilityAction(named: draft == nil ? "Insert without cleanup" : "Insert draft") { if controller.canSendPreview { controller.previewSwiped() } }
                 .accessibilityAction(named: "Clear") { if controller.canDiscardPreview { controller.discardPreview() } }
                 .accessibilityIdentifier("keyboard.hint")
             if showsUndo { undoChip.transition(.opacity) }
         }
         .animation(reduceMotion ? nil : .easeOut(duration: Self.fadeSeconds), value: showsUndo)
-        .overlay { bloomOverlay }
-        .onChange(of: bloom?.start) { _, start in
-            guard let start else { return }
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(Int(Self.bloomSeconds * 1000) + 100))
-                if bloom?.start == start { bloom = nil }
-            }
-        }
+        .overlay { holdGlow }
+        .onDisappear { controller.endPreviewHold(apply: false) }
     }
 
     nonisolated static let fadeSeconds = 0.15
-    private static let bloomSeconds = 0.35
 
     /// "Undo" while the app keeps the cleared words (`KeyboardController.canUndoDiscard`), on the dictation key's side.
     private var undoChip: some View {
@@ -76,29 +68,36 @@ struct DictationPreviewView: View {
         .accessibilityIdentifier("keyboard.preview.undo")
     }
 
-    /// A soft bloom of the magic colours growing from the touch point across the whole preview (350 ms, low opacity); with
-    /// Reduce Motion a brief plain highlight.
-    @ViewBuilder
-    private var bloomOverlay: some View {
-        if let bloom {
-            TimelineView(.animation) { timeline in
-                let t = min(1, max(0, timeline.date.timeIntervalSince(bloom.start) / (reduceMotion ? 0.2 : Self.bloomSeconds)))
-                Canvas { context, canvas in
-                    let whole = Path(CGRect(origin: .zero, size: canvas))
-                    if reduceMotion {
-                        context.fill(whole, with: .color(Color.primary.opacity(0.1 * (1 - t))))
-                        return
-                    }
-                    let reach = max(hypot(bloom.point.x, bloom.point.y), hypot(canvas.width - bloom.point.x, bloom.point.y),
-                                    hypot(bloom.point.x, canvas.height - bloom.point.y), hypot(canvas.width - bloom.point.x, canvas.height - bloom.point.y))
-                    let radius = max(1, reach * (1 - (1 - t) * (1 - t)))
-                    // Soft: it peaks early and is gone by the end.
-                    let colors = MagicGradient.colors.map { $0.opacity(0.4 * (1 - t) * (1 - t)) }
-                    context.fill(whole, with: .radialGradient(Gradient(colors: colors + [.clear]), center: bloom.point,
-                                                              startRadius: 0, endRadius: radius))
-                }
-            }
+    private var holdGlow: some View {
+        let rim = RoundedRectangle(cornerRadius: WordRowLayout.contentInset)
+            .strokeBorder(LinearGradient(colors: MagicGradient.colors, startPoint: .topLeading, endPoint: .bottomTrailing),
+                          lineWidth: 1.5)
+        return rim
+            .background { rim.blur(radius: 5) }
+            .padding(2)
+            .opacity(controller.isHoldingPreview ? 0.9 : 0)
+            .scaleEffect(controller.isHoldingPreview || reduceMotion ? 1 : 0.97)
+            .animation(reduceMotion ? nil : .smooth, value: controller.isHoldingPreview)
             .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
+/// UIKit's standard hold takes precedence once recognized. Movement that starts first still
+/// goes to the preview's existing scrolling and swipe gestures.
+private struct PreviewHoldGesture: UIGestureRecognizerRepresentable {
+    let controller: KeyboardController
+
+    func makeUIGestureRecognizer(context: Context) -> UILongPressGestureRecognizer {
+        UILongPressGestureRecognizer()
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UILongPressGestureRecognizer, context: Context) {
+        switch recognizer.state {
+        case .began: _ = controller.beginPreviewHold()
+        case .ended: controller.endPreviewHold(apply: true)
+        case .cancelled: controller.endPreviewHold(apply: false)
+        default: break
         }
     }
 }
@@ -333,14 +332,12 @@ private struct PreviewRenderer: TextRenderer {
 /// anchored (a short text sits at the bottom, a long one shows its newest lines and follows as it grows). Scrolled up into older
 /// text it stops following and resumes at the bottom or after `PreviewScroll.idleResumeSeconds`; a soft fade marks older text above.
 /// While a staged take shows it: the unit being typed leaves letter by letter (the view keeps that line in view), words waiting
-/// for cleanup shimmer, a tap sends them and blooms from the touch point (`canSend`), a swipe right sends them as spoken
-/// and the text swooshes right once, and a swipe left clears what is still in it (`canDiscard`; the text fades out). Reduce Motion: no
-/// swoosh, fade, lift or shimmer.
+/// for cleanup shimmer. Holding captures Magic instructions. A swipe right sends the draft with a swoosh; a swipe left
+/// clears the preview with a fade. Reduce Motion skips those effects.
 private struct PreviewRow: View {
     let text: String
     let layout: StagedDictation.PreviewLayout?
     let draft: StagedDictation.PreviewDraft?
-    let canCompose: Bool
     let canSend: Bool
     let canDiscard: Bool
     /// The text's leading and trailing insets (`WordRowLayout.insets`).
@@ -348,8 +345,7 @@ private struct PreviewRow: View {
     let bandHeight: Double
     /// The undo chip is up: the text keeps clear of it at the bottom.
     let reservesChip: Bool
-    /// A tap that sends, at the touch point (the preview's own coordinates).
-    let onSend: (CGPoint) -> Void
+    let hold: PreviewHoldGesture
     /// A swipe right: send without cleanup.
     let onSendRaw: () -> Void
     /// A swipe left: clear what is still in the preview.
@@ -461,11 +457,8 @@ private struct PreviewRow: View {
             // Fully clear areas get no touches in a keyboard extension.
             .background(Color.black.opacity(0.001))
             .contentShape(Rectangle())
-            .onTapGesture(coordinateSpace: .local) { point in
-                guard canCompose else { return }
-                onSend(point)
-            }
-            // A drag never also taps: the tap fails once the finger has moved. Acts while moving, once per drag: a drag that
+            .gesture(hold)
+            // Act while moving, once per drag: a drag that
             // leaves a short view gets cancelled, so waiting for its end would lose it. Vertical drags still scroll.
             .simultaneousGesture(
                 DragGesture(minimumDistance: CGFloat(PreviewScroll.swipeDistance), coordinateSpace: .local)

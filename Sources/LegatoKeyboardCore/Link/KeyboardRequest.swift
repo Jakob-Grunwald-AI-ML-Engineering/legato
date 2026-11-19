@@ -6,6 +6,8 @@ public enum RequestCommand: String, Codable, Sendable, Equatable {
     case send
     /// Compose the spoken unit and hold it in the keyboard preview until a swipe.
     case editPreview
+    /// Boundaries of speech explicitly addressed to preview Magic.
+    case beginPreviewHold, releasePreviewHold, cancelPreviewHold
     /// Send everything dictated so far that is not typed yet as raw words, with no cleanup (a swipe right on the preview).
     case sendRaw
     /// Throw away what is still in the preview and not yet sent for cleanup: the open unit and the speaking head (a swipe left).
@@ -34,12 +36,24 @@ public struct KeyboardRequest: Codable, Sendable, Equatable {
     public var command: RequestCommand
     public var at: Date
     public var preview: PreviewAnchor?
+    public var previewHold: PreviewHold?
 
-    public init(id: String, command: RequestCommand, at: Date, preview: PreviewAnchor? = nil) {
+    public struct PreviewHold: Codable, Sendable, Equatable {
+        public let id: String
+        public let runID: String
+
+        public init(id: String, runID: String) {
+            self.id = id
+            self.runID = runID
+        }
+    }
+
+    public init(id: String, command: RequestCommand, at: Date, preview: PreviewAnchor? = nil, previewHold: PreviewHold? = nil) {
         self.id = id
         self.command = command
         self.at = at
         self.preview = preview
+        self.previewHold = previewHold
     }
 }
 

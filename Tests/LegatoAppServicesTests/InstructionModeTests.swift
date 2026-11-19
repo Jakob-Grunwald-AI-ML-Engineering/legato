@@ -40,6 +40,27 @@ import LegatoKeyboardCore
 }
 
 @MainActor @Suite struct SpeechModeSinkTests {
+    @Test func previewHoldRoutesLateFinalsOnBothSidesOfTheCut() async {
+        let dictation = RecordingDictation()
+        let sink = SpeechModeSink(dictation: dictation)
+        var instructions: [String] = []
+        sink.onPreviewInstructionLine = { instructions.append($0.text) }
+        func line(_ text: String) -> DictationRouteLine { .init(sequence: 0, text: text, words: [], reason: "finalize") }
+
+        sink.toggle(to: .previewInstruction, cut: true)
+        sink.toggle(to: .dictation, cut: true)
+        await sink.receive(line("Last part of the draft"))
+        sink.boundary("finalize")
+        sink.tailChanged("Make it")
+        await sink.receive(line("Make it friendlier"))
+        sink.boundary("finalize")
+        await sink.receive(line("First words after release"))
+
+        #expect(dictation.lines == ["Last part of the draft", "First words after release"])
+        #expect(instructions == ["Make it friendlier"])
+        #expect(!dictation.tails.contains("Make it"))
+    }
+
     @Test func mixedSpeechIsTaggedPerSegment() async {
         let dictation = RecordingDictation()
         let sink = SpeechModeSink(dictation: dictation)

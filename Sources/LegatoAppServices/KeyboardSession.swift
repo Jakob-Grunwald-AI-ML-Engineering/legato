@@ -283,6 +283,18 @@ import LegatoVocabulary
         await speechRoute.sendNow(editPreview: editPreview, preview: preview)
     }
 
+    public func handlePreviewHold(_ request: KeyboardRequest) {
+        guard isOpen, !meetingSuspended, let hold = request.previewHold else { return }
+        let cut = gate.route == .dictation || dictation.hasActiveTake || dictation.isReplaying
+        switch request.command {
+        case .beginPreviewHold where canSend:
+            speechRoute.beginPreviewHold(hold, anchor: request.preview, cut: cut)
+        case .releasePreviewHold, .cancelPreviewHold:
+            speechRoute.endPreviewHold(hold, apply: request.command == .releasePreviewHold, cut: cut)
+        default: break
+        }
+    }
+
     /// A take is running, or a manual one is paused with words waiting (Stop keeps them pending, #313).
     private var canSend: Bool {
         #if DEBUG || LEGATO_INTERNAL
@@ -361,6 +373,7 @@ import LegatoVocabulary
             if waitingForWords { await dictation.waitForFinish(timeout: Self.takeEndWait) }
             await previous?.value
             guard !Task.isCancelled, self?.takeGeneration == generation else { return }
+            self?.speechRoute.finishPreviewHold()
             if pausing { await sink.pauseTake() } else { await sink.finishTake() }
         }
     }

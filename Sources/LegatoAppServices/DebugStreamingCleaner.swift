@@ -20,7 +20,11 @@ public final class DebugStreamingCleaner: SentenceCleaning, @unchecked Sendable 
     /// A sentence (line by line, live), capitalized like a take, so a cleanup that lands shows word by word.
     public func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence {
         try await Task.sleep(for: chunkDelay)
-        return .init(sentenceID: input.sentenceID, sequence: input.sequence, text: reply ?? input.text.capitalized)
+        let instructions = input.dictation?.instructions?.lowercased() ?? ""
+        let text = if instructions.contains("uppercase") { input.text.uppercased() }
+            else if instructions.contains("lowercase") { input.text.lowercased() }
+            else { input.text.capitalized }
+        return .init(sentenceID: input.sentenceID, sequence: input.sequence, text: reply ?? text)
     }
     public func cleanTake(_ input: DictationTakeInput) async throws -> String {
         try await Task.sleep(for: chunkDelay)

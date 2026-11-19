@@ -201,3 +201,17 @@ private final class HangingSentenceMessages: MessagesStreaming {
     let haikuRequest = try JSONDecoder().decode(JSONValue.self, from: #require(haiku.requests.withLock { $0 }.first))
     #expect(haikuRequest["thinking"]?["type"] == .string("disabled") && haikuRequest["tool_choice"]?["type"] == .string("tool"))
 }
+
+@Test func previewCompositionSendsInstructionsSeparateFromDraftText() async throws {
+    let fixture = SentenceFixtureMessages(try sentenceToolEvents(sentencePayload(text: "Hallo.")))
+    let client = SentenceCleanupClient(client: fixture)
+    _ = try await client.clean(.init(sentenceID: "sentence-a", sequence: 7, text: "Hello.", vocabulary: [],
+                                     dictation: .init(style: .send, instructions: "Translate to German.")))
+
+    let request = try JSONSerialization.jsonObject(with: #require(fixture.requests.withLock { $0 }.first)) as? [String: Any]
+    let messages = try #require(request?["messages"] as? [[String: String]])
+    let content = try #require(messages.first?["content"])
+    let source = try JSONSerialization.jsonObject(with: Data(content.utf8)) as? [String: Any]
+    #expect(source?["text"] as? String == "Hello.")
+    #expect(source?["instructions"] as? String == "Translate to German.")
+}

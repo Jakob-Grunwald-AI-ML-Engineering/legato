@@ -144,9 +144,16 @@ public final class HostLink {
     /// A request the app can act on from where it is gets acted on once (the ledger drops copies) and an
     /// ack of `accepted`; one it can't gets `hop`, and stays admittable by the URL that opens the app.
     public func processInbox() async {
-        guard let request = store.read(KeyboardRequest.self, forKey: LinkChannel.Key.request),
-              now().timeIntervalSince(request.at) <= LinkChannel.requestMaxAge
-        else { return }
+        // Keep the leading edge available even when both Darwin notifications arrive after release.
+        if let start = store.read(KeyboardRequest.self, forKey: LinkChannel.Key.previewHoldStart),
+           start.command == .beginPreviewHold, !ledger.contains(id: start.id) {
+            await process(start)
+        }
+        if let request = store.read(KeyboardRequest.self, forKey: LinkChannel.Key.request) { await process(request) }
+    }
+
+    private func process(_ request: KeyboardRequest) async {
+        guard now().timeIntervalSince(request.at) <= LinkChannel.requestMaxAge else { return }
         if ledger.contains(id: request.id) { // a copy: already being handled
             acknowledge(request.id, .accepted)
             return
@@ -219,7 +226,7 @@ public final class HostLink {
         case .stop: isRunning || pendingStartID != nil || state.leaseUntil != nil
         case .endKeepAlive: state.leaseUntil != nil
         // A manual take that is paused (#313) has no running phase but still holds words to send; the app ignores a send with nothing to send.
-        case .send, .editPreview, .sendRaw, .discard, .undoDiscard: true
+        case .send, .editPreview, .beginPreviewHold, .releasePreviewHold, .cancelPreviewHold, .sendRaw, .discard, .undoDiscard: true
         case .arm: false // arming activates audio: only from the front, through the URL that opens the app
         }
     }

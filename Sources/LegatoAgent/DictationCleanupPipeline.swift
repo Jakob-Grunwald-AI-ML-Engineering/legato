@@ -108,7 +108,15 @@ public enum DictationCleanupGuard {
 /// A line whose call fails, is rejected by the guard or takes longer than `timeout` goes on raw: dictation never
 /// waits on the model beyond that.
 public actor DictationCleanupPipeline {
-    private struct Pending { let sequence: Int; let lineID: String; let raw: String; let textBefore: String; let allowsEmpty: Bool; let enqueued: ContinuousClock.Instant }
+    private struct Pending {
+        let sequence: Int
+        let lineID: String
+        let raw: String
+        let textBefore: String
+        let allowsEmpty: Bool
+        let instructions: String?
+        let enqueued: ContinuousClock.Instant
+    }
     /// A speculative request (`speculate`): the text it cleans, what stood before it, and its running task.
     private struct Speculation {
         let id: UUID; let raw: String; let textBefore: String
@@ -151,13 +159,15 @@ public actor DictationCleanupPipeline {
     /// `textBefore`: the field's text before the cursor now (`documentContextBeforeInput`). `allowsEmpty`: the caller
     /// can drop the line, so an empty result the guard accepts is delivered as cleaned empty text; otherwise an empty
     /// result is a failure (`invalidText`) and the raw line goes on.
-    public func submit(sequence: Int, lineID: String, raw: String, textBefore: String, allowsEmpty: Bool = false) async {
+    public func submit(sequence: Int, lineID: String, raw: String, textBefore: String, allowsEmpty: Bool = false,
+                       instructions: String? = nil) async {
         // Lines that never came here (another send mode took them) leave a gap: with nothing waiting, start at this one.
         if firstSequence == nil || (queue.isEmpty && inFlight.isEmpty && finished.isEmpty && sequence != nextDelivery) {
             firstSequence = firstSequence ?? sequence; nextDelivery = sequence
         }
         known[sequence] = raw
-        queue.append(Pending(sequence: sequence, lineID: lineID, raw: raw, textBefore: String(textBefore.suffix(600)), allowsEmpty: allowsEmpty, enqueued: .now))
+        queue.append(Pending(sequence: sequence, lineID: lineID, raw: raw, textBefore: String(textBefore.suffix(600)),
+                             allowsEmpty: allowsEmpty, instructions: instructions, enqueued: .now))
         queue.sort { $0.sequence < $1.sequence }
         pump()
     }
@@ -205,14 +215,18 @@ public actor DictationCleanupPipeline {
             let line = queue.removeFirst()
             inFlight.insert(line.sequence)
             let previous = known.filter { $0.key < line.sequence }.sorted { $0.key < $1.key }.map(\.value).filter { !$0.isEmpty }.suffix(2).map { $0 }
-            let context = DictationCleanupContext(previousLines: previous, textBeforeCursor: line.textBefore, style: style)
+            let context = DictationCleanupContext(previousLines: previous, textBeforeCursor: line.textBefore, style: style,
+                                                  instructions: line.instructions)
             let token = generation
             let waited = line.enqueued.duration(to: .now).components
             let queueWaitMs = Int(waited.seconds * 1000 + waited.attoseconds / 1_000_000_000_000_000)
             // A speculative request for exactly this text (and context) is this line's call; any other is stale.
             var spec: Speculation?
             if let held = speculation {
-                if held.raw == line.raw, held.textBefore == line.textBefore { spec = held; speculation = nil } else { cancelSpeculation() }
+                if line.instructions == nil, held.raw == line.raw, held.textBefore == line.textBefore {
+                    spec = held
+                    speculation = nil
+                } else { cancelSpeculation() }
             }
             let input = SentenceCleanupInput(sentenceID: line.lineID, sequence: line.sequence, text: line.raw, vocabulary: vocabulary, dictation: context)
             tasks[line.sequence] = Task { [cleaner, timeout, spec] in

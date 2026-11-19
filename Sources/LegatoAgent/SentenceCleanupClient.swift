@@ -14,8 +14,11 @@ public struct DictationCleanupContext: Sendable, Equatable {
     public var previousLines: [String]
     public var textBeforeCursor: String
     public var style: DictationCleanupStyle
-    public init(previousLines: [String] = [], textBeforeCursor: String = "", style: DictationCleanupStyle = .line) {
+    public var instructions: String?
+    public init(previousLines: [String] = [], textBeforeCursor: String = "", style: DictationCleanupStyle = .line,
+                instructions: String? = nil) {
         self.previousLines = previousLines; self.textBeforeCursor = textBeforeCursor; self.style = style
+        self.instructions = instructions
     }
 }
 
@@ -134,6 +137,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
               input.sequence >= 0, input.sequence <= 9_007_199_254_740_991,
               !input.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               input.text.utf8.count <= Self.maximumTextBytes,
+              (input.dictation?.instructions?.utf8.count ?? 0) <= Self.maximumTextBytes,
               input.vocabulary.count <= 200,
               input.vocabulary.reduce(0, { $0 + $1.utf8.count }) <= 16_384 else { throw SentenceCleanupError.invalidInput }
         let chosen: ModelChoice = input.dictation == nil ? .haiku : model()
@@ -422,6 +426,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
         if let dictation = input.dictation {
             fields["previousLines"] = .array(dictation.previousLines.map(JSONValue.string))
             fields["textBeforeCursor"] = .string(dictation.textBeforeCursor)
+            if style == .send, let instructions = dictation.instructions { fields["instructions"] = .string(instructions) }
         }
         let source: JSONValue = .object(fields)
         let instruction = """
@@ -430,7 +435,8 @@ public struct SentenceCleanupClient: SentenceCleaning {
         Return only the locally corrected plain text through submit_sentence, copying the supplied sentenceID and sequence exactly. If no useful local improvement is needed, submit the same sentence. No acknowledgement, explanation, formatting wrapper or second call is needed.
         """
         let request: JSONValue = .object([
-            "model": .string(model.rawValue), "max_tokens": .number(Double(input.dictation == nil ? 1024 : Self.lineMaxTokens(characters: input.text.count, style: style))),
+            "model": .string(model.rawValue), "max_tokens": .number(Double(input.dictation == nil ? 1024 :
+                Self.lineMaxTokens(characters: input.text.count + (input.dictation?.instructions?.count ?? 0), style: style))),
             "stream": .bool(true), "thinking": Self.thinking(model),
             "system": input.dictation == nil ? .string(instruction)
                 : .array([.object(["type": .string("text"), "text": .string(prompt.system), "cache_control": dictationCache])]),

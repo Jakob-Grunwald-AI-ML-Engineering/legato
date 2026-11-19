@@ -304,14 +304,13 @@ final class KeyboardController {
     }
 
     var canSendPreview: Bool {
-        guard fullAccess, !stagedTake.isAwaitingPreview else { return false }
+        guard fullAccess, !isHoldingPreview, !stagedTake.isAwaitingPreview else { return false }
         if stagedTake.previewDraft?.released == false { return composedPreview != nil }
         return stagedTake.runID != nil && (!stagedTake.complete || stagedTake.held) && !stagedTake.preview.isEmpty
     }
 
     var canComposePreview: Bool {
         canSendPreview && !stagedTake.complete && stagedTake.inFlight == nil && stagedTake.previewDraft?.released != true
-            && (composedPreview == nil || stagedTake.hasPreviewContinuation)
     }
 
     private var previewAnchor: KeyboardRequest.PreviewAnchor? {
@@ -319,11 +318,31 @@ final class KeyboardController {
         return .init(runID: runID, unitID: draft.unitID)
     }
 
-    func previewTapped() {
+    private var previewHold: (request: KeyboardRequest.PreviewHold, documentID: String?)?
+    var isHoldingPreview: Bool { previewHold != nil }
+
+    func beginPreviewHold() -> Bool {
+        guard canComposePreview, let runID = stagedTake.runID else { return false }
+        let anchor = previewAnchor
+        guard composedPreview == nil || anchor != nil else { return false }
+        let hold = KeyboardRequest.PreviewHold(id: UUID().uuidString, runID: runID)
+        previewHold = (hold, document.documentID)
+        link.send(.beginPreviewHold, id: hold.id, preview: anchor, previewHold: hold)
+        return true
+    }
+
+    func endPreviewHold(apply: Bool) {
+        guard let hold = previewHold else { return }
+        previewHold = nil
+        let valid = apply && document.documentID == hold.documentID && stagedTake.runID == hold.request.runID
+        link.send(valid ? .releasePreviewHold : .cancelPreviewHold, id: UUID().uuidString, previewHold: hold.request)
+    }
+
+    /// Plain cleanup remains available as an accessibility action without requiring a sustained touch.
+    func composePreviewWithoutInstructions() {
         guard canComposePreview else { return }
         let anchor = previewAnchor
         guard composedPreview == nil || anchor != nil else { return }
-        trace?("preview tapped: compose")
         link.send(.editPreview, id: UUID().uuidString, preview: anchor)
     }
 
@@ -532,6 +551,7 @@ final class KeyboardController {
     }
 
     func disappeared() {
+        endPreviewHold(apply: false)
         #if DEBUG || LEGATO_INTERNAL
         endFieldProbe()
         #endif
@@ -636,6 +656,7 @@ final class KeyboardController {
     }
 
     func documentDidChange(callback: Bool = false) {
+        if let previewHold, previewHold.documentID != document.documentID { endPreviewHold(apply: false) }
         #if DEBUG || LEGATO_INTERNAL
         if probeLease != nil, document.documentID != probeFieldID || document.isSecureTextEntry { endFieldProbe() }
         #endif

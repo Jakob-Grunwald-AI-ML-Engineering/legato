@@ -408,11 +408,13 @@ public struct LiveDictationRun: Sendable, Equatable {
 
     /// Replaces the draft and the finalized speech after it with one unit. The original ASR segments
     /// remain intact for History, and speech arriving after this cut starts a new unit.
-    public mutating func extendPreview(_ anchor: KeyboardRequest.PreviewAnchor, release: Bool) -> (key: Int, text: String)? {
+    public mutating func extendPreview(_ anchor: KeyboardRequest.PreviewAnchor, release: Bool,
+                                       allowsUnchangedSource: Bool = false) -> (key: Int, text: String)? {
         let id = anchor.unitID
         guard staged, anchor.runID == runID, previewStarts.contains(id), !releasedPreviews.contains(id),
               let first = units.firstIndex(where: { $0.lowerBound == id }), ready.contains(first),
-              let last = units.indices.last, release || first < last, let key = closingKey(last) else { return nil }
+              let last = units.indices.last, release || allowsUnchangedSource || first < last,
+              let key = closingKey(last) else { return nil }
         let source = LiveSegment.joined((first...last).map(shownText))
         let end = units[last].upperBound
         units.replaceSubrange(first...last, with: [id..<end])
