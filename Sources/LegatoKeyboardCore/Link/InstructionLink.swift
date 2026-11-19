@@ -186,9 +186,11 @@ public struct ScopedEdit: Codable, Sendable, Equatable {
     public var selected: String?
     public var target: String
     public var at: Date
+    public var requiresShadowRead: Bool?
     public init(id: String = UUID().uuidString, instructionID: String, documentID: String?, before: String, after: String,
-                selected: String? = nil, target: String, at: Date = Date(), draftID: String? = nil) {
+                selected: String? = nil, target: String, at: Date = Date(), draftID: String? = nil, requiresShadowRead: Bool? = nil) {
         self.id = id; self.instructionID = instructionID; self.documentID = documentID; self.draftID = draftID
+        self.requiresShadowRead = requiresShadowRead
         self.before = before; self.after = after; self.selected = selected; self.target = target; self.at = at
     }
     /// The scope as the field shows it now.
@@ -211,13 +213,16 @@ public struct ScopedEditAck: Codable, Sendable, Equatable {
     public var partial: String?
     /// Ops went out and the edit stopped before the end; without `partial` the field's text is unknown.
     public var stopped: Bool?
-    /// Not applied because the scope could not be found or verified again (`FieldQueue.DropReason.unplaceable`): the
-    /// field may hold part of the edit. A cleanup reads it afresh and runs once more (`FieldCleanupSession`).
+    /// Not applied because the scope could not be found or verified again.
     public var unplaceable: Bool?
+    /// Intended text from a committed cleanup whose host synchronization could not finish.
+    public var recoveryTarget: String?
+    /// The confirmed scope after priority reconciliation, which may differ from the proposal.
+    public var confirmedText: String?
     public init(id: String, applied: Bool, cursor: Int? = nil, reason: String? = nil, partial: String? = nil, stopped: Bool? = nil,
-                unplaceable: Bool? = nil) {
+                unplaceable: Bool? = nil, recoveryTarget: String? = nil, confirmedText: String? = nil) {
         self.id = id; self.applied = applied; self.cursor = cursor; self.reason = reason; self.partial = partial; self.stopped = stopped
-        self.unplaceable = unplaceable
+        self.unplaceable = unplaceable; self.recoveryTarget = recoveryTarget; self.confirmedText = confirmedText
     }
 }
 

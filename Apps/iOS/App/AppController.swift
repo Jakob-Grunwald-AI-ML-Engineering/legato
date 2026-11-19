@@ -50,13 +50,13 @@ final class AppController {
         if UserDefaults.standard.bool(forKey: "LegatoOfflineFixture") {
             dictation = DictationPipeline(recentTakes: RecentTakesStore(fileURL: root.appending(path: "recent-takes.json")),
                                           history: history, cleaner: DebugStreamingCleaner(chunkMilliseconds: 0),
-                                          sendMode: { DictationSendSetting.mode(in: AppGroup.defaults) }, supportsLive: true, groupsLiveHistory: true)
+                                          sendMode: { DictationSendSetting.mode(in: AppGroup.defaults) }, supportsLive: true, groupsLiveHistory: true, stagedLive: true)
             keyboardSession = KeyboardSession.offlineFixture(microphone: microphone, sink: dictation,
                                                              instruction: InstructionSession(runner: IOSOfflineInstructionRunner(), history: history))
         } else {
             dictation = DictationPipeline(vocabularyURL: root.appending(path: "vocabulary.json"),
                                           recentTakesURL: root.appending(path: "recent-takes.json"), history: history, defaults: AppGroup.defaults,
-                                          supportsLive: true, groupsLiveHistory: true)
+                                          supportsLive: true, groupsLiveHistory: true, stagedLive: true)
             keyboardSession = KeyboardSession(microphone: microphone, sink: dictation,
                                               instruction: InstructionSession(vocabularyURL: root.appending(path: "vocabulary.json"), history: history))
         }
@@ -64,7 +64,7 @@ final class AppController {
         #else
         dictation = DictationPipeline(vocabularyURL: root.appending(path: "vocabulary.json"),
                                       recentTakesURL: root.appending(path: "recent-takes.json"), history: history, defaults: AppGroup.defaults,
-                                      supportsLive: true, groupsLiveHistory: true)
+                                      supportsLive: true, groupsLiveHistory: true, stagedLive: true)
         keyboardSession = KeyboardSession(microphone: microphone, sink: dictation,
                                           instruction: InstructionSession(vocabularyURL: root.appending(path: "vocabulary.json"), history: history))
         #endif

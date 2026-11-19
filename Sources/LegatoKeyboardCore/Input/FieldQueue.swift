@@ -21,6 +21,51 @@ import Foundation
 /// as it is then. Live dictation types at its open piece's end, the user's caret, and pieces close on the user's input;
 /// cleanup may change hand-typed text only when it was in the cleanup's input (`placeThroughRead`, `FieldMerge`).
 public struct FieldQueue: Sendable {
+    /// Empty proxy windows during cursor movement can briefly coincide with hasText=false.
+    /// Confirm sustained emptiness from the first such observation, independently of an operation's acknowledgement.
+    public struct DraftEvidence: Sendable {
+        public enum Decision: Equatable, Sendable { case unchanged, pending, resumed, cleared }
+        private var observedContent = false
+        private var firstEmptyMs: Double?
+        private var firstUnavailableMs: Double?
+        public private(set) var isPending = false
+
+        public init() {}
+
+        public mutating func observe(_ report: Report, hasText: Bool, ownsEmpty: Bool,
+                                     nowMs: Double, confirmationMs: Double) -> Decision {
+            let hasWindows = !report.before.isEmpty || !report.after.isEmpty || report.selected != nil
+            if hasWindows {
+                let resumed = isPending
+                observedContent = true; firstEmptyMs = nil; firstUnavailableMs = nil; isPending = false
+                return resumed ? .resumed : .unchanged
+            }
+            if ownsEmpty {
+                self = .init()
+                return .unchanged
+            }
+            if hasText {
+                guard observedContent else { return .unchanged }
+                if firstUnavailableMs == nil { firstUnavailableMs = nowMs }
+                firstEmptyMs = nil
+                isPending = true
+                return .pending
+            }
+            guard observedContent else { return .unchanged }
+            isPending = true
+            if firstUnavailableMs == nil { firstUnavailableMs = nowMs }
+            if firstEmptyMs == nil { firstEmptyMs = nowMs }
+            if nowMs - (firstEmptyMs ?? nowMs) < confirmationMs { return .pending }
+            self = .init()
+            return .cleared
+        }
+
+        public func recheckAfterMs(nowMs: Double, confirmationMs: Double, includingOpaque: Bool = false) -> Double? {
+            let since = firstEmptyMs ?? (includingOpaque ? firstUnavailableMs : nil)
+            return since.map { max(0, confirmationMs - (nowMs - $0)) }
+        }
+    }
+
     // MARK: Public types
 
     /// The field's report around the cursor: `selected` is the selection (nil or empty: none).
@@ -58,11 +103,35 @@ public struct FieldQueue: Sendable {
         /// The read (`markRead`) `before` and `after` came from: the scope is found through every change since, and
         /// the keyboard's own changes to it are merged into `target` (only the user's cancel the edit).
         public var readID: String?
+        /// A logical cleanup read may never fall back to a coincidental matching substring.
+        public var requiresShadowRead: Bool?
+        /// Recovery is consumed only after the original, collapsed insertion scope verifies.
+        public var requiresVerifiedInsertion: Bool?
+        /// Dictated words typed at the caret (a staged unit): under unverified input they go in as speech does
+        /// (`heldSpeechNext`), still as one burst with one check.
+        public var isSpeech: Bool?
+        /// A staged unit's words, still unprepared: the queue puts the separator and capital on them when the unit starts,
+        /// from the text its model shows before the caret then (what the user typed meanwhile included), because `target`
+        /// would be prepared before keys that go first. `target` is then the prepared text.
+        public var unit: SpeechUnit?
+        public struct SpeechUnit: Sendable, Equatable, Codable {
+            public var text: String
+            public var capitalization: Int
+            /// The context when the model knows nothing before the caret (the take's own record).
+            public var contextFallback: String
+            public init(text: String, capitalization: AutoCapitalizationType, contextFallback: String) {
+                self.text = text; self.capitalization = capitalization.rawValue; self.contextFallback = contextFallback
+            }
+        }
         public init(id: String = UUID().uuidString, kind: Kind, before: String = "", after: String = "", selected: String? = nil,
-                    target: String, atCursor: Bool = false, cursorAtEnd: Bool = true, readID: String? = nil) {
+                    target: String, atCursor: Bool = false, cursorAtEnd: Bool = true, readID: String? = nil,
+                    requiresShadowRead: Bool? = nil, requiresVerifiedInsertion: Bool? = nil, isSpeech: Bool? = nil) {
             self.id = id; self.kind = kind; self.before = before; self.after = after
             self.selected = selected?.isEmpty == true ? nil : selected
             self.target = target; self.atCursor = atCursor; self.cursorAtEnd = cursorAtEnd; self.readID = readID
+            self.requiresShadowRead = requiresShadowRead
+            self.requiresVerifiedInsertion = requiresVerifiedInsertion
+            self.isSpeech = isSpeech
         }
     }
 
@@ -118,6 +187,15 @@ public struct FieldQueue: Sendable {
         /// A run's drop: the part of its text the field never got (`missingText`), all the keyboard keeps. Empty when
         /// every word of it was typed, whatever became of it since. Nil for other drops.
         public var kept: String? = nil
+        /// A resolved shadow edit existed before the host attempted to synchronize it.
+        public var shadowCommitted = false
+        /// At least one text mutation was issued. A missing receipt cannot safely repeat it.
+        public var issuedMutation = false
+    }
+
+    public struct AppliedText: Sendable, Equatable {
+        public var original: String
+        public var result: String
     }
 
     public enum Event: Sendable, Equatable {
@@ -125,7 +203,7 @@ public struct FieldQueue: Sendable {
         case confirmed(waitedMs: Double)
         case resync(Resync)
         /// An edit landed; `cursor`: UTF-16 offset into its target where the user's cursor ended.
-        case applied(id: String, cursor: Int)
+        case applied(id: String, cursor: Int, text: AppliedText)
         case dropped(Drop)
         case liveApplied(runID: String, version: Int, complete: Bool)
         case regionStarted(runID: String, anchorChars: Int)
@@ -205,12 +283,26 @@ public struct FieldQueue: Sendable {
 
     private struct EditState: Sendable, Equatable {
         var edit: Edit
+        /// The scope's intended text. Once placed, this survives rollback or partial delivery of host operations.
+        var shadow: ShadowDocument.EditIntent?
+        var isCleanup = false
+
+        var target: String {
+            get { shadow?.target ?? edit.target }
+            set {
+                if shadow != nil { shadow?.target = newValue }
+                else { edit.target = newValue }
+            }
+        }
         var spanID: Int?
         /// Where the user's cursor was when the edit came: a zero-width span that moves with every change.
         var anchorID: Int?
         var unplacedMs = 0.0
         /// Chunks of it whose check failed (the queue re-read and planned it again).
         var failures = 0
+        /// Bounded per target, even when multiple failed checks each appear to make progress.
+        var syncRecoveries = 0
+        var issuedMutation = false
         /// The span's text when its last chunk was planned.
         var plannedFrom: [Character]?
         var revision: LiveRevision?
@@ -290,6 +382,17 @@ public struct FieldQueue: Sendable {
         /// A cleanup's read (`FieldShadow`): the user's changes since do not cancel its edit, the edit is merged around
         /// them (the field's text wins, `FieldMerge`). An instruction's read is cancelled by them.
         var mergesUser = false
+        /// The cleanup source was accepted logically. The other fields in this mark locate its
+        /// host scope through transport echoes; they never replace this source.
+        var intended: IntendedRead?
+    }
+
+    private struct IntendedRead: Sendable, Equatable {
+        var runID: String
+        var text: [Character]
+        var cursor: Int
+        var editable: [Range<Int>]
+        var protected: [Range<Int>]
     }
     private var readMarks: [ReadMark] = []
     static let readMarkCount = 4
@@ -374,7 +477,15 @@ public struct FieldQueue: Sendable {
         /// them, is the chunk's; the proxy's view then shows them.
         var behind: ModelState?
         var behindFrom = 0
+        /// Before this edit's current mutation, independently of where its preceding cursor hop started.
+        var checkpoint: SyncCheckpoint?
     }
+    private struct SyncCheckpoint: Sendable, Equatable {
+        var before: ShadowDocument
+        var operation: ShadowOp
+        var owner: Int
+    }
+
     /// The report a held insert of speech was sent on, and the piece's span it went to.
     private struct HeldSpeech: Sendable, Equatable {
         var report: Report
@@ -462,7 +573,8 @@ public struct FieldQueue: Sendable {
         guard !userLane.contains(where: { if case .input = $0 { true } else { false } }) else { return }
         let pieces = Set(runs.flatMap { $0.pieces.map(\.spanID) })
         let targets = spans.sorted { $0.key < $1.key }.compactMap { id, span -> FieldRecovery.Target? in
-            guard span.parked, !span.anchor, !span.userChanged, !span.edited, !span.lastText.isEmpty, !pieces.contains(id) else { return nil }
+            guard span.parked, !span.anchor, !span.protected, !span.userChanged, !span.edited,
+                  !span.lastText.isEmpty, !pieces.contains(id) else { return nil }
             return .init(id: String(id), expected: String(span.lastText), landed: nil,
                          before: String(span.lastBefore), after: String(span.lastAfter))
         }
@@ -556,13 +668,82 @@ public struct FieldQueue: Sendable {
         return observation
     }
 
-    /// The draft was cleared outside the keyboard (Send): the field reads empty and says it has no text, while the shadow
-    /// held text, and no op of the keyboard's own explains it (an own op within the deadline, or a clear of its own).
-    /// A clear observed in the same instant as the keyboard's own move is not believed (#299, task 9): it is looked at
-    /// again once the deadline passed.
-    public func observesClearedDraft(_ report: Report, hasText: Bool, elapsedSinceLastStepMs: Double = 0) -> Bool? {
-        guard !hasText, report.before.isEmpty, report.after.isEmpty, report.selected == nil, !ownsEmptyReport else { return false }
-        return hasRecentOwnOperation(elapsedMs: elapsedSinceLastStepMs) ? nil : true
+    /// Never declare the field cleared on a learned short deadline or while a large issued deletion can still land.
+    public var draftConfirmationMs: Double {
+        let deletes = inFlight?.ops.reduce(0) { count, op in
+            if case .deleteBackward(let n) = op { return count + n }
+            return count
+        } ?? 0
+        return max(Self.checkDeadlineMs, host.deadlineMs(deletes: deletes))
+    }
+
+    /// A read-only excursion from the last independently known caret on a structurally blank line.
+    public struct BlankLineProbe: Equatable, Sendable {
+        public let units: Int
+        fileprivate let origin: Int
+        fileprivate let landmark: Int
+        fileprivate let text: [Character]
+
+        public func confirmsLandmark(_ report: Report) -> Bool {
+            !((report.before + report.after).trimmingCharacters(in: .whitespacesAndNewlines)).isEmpty
+                && confirms(report, at: landmark)
+        }
+
+        public func confirmsOrigin(_ report: Report) -> Bool {
+            confirms(report, at: origin)
+        }
+
+        private func confirms(_ report: Report, at position: Int) -> Bool {
+            guard report.selected == nil, !report.before.isEmpty || !report.after.isEmpty else { return false }
+            // Do not infer a caret from a WebKit block echo or windows extending beyond the known draft.
+            let before = Array(report.before), after = Array(report.after)
+            guard before.count <= position, after.count <= text.count - position,
+                  text[(position - before.count)..<position].elementsEqual(before),
+                  text[position..<(position + after.count)].elementsEqual(after) else { return false }
+            let enoughContext = before.count + after.count >= min(FieldQueue.relocateChars, text.count)
+            let exactBreaks = before.contains(where: \.isNewline) && after.contains(where: \.isNewline)
+            return (enoughContext || exactBreaks)
+                && FieldMatch.positions(in: text, reportedBefore: report.before, reportedAfter: report.after) == [position]
+        }
+    }
+
+    /// Plan from known hard line breaks only. An opaque selection, offset uncertainty or an unconfirmed
+    /// move cannot provide an origin for another read. Prefer the preceding line, then the following one.
+    public func blankLineProbe() -> BlankLineProbe? {
+        guard seeded, isHome, selection == 0, !hasUnverifiedInput, !hasUserInput, !draftUserDispatched,
+              !draftUserDispatchPending, userLost == nil, tapRace == nil, strayInsertion == nil,
+              let lastReport, lastReport.selected == nil, doc.hasEvidence(lastReport, chars: Self.relocateChars),
+              doc.positions(of: lastReport) == [cursor] else { return nil }
+        let before = text[..<cursor], after = text[cursor...]
+        let localBefore = before.reversed().prefix { !$0.isNewline }
+        let localAfter = after.prefix { !$0.isNewline }
+        guard localBefore.allSatisfy(\.isWhitespace), localAfter.allSatisfy(\.isWhitespace) else { return nil }
+        let above = before.lastIndex(where: { !$0.isWhitespace }).map { $0 + 1 }
+        let below = after.firstIndex(where: { !$0.isWhitespace }).map { $0 + 1 }
+        for candidate in [above, below].compactMap({ $0 }) {
+            let path = text[min(cursor, candidate)..<max(cursor, candidate)]
+            guard path.contains(where: \.isNewline) else { continue }
+            let units = units(to: candidate)
+            guard abs(units) <= FieldRecovery.lookAroundChars else { continue }
+            let probe = BlankLineProbe(units: units, origin: cursor, landmark: candidate, text: text)
+            if probe.confirmsOrigin(lastReport) { return probe }
+        }
+        return nil
+    }
+
+    /// A returning window must independently locate the prior draft in a known result of this
+    /// keyboard's operations. Defer reseeding and recovery until we actually have that evidence.
+    public func recognizesDraft(_ report: Report) -> Bool {
+        guard seeded else { return true }
+        let possible = [doc] + (inFlight.map { [$0.pre] } ?? []) + recentSends.map(\.pre)
+        if possible.contains(where: { state in
+            state.hasEvidence(report, chars: Self.relocateChars) && state.positions(of: report).count == 1
+        }) { return true }
+        if draftUserDispatched {
+            var observed = self
+            return observed.absorbOutsideInsert(report)
+        }
+        return false
     }
 
     /// Empty proxy windows can be stale; the native field's independent hasText=false
@@ -586,6 +767,11 @@ public struct FieldQueue: Sendable {
     public mutating func releaseRead() { coordinator.finishRead() }
     /// The adapter calls this after the OS send, never before planning or dispatch.
     public mutating func operationDispatched() {
+        if draftUserDispatchPending {
+            draftUserDispatchPending = false
+            draftUserDispatched = true
+            return
+        }
         coordinator.dispatched(); sinceSendMs = 0; inFlight?.waitedMs = 0
         // An op behind a chunk is no op of the chunk: the chunk's latency still counts from its own last op.
         if inFlight?.behind == nil { inFlight?.chunkMs = 0; inFlight?.callbacks = 0 }
@@ -647,27 +833,71 @@ public struct FieldQueue: Sendable {
             && !runs.contains(where: { runNeedsWork($0) || ackDue($0) })
     }
     public var hasUserInput: Bool { !userLane.isEmpty }
+
+    /// Explicit keys that have not been sent. The adapter can preserve them when the same native
+    /// field invalidates its draft; scoped user edits still belong to the old draft.
+    public var pendingDirectInput: [Input] {
+        userLane.compactMap { item in
+            if case .input(let input) = item { return input }
+            return nil
+        }
+    }
     /// The keyboard's own writes still to land (a unit, queued edits, dictation): a read for an instruction waits for
     /// them, so its scope already shows them.
     public var hasOwnWork: Bool {
         unit != nil || burst != nil || swap != nil || (!editLane.isEmpty && !prioritizesSpeech) || runs.contains(where: { runNeedsWork($0) })
     }
-    public var hasOpInFlight: Bool { inFlight != nil }
+    private var draftUserDispatchPending = false
+    private var draftUserDispatched = false
+    public var hasOpInFlight: Bool { inFlight != nil || draftUserDispatchPending }
     /// Nothing in flight and the caret at the user's cursor: the field is as the user left it, as far as the queue goes.
     public var isHome: Bool { inFlight == nil && cursor == userCursor && swap == nil }
     public var isInUnit: Bool { unit != nil }
     /// A chunk is running: its next op goes out at once (the adapter keeps stepping).
     public var isInChunk: Bool { inFlight != nil && unit.map { !$0.ops.isEmpty } == true }
     public var modelText: String { String(text) }
-    /// The text before the user's cursor once pending at-cursor edits landed: what typed lines and host text plan against.
+    /// Pending, placeable text for producers such as the next agent contribution. The host's cursor and
+    /// readback remain unchanged until the synchronizer dispatches and verifies its operations.
     public var projectedBefore: String {
-        var before = String(text[..<min(userCursor, text.count)])
-        for state in editLane where state.spanID == nil && state.edit.atCursor { before += state.edit.target }
-        for state in editLane {
-            guard let id = state.spanID, let span = spans[id], span.end == userCursor else { continue }
-            before = String(before.dropLast(span.end - span.start)) + state.edit.target
+        var intended = doc
+        intended.cursor = userCursor
+        if cursor != userCursor { intended.selection = 0 }
+        guard !hasUnverifiedInput, tapRace == nil, strayInsertion == nil else {
+            return String(intended.text[..<intended.cursor])
         }
-        return before
+
+        // Use the same recognition and insertion rules as the delivery lane. When a key can split an
+        // open word, its continuation is resolved by nextUser at the caret and held out of this view.
+        var live = self
+        for index in runs.indices { live.applyPending(index) }
+        let effectsOfSpeechAndKeysAreKnown = userLane.isEmpty || live.openPieceWordRest() == nil
+        if effectsOfSpeechAndKeysAreKnown {
+            for item in userLane {
+                switch item {
+                case .input(let input):
+                    guard intended.project(input) else { return String(intended.text[..<intended.cursor]) }
+                case .edit(let state):
+                    if let intent = state.shadow, let scope = state.spanID {
+                        intended.project(intent, in: scope, cursorAtEnd: state.edit.cursorAtEnd)
+                    } else {
+                        return String(intended.text[..<intended.cursor])
+                    }
+                }
+            }
+        }
+        if userLane.isEmpty, let append = live.projectableOpenSpeech {
+            intended.insertAtCursor(append.text, owner: append.spanID)
+        }
+        var edits = editLane
+        if case .edit(let active, .edit)? = unit?.owner { edits.insert(active, at: 0) }
+        for state in edits {
+            if let intent = state.shadow, let scope = state.spanID {
+                intended.project(intent, in: scope, cursorAtEnd: state.edit.cursorAtEnd)
+            } else if state.edit.atCursor, intended.selection == 0 {
+                intended.insertAtCursor(Array(state.target), owner: nil)
+            }
+        }
+        return String(intended.text[..<intended.cursor])
     }
     public var expectedBefore: String { String(text[..<cursor]) }
     public var expectedAfter: String { String(text[(cursor + selection)...]) }
@@ -728,6 +958,8 @@ public struct FieldQueue: Sendable {
     public mutating func enqueue(_ edit: Edit, user: Bool = false) {
         if user { recoveryRevision &+= 1; recoveryRequest = nil }
         var state = EditState(edit: edit)
+        state.isCleanup = edit.requiresShadowRead == true
+            || (edit.readID.map { id in readMarks.contains { $0.id == id && $0.mergesUser } } ?? false)
         if seeded, !edit.atCursor, edit.selected == nil { state.anchorID = addSpan(Span(start: userCursor, end: userCursor, anchor: true)) }
         if user { userLane.append(.edit(state)) } else { editLane.append(state) }
     }
@@ -771,22 +1003,38 @@ public struct FieldQueue: Sendable {
     /// changes since, not cancelled by them.
     public mutating func markRead(_ id: String, mergingUser: Bool = false) {
         guard seeded else { return }
-        readMarks.removeAll { $0.id == id }
         var mark = ReadMark(id: id, text: text, cursor: userCursor, spanIDs: Set(spans.keys))
         mark.mergesUser = mergingUser
+        storeReadMark(mark)
+    }
+
+    private mutating func storeReadMark(_ mark: ReadMark) {
+        readMarks.removeAll { $0.id == mark.id }
         readMarks.append(mark)
         if readMarks.count > Self.readMarkCount { readMarks.removeFirst() }
     }
 
     public mutating func forgetRead(_ id: String) { readMarks.removeAll { $0.id == id } }
 
-    /// Cancels an edit not yet landed.
+    /// Cancel without losing a committed edit's outcome, including whether a write already went out.
     public mutating func cancelEdit(_ id: String) {
-        if case .edit(let s, _)? = unit?.owner, s.edit.id == id { unit = nil; finishSpan(s.spanID) }
-        var spanIDs: [Int?] = []
-        userLane.removeAll { if case .edit(let s) = $0, s.edit.id == id { spanIDs += [s.spanID, s.anchorID]; return true }; return false }
-        editLane.removeAll { if $0.edit.id == id { spanIDs += [$0.spanID, $0.anchorID]; return true }; return false }
-        for spanID in spanIDs { finishSpan(spanID) }
+        var cancelled: [EditState] = []
+        if case .edit(let state, _)? = unit?.owner, state.edit.id == id {
+            unit = nil
+            burst = nil
+            cancelled.append(state)
+        }
+        userLane.removeAll { item in
+            guard case .edit(let state) = item, state.edit.id == id else { return false }
+            cancelled.append(state)
+            return true
+        }
+        editLane.removeAll { state in
+            guard state.edit.id == id else { return false }
+            cancelled.append(state)
+            return true
+        }
+        for state in cancelled { drop(state, .reset) }
     }
 
     /// The field went away or changed: everything pending is dropped with events, and the model starts over. What was
@@ -814,8 +1062,11 @@ public struct FieldQueue: Sendable {
     ///
     /// `callback`: the report came with a host callback (`textDidChange`, `selectionDidChange`), not from reading the proxy
     /// again right after an op of the keyboard's own (its echo). Only moves make callbacks (measured).
-    public mutating func step(report: Report, elapsedMs: Double, callback: Bool = true) -> Action {
+    public mutating func step(report: Report, elapsedMs: Double, callback: Bool = true,
+                              awaitingDraftEvidence: Bool = false) -> Action {
         guard !ownsRead else { return .wait }
+        if awaitingDraftEvidence { return nextInputWhileDraftIsUnverified() }
+        draftUserDispatched = false
         if config.prioritizeSpeech {
             // Delivery metadata is independent of the OS operation in flight. See the newest heard tail before
             // admitting more background work, even when the route already reports quiet audio.
@@ -946,15 +1197,9 @@ public struct FieldQueue: Sendable {
             let deadline = host.deadlineMs(deletes: deletes)
             // The running insert's entrance pieces go out first; the check comes after the last piece.
             if burst != nil { return next() }
-            // A cleanup's delete can still be on its way when the proxy first echoes the new text. If
-            // the return hop goes out on that echo, a delayed delete can land at the returned caret.
-            if let current = unit, !current.ops.isEmpty {
-                guard deletes > 0, cleanupReturning(current) else { return next() }
-                let limit = min(deadline, FieldEditCoordinator.inputResponseTargetMs)
-                if consistent(report), callback || flight.waitedMs >= limit { return next() }
-                guard flight.waitedMs >= limit else { return .wait }
-                abortUnit()
-            }
+            // A cleanup's mutations settle separately. A delayed delete must never land at a returned
+            // caret, or consume replacement text that already went out after it.
+            if let current = unit, !current.ops.isEmpty, flight.checkpoint == nil { return next() }
             // A report that fits the state before the chunk as well proves nothing (an edit at the caret may still be on its
             // way). A chunk that ends with a move is shown by the report at its end: its edit may be out of the window
             // there (a burst lands whole, measured), and an edit inside the window would not fit.
@@ -979,12 +1224,13 @@ public struct FieldQueue: Sendable {
             // It grows with the chunk's delete run (`HostProfile.deadlineMs(deletes:)`).
             let waited = flight.behind != nil && !chunkHeard ? flight.chunkMs : flight.waitedMs
             let heard = !hops || chunkHeard || waited >= deadline
-            if shows, heard, flight.anywhere || hops || !fits(report, in: flight.pre) {
+            let checkpointSettled = flight.checkpoint == nil || callback || flight.waitedMs >= deadline
+            if shows, heard, checkpointSettled, flight.anywhere || hops || !fits(report, in: flight.pre) {
                 guard confirm(flight, report: report) else { return .wait }
             } else if waited < deadline {
-                // Not shown yet: no seam. The user's input and speech at the caret go behind the chunk all the same
-                // (`plannedNext`).
-                return next()
+                // A destructive checkpoint needs its own independent readback before a later input can issue.
+                // Other lanes still let keys and speech append behind the chunk.
+                return flight.checkpoint == nil ? next() : .wait
             } else {
                 // The check failed: the field does not show the chunk. Re-read; what is left is planned against it.
                 inFlight = nil
@@ -996,6 +1242,7 @@ public struct FieldQueue: Sendable {
                 }
                 events.append(.resync(.checkFailed))
                 if takeBackAppends(report, flight: flight) { return next() }
+                if recoverCheckpoint(report, flight: flight) { return next() }
                 if !explainTap(report, flight: flight) { resync(report, pre: flight) }
             }
         } else if !consistent(report) {
@@ -1006,6 +1253,21 @@ public struct FieldQueue: Sendable {
             merge(report)
         }
         return next()
+    }
+
+    /// Only direct user input can go to the native caret during a blank interval. It must neither
+    /// adopt the blank window into the old shadow nor confirm or relocate an outstanding automated edit.
+    private mutating func nextInputWhileDraftIsUnverified() -> Action {
+        guard let index = userLane.firstIndex(where: { if case .input = $0 { true } else { false } }),
+              case .input(let input) = userLane.remove(at: index) else { return .wait }
+        let op: ShadowOp = switch input {
+        case .insert(let text): .insert(text)
+        case .deleteBackward: .deleteBackward(1)
+        case .move(let amount): .move(amount)
+        }
+        draftUserDispatchPending = true
+        events.append(.sent(op, .user))
+        return .send(op)
     }
 
     /// After a hop: the report shows the caret at the hop's target (the chunk goes on), or exactly where the same move
@@ -1119,6 +1381,7 @@ public struct FieldQueue: Sendable {
             }
         }
         if !userLane.isEmpty {
+            finishCaretTail()
             abortUnit()
             if cursor != userCursor, selection == 0 { return send(.move(units(to: userCursor)), lane: .user, moveTo: userCursor) }
             if let action = nextUser() { return action }
@@ -1159,6 +1422,11 @@ public struct FieldQueue: Sendable {
             for ri in runs.indices { ack(ri) }
             return .idle
         }
+        if editLane.contains(where: { $0.isCleanup }), !editLane.contains(where: { $0.revision != nil }) {
+            for ri in runs.indices where revisionDue(runs[ri]) {
+                if let action = revisePieces(ri) { return action }
+            }
+        }
         if let action = nextEdit() { return action }
         if let action = nextLive() { return action }
         return .idle
@@ -1192,11 +1460,7 @@ public struct FieldQueue: Sendable {
     private mutating func sendUser(_ input: Input) -> Action? {
         switch input {
         case .insert(let key):
-            let action = send(.insert(key), lane: .user) { q in
-                if q.selection > 0 { q.removeRange(q.cursor, q.cursor + q.selection, owner: nil); q.selection = 0 }
-                q.insertAtCursor(Array(key), owner: nil)
-                q.userCursor = q.cursor
-            }
+            let action = send(.insert(key), lane: .user) { q in q.applyKnownUserReplacement(input) }
             inFlight?.input = .insert(key)
             return action
         case .deleteBackward:
@@ -1206,11 +1470,7 @@ public struct FieldQueue: Sendable {
                 inFlight?.input = input
                 return action
             }
-            let action = send(.deleteBackward(1), lane: .user) { q in
-                if q.selection > 0 { q.removeRange(q.cursor, q.cursor + q.selection, owner: nil); q.selection = 0 }
-                else { q.removeRange(q.cursor - 1, q.cursor, owner: nil) }
-                q.userCursor = q.cursor
-            }
+            let action = send(.deleteBackward(1), lane: .user) { q in q.applyKnownUserReplacement(input) }
             inFlight?.input = input
             return action
         case .move(let characters):
@@ -1230,10 +1490,28 @@ public struct FieldQueue: Sendable {
         }
     }
 
+    private mutating func applyKnownUserReplacement(_ input: Input) {
+        guard let change = doc.replacement(for: input) else { return }
+        removeRange(change.range.lowerBound, change.range.upperBound, owner: nil)
+        selection = 0
+        insertAtCursor(change.text, owner: nil)
+        userCursor = cursor
+    }
+
     /// What the open piece still appends at its end (the cursor): its untyped end.
     private func heldAppend(_ piece: Piece, in run: LiveRun, span: Span) -> [Character] {
         let desired = Array(desiredText(piece, in: run)), current = chars(of: span)
         return desired.starts(with: current) ? Array(desired[current.count...]) : []
+    }
+
+    private var projectableOpenSpeech: (spanID: Int, runID: String, text: [Character])? {
+        guard selection == 0, swap == nil, let (ri, pi) = openPieceIndex() else { return nil }
+        let run = runs[ri], piece = run.pieces[pi]
+        guard let span = spans[piece.spanID], span.end == userCursor, !span.parked, !span.userChanged,
+              !span.edited, liveRevision(for: piece) == nil else { return nil }
+        let desired = Array(desiredText(piece, in: run)), observed = chars(of: span)
+        guard desired.starts(with: observed) else { return nil }
+        return (piece.spanID, run.runID, Array(desired.dropFirst(observed.count)))
     }
 
     /// A key at the open piece's end while it shows only part of a word: the word's rest goes in
@@ -1274,6 +1552,13 @@ public struct FieldQueue: Sendable {
     /// Places an edit (if not yet), plans its jump unit against the model now, or drops it.
     private mutating func start(_ state: inout EditState, lane: Lane) -> StartResult {
         if state.spanID == nil {
+            if state.edit.requiresShadowRead == true, let id = state.edit.readID,
+               let intended = readMarks.last(where: { $0.id == id })?.intended,
+               let run = runs.first(where: { $0.runID == intended.runID }),
+               rawAppendPending(run) || revisionDue(run) {
+                // The model can work early. Synchronization still lets higher-priority dictation arrive first.
+                return .wait
+            }
             if let selected = state.edit.selected {
                 guard selection > 0, String(text[cursor..<(cursor + selection)]) == selected else {
                     drop(state, .selectionChanged); return .done
@@ -1288,6 +1573,17 @@ public struct FieldQueue: Sendable {
                 return .sent(send(.move(0), lane: lane, anywhere: true) { q in q.selection = 0 })
             }
             if state.edit.atCursor {
+                if let unit = state.edit.unit, state.shadow == nil {
+                    let known = String(text[max(0, userCursor - Self.unitContextCharacters)..<userCursor])
+                    let prepared = FieldInsertion.prepare(unit.text, contextBefore: known.isEmpty ? unit.contextFallback : known,
+                                                          capitalization: AutoCapitalizationType(rawValue: unit.capitalization) ?? .none)
+                    guard !prepared.isEmpty else { drop(state, .changed); return .done }
+                    state.edit.target = prepared + FieldInsertion.trailingSeparator(after: prepared, before: userCursor < text.count ? text[userCursor] : nil)
+                    state.edit.unit = nil
+                }
+                if state.edit.requiresVerifiedInsertion == true, selection > 0 || (hasUnverifiedInput && state.edit.isSpeech != true) {
+                    drop(state, .selectionChanged); return .done
+                }
                 state.spanID = addSpan(Span(start: userCursor, end: userCursor))
             } else if let found = placeThroughRead(state.edit) {
                 // Through the changes since the read: the user's cancel it, the keyboard's own merge into the target.
@@ -1296,6 +1592,7 @@ public struct FieldQueue: Sendable {
                 finishSpan(state.anchorID); state.anchorID = nil
                 if state.edit.kind == .magic { closeOpenPieces(.edit) }
             } else {
+                guard state.edit.requiresShadowRead != true else { drop(state, .unplaceable); return .done }
                 let placement = place(state.edit, anchor: state.anchorID)
                 switch placement {
                 case .placed(let id): state.spanID = id; finishSpan(state.anchorID); state.anchorID = nil
@@ -1317,7 +1614,10 @@ public struct FieldQueue: Sendable {
             }
         }
         guard let id = state.spanID, let span = spans[id] else { drop(state, .changed); return .done }
-        if state.revision == nil, span.userChanged { drop(state, .userEdited); return .done }
+        if lane == .user { spans[id]?.userEdit = true }
+        if state.revision == nil, !state.isCleanup || span.parked, span.userChanged {
+            drop(state, .userEdited); return .done
+        }
         if span.parked {
             // Behind a seam: explored with a read where the adapter can, else found again by the observer within the
             // deadline, or dropped (the app keeps the result in History; a cleanup gets one fresh pass).
@@ -1330,13 +1630,24 @@ public struct FieldQueue: Sendable {
         let current = chars(of: span)
         if var revision = state.revision {
             // Replanning after a key protects changes made since our last confirmed partial text.
-            state.edit.target = String(conditionalRevisionTarget(base: revision.baseline, current: current,
-                                                               proposal: Array(state.edit.target), span: span))
+            state.target = String(conditionalRevisionTarget(base: revision.baseline, current: current,
+                                                           proposal: Array(state.target), span: span))
             revision.baseline = current
             state.revision = revision
             spans[id]?.userChanged = false
         }
-        let target = Array(state.edit.target)
+        if state.shadow == nil {
+            let origin: ShadowDocument.EditIntent.Origin = state.isCleanup ? .cleanup : state.revision != nil ? .recognition : .edit
+            state.shadow = .init(target: state.edit.target, origin: origin, original: current, transportBaseline: current)
+        } else if var intent = state.shadow, intent.origin == .cleanup, intent.transportBaseline != current {
+            // An observed change wins over this cleanup. Internal writes update transportBaseline as they
+            // issue (and on recovery), so unfinished sync is never mistaken for a caller's text edit.
+            intent.target = String(intent.target(around: current))
+            intent.original = FieldMerge.rebase(base: intent.transportBaseline, kept: current, incoming: intent.original).text
+            intent.transportBaseline = current
+            state.shadow = intent
+        }
+        let target = Array(state.target)
         if current == target {
             if state.edit.cursorAtEnd, userCursor != span.end {
                 state.failures += 1
@@ -1361,6 +1672,8 @@ public struct FieldQueue: Sendable {
 
     /// Chunks of an edit whose check failed, or that changed nothing, in a row before it drops.
     static let failureLimit = 4
+    /// How much of the model before the caret a staged unit's separator and capital read.
+    static let unitContextCharacters = 200
 
     /// The next chunk of a change of span `spanID` from `current` to `target`: its last group of nearby changes
     /// (`SpanPlanner`, back to front so earlier offsets stay valid), as hops to its place and that place's deletes and
@@ -1497,14 +1810,60 @@ public struct FieldQueue: Sendable {
         return action
     }
 
-    private func cleanupReturning(_ unit: Unit) -> Bool {
-        guard case .edit(let state, .edit) = unit.owner, let id = state.spanID,
-              let span = spans[id], span.cleanup else { return false }
-        switch unit.ops.first {
-        case .moveToUser: return cursor != userCursor
-        case .moveToSpanEnd: return cursor != span.end
-        default: return false
+    /// Reconcile an unambiguous prefix of the issued mutation at its original position. The shadow
+    /// target stays committed, so the next chunk plans only what is still missing from that target.
+    private mutating func recoverCheckpoint(_ report: Report, flight: InFlight) -> Bool {
+        guard let checkpoint = flight.checkpoint, report.selected == nil,
+              case .edit(var state, let lane)? = unit?.owner else { return false }
+        let before = checkpoint.before, owner = checkpoint.owner
+        let size: Int
+        switch checkpoint.operation {
+        case .insert(let value): size = value.count
+        case .deleteBackward(let count): size = count
+        case .move: return false
         }
+        guard size <= FieldRecovery.lookAroundChars else { return false }
+        var candidate = before
+        var match: ShadowDocument?
+        func matches(_ document: ShadowDocument) -> Bool {
+            document.pins(report) && document.fitsInside(report) && document.hasEvidence(report, chars: Self.relocateChars)
+        }
+        if matches(candidate) { match = candidate }
+        switch checkpoint.operation {
+        case .insert(let value):
+            for character in value {
+                candidate.insertAtCursor([character], owner: owner)
+                if matches(candidate) {
+                    guard match == nil else { return false }
+                    match = candidate
+                }
+            }
+        case .deleteBackward(let count):
+            for _ in 0..<count {
+                guard candidate.cursor > 0 else { return false }
+                candidate.removeRange(candidate.cursor - 1, candidate.cursor, owner: owner)
+                if matches(candidate) {
+                    guard match == nil else { return false }
+                    match = candidate
+                }
+            }
+        case .move: return false
+        }
+        guard let match else { return false }
+        unit = nil
+        coordinator.invalidate()
+        restore(match)
+        merge(report)
+        recentSends = []
+        if let span = spans[owner] { state.shadow?.transportBaseline = chars(of: span) }
+        state.syncRecoveries += 1
+        if state.syncRecoveries > Self.failureLimit {
+            drop(state, .unplaceable)
+        } else {
+            requeue(.edit(state, lane))
+            events.append(.resync(.recoveryReplanned))
+        }
+        return true
     }
 
     private func lane(of owner: UnitOwner) -> Lane {
@@ -1517,7 +1876,7 @@ public struct FieldQueue: Sendable {
     private mutating func finishUnit(_ owner: UnitOwner) {
         guard case .edit(var state, let lane) = owner else { return }
         guard let id = state.spanID, let span = spans[id] else { drop(state, .changed); return }
-        if chars(of: span) == Array(state.edit.target), cursor == userCursor,
+        if chars(of: span) == Array(state.target), cursor == userCursor,
            !state.edit.cursorAtEnd || userCursor == span.end {
             applied(state)
         } else {
@@ -1529,6 +1888,23 @@ public struct FieldQueue: Sendable {
     }
 
     /// The unit stops where it is; its item is planned again from the model later.
+    /// A confirmed chunk whose remaining ops only put the caret where it already is (the way back to its own end) is finished
+    /// before a key goes: a key then lands at that caret, and the chunk is not planned again behind the key, which would
+    /// hop the caret back over what the key typed and take the user's caret with it.
+    private mutating func finishCaretTail() {
+        guard var current = unit, case .edit = current.owner, inFlight == nil, burst == nil else { return }
+        while let op = current.ops.first {
+            switch op {
+            case .moveToSpanEnd(let id) where spans[id]?.end == cursor: current.ops.removeFirst()
+            case .moveToUser where userCursor == cursor: current.ops.removeFirst()
+            case .setUserCursorToCursor: current.ops.removeFirst(); userCursor = cursor
+            default: unit = current; return
+            }
+        }
+        unit = nil
+        finishUnit(current.owner)
+    }
+
     private mutating func abortUnit() {
         guard let current = unit else { return }
         unit = nil
@@ -1556,7 +1932,8 @@ public struct FieldQueue: Sendable {
             return
         }
         spans[id] = nil; finishSpan(state.anchorID)
-        events.append(.applied(id: state.edit.id, cursor: cursorUnits))
+        let original = state.shadow.map { String($0.original) } ?? (state.edit.selected ?? (state.edit.before + state.edit.after))
+        events.append(.applied(id: state.edit.id, cursor: cursorUnits, text: .init(original: original, result: state.target)))
     }
 
     private mutating func drop(_ state: EditState, _ reason: DropReason) {
@@ -1573,7 +1950,8 @@ public struct FieldQueue: Sendable {
         if let id = state.spanID, let span = spans[id], !span.parked, inFlight == nil { partial = String(chars(of: span)) }
         finishSpan(state.spanID); finishSpan(state.anchorID)
         events.append(.dropped(Drop(id: state.edit.id, runID: nil, kind: state.edit.kind, reason: reason,
-                                    text: state.edit.target, partial: partial)))
+                                    text: state.target, partial: partial, shadowCommitted: state.isCleanup && state.shadow != nil,
+                                    issuedMutation: state.issuedMutation)))
     }
 
     private mutating func finishSpan(_ id: Int?) { if let id { spans[id] = nil } }
@@ -1727,6 +2105,18 @@ public struct FieldQueue: Sendable {
     /// replaces a selection no report showed is accepted, as for a key; its report then becomes the model (`step`).
     private mutating func heldSpeechNext() -> Action {
         if case .space? = unit?.owner { return nextInUnit() }
+        if case .edit(let state, _)? = unit?.owner, state.edit.isSpeech == true { return nextInUnit() }
+        if unit == nil, !paused, swap == nil, strayInsertion == nil, tapRace == nil, userLost == nil, userLane.isEmpty,
+           selection == 0, cursor == userCursor, let index = editLane.firstIndex(where: { $0.edit.isSpeech == true && $0.edit.atCursor }) {
+            // A staged unit is speech: a plain insert at the caret.
+            var state = editLane.remove(at: index)
+            switch start(&state, lane: .edit) {
+            case .started: return nextInUnit()
+            case .sent(let action): return action
+            case .wait: editLane.insert(state, at: index)
+            case .done: break
+            }
+        }
         guard !paused, unit == nil, swap == nil, strayInsertion == nil, tapRace == nil, userLost == nil, userLane.isEmpty,
               selection == 0, cursor == userCursor, let report = lastReport else { return .idle }
         for ri in runs.indices { applyPending(ri) }
@@ -1978,27 +2368,84 @@ public struct FieldQueue: Sendable {
     /// Revised words go in first: while the pass waits, the run is in a pause (`LiveRun.paused`) and its revisions land,
     /// so the text sent never holds a word the recognizer has revised since. An answer given (ready or refused) ends
     /// that pause.
-    public mutating func shadow(of runID: String, version: Int) -> ShadowAnswer {
-        let answer = shadowAnswer(of: runID, version: version)
+    public mutating func shadow(of runID: String, version: Int, markID: String? = nil) -> ShadowAnswer {
+        var intention: ShadowDocument?
+        if markID != nil, let ri = runs.firstIndex(where: { $0.runID == runID }) {
+            applyPending(ri)
+            intention = projectedCleanupDocument(run: runs[ri], version: version)
+        }
+        let answer: ShadowAnswer
+        if let intention {
+            answer = cleanupAnswer(doc: intention, runID: runID)
+        } else {
+            answer = shadowAnswer(of: runID, version: version)
+        }
+        if case .ready(let before, let after, _) = answer, let markID {
+            let desired = intention ?? doc
+            let editRanges = cleanupPieces(in: desired, runID: runID)
+            let intended = IntendedRead(runID: runID, text: Array(before + after), cursor: before.count,
+                                        editable: editRanges, protected: desired.protectedRanges)
+            let mark = ReadMark(id: markID, text: text, cursor: userCursor, spanIDs: Set(spans.keys),
+                                mergesUser: true, intended: intended)
+            storeReadMark(mark)
+        }
         if answer != .notYet, let ri = runs.firstIndex(where: { $0.runID == runID }) { runs[ri].answeredAsk = runs[ri].shadowAsk }
         return answer
+    }
+
+    private func projectedCleanupDocument(run: LiveRun, version: Int) -> ShadowDocument? {
+        guard seeded, !hasUnverifiedInput, selection == 0, cursor == userCursor, userLane.isEmpty,
+              unit == nil, recoveryRequest == nil, userLost == nil, strayInsertion == nil, tapRace == nil,
+              !editLane.contains(where: { $0.shadow != nil }), (run.version ?? -1) >= version, !revisionDue(run),
+              let append = projectableOpenSpeech, append.runID == run.runID else { return nil }
+        if let flight = inFlight {
+            guard flight.lane == .live, flight.owners.allSatisfy({ $0 == append.spanID }),
+                  flight.ops.allSatisfy({ if case .insert = $0 { true } else { false } }) else { return nil }
+        }
+        var intended = doc
+        intended.insertAtCursor(append.text, owner: append.spanID)
+        return intended
+    }
+
+    private func cleanupPieces(in document: ShadowDocument, runID: String) -> [Range<Int>] {
+        guard let run = runs.first(where: { $0.runID == runID }) else { return [] }
+        let protected = document.protectedRanges
+        return run.pieces.compactMap { piece -> Range<Int>? in
+            guard let span = document.spans[piece.spanID], !span.parked, span.start < span.end else { return nil }
+            // A seam can hide the precise manual edit. Keep the whole affected piece until it is known.
+            if span.userChanged, !protected.contains(where: { span.start <= $0.lowerBound && $0.upperBound <= span.end }) { return nil }
+            return span.start..<span.end
+        }.sorted { $0.lowerBound < $1.lowerBound }.reduce(into: [Range<Int>]()) { joined, piece in
+            if let last = joined.last, piece.lowerBound <= last.upperBound {
+                joined[joined.count - 1] = last.lowerBound..<max(last.upperBound, piece.upperBound)
+            } else { joined.append(piece) }
+        }
+    }
+
+    private func cleanupAnswer(doc document: ShadowDocument, runID: String) -> ShadowAnswer {
+        let placed = runs.first(where: { $0.runID == runID })?.pieces.compactMap { document.spans[$0.spanID] }.filter { !$0.parked } ?? []
+        let take = placed.map(\.start).min().flatMap { start in placed.map(\.end).max().map { start..<$0 } }
+        return .ready(before: String(document.text[..<document.userCursor]),
+                      after: String(document.text[document.userCursor...]), take: take)
     }
 
     private func shadowAnswer(of runID: String, version: Int) -> ShadowAnswer {
         guard seeded else { return .refused("unseeded") }
         guard !hasUnverifiedInput else { return .refused("unverified") }
         guard selection == 0 else { return .refused("selection") }
-        guard inFlight == nil, swap == nil, recoveryRequest == nil, userLost == nil, strayInsertion == nil, tapRace == nil else { return .notYet }
-        var take: Range<Int>?
+        let committedCleanupPending = editLane.contains { $0.isCleanup && $0.shadow != nil }
+        // Future speech takes priority over sync. If it defers the committed cleanup, skip this
+        // request: a later pause can read its settled result without keeping a pass waiting.
+        if committedCleanupPending, prioritizesSpeech { return .refused("syncPending") }
+        guard inFlight == nil, unit == nil, swap == nil, recoveryRequest == nil,
+              userLost == nil, strayInsertion == nil, tapRace == nil, !committedCleanupPending else { return .notYet }
         if let run = runs.first(where: { $0.runID == runID }) {
             guard run.pending == nil, (run.version ?? -1) >= version, !rawAppendPending(run), !revisionDue(run) else { return .notYet }
-            let placed = run.pieces.compactMap { spans[$0.spanID] }.filter { !$0.parked }
-            if let start = placed.map(\.start).min(), let end = placed.map(\.end).max(), start <= end { take = start..<end }
         } else if !retiredRunIDs.contains(runID) {
             // Not seen yet: its snapshot comes first.
             return .notYet
         }
-        return .ready(before: String(text[..<userCursor]), after: String(text[userCursor...]), take: take)
+        return cleanupAnswer(doc: doc, runID: runID)
     }
 
     /// A snapshot's text: its segments, trimmed, joined by a space where a reader expects one.
@@ -2138,6 +2585,9 @@ public struct FieldQueue: Sendable {
         let adjacent = Array(text[span.end...].prefix { character in
             character.unicodeScalars.allSatisfy { CharacterSet.punctuationCharacters.contains($0) }
         })
+        if span.cleaned, !span.userChanged, adjacent.isEmpty {
+            return FieldMerge.rebase(base: base, kept: proposal, incoming: current).text
+        }
         let merged = FieldMerge.rebase(base: base, kept: current + adjacent, incoming: proposal).text
         guard adjacent.isEmpty || merged.suffix(adjacent.count).elementsEqual(adjacent) else { return current }
         return Array(merged.dropLast(adjacent.count))
@@ -2175,7 +2625,8 @@ public struct FieldQueue: Sendable {
             state.spanID = piece.spanID
             state.revision = LiveRevision(runID: run.runID, version: version, proposal: proposal,
                                           through: piece.tEnd ?? run.delivered.count, baseline: current)
-            editLane.append(state)
+            let cleanupIndex = editLane.firstIndex { $0.isCleanup } ?? editLane.endIndex
+            editLane.insert(state, at: cleanupIndex)
             return nextEdit() ?? .wait
         }
         return nil
@@ -2309,8 +2760,8 @@ public struct FieldQueue: Sendable {
         runs[ri].pieces[pi].spaceAfter = false
         guard let span = spans[runs[ri].pieces[pi].spanID], !span.parked, span.end == cursor, cursor == userCursor, selection == 0,
               cursor < text.count, !FieldInsertion.trailingSeparator(after: String(text.prefix(cursor)), before: text[cursor]).isEmpty else { return nil }
-        return send(.insert(" "), lane: .live) { q in
-            q.insertAtCursor([" "], owner: nil)
+        return send(.insert(" "), lane: .live, owner: -1) { q in
+            q.insertAtCursor([" "], owner: -1)
             q.userCursor = q.cursor
         }
     }
@@ -2408,6 +2859,25 @@ public struct FieldQueue: Sendable {
         flight.jumpSpan = joining?.jumpSpan
         flight.input = joining?.input
         flight.visited = joining?.visited ?? []
+        if let owner, case .edit(var state, let editLane)? = unit?.owner, state.spanID == owner,
+           state.isCleanup || state.edit.requiresVerifiedInsertion == true {
+            if case .move = op { } else {
+                state.issuedMutation = true
+                unit?.owner = .edit(state, editLane)
+            }
+            switch op {
+            case .insert(let piece):
+                if var checkpoint = joining?.checkpoint, case .insert(let sent) = checkpoint.operation {
+                    checkpoint.operation = .insert(sent + piece)
+                    flight.checkpoint = checkpoint
+                } else {
+                    flight.checkpoint = SyncCheckpoint(before: opPre, operation: op, owner: owner)
+                }
+            case .deleteBackward:
+                flight.checkpoint = SyncCheckpoint(before: opPre, operation: op, owner: owner)
+            case .move: break
+            }
+        }
         // Behind a chunk with hops whose own ops are done: its check goes on covering what goes behind it.
         // A later piece of a chunk's own insert is no op behind the chunk, unless the burst itself went behind it.
         let behindChunk = continuing ? joining?.behind != nil : unit?.ops.isEmpty ?? true
@@ -2465,22 +2935,22 @@ public struct FieldQueue: Sendable {
         guard !chars.isEmpty else { return }
         record(.insert(at: cursor, count: chars.count, owner: owner))
         doc.insertAtCursor(chars, owner: owner)
-        updateRevisionBaseline(owner: owner)
+        updateEditBaseline(owner: owner)
     }
 
     private mutating func removeRange(_ a: Int, _ b: Int, owner: Int?) {
         guard a < b, a >= 0, b <= text.count else { return }
         record(.remove(a, b, owner: owner))
         doc.removeRange(a, b, owner: owner)
-        updateRevisionBaseline(owner: owner)
+        updateEditBaseline(owner: owner)
     }
 
-    private mutating func updateRevisionBaseline(owner: Int?) {
+    private mutating func updateEditBaseline(owner: Int?) {
         guard let owner, let span = spans[owner],
-              case .edit(var state, let lane)? = unit?.owner,
-              state.spanID == owner, var revision = state.revision else { return }
-        revision.baseline = chars(of: span)
-        state.revision = revision
+              case .edit(var state, let lane)? = unit?.owner, state.spanID == owner else { return }
+        let current = chars(of: span)
+        state.shadow?.transportBaseline = current
+        state.revision?.baseline = current
         unit?.owner = .edit(state, lane)
     }
 
@@ -3087,11 +3557,49 @@ public struct FieldQueue: Sendable {
         guard edit.selected == nil, let readID = edit.readID, let mark = readMarks.last(where: { $0.id == readID }) else { return nil }
         let before = Array(edit.before), after = Array(edit.after)
         let c = mark.cursor, old = mark.text
+        if let intended = mark.intended {
+            guard edit.requiresShadowRead == true, before.count == intended.cursor,
+                  intended.text.elementsEqual(before + after) else { return nil }
+            return placeIntendedEdit(edit, read: mark, intended: intended)
+        }
+        guard edit.requiresShadowRead != true else { return nil }
         let kb = min(c, before.count), ka = min(old.count - c, after.count)
         // The scope as the read saw it; what the model did not know then lies past its ends.
         guard old[(c - kb)..<c].elementsEqual(before.suffix(kb)), old[c..<(c + ka)].elementsEqual(after.prefix(ka)),
               kb == before.count || kb == c, ka == after.count || c + ka == old.count else { return nil }
-        var s = c - kb, e = c + ka, userTouched = false
+        let bounds = locateRead(mark, start: c - kb, end: c + ka)
+        var s = bounds.start, e = bounds.end
+        if bounds.userTouched, !mark.mergesUser { return .userEdited }
+        guard s >= 0, s <= e, e <= text.count else { return nil }
+        // The parts the read knew beyond the model: they must agree with what the model shows there now, or grow it.
+        let front = Array(before.prefix(before.count - kb)), back = Array(after.suffix(after.count - ka))
+        let k = min(s, front.count), m = min(text.count - e, back.count)
+        guard text[(s - k)..<s].elementsEqual(front.suffix(k)), k == front.count || s - k == 0,
+              text[e..<(e + m)].elementsEqual(back.prefix(m)), m == back.count || e + m == text.count else { return nil }
+        if k < front.count { prepend(Array(front.prefix(front.count - k))); s += front.count - k; e += front.count - k }
+        if m < back.count { text += back.suffix(back.count - m) }
+        s -= front.count; e += back.count
+        let now = Array(text[s..<e])
+        let target = mark.mergesUser ? FieldMerge.rebase(base: before + after, kept: now, incoming: Array(edit.target)).text
+            : FieldMerge.rebase(base: before + after, kept: Array(edit.target), incoming: now).text
+        return .placed(addSpan(Span(start: s, end: e, cleanup: mark.mergesUser)), target: String(target))
+    }
+
+    private mutating func placeIntendedEdit(_ edit: Edit, read: ReadMark, intended: IntendedRead) -> ReadPlacement? {
+        let bounds = locateRead(read, start: 0, end: read.text.count)
+        guard bounds.start >= 0, bounds.start <= bounds.end, bounds.end <= text.count else { return nil }
+        let current = Array(text[bounds.start..<bounds.end])
+        let desired = FieldMerge.restrictingCleanup(base: intended.text, incoming: Array(edit.target),
+                                                    editable: intended.editable, protected: intended.protected)
+        // A confirmed transport echo simply brings current toward intended. New recognition or
+        // user/host edits are the remaining difference and win over any overlapping cleanup.
+        let target = FieldMerge.rebase(base: intended.text, kept: current, incoming: desired).text
+        let scope = addSpan(Span(start: bounds.start, end: bounds.end, cleanup: true))
+        return .placed(scope, target: String(target))
+    }
+
+    private func locateRead(_ mark: ReadMark, start: Int, end: Int) -> (start: Int, end: Int, userTouched: Bool) {
+        var s = start, e = end, userTouched = false
         for change in mark.changes {
             switch change {
             case .grow(let n): s += n; e += n
@@ -3108,22 +3616,7 @@ public struct FieldQueue: Sendable {
                 s = shift(s); e = shift(e)
             }
         }
-        if userTouched, !mark.mergesUser { return .userEdited }
-        guard s >= 0, s <= e, e <= text.count else { return nil }
-        // The parts the read knew beyond the model: they must agree with what the model shows there now, or grow it.
-        let front = Array(before.prefix(before.count - kb)), back = Array(after.suffix(after.count - ka))
-        let k = min(s, front.count), m = min(text.count - e, back.count)
-        guard text[(s - k)..<s].elementsEqual(front.suffix(k)), k == front.count || s - k == 0,
-              text[e..<(e + m)].elementsEqual(back.prefix(m)), m == back.count || e + m == text.count else { return nil }
-        if k < front.count { prepend(Array(front.prefix(front.count - k))); s += front.count - k; e += front.count - k }
-        if m < back.count { text += back.suffix(back.count - m) }
-        s -= front.count; e += back.count
-        let now = Array(text[s..<e])
-        // An instruction's result wins over the keyboard's own changes since; a cleanup's changes give way to every
-        // change since (the user's, speech typed meanwhile) and land only in untouched words.
-        let target = mark.mergesUser ? FieldMerge.rebase(base: before + after, kept: now, incoming: Array(edit.target)).text
-            : FieldMerge.rebase(base: before + after, kept: Array(edit.target), incoming: now).text
-        return .placed(addSpan(Span(start: s, end: e, cleanup: mark.mergesUser)), target: String(target))
+        return (s, e, userTouched)
     }
 
     private enum Placement: Equatable { case placed(Int), ambiguous, absent }

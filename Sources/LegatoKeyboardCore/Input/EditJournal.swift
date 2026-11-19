@@ -64,6 +64,7 @@ public enum EditJournal {
         public var report: FieldQueue.Report?
         /// True for a host callback, false for a proxy read. Older journals leave it unset.
         public var callback: Bool?
+        public var awaitingDraftEvidence: Bool?
         /// `send`, `wait` or `idle` for a step.
         public var action: String?
         public var op: Op?
@@ -105,7 +106,7 @@ public enum EditJournal {
             case .sent(let op, let lane): entry.kind = .sent; entry.op = Op(op); entry.lane = lane
             case .confirmed(let waited): entry.kind = .confirmed; entry.detail = "\(Int(waited))"
             case .resync(let kind): entry.kind = .resync; entry.reason = kind.rawValue
-            case .applied(let id, let cursor): entry.kind = .applied; entry.id = id; entry.detail = "\(cursor)"
+            case .applied(let id, let cursor, _): entry.kind = .applied; entry.id = id; entry.detail = "\(cursor)"
             case .dropped(let drop):
                 entry.kind = .dropped; entry.id = drop.id; entry.run = drop.runID; entry.reason = drop.reason.rawValue
                 entry.text = drop.text; entry.partial = drop.partial

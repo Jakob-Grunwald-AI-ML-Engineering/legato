@@ -35,11 +35,11 @@ import Testing
         #expect(store.read()?.text == "five.")
     }
 
-    @Test func previewCutsFromTheHead() {
+    @Test func previewShowsTheStartAndCutsTheTail() {
         let item = KeptText(text: "milk and the eggs on Tuesday.")
         #expect(item.preview(maxCharacters: 100) == "milk and the eggs on Tuesday.")
         let cut = item.preview(maxCharacters: 12)
-        #expect(cut.hasPrefix("…") && cut.hasSuffix("Tuesday.") && cut.count == 12)
+        #expect(cut.hasPrefix("milk and th") && cut.hasSuffix("…") && cut.count == 12)
     }
 
     // MARK: What a dropped run keeps (#299 device run: a take whose cleaned text stood in the field was kept raw)
@@ -140,13 +140,58 @@ import Testing
         #expect(reset(&rig)?.kept == "early today")
     }
 
-    /// The item belongs to its draft: sending or clearing that draft ends it; another draft's end does not.
-    @Test func sendingTheDraftEndsWhatWasKeptFromIt() {
-        let store = KeptTextStore(LinkStore(MemoryLinkStore()))
-        store.keep("five.", draftID: "a")
-        #expect(!store.draftEnded("b"))
-        #expect(store.read()?.text == "five.")
-        #expect(store.draftEnded("a"))
+    @Test func anInsertionIsReservedAcrossReopenUntilItsOutcomeIsKnown() throws {
+        let link = LinkStore(MemoryLinkStore())
+        let store = KeptTextStore(link)
+        let original = try #require(store.keep("five.", draftID: "a"))
+        var pending = original
+        let began = pending.beginInsertion()
+        #expect(began)
+        #expect(store.replace(original, with: pending))
+
+        let reopened = KeptTextStore(link)
+        var held = try #require(reopened.read())
+        #expect(held.text == "five.")
+        let beganAgain = held.beginInsertion()
+        #expect(!beganAgain)
+        #expect(held.resolvingInsertion(.uncertain) == held)
+
+        let safeRetry = try #require(held.resolvingInsertion(.refusedBeforeWrite))
+        #expect(reopened.replace(held, with: safeRetry))
+        held = safeRetry
+        let retried = held.beginInsertion()
+        #expect(retried)
+        #expect(reopened.replace(safeRetry, with: held))
+        #expect(reopened.replace(held, with: held.resolvingInsertion(.confirmed)))
         #expect(store.read() == nil)
+    }
+
+    @Test func aRecoveredCleanupIsOnlyCopyableAndDoesNotDisplaceUndeliveredSpeech() throws {
+        let link = LinkStore(MemoryLinkStore())
+        let store = KeptTextStore(link)
+        let rewrite = try #require(store.keep("The full field, including text already there.", draftID: "a", kind: .cleanupRewrite))
+        var reopened = try #require(KeptTextStore(link).read())
+        #expect(reopened.id == rewrite.id)
+        #expect(!reopened.offersInsertion)
+        let began = reopened.beginInsertion()
+        #expect(!began)
+
+        let speech = try #require(store.keep("The words the field never got.", draftID: "a"))
+        let preferred = store.keep("The full field again.", draftID: "a", kind: .cleanupRewrite)
+        #expect(preferred?.id == speech.id)
+        #expect(store.read()?.id == speech.id)
+        #expect(store.read()?.offersInsertion == true)
+    }
+
+    @Test func aLateReceiptCannotConsumeNewerRecovery() throws {
+        let store = KeptTextStore(LinkStore(MemoryLinkStore()))
+        var pending = try #require(store.keep("five.", draftID: "a"))
+        let original = pending
+        let began = pending.beginInsertion()
+        #expect(began)
+        #expect(store.replace(original, with: pending))
+        store.keep("six.", draftID: "b")
+        #expect(!store.replace(pending, with: nil))
+        #expect(store.read()?.text == "six.")
     }
 }

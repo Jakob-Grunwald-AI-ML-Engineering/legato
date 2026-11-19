@@ -18,7 +18,10 @@ struct WordRowView: View {
 
     var body: some View {
         Group {
-            if controller.keptRowOpen, controller.statusText == nil, let kept = controller.keptText, kept.isShowable {
+            if controller.isShowingPreview, let preview = controller.statusText {
+                // A take in progress owns the row; kept text (an earlier one or this take's own) returns when it ends.
+                previewRow(preview)
+            } else if let kept = controller.keptText, kept.isShowable {
                 keptRow(kept)
             } else if let recovery = controller.liveRecoveryNotice {
                 HStack(spacing: 8) {
@@ -33,7 +36,7 @@ struct WordRowView: View {
                         .accessibilityAddTraits(.isStaticText)
                     takeButton("Dismiss", id: "keyboard.liveRecovery.dismiss") { controller.dismissLiveRecovery() }
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, CGFloat(WordRowLayout.contentInset))
                 .accessibilityIdentifier("keyboard.liveRecovery")
             } else if controller.offersAutoFillSwitch, let target = controller.inputModeTarget {
                 AutoFillSwitchKey(target: target)
@@ -62,7 +65,7 @@ struct WordRowView: View {
                         takeButton("Insert as-is", id: "keyboard.take.insertRaw") { controller.insertTakeRaw() }
                     }
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, CGFloat(WordRowLayout.contentInset))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.black.opacity(0.001))
                 .contentShape(Rectangle())
@@ -77,10 +80,22 @@ struct WordRowView: View {
             }
         }
         // The status (or a hint) takes the row over and gives it back with a plain short fade.
-        .animation(.easeOut(duration: 0.12), value: controller.statusText)
+        .animation(controller.isShowingPreview ? nil : .easeOut(duration: 0.12), value: controller.statusText)
     }
 
-    private func takeButton(_ title: String, id: String, action: @escaping () -> Void) -> some View {
+    /// The dictation preview (#312): the words not in the field yet, left aligned, two lines, anchored on the newest words. The
+    /// text keeps its natural wrapping and sits at the row's bottom edge, so a growing text pushes the oldest line out at the
+    /// top and nothing re-centres or jumps. The row keeps its height; the font is the largest that fits two lines with air
+    /// between them and clear of the row's edges (`WordRowHeight`, an estimate to measure on the phone).
+    private func previewRow(_ text: String) -> some View {
+        PreviewRow(text: text)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(text)
+        .accessibilityIdentifier("keyboard.hint")
+        .transition(.identity)
+    }
+
+    private func takeButton(_ title: String, id: String, enabled: Bool = true, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title).font(.system(size: fontSize - 4, weight: .semibold))
                 .foregroundStyle(Color(uiColor: KeyColors.suggestion))
@@ -88,21 +103,47 @@ struct WordRowView: View {
                 .background(Color(uiColor: KeyColors.suggestion).opacity(0.15), in: Capsule())
         }
         .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.5)
         .accessibilityIdentifier(id)
     }
 
     /// Text the keyboard could not place: its end, then Insert and Copy (Copy needs Full Access), and a small close.
     private func keptRow(_ kept: KeptText) -> some View {
         HStack(spacing: 8) {
-            Text(kept.preview(maxCharacters: 120))
-                .font(.system(size: fontSize - 4))
-                .foregroundStyle(Color(uiColor: KeyColors.suggestion))
-                .lineLimit(1)
-                .truncationMode(.head)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityIdentifier("keyboard.kept.text")
-            takeButton("Insert", id: "keyboard.kept.insert") { controller.insertKeptText() }
-            if controller.fullAccess {
+            if let notice = controller.keptInsertNotice {
+                // Short and readable; it gives the sentence's place back after a moment.
+                Text(notice)
+                    .font(.system(size: fontSize - 4, weight: .medium))
+                    .foregroundStyle(Color(uiColor: KeyColors.suggestion))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("keyboard.kept.notice")
+            } else {
+                // Unsent dictation: a quiet cue, then the start of the sentence so it is recognisable.
+                Image(systemName: "waveform")
+                    .font(.system(size: fontSize - 6, weight: .medium))
+                    .foregroundStyle(Color(uiColor: KeyColors.suggestion).opacity(0.7))
+                    .accessibilityHidden(true)
+                Text(kept.preview(maxCharacters: 120))
+                    .font(.system(size: fontSize - 4))
+                    .foregroundStyle(Color(uiColor: KeyColors.suggestion))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityLabel("Unsent dictation: \(kept.preview(maxCharacters: 120))")
+                    .accessibilityIdentifier("keyboard.kept.text")
+            }
+            if kept.offersInsertion, kept.insertion == nil || controller.insertingKeptText {
+                takeButton(controller.insertingKeptText ? "Inserting…" : "Insert", id: "keyboard.kept.insert",
+                           enabled: controller.canInsertKeptText) { controller.insertKeptText() }
+                    .accessibilityLabel("Insert at cursor")
+            } else if kept.offersInsertion {
+                Text("Check the field").font(.system(size: fontSize - 5))
+                    .accessibilityLabel("Previous insertion could not be confirmed. You can still copy or dismiss the recovery text.")
+            }
+            if controller.fullAccess, controller.keptInsertNotice == nil {
                 takeButton("Copy", id: "keyboard.kept.copy") { controller.copyKeptText() }
             }
             Button { controller.dismissKeptText() } label: {
@@ -115,24 +156,8 @@ struct WordRowView: View {
             .accessibilityLabel("Discard kept text")
             .accessibilityIdentifier("keyboard.kept.dismiss")
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, CGFloat(WordRowLayout.contentInset))
         .accessibilityIdentifier("keyboard.kept")
-    }
-
-    /// The chip that stands for kept text while the row shows suggestions.
-    private var keptChip: some View {
-        Button { controller.openKeptText() } label: {
-            Label("Kept", systemImage: "tray.and.arrow.down")
-                .font(.system(size: fontSize - 6, weight: .semibold))
-                .foregroundStyle(Color(uiColor: KeyColors.suggestion))
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(Color(uiColor: KeyColors.suggestion).opacity(0.15), in: Capsule())
-        }
-        .buttonStyle(.plain)
-        .padding(.leading, 6).padding(.trailing, 2)
-        .accessibilityLabel("Kept text")
-        .accessibilityHint("Shows the text Legato could not place, to insert or copy.")
-        .accessibilityIdentifier("keyboard.kept.chip")
     }
 
     private var row: some View {
@@ -140,8 +165,6 @@ struct WordRowView: View {
         let words = controller.suggestions
         let highlighted = controller.highlightedSuggestionRank.flatMap { ranks.firstIndex(of: $0) }
         return HStack(spacing: 0) {
-            // Never an empty or stale chip: only an item with text, from a draft.
-            if controller.keptText?.isShowable == true { keptChip }
             ForEach(Array(ranks.enumerated()), id: \.offset) { position, rank in
                 SuggestionSlot(controller: controller, word: rank < words.count ? words[rank] : nil,
                                rank: rank, fontSize: fontSize, highlighted: highlighted == position,
@@ -153,7 +176,7 @@ struct WordRowView: View {
                         if position < ranks.count - 1 {
                             Rectangle().fill(Color(uiColor: KeyColors.divider))
                                 .frame(width: 0.67, height: 24)
-                                .opacity(pressed == position || pressed == position + 1
+                                .opacity(words.isEmpty || pressed == position || pressed == position + 1
                                          || highlighted == position || highlighted == position + 1 ? 0 : 1)
                                 .transaction { $0.animation = nil }
                         }
@@ -374,4 +397,45 @@ private struct AutoFillSwitchKey: UIViewRepresentable {
     }
 
     func updateUIView(_ button: UIButton, context: Context) {}
+}
+
+/// The dictation preview text: a clearly readable secondary colour, one line centred vertically, two lines filling the row, and
+/// a soft fade at the first line's leading edge when the head of the text is cut off.
+private struct PreviewRow: View {
+    let text: String
+    @State private var textHeight = 0.0
+
+    var body: some View {
+        GeometryReader { proxy in
+            let height = Double(proxy.size.height)
+            let size = WordRowHeight.previewFontSize(rowHeight: height)
+            let single = WordRowHeight.previewIsSingleLine(textHeight: textHeight, size: size)
+            let truncated = WordRowHeight.previewTruncated(textHeight: textHeight, rowHeight: height, prefixed: text.hasPrefix("…"))
+            Text(text)
+                .font(.system(size: CGFloat(size)))
+                .lineSpacing(CGFloat(WordRowHeight.previewLineSpacing(size: size)))
+                .foregroundStyle(Color(uiColor: .secondaryLabel))
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .onGeometryChange(for: Double.self) { Double($0.size.height) } action: { textHeight = $0 }
+                .frame(width: max(proxy.size.width - 2 * CGFloat(WordRowLayout.previewInset), 0), alignment: .leading)
+                .padding(.horizontal, CGFloat(WordRowLayout.previewInset))
+                .padding(.bottom, single ? 0 : CGFloat(WordRowHeight.previewPadding(rowHeight: height, size: size)))
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: single ? .leading : .bottomLeading)
+                .clipped()
+                .mask {
+                    VStack(spacing: 0) {
+                        // The first line's leading edge; the second line is solid.
+                        HStack(spacing: 0) {
+                            Color.black.frame(width: CGFloat(WordRowLayout.previewInset))
+                            LinearGradient(colors: [truncated ? .clear : .black, .black], startPoint: .leading, endPoint: .trailing)
+                                .frame(width: CGFloat(WordRowHeight.previewFadeWidth))
+                            Color.black
+                        }
+                        .frame(height: proxy.size.height / 2)
+                        Color.black
+                    }
+                }
+        }
+    }
 }

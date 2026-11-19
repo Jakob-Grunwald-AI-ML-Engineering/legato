@@ -150,11 +150,29 @@ import LegatoVocabulary
         Self.log.info("keyboard.session.open surface=\(surface.rawValue, privacy: .public) input=\(self.microphone.holdsWarmInput ? 1 : 0)")
     }
 
+    /// How long a take end waits for the recognizer's last final words (a stop, and the keyboard hiding mid-take).
+    static let takeEndWait = Duration.seconds(3)
+
     private func close() async {
+        // Hiding ends a take that is speaking like Stop does for the words already spoken: the recognizer finalizes what it
+        // heard (bounded) before the route closes, so a sentence not yet final when the keyboard hid is not lost. Only audio
+        // arriving after the hide is dropped (the route stops first). A debug replay is cut here too; it cannot prove the
+        // real mic's tail, which only a spoken take on the phone does.
+        if gate.route == .dictation || dictation.hasActiveTake || dictation.isReplaying {
+            _ = gate.close()
+            microphone.setRoute(.idle)
+            await dictation.finalizeTake()
+            await dictation.waitForFinish(timeout: Self.takeEndWait)
+            routeClosedAt = now()
+        }
         if let action = gate.abandon() { await perform(action) }
         isOpen = false; probe.cancel()
-        // The take is the keyboard appearance's: closing mid-take drops what was not sent.
-        takeFinish?.cancel(); takeFinish = nil; takeGeneration += 1
+        // The take is the keyboard appearance's: it ends as a stop would, in the
+        // background, so its final words are cleaned, written to History and offered to the keyboard's kept-text row. Closing
+        // used to cancel the end and leave the run open for good, and nothing of it was recorded past its first words.
+        let earlierFinish = takeFinish; takeFinish = nil; takeGeneration += 1
+        let sink = self.sink
+        Task { await earlierFinish?.value; await sink.finishTake() }
         #if DEBUG || LEGATO_INTERNAL
         debugTakeOpen = false
         #endif
@@ -292,7 +310,7 @@ import LegatoVocabulary
         let dictation = self.dictation, sink = self.sink
         let previous = takeFinish, generation = takeGeneration
         takeFinish = Task { [weak self] in
-            if waitingForWords { await dictation.waitForFinish(timeout: .seconds(3)) }
+            if waitingForWords { await dictation.waitForFinish(timeout: Self.takeEndWait) }
             await previous?.value
             guard !Task.isCancelled, self?.takeGeneration == generation else { return }
             await sink.finishTake()
@@ -354,7 +372,7 @@ import LegatoVocabulary
         speechRoute.beginTake()
         try await dictation.debugReplay(timeline, speed: speed, pcm: pcm)
         try Task.checkCancellation()
-        await dictation.waitForFinish(timeout: .seconds(3))
+        await dictation.waitForFinish(timeout: Self.takeEndWait)
         try Task.checkCancellation()
         await sink.finishTake()
     }

@@ -151,6 +151,9 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     @ObservationIgnored private var suppressed = false
     /// Whether `live` may run here: the iOS keyboard link publishes it. Elsewhere (the Mac) `live` acts as `onStop`.
     @ObservationIgnored private let supportsLive: Bool
+    /// iPhone (#312): a live run is staged. Cleaned units are published as they land and the keyboard types each into the
+    /// field once; no field-pass cleanup runs (it would edit text already typed). Needs no attached cleanup field.
+    @ObservationIgnored private let stagedLive: Bool
     /// The run being typed in `live` (nil between runs); a new one starts with the first words after a finished one.
     @ObservationIgnored public private(set) var liveRun: LiveDictationRun?
     /// The run's snapshot changed (nil: no run, remove it from the link). Called on every change; the host throttles.
@@ -239,7 +242,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             }
             return whole ? await clean(text, before) : await FieldCleanupChunks.clean(text, before: before, using: clean)
         }
-        cleanup.onResult = { [weak self] source, confirmed, status in
+        cleanup.onResult = { [weak self, weak cleanup] source, confirmed, status in
             guard let self else { return }
             let capture = self.fieldEntry ?? self.liveRun.flatMap { run in UUID(uuidString: run.runID).map { (id: $0, raw: run.wholeRaw.text) } }
             guard let capture else { return }
@@ -256,6 +259,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             entry.text = raw
             entry.cleanupSourceText = source.isEmpty ? nil : source
             entry.cleanupResultText = confirmed.isEmpty ? nil : confirmed
+            entry.cleanupRecoveryText = cleanup?.recoveryTarget
             entry.cleanupFieldStatus = status
             self.lastLiveHistory = entry
             try? await history.upsert(entry)
@@ -308,6 +312,16 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         setVoiceActive(false)
         if cleanupDuringPauses { fieldCleanup?.request() }
         if cleanupSentences { scheduleWholePause() }
+        closeUnitAtPause()
+    }
+
+    /// An admitted pause (`DictationActivity`: an endpoint, then 200 ms at -55 dBFS or below) closes the open unit of a staged
+    /// run, whatever its length, and cleans it now, so the keyboard types what was said before the pause. Stop closes it too
+    /// (`endLive`). The unit is not cut short by a forced split: those words wait in the head until their sentence ends.
+    private func closeUnitAtPause() {
+        guard stagedLive, var run = liveRun, !run.complete, let open = run.flush() else { return }
+        liveRun = run
+        Task { [weak self] in await self?.submitLive(open.text, key: open.key, run: run) }
     }
 
     /// A pause this long after an endpoint runs the whole-take pass with the raw words, as the stop does. Unmeasured: a
@@ -370,14 +384,14 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// `defaults` holds the send setting: the Mac app's standard defaults, or the App Group on iOS.
     /// `supportsLive`: the iOS keyboard link is there to carry the live mode.
     public convenience init(vocabularyURL: URL, recentTakesURL: URL? = nil, history: (any HistoryStore)? = nil, defaults: UserDefaults = .standard,
-                            supportsLive: Bool = false, groupsLiveHistory: Bool = false) {
+                            supportsLive: Bool = false, groupsLiveHistory: Bool = false, stagedLive: Bool = false) {
         // `UserDefaults` is thread-safe by contract; the model is read on the cleanup call's thread.
         nonisolated(unsafe) let store = defaults
         self.init(recentTakes: RecentTakesStore(fileURL: recentTakesURL), history: history,
                   cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore()), model: { DictationSendSetting.cleanupModel(in: store) }),
                   vocabulary: { (try? await VocabularyStore(fileURL: vocabularyURL).snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? [] },
                   sendMode: { DictationSendSetting.mode(in: defaults) }, pauseSeconds: { DictationSendSetting.pause(in: defaults) },
-                  supportsLive: supportsLive, groupsLiveHistory: groupsLiveHistory)
+                  supportsLive: supportsLive, groupsLiveHistory: groupsLiveHistory, stagedLive: stagedLive)
     }
     public init(recentTakes: RecentTakesStore = RecentTakesStore(), history: (any HistoryStore)? = nil, cleaner: any SentenceCleaning, vocabulary: @escaping @Sendable () async -> [String] = { [] },
                 timeout: Duration = .milliseconds(2500),
@@ -386,8 +400,9 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
                 clock: any Clock<Duration> = ContinuousClock(),
                 takeTimeout: (@Sendable (Int) -> Duration)? = nil,
                 supportsLive: Bool = false,
-                liveTimeout: Duration = .seconds(6), groupsLiveHistory: Bool = false) {
+                liveTimeout: Duration = .seconds(6), groupsLiveHistory: Bool = false, stagedLive: Bool = false) {
         self.groupsLiveHistory = groupsLiveHistory
+        self.stagedLive = stagedLive
         self.supportsLive = supportsLive; self.liveTimeout = liveTimeout
         self.recentTakes = recentTakes; self.history = history
         self.cleaner = cleaner; self.vocabulary = vocabulary; self.timeout = timeout
@@ -639,7 +654,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         guard let unit else { return }
         await submitLive(unit, key: sequence, run: run)
         // A straggler of a finished take: the short take is cleaned whole again with it, landing as one more diff.
-        if run.complete { await cleanWholeLate(run) }
+        if run.complete, !run.staged { await cleanWholeLate(run) }
     }
 
     /// The keyboard started new pieces of the live run at these segments (the user typed or moved the caret between
@@ -750,7 +765,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         // A short take of several units is also cleaned whole, in parallel with the units still in cleanup.
         var wholeTask: Task<String?, Never>?
         var wholeFinals = 0
-        if let run = liveRun, !run.complete, run.unitCount > 1, !run.isSplit {
+        // Not a staged run: its units are typed already, and a whole-take result cannot replace them.
+        if let run = liveRun, !run.complete, !run.staged, run.unitCount > 1, !run.isSplit {
             let whole = run.wholeRaw
             if whole.words <= Self.wholeTakeWords {
                 wholeFinals = whole.finals
@@ -768,7 +784,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         }
         let wholeText = await wholeTask?.value
         guard var run = liveRun, !run.complete else { return }
-        if let wholeText, !run.isSplit {
+        if let wholeText, !run.isSplit, !run.staged {
             let before = liveAnchor
             run.setWhole(SentenceStart.capitalized(wholeText, after: before), finals: wholeFinals)
         }
@@ -838,7 +854,11 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
                                            "segments": segments, "rawChars": line.raw.count, "chars": text.count, "ms": ms as Any])
             if shown { publishLive(run) } else { liveRun = run }
         } else {
-            diagnostics?("live2.cleanup", ["landed": false, "reason": line.reason ?? "raw", "detail": line.detail ?? "", "rawChars": line.raw.count, "ms": ms as Any])
+            // A staged unit whose cleanup failed or ran out of time is typed as its raw words.
+            let shown = run.setRaw(key: key)
+            diagnostics?("live2.cleanup", ["landed": false, "reason": line.reason ?? "raw", "detail": line.detail ?? "", "rawChars": line.raw.count,
+                                           "ms": ms as Any, "raw": shown])
+            if shown { publishLive(run) } else { liveRun = run }
         }
     }
 
@@ -849,7 +869,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         if let run = liveRun, !run.complete || late { return run }
         fieldCleanup?.reset()
         liveHistoryFallbacks = []
-        let run = LiveDictationRun()
+        let run = LiveDictationRun(staged: stagedLive)
         liveDeliveryAck = nil
         liveRun = run
         liveAnchor = String(contextBefore().suffix(600))

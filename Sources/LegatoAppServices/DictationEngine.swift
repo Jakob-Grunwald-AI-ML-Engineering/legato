@@ -134,6 +134,10 @@ import LegatoVocabulary
     /// Stop routing and finalize (after ~200 ms of silence, as Soniox recommends). The finalized stream ends in
     /// the background once its words are final; a held, unbilled connection waits for the next take.
     public func finalizeTake() async {
+        #if DEBUG || LEGATO_INTERNAL
+        // A replay has no microphone: what it has heard is finalized, the rest of its timeline never arrives.
+        if replaying != nil { _ = try? await replaying?.finalizeChunk(); await cancelDebugReplay(); return }
+        #endif
         await flush()
         guard let take = active else { return }
         active = nil
@@ -155,11 +159,12 @@ import LegatoVocabulary
     /// Waits for the last finalized take to end (its words are final), at most `timeout`.
     public func waitForFinish(timeout: Duration) async {
         guard let finishing else { return }
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask { await finishing.value }
-            group.addTask { try? await Task.sleep(for: timeout) }
-            await group.next()
-            group.cancelAll()
+        // A race, not a task group: a group waits for its slower child, and a finish task ignores cancellation until its own
+        // (longer) provider timeout, which would make this bound meaningless.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let once = OnceResume(continuation)
+            Task { await finishing.value; once.resume() }
+            Task { try? await Task.sleep(for: timeout); once.resume() }
         }
         // A later take's finish may have replaced it meanwhile: that one is still to be waited for.
         if self.finishing == finishing { self.finishing = nil }
@@ -309,4 +314,15 @@ import LegatoVocabulary
         }
     }
 
+}
+
+/// Resumes its continuation the first time only.
+private final class OnceResume: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    init(_ continuation: CheckedContinuation<Void, Never>) { self.continuation = continuation }
+    func resume() {
+        lock.lock(); let c = continuation; continuation = nil; lock.unlock()
+        c?.resume()
+    }
 }

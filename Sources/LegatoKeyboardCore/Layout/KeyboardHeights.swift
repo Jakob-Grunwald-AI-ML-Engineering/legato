@@ -11,6 +11,29 @@ public enum WordRowHeight {
     public static let strip = portrait
 
     public static func content(landscape: Bool) -> Double { landscape ? visible : portrait }
+
+    /// Two lines of the dictation preview (#312) must fit the row as it is: the row never grows or shrinks for a take (the
+    /// compact strip stays reachable, and the native prediction frame is its size). The largest size whose two lines and the
+    /// padding fit; 11 pt in portrait (27 pt row), which is the readable floor: lines touch with no extra spacing and the
+    /// remaining fraction of a point is the padding. The line height is an ESTIMATE (1.2 x the size, SF's usual), not measured.
+    public static let previewSizes: [Double] = [13, 12, 11]
+    public static func previewLineHeight(size: Double) -> Double { size * 1.2 }
+    public static func previewLineSpacing(size: Double) -> Double { 0 }
+    public static let previewMinPadding = 0.0
+    public static func previewContentHeight(size: Double) -> Double { 2 * previewLineHeight(size: size) + previewLineSpacing(size: size) }
+    public static func previewFontSize(rowHeight: Double) -> Double {
+        previewSizes.first { previewContentHeight(size: $0) + 2 * previewMinPadding <= rowHeight } ?? previewSizes[previewSizes.count - 1]
+    }
+    /// A text one line tall sits vertically centred in the row; two lines fill it.
+    public static func previewIsSingleLine(textHeight: Double, size: Double) -> Bool { textHeight < 1.5 * previewLineHeight(size: size) }
+    /// The text is cut at its head (the row shows its newest two lines): the first line fades in from the leading edge.
+    public static func previewTruncated(textHeight: Double, rowHeight: Double, prefixed: Bool) -> Bool { prefixed || textHeight > rowHeight + 0.5 }
+    /// The width of the soft fade at the first line's leading edge.
+    public static let previewFadeWidth = 36.0
+    /// The space above and below the two lines (balanced).
+    public static func previewPadding(rowHeight: Double, size: Double) -> Double {
+        max(0, (rowHeight - previewContentHeight(size: size)) / 2)
+    }
 }
 
 /// Predictions, one tool key row, then the unchanged native typing grid.

@@ -25,11 +25,18 @@ enum JournalReplay {
             case .input: if let input = entry.input { queue.enqueue(input) }
             case .edit: if let edit = entry.edit { queue.enqueue(edit, user: entry.user ?? false) }
             case .live: if let snapshot = entry.snapshot { queue.enqueue(snapshot) }
-            case .read: if let id = entry.id { queue.markRead(id, mergingUser: entry.reason == "shadow") }
+            case .read:
+                if let id = entry.id {
+                    if let run = entry.run, let version = entry.version, entry.reason == "shadow" {
+                        _ = queue.shadow(of: run, version: version, markID: id)
+                    } else {
+                        queue.markRead(id, mergingUser: entry.reason == "shadow")
+                    }
+                }
             case .step:
                 guard let report = entry.report else { continue }
                 let action = queue.step(report: report, elapsedMs: lastStep.map { entry.t - $0 } ?? 0,
-                                        callback: entry.callback ?? true)
+                                        callback: entry.callback ?? true, awaitingDraftEvidence: entry.awaitingDraftEvidence ?? false)
                 lastStep = entry.t
                 result.events += queue.drainEvents()
                 if case .send(let op) = action { result.sent.append(op) }
@@ -55,7 +62,14 @@ enum JournalReplay {
             case .input: if let input = entry.input { rig.queue.enqueue(input) }
             case .edit: if let edit = entry.edit { rig.queue.enqueue(edit, user: entry.user ?? false) }
             case .live: if let snapshot = entry.snapshot { rig.queue.enqueue(snapshot) }
-            case .read: if let id = entry.id { rig.queue.markRead(id, mergingUser: entry.reason == "shadow") }
+            case .read:
+                if let id = entry.id {
+                    if let run = entry.run, let version = entry.version, entry.reason == "shadow" {
+                        _ = rig.queue.shadow(of: run, version: version, markID: id)
+                    } else {
+                        rig.queue.markRead(id, mergingUser: entry.reason == "shadow")
+                    }
+                }
             default: break
             }
         }

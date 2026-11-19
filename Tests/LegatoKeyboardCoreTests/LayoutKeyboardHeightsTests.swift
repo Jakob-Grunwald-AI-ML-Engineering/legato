@@ -81,3 +81,18 @@ import Testing
         #expect(StripHeight.requested(row: 1) == 1)
     }
 }
+
+@Test func thePreviewFontFitsTwoLinesInTheRowAsItIs() {
+    // Portrait: 27 pt holds two lines of 11 pt (2 x 13.2 = 26.4; 12 pt needs 28.8); landscape's 44 pt holds 13 pt (31.2).
+    #expect(WordRowHeight.previewFontSize(rowHeight: WordRowHeight.content(landscape: false)) == 11, "11 pt is the readable floor: 10 pt read as disabled; two lines of 13.2 pt fit 27 pt with no line spacing")
+    #expect(WordRowHeight.previewFontSize(rowHeight: WordRowHeight.content(landscape: true)) == 13)
+    let size = WordRowHeight.previewFontSize(rowHeight: WordRowHeight.portrait)
+    let pad = WordRowHeight.previewPadding(rowHeight: WordRowHeight.portrait, size: size)
+    #expect(WordRowHeight.previewContentHeight(size: size) + 2 * pad <= WordRowHeight.portrait && pad >= WordRowHeight.previewMinPadding)
+    #expect(WordRowHeight.portrait == 27, "The preview does not change the row")
+    #expect(WordRowHeight.previewIsSingleLine(textHeight: WordRowHeight.previewLineHeight(size: 11), size: 11))
+    #expect(!WordRowHeight.previewIsSingleLine(textHeight: 2 * WordRowHeight.previewLineHeight(size: 11), size: 11))
+    #expect(WordRowHeight.previewTruncated(textHeight: 40, rowHeight: 27, prefixed: false))
+    #expect(WordRowHeight.previewTruncated(textHeight: 20, rowHeight: 27, prefixed: true))
+    #expect(!WordRowHeight.previewTruncated(textHeight: 26.4, rowHeight: 27, prefixed: false))
+}

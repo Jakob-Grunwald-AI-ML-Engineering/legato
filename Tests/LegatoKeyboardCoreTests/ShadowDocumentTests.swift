@@ -4,6 +4,27 @@ import Testing
 /// The shadow-document model's contracts (#299): the observer's classification, chunk planning, hops that look and
 /// correct, and a failed check that re-reads.
 @Suite struct ShadowObserverTests {
+    @Test func cleanupReplacingTheNextPiecesFirstLetterKeepsTheSharedBoundary() {
+        var document = shadow("x water it gently tomorrow.", "plant basil.")
+        let at = document.cursor
+        var preceding = ShadowDocument.Span(start: 1, end: at)
+        preceding.dictated = true
+        var following = ShadowDocument.Span(start: at, end: document.text.count)
+        following.dictated = true
+        var scope = ShadowDocument.Span(start: 0, end: document.text.count)
+        scope.cleanup = true
+        let earlier = document.addSpan(preceding)
+        let later = document.addSpan(following)
+        let edit = document.addSpan(scope)
+
+        document.removeRange(at, at + 1, owner: edit)
+        document.insertAtCursor(["P"], owner: edit)
+        #expect(document.userCursor == at)
+        #expect(document.spans[earlier]?.end == at)
+        #expect(document.spans[later]?.start == at)
+        #expect(String(document.text) == "x water it gently tomorrow.Plant basil.")
+    }
+
     private func shadow(_ before: String, _ after: String = "") -> ShadowDocument {
         var doc = ShadowDocument()
         doc.seed(.init(before: before, after: after))
@@ -51,15 +72,86 @@ import Testing
         #expect(empty.observe(.init(before: ""), callback: .identity) == .match)
     }
 
-    /// A clear in the same instant as the keyboard's own move is looked at again after the deadline (task 9).
-    @Test func aClearRightAfterAnOwnMoveIsNotBelievedYet() {
-        var rig = QueueRig(FakeField("alpha beta"))
+    @Test func transientBlankAfterAConfirmedMoveDoesNotEndTheDraftOrConsumeItsSpeech() {
+        var rig = QueueRig(FakeField("Please move the review to Thursday."))
         rig.queue.enqueue(.move(-5))
         rig.drain()
+        let known = rig.field.current
         let empty = FieldQueue.Report(before: "")
-        #expect(rig.queue.observesClearedDraft(empty, hasText: false) == nil, "the move went out a moment ago")
-        #expect(rig.queue.observesClearedDraft(empty, hasText: false, elapsedSinceLastStepMs: FieldQueue.checkDeadlineMs) == true)
-        #expect(rig.queue.observesClearedDraft(empty, hasText: true, elapsedSinceLastStepMs: FieldQueue.checkDeadlineMs) == false)
+        #expect(!rig.queue.hasOpInFlight)
+        var evidence = FieldQueue.DraftEvidence()
+        let deadline = rig.queue.draftConfirmationMs
+        #expect(evidence.observe(known, hasText: true, ownsEmpty: false, nowMs: 0, confirmationMs: deadline) == .unchanged)
+        #expect(evidence.observe(empty, hasText: false, ownsEmpty: false, nowMs: 10, confirmationMs: deadline) == .pending)
+
+        rig.queue.enqueue(snap(1, "after lunch"))
+        #expect(rig.queue.step(report: empty, elapsedMs: 100, awaitingDraftEvidence: evidence.isPending) == .wait)
+        rig.queue.enqueue(.insert("x"))
+        #expect(rig.queue.step(report: empty, elapsedMs: 30, awaitingDraftEvidence: evidence.isPending) == .send(.insert("x")))
+        rig.queue.operationDispatched()
+        rig.field.apply(.insert("x"))
+        let returning = rig.field.current
+        #expect(rig.queue.recognizesDraft(returning))
+        #expect(evidence.observe(returning, hasText: true, ownsEmpty: false, nowMs: 165, confirmationMs: deadline) == .resumed)
+        rig.drain()
+        #expect(rig.field.string.contains("x"))
+        #expect(rig.field.string.contains("after lunch"))
+    }
+
+    @Test func blankLineRecoveryRequiresIndependentEvidenceOfTheOriginalCaret() throws {
+        let upper = "The upper paragraph is uniquely known."
+        let lower = "The lower paragraph is also known."
+        let origin = FieldQueue.Report(before: upper + "\n", after: "\n" + lower)
+        var rig = QueueRig(FakeField(upper + "\n\n" + lower, caret: origin.before.count))
+        rig.run(ms: 100)
+        let probe = try #require(rig.queue.blankLineProbe())
+        #expect(probe.units == -1)
+        rig.queue.enqueue(snap(1, "At noon.", complete: true))
+        let held = rig.queue.step(report: .init(before: ""), elapsedMs: 45, awaitingDraftEvidence: true)
+        #expect(held == .wait)
+
+        rig.field.apply(.move(probe.units))
+        let neighbor = rig.field.current
+        #expect(probe.confirmsLandmark(neighbor))
+        #expect(!probe.confirmsOrigin(neighbor))
+        #expect(!probe.confirmsOrigin(.init(before: "")))
+        #expect(probe.confirmsOrigin(.init(before: "\n", after: "\n")))
+        rig.field.apply(.move(-probe.units))
+        #expect(probe.confirmsOrigin(rig.field.current))
+        rig.drain()
+        #expect(rig.field.string == upper + "\nAt noon.\n" + lower)
+    }
+
+    @Test func blankLineRecoveryUsesTheLowerLineOnlyWhenTheUpperIsUnavailable() throws {
+        let lower = "The lower paragraph is uniquely known."
+        var queue = FieldQueue()
+        _ = queue.step(report: .init(before: "", after: "\n" + lower), elapsedMs: 0)
+        let probe = try #require(queue.blankLineProbe())
+        #expect(probe.units == 2)
+        let neighbor = FieldQueue.Report(before: "\nT", after: String(lower.dropFirst()))
+        #expect(probe.confirmsLandmark(neighbor))
+
+        queue.enqueue(.insert("x"))
+        #expect(queue.blankLineProbe() == nil, "a pending key preempts the automatic excursion")
+
+        var unstructured = FieldQueue()
+        _ = unstructured.step(report: .init(before: "Host context without a hard line break."), elapsedMs: 0)
+        #expect(unstructured.blankLineProbe() == nil)
+    }
+
+    @Test func onlySustainedConfirmedEmptinessEndsTheDraft() {
+        var evidence = FieldQueue.DraftEvidence()
+        let nonempty = FieldQueue.Report(before: "This field was known.")
+        let empty = FieldQueue.Report(before: "")
+        let deadline = FieldQueue.checkDeadlineMs
+        #expect(evidence.observe(nonempty, hasText: true, ownsEmpty: false, nowMs: 0, confirmationMs: deadline) == .unchanged)
+        #expect(evidence.observe(empty, hasText: false, ownsEmpty: false, nowMs: 100, confirmationMs: deadline) == .pending)
+        #expect(evidence.observe(empty, hasText: true, ownsEmpty: false, nowMs: 500, confirmationMs: deadline) == .pending)
+        #expect(evidence.recheckAfterMs(nowMs: 500, confirmationMs: deadline) == nil)
+        #expect(evidence.recheckAfterMs(nowMs: 500, confirmationMs: deadline, includingOpaque: true) == 0)
+        #expect(evidence.observe(empty, hasText: false, ownsEmpty: false, nowMs: 550, confirmationMs: deadline) == .pending)
+        #expect(evidence.observe(empty, hasText: false, ownsEmpty: false, nowMs: 550 + deadline, confirmationMs: deadline) == .cleared)
+        #expect(!evidence.isPending)
     }
 }
 

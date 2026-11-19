@@ -14,8 +14,11 @@ public struct LiveSegment: Codable, Equatable, Sendable {
     /// The segment's raw words, on the segments of a cleaned unit of several segments: the keyboard falls back to them
     /// for a unit it can no longer edit whole (part of it is frozen).
     public var raw: String?
-    public init(id: Int, text: String, cleaned: Bool = false, final: Bool, unit: Int? = nil, raw: String? = nil) {
-        self.id = id; self.text = text; self.cleaned = cleaned; self.final = final; self.unit = unit; self.raw = raw
+    /// Staged takes only (`LiveDictationSnapshot.staged`): the segment is a cleanup unit and its text is final, cleaned or
+    /// (cleanup failed or ran out of time) the raw words. A segment that is not ready shows its raw words in the preview.
+    public var ready: Bool?
+    public init(id: Int, text: String, cleaned: Bool = false, final: Bool, unit: Int? = nil, raw: String? = nil, ready: Bool? = nil) {
+        self.id = id; self.text = text; self.cleaned = cleaned; self.final = final; self.unit = unit; self.raw = raw; self.ready = ready
     }
 
     /// Pieces of a take's text joined as a reader expects: trimmed, a space between them, none before closing
@@ -31,13 +34,10 @@ public struct LiveSegment: Codable, Equatable, Sendable {
         return text
     }
 
-    public static let closingMarks: Set<Character> = [",", ".", ";", ":", "!", "?", ")", "]", "}", "%", "…", "\u{2019}", "\u{201D}", "\u{2014}"]
-    public static let openingMarks: Set<Character> = ["(", "[", "{", "\u{201C}", "\u{2018}", "\u{201E}", "\u{201A}", "\u{BF}", "\u{A1}"]
-
-    /// Whether a space goes between text ending in `last` and a piece starting with `first`.
+    /// Whether a space goes between text ending in `last` and a piece starting with `first`: `FieldInsertion` owns the rule
+    /// (the join between segments here and the join with the field's text are one fact).
     public static func spaced(_ last: Character?, _ first: Character) -> Bool {
-        guard let last, !last.isWhitespace else { return false }
-        return !first.isWhitespace && !closingMarks.contains(first) && !openingMarks.contains(last)
+        !FieldInsertion.separator(before: String(first), after: last).isEmpty
     }
 }
 
@@ -60,13 +60,17 @@ public struct LiveDictationSnapshot: Codable, Equatable, Sendable {
     /// A cleanup pass asks for the field's text with this id (`FieldShadow`): the keyboard answers from its shadow once
     /// this version's words are typed, without a field read. Nil: no pass asked.
     public var shadowAsk: String?
+    /// iPhone staged delivery (#312): the segments are the run's cleanup units in speaking order (`LiveSegment.ready` marks the
+    /// ones whose text is final) and the speaking head. The keyboard shows them in its preview and types each ready unit into
+    /// the field once, in order; it never edits typed text. Nil: the snapshot is the whole text the keyboard types and edits.
+    public var staged: Bool?
     public init(runID: String, version: Int, segments: [LiveSegment], complete: Bool = false, stopped: Bool? = nil, rawText: String? = nil,
-                shadowAsk: String? = nil) {
+                shadowAsk: String? = nil, staged: Bool? = nil) {
         self.runID = runID; self.version = version; self.segments = segments; self.complete = complete; self.stopped = stopped
         self.rawText = rawText ?? LiveSegment.joined(segments.map { $0.raw ?? $0.text }); self.text = LiveSegment.joined(segments.map(\.text))
-        self.shadowAsk = shadowAsk
+        self.shadowAsk = shadowAsk; self.staged = staged
     }
-    private enum CodingKeys: String, CodingKey { case runID, version, text, segments, complete, stopped, rawText, shadowAsk }
+    private enum CodingKeys: String, CodingKey { case runID, version, text, segments, complete, stopped, rawText, shadowAsk, staged }
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         runID = try values.decode(String.self, forKey: .runID)
@@ -77,13 +81,12 @@ public struct LiveDictationSnapshot: Codable, Equatable, Sendable {
         stopped = try values.decodeIfPresent(Bool.self, forKey: .stopped)
         rawText = try values.decodeIfPresent(String.self, forKey: .rawText)
         shadowAsk = try values.decodeIfPresent(String.self, forKey: .shadowAsk)
+        staged = try values.decodeIfPresent(Bool.self, forKey: .staged)
     }
 }
 
-/// keyboard -> app (`link.dictation.shadow`): the field as the keyboard's shadow has it, for the cleanup pass that asked
-/// with a run's snapshot (`LiveDictationSnapshot.shadowAsk`), once that snapshot's words are typed. No field read: the
-/// keyboard marks a read under `id` (`FieldQueue.markRead`), so the pass's edit (`ScopedEdit.instructionID == id`) is
-/// placed through every change made since and merged around them (`FieldMerge`). The app removes it once read.
+/// The field as a cleanup pass sees it (`LiveDictationSnapshot.shadowAsk`): the Mac's field editor answers the ask with it.
+/// The iPhone keyboard no longer answers (staged delivery, #312).
 public struct FieldShadow: Codable, Sendable, Equatable {
     public var id: String
     public var runID: String
@@ -145,8 +148,13 @@ public struct LiveDictationAck: Codable, Equatable, Sendable {
     /// Segment ids where a new piece of the run starts in the field: the user typed or moved the caret between it and
     /// the words before (a list item per line). Cleanup takes the pieces apart (`LiveDictationRun.split`).
     public var pieces: [Int]?
-    public init(runID: String, version: Int?, complete: Bool = false, stats: LiveDictationStats, pieces: [Int]? = nil, delivered: Bool? = nil) {
+    /// Staged takes: the id of the last segment the keyboard typed into the field (segments go in order, so every earlier one
+    /// is in). Nil: none yet, or not a staged take.
+    public var deliveredThrough: Int?
+    public init(runID: String, version: Int?, complete: Bool = false, stats: LiveDictationStats, pieces: [Int]? = nil, delivered: Bool? = nil,
+                deliveredThrough: Int? = nil) {
         self.runID = runID; self.version = version; self.complete = complete; self.stats = stats; self.pieces = pieces; self.delivered = delivered
+        self.deliveredThrough = deliveredThrough
     }
 }
 
@@ -158,14 +166,6 @@ public struct LiveDictationLink: Sendable {
     public func read() -> LiveDictationSnapshot? { store.read(LiveDictationSnapshot.self, forKey: LinkChannel.Key.dictationLive) }
     public func acknowledge(_ ack: LiveDictationAck) { store.write(ack, forKey: LinkChannel.Key.dictationLiveAck) }
     public func acknowledged() -> LiveDictationAck? { store.read(LiveDictationAck.self, forKey: LinkChannel.Key.dictationLiveAck) }
-    public func send(_ shadow: FieldShadow) { store.write(shadow, forKey: LinkChannel.Key.dictationShadow) }
-    /// The shadow for `id` when one is stored, removed as it is taken.
-    public func takeShadow(id: String) -> FieldShadow? {
-        guard let shadow = store.read(FieldShadow.self, forKey: LinkChannel.Key.dictationShadow), shadow.id == id else { return nil }
-        store.remove(forKey: LinkChannel.Key.dictationShadow)
-        return shadow
-    }
-    public func clearShadow() { store.remove(forKey: LinkChannel.Key.dictationShadow) }
 }
 
 /// The app's model of one live run: the finished segments and the speaking head, as the target the keyboard
@@ -182,6 +182,11 @@ public struct LiveDictationLink: Sendable {
 ///
 /// A sentence the segmenter cut short (a forced split at 25 words or 8 s) is not finished: its words stay in the
 /// speaking head until the segment that really ends it arrives.
+///
+/// A *staged* run (iPhone, #312) publishes its units instead: each unit is a segment that is `ready` once its cleanup
+/// landed (or failed: the raw words stand), at once and not at the end. The keyboard shows the units that are not typed yet
+/// in its preview and types each ready one into the field once, in order. An admitted pause or the stop closes the open unit
+/// early (`flush()`); `finish()` makes every unit ready.
 public struct LiveDictationRun: Sendable, Equatable {
     /// A unit ends a sentence only with this many words; shorter ones ("Um.", "Yeah.", "I think.") join the next.
     public static let minUnitWords = 6
@@ -213,7 +218,12 @@ public struct LiveDictationRun: Sendable, Equatable {
     /// The user split the run into pieces: no whole-take pass joins them again.
     public var isSplit: Bool { !pieceStarts.isEmpty }
 
-    public init(runID: String = UUID().uuidString) { self.runID = runID }
+    /// Units are published as they are cleaned (see the type's note).
+    public let staged: Bool
+    /// Units (by index) whose text is final in a staged run: cleaned, or cleanup failed and the raw words stand.
+    private var ready: Set<Int> = []
+
+    public init(runID: String = UUID().uuidString, staged: Bool = false) { self.runID = runID; self.staged = staged }
 
     /// The cleanup pass waiting for the field's text (`LiveDictationSnapshot.shadowAsk`).
     public private(set) var shadowAsk: String?
@@ -224,6 +234,7 @@ public struct LiveDictationRun: Sendable, Equatable {
     }
 
     public var snapshot: LiveDictationSnapshot {
+        if staged { return stagedSnapshot }
         var segments = finals
         if complete {
             if let whole {
@@ -251,6 +262,16 @@ public struct LiveDictationRun: Sendable, Equatable {
         if !speaking.isEmpty { segments.append(.init(id: finals.count, text: speaking, final: false)) }
         return .init(runID: runID, version: version, segments: segments, complete: complete, stopped: stopped && !complete ? true : nil,
                      rawText: complete ? LiveSegment.joined(finals.map(\.text)) : nil, shadowAsk: shadowAsk)
+    }
+    /// The units in speaking order (the open one too, not ready), then the speaking head.
+    private var stagedSnapshot: LiveDictationSnapshot {
+        var segments = units.indices.map { index in
+            LiveSegment(id: units[index].lowerBound, text: shownText(index), cleaned: cleaned[index] != nil, final: true, ready: ready.contains(index))
+        }
+        let speaking = LiveSegment.joined(open + [head])
+        if !speaking.isEmpty { segments.append(.init(id: finals.count, text: speaking, final: false)) }
+        return .init(runID: runID, version: version, segments: segments, complete: complete, stopped: stopped && !complete ? true : nil,
+                     rawText: complete ? LiveSegment.joined(finals.map(\.text)) : nil, staged: true)
     }
     public var isEmpty: Bool { finals.isEmpty && head.isEmpty && open.isEmpty }
     public var finalCount: Int { finals.count }
@@ -381,9 +402,24 @@ public struct LiveDictationRun: Sendable, Equatable {
         guard let unit = unitIndex(ofKey: key) else { return false }
         let shown = shownText(unit)
         cleaned[unit] = text
+        if staged {
+            // A staged unit is published the moment its cleanup lands, and not changed again.
+            guard !ready.contains(unit) else { return false }
+            ready.insert(unit); version += 1
+            return true
+        }
         // A unit the whole take's cleanup covers is shown by that.
         guard complete, shown != text, units[unit].lowerBound >= (whole?.end ?? 0) else { return false }
         version += 1
+        return true
+    }
+
+    /// Cleanup of the unit `key` belongs to failed or ran out of time: its raw words stand as its final text (cleanup only
+    /// tidies, so raw is a valid result). Staged runs only. True when the target changed.
+    @discardableResult
+    public mutating func setRaw(key: Int) -> Bool {
+        guard staged, let unit = unitIndex(ofKey: key), !ready.contains(unit) else { return false }
+        ready.insert(unit); version += 1
         return true
     }
 
@@ -418,6 +454,8 @@ public struct LiveDictationRun: Sendable, Equatable {
     public mutating func finish() {
         guard !complete else { return }
         complete = true
+        // Staged: a unit still in cleanup at the end stands raw (the stop waited for it, bounded).
+        if staged { ready.formUnion(units.indices) }
         version += 1
     }
 }
