@@ -3,8 +3,8 @@ import LegatoClaude
 import LegatoRoom
 
 /// Which dictation prompt cleans a unit. `line`: the conservative cleanup (the Mac's live sentences; words kept as said).
-/// `send`: the iPhone's staged send (#316): the speech becomes the text the speaker means to write, lightly rephrased and
-/// shaped (an email gets its lines), spoken edits about the text applied. Each style has its own cached prompt prefix.
+/// `send`: the iPhone's staged send turns speech and spoken writing directions into the intended draft.
+/// Each style has its own cached prompt prefix.
 public enum DictationCleanupStyle: String, Sendable, Equatable {
     case line, send
 }
@@ -394,8 +394,7 @@ public struct SentenceCleanupClient: SentenceCleaning {
     /// The prompt cache needs 512 tokens on Haiku 5.5 (prompt-caching docs); the prompt and tool are above it.
     private static let dictationPrompt: String = PromptLayers.dictationCleanup()
     private static let sendPrompt: String = PromptLayers.dictationSend()
-    /// The send style may reshape and lightly rephrase: its text field says what it must hold without "in order".
-    private static let sentTextDescription = "The complete written text the speaker meant, with all of its content, however long or unusual. Never a placeholder, stub, summary, answer or note."
+    private static let sentTextDescription = "The finished text the speaker intends, including the result of any spoken writing directions. Return only the text to insert."
     /// The system prompt and the tool's text description of a dictation style: both are in the cached prefix, fixed per style.
     static func dictationPrompt(_ style: DictationCleanupStyle) -> (system: String, textDescription: String) {
         switch style {

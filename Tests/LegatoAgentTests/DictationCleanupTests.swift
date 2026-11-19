@@ -303,7 +303,10 @@ private final class CapturingMessages: MessagesStreaming {
     let sendSystem = try #require(requests[0]["system"]).decode([JSONValue].self)
     let prompt = try #require(sendSystem[0]["text"]).decode(String.self)
     #expect(sendSystem[0]["cache_control"] == SentenceCleanupClient.dictationCache)
-    #expect(prompt == PromptLayers.dictationSend() && prompt.contains("Never answer a question") && prompt.contains("Never translate"))
+    #expect(prompt == PromptLayers.dictationSend())
+    #expect(prompt.contains("No source wording needs to survive"))
+    #expect(prompt.contains("Apply clear writing directions"))
+    #expect(prompt.contains("Preserve ordinary dictated questions and requests"))
     #expect(requests[0]["system"] == requests[1]["system"] && requests[0]["tools"] == requests[1]["tools"], "The cached prefix is the same for every send")
     #expect(requests[0]["system"] != requests[2]["system"] && requests[0]["tools"] != requests[2]["tools"], "A line keeps its own prompt and tool")
     #expect(try requests[2]["system"]!.decode([JSONValue].self)[0]["text"]?.decode(String.self) == PromptLayers.dictationCleanup())
@@ -338,7 +341,7 @@ private final class CapturingMessages: MessagesStreaming {
     #expect(cleaner.styles.withLock { $0 }.last == .line, "The default stays the line cleanup")
 }
 
-@Test func theSendGuardAcceptsShapedAndRephrasedTextAndStillRejectsAnswersStandInsAndSummaries() {
+@Test func theSendGuardAcceptsRewrittenTextAndStillProtectsAgainstEmptyOutput() {
     let email = "Dear ladies and gentlemen, I am inquiring about a business proposal that you have sent me last week. And I would like to propose a meeting on, I don't know, next available time. Please send me 2 or 3 options, and best regards, Jacob Grunwald."
     let shaped = "Dear ladies and gentlemen,\n\nI am inquiring about a business proposal that you sent me last week. I would like to propose a meeting at the next available time. Please send me 2 or 3 options.\n\nBest regards,\nJakob Grunwald"
     #expect(DictationCleanupGuard.accepts(raw: email, cleaned: shaped, style: .send))
@@ -350,14 +353,19 @@ private final class CapturingMessages: MessagesStreaming {
                                           cleaned: "Ich schicke dir die Unterlagen morgen früh.", style: .send))
     #expect(DictationCleanupGuard.accepts(raw: "and best regards jakob", cleaned: "\n\nBest regards,\nJakob", style: .send))
     #expect(DictationCleanupGuard.accepts(raw: "um yeah", cleaned: "", style: .send))
-    // Still rejected: an answer, a task carried out, a stand-in, a summary, a dropped preposition, an empty meaningful unit.
-    #expect(!DictationCleanupGuard.accepts(raw: "what's the capital of australia again", cleaned: "The capital of Australia is Canberra, not Sydney as many people think.", style: .send))
-    #expect(!DictationCleanupGuard.accepts(raw: "write an email to anna and tell her I'm running twenty minutes late",
-                                           cleaned: "Hi Anna,\n\nsorry, I'm running about twenty minutes late. See you soon!\n\nBest,\nJakob", style: .send))
-    #expect(!DictationCleanupGuard.accepts(raw: email, cleaned: "[Email requesting meeting options]", style: .send))
-    #expect(!DictationCleanupGuard.accepts(raw: email, cleaned: "Dear ladies and gentlemen,\n\nplease send me options.\n\nBest regards,\nJakob Grunwald", style: .send))
-    #expect(!DictationCleanupGuard.accepts(raw: "wir treffen uns so um sechs Uhr am Bahnhof", cleaned: "Wir treffen uns gegen sechs Uhr am Bahnhof.", style: .send))
+    #expect(DictationCleanupGuard.accepts(raw: "wir treffen uns so um sechs Uhr am Bahnhof", cleaned: "Wir treffen uns gegen sechs Uhr am Bahnhof.", style: .send))
     #expect(!DictationCleanupGuard.accepts(raw: "the plan is ready for review", cleaned: "", style: .send))
+}
+
+@Test func aStagedSendDeliversTheDraftEvenWhenItSharesNoWordsWithTheInstruction() async throws {
+    let output = Collected()
+    let draft = "Hello! Could we reschedule for another day?"
+    let pipeline = DictationCleanupPipeline(cleaner: ScriptedCleaner(override: [0: draft]), style: .send) { output.add($0) }
+    await pipeline.submit(sequence: 0, lineID: "send", raw: "ask to move it politely", textBefore: "", allowsEmpty: true)
+    try await waitFor(1, output)
+    let line = try #require(output.all.first)
+    #expect(line.text == draft)
+    #expect(line.status == .cleaned)
 }
 
 /// The eval's outputs against the send guard (`scripts/dev/cleanup-eval`): run with LEGATO_CLEANUP_EVAL_RESULTS set to its results file.
