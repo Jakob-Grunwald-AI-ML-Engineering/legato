@@ -1,7 +1,7 @@
 import Foundation
 
-/// The dictation preview's type in the transcript area (#312): two lines, the largest size that fits the area as it is. The
-/// area never grows or shrinks for a take.
+/// The dictation preview's type (#312): the largest size at which two lines fit the transcript band as it is (`TopRowLayout.transcript`).
+/// The preview itself is taller (`TopRowLayout.preview`) and shows more lines at that size; the size never grows with it.
 public enum WordRowHeight {
     /// The smallest transcript area: two lines of the smallest size with their air (2 x 13.2 + 1.1 + 2 x 1 = 29.5 pt). The
     /// full keyboard's top row is at least this tall (landscape keys are shorter).
@@ -17,16 +17,6 @@ public enum WordRowHeight {
     public static func previewContentHeight(size: Double) -> Double { 2 * previewLineHeight(size: size) + previewLineSpacing(size: size) }
     public static func previewFontSize(rowHeight: Double) -> Double {
         previewSizes.first { previewContentHeight(size: $0) + 2 * previewMinPadding <= rowHeight } ?? previewSizes[previewSizes.count - 1]
-    }
-    /// A text one line tall sits vertically centred in the row; two lines fill it.
-    public static func previewIsSingleLine(textHeight: Double, size: Double) -> Bool { textHeight < 1.5 * previewLineHeight(size: size) }
-    /// The text is cut at its head (the row shows its newest two lines): the first line fades in from the leading edge.
-    public static func previewTruncated(textHeight: Double, rowHeight: Double, prefixed: Bool) -> Bool { prefixed || textHeight > rowHeight + 0.5 }
-    /// The width of the soft fade at the first line's leading edge.
-    public static let previewFadeWidth = 36.0
-    /// The space above and below the two lines (balanced).
-    public static func previewPadding(rowHeight: Double, size: Double) -> Double {
-        max(0, (rowHeight - previewContentHeight(size: size)) / 2)
     }
 }
 

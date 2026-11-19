@@ -30,6 +30,8 @@ public enum TopRowReturnStyle: Sendable, Equatable { case glyph, text }
 ///   wide as the grid's emoji key (`keyWidth`; a worded return caption gets ``textReturnWidth``) and stretched to fill the
 ///   column, which grows past `columnWidth` only when they need it. The transcript spans both rows.
 ///
+/// The dictation preview has a frame of its own (`preview`): the transcript's width, from the top of the view to the keys below.
+///
 /// The keys' touch areas reach the screen edge on their side and half the gap toward their neighbours; the dictation key's
 /// reaches the top of the view and, on the full keyboard, down to where the grid's touch area starts.
 public struct TopRowLayout: Sendable, Equatable {
@@ -46,6 +48,10 @@ public struct TopRowLayout: Sendable, Equatable {
     public let cells: [Cell]
     /// The transcript (the dictation preview or the suggestions), drawn and touched in this frame.
     public let transcript: KeyRect
+    /// Where the dictation preview is drawn and touched while a take shows one: the transcript's width, from the top of the view
+    /// down to where the keys below start (full: where the grid takes touches; minimised: above the bottom gap). Taller than
+    /// `transcript`, which keeps the word slots, status and hints in their own frame.
+    public let preview: KeyRect
     public let side: DictationKeySide
 
     public static let textReturnWidth = 72.0
@@ -86,10 +92,12 @@ public struct TopRowLayout: Sendable, Equatable {
         let transcriptX = right ? 0 : split
         let transcriptWidth = right ? split : width - split
         let transcript: KeyRect
+        let previewBottom: Double
         switch mode {
         case .full:
             // Down to where the grid takes touches (`KeyGridView`: a gap above the first row).
             let bottom = KeyboardHeights.firstRowTop(landscape: landscape) * scale - gap
+            previewBottom = bottom
             cells.append(Cell(slot: .dictation, face: dictationFace,
                               hit: KeyRect(x: columnHit.x, y: 0, width: columnHit.width, height: bottom)))
             let height = max(keyHeight, WordRowHeight.minimumRow * scale)
@@ -97,6 +105,7 @@ public struct TopRowLayout: Sendable, Equatable {
         case .minimised:
             let between = faceTop + keyHeight + (pitch - keyHeight) / 2
             let bottom = KeyboardHeights.minimisedHeight(landscape: landscape) * scale
+            previewBottom = bottom - KeyboardHeights.bottomGap(landscape: landscape) * scale
             cells.append(Cell(slot: .dictation, face: dictationFace,
                               hit: KeyRect(x: columnHit.x, y: 0, width: columnHit.width, height: between)))
             let ordered = right ? row : row.reversed()
@@ -115,6 +124,7 @@ public struct TopRowLayout: Sendable, Equatable {
             }
             transcript = KeyRect(x: transcriptX, y: faceTop, width: transcriptWidth, height: pitch + keyHeight)
         }
-        return TopRowLayout(cells: cells, transcript: transcript, side: side)
+        let preview = KeyRect(x: transcriptX, y: 0, width: transcriptWidth, height: previewBottom)
+        return TopRowLayout(cells: cells, transcript: transcript, preview: preview, side: side)
     }
 }

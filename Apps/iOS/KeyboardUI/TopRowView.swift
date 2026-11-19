@@ -2,7 +2,7 @@ import LegatoKeyboardCore
 import SwiftUI
 
 /// The keyboard's top area (#315), drawn from `TopRowLayout` in the keyboard view's coordinates: the dictation key, the
-/// transcript beside it (the dictation preview, a status, or the word slots) and, minimised, delete, return and the globe key
+/// transcript beside it (a status or the word slots; the dictation preview has the taller `TopRowLayout.preview` frame) and, minimised, delete, return and the globe key
 /// under the dictation key. Each key fills its touch area and draws its face inside it.
 struct TopRowView: View {
     let controller: KeyboardController
@@ -10,9 +10,17 @@ struct TopRowView: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            place(layout.transcript.cgRect) {
-                WordRowView(controller: controller, slots: WordRowLayout.visibleSlots(width: layout.transcript.width), keySide: layout.side)
-                    .accessibilityIdentifier("typing.predictions")
+            if controller.isShowingPreview, let preview = controller.statusText {
+                // A take in progress owns the area, taller than the transcript band (`TopRowLayout.preview`).
+                place(layout.preview.cgRect) {
+                    DictationPreviewView(controller: controller, text: preview, keySide: layout.side, bandHeight: layout.transcript.height)
+                        .accessibilityIdentifier("typing.predictions")
+                }
+            } else {
+                place(layout.transcript.cgRect) {
+                    WordRowView(controller: controller, slots: WordRowLayout.visibleSlots(width: layout.transcript.width), keySide: layout.side)
+                        .accessibilityIdentifier("typing.predictions")
+                }
             }
             ForEach(layout.cells, id: \.slot) { cell in
                 place(cell.hit.cgRect) { key(cell) }
