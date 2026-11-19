@@ -104,7 +104,7 @@ import UIKit
             await AppController.shared.keyboardSession.sendNow()
             return AppController.shared.dictation.takeState
         }
-        // The preview's swipe up: the words so far are sent as spoken, uncleaned.
+        // The preview's swipe right: the words so far are sent as spoken, uncleaned.
         harness.register("dictation-debug-send-raw") { _ in
             await AppController.shared.keyboardSession.sendRawNow()
             return AppController.shared.dictation.takeState

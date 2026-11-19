@@ -378,7 +378,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// cut start the next unit. Ignored without a staged run in progress.
     public func sendNow() async { await send(raw: false) }
 
-    /// The user's swipe up on the preview: like `sendNow()`, but nothing is cleaned. The open unit and every closed unit still
+    /// The user's swipe right on the preview: like `sendNow()`, but nothing is cleaned. The open unit and every closed unit still
     /// waiting for cleanup stand as their raw words now (they are history's uncleaned fallbacks), a speculative request is
     /// dropped, and a cleanup result that arrives later is ignored. A tap's cut already in flight becomes raw.
     public func sendRawNow() async { await send(raw: true) }

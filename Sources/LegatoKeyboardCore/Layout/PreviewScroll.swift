@@ -16,18 +16,17 @@ public enum PreviewScroll {
     public static let swipeDistance = 20.0
 
     public enum Swipe: Sendable, Equatable {
-        /// Up, at the bottom: send what is said as spoken (no cleanup).
+        /// Right: send what is said as spoken (no cleanup).
         case sendRaw
         /// Left: clear what is still in the preview.
         case clear
     }
 
-    /// What a drag that has travelled (`dx`, `dy`) means, if anything. Up sends raw only when the drag began scrolled to the
-    /// bottom (scrolled up, an upward drag scrolls); left must be horizontal-dominant (`|dx| > 2|dy|`). Other drags scroll.
-    public static func swipe(dx: Double, dy: Double, startedAtBottom: Bool) -> Swipe? {
-        if dy <= -swipeDistance, abs(dy) > 2 * abs(dx) { return startedAtBottom ? .sendRaw : nil }
-        if dx <= -swipeDistance, abs(dx) > 2 * abs(dy) { return .clear }
-        return nil
+    /// What a drag that has travelled (`dx`, `dy`) means, if anything: a horizontal-dominant swipe (`|dx| > 2|dy|`) right sends
+    /// raw, left clears. Vertical drags only scroll, so neither ever competes with the scroll view.
+    public static func swipe(dx: Double, dy: Double) -> Swipe? {
+        guard abs(dx) >= swipeDistance, abs(dx) > 2 * abs(dy) else { return nil }
+        return dx > 0 ? .sendRaw : .clear
     }
 }
 

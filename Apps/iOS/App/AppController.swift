@@ -100,7 +100,7 @@ final class AppController {
             case .stop: await self.keyboardSession.closeGate()
             // The preview's tap: a staged take sends its words so far, with no hop and no change to the microphone.
             case .send: await self.keyboardSession.sendNow()
-            // The preview's swipe up: the same, with the words as spoken (no cleanup).
+            // The preview's swipe right: the same, with the words as spoken (no cleanup).
             case .sendRaw: await self.keyboardSession.sendRawNow()
             // The preview's swipe left: the words still in it are dropped for a short undo window.
             case .discard: await self.keyboardSession.discardNow()

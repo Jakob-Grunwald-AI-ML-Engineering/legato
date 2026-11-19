@@ -296,7 +296,7 @@ final class KeyboardController {
         return layout.dropping(layout.text.count - shown)
     }
 
-    /// A tap on the preview row sends what is spoken so far to the field (`RequestCommand.send`), cleaned; a swipe up sends it
+    /// A tap on the preview row sends what is spoken so far to the field (`RequestCommand.send`), cleaned; a swipe right sends it
     /// as spoken (`previewSwiped`). Listening continues. Only
     /// while a staged take shows words: the placeholder and a finished take do nothing.
     var canSendPreview: Bool {
@@ -337,7 +337,7 @@ final class KeyboardController {
         link.send(.undoDiscard, id: UUID().uuidString)
     }
 
-    /// A swipe up on the preview row sends what is not typed yet as spoken, without cleanup (`RequestCommand.sendRaw`).
+    /// A swipe right on the preview row sends what is not typed yet as spoken, without cleanup (`RequestCommand.sendRaw`).
     func previewSwiped() {
         guard canSendPreview else { return }
         trace?("preview swiped: send raw")
@@ -1377,7 +1377,7 @@ final class KeyboardController {
     }
 
     /// Delivery stops: nothing more is typed, and the units not in the field go back into the preview as pending (cleaned where it
-    /// landed, else raw). The person moves the caret and taps or swipes up to send them again (`resumeStaged`). History holds it all.
+    /// landed, else raw). The person moves the caret and taps or swipes right to send them again (`resumeStaged`). History holds it all.
     private func holdStaged() {
         stagedTake.hold()
         trace?("staged held")

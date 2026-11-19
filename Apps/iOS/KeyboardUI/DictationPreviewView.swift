@@ -4,7 +4,7 @@ import SwiftUI
 
 /// The dictation preview in its own frame (`TopRowLayout.preview`, taller than the transcript band): the words not in the field
 /// yet, scrollable with no scrollbar and anchored on the newest words, with the touch bloom and the undo chip over it.
-/// Tap sends (cleaned), a swipe up at the bottom sends raw, a swipe left clears what is still in it (`PreviewScroll.swipe`).
+/// Tap sends (cleaned), a swipe right sends raw, a swipe left clears what is still in it (`PreviewScroll.swipe`).
 struct DictationPreviewView: View {
     let controller: KeyboardController
     let text: String
@@ -33,7 +33,7 @@ struct DictationPreviewView: View {
                        onDiscard: { controller.discardPreview() })
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(text)
-                .accessibilityHint(controller.canSendPreview ? "Tap to send what you have said so far. Swipe left to clear." : "")
+                .accessibilityHint(controller.canSendPreview ? "Tap to send what you have said so far. Swipe right to send it as spoken, left to clear." : "")
                 .accessibilityAddTraits(controller.canSendPreview ? .isButton : [])
                 .accessibilityAction { if controller.canSendPreview { controller.previewTapped() } }
                 .accessibilityAction(named: "Insert without cleanup") { if controller.canSendPreview { controller.previewSwiped() } }
@@ -240,8 +240,8 @@ private struct PreviewRenderer: TextRenderer {
 /// anchored (a short text sits at the bottom, a long one shows its newest lines and follows as it grows). Scrolled up into older
 /// text it stops following and resumes at the bottom or after `PreviewScroll.idleResumeSeconds`; a soft fade marks older text above.
 /// While a staged take shows it: the unit being typed leaves letter by letter (the view keeps that line in view), words waiting
-/// for cleanup shimmer, a tap sends them and blooms from the touch point (`canSend`), a swipe up at the bottom sends them as spoken
-/// and the text swooshes up once, and a swipe left clears what is still in it (`canDiscard`; the text fades out). Reduce Motion: no
+/// for cleanup shimmer, a tap sends them and blooms from the touch point (`canSend`), a swipe right sends them as spoken
+/// and the text swooshes right once, and a swipe left clears what is still in it (`canDiscard`; the text fades out). Reduce Motion: no
 /// swoosh, fade, lift or shimmer.
 private struct PreviewRow: View {
     let text: String
@@ -255,16 +255,15 @@ private struct PreviewRow: View {
     let reservesChip: Bool
     /// A tap that sends, at the touch point (the preview's own coordinates).
     let onSend: (CGPoint) -> Void
-    /// A swipe up: send without cleanup.
+    /// A swipe right: send without cleanup.
     let onSendRaw: () -> Void
     /// A swipe left: clear what is still in the preview.
     let onDiscard: () -> Void
 
-    /// What one drag has done: whether it began at the bottom (a drag that scrolls down to it is not a swipe up) and whether it
-    /// already acted. Resets when the drag ends or is cancelled (iOS may cancel a drag that leaves a short view).
-    private struct DragMemory { var startedAtBottom: Bool?; var fired = false }
-    @GestureState private var drag = DragMemory()
-    /// The swoosh: the text lifts and dims a little, then settles back.
+    /// Whether the current drag already acted. Resets when the drag ends or is cancelled (iOS may cancel a drag that leaves a
+    /// short view).
+    @GestureState private var fired = false
+    /// The swoosh: the text slides right and dims a little, then settles back.
     @State private var swoosh = false
     @State private var reveal = PreviewReveal()
     @State private var probe = ExitProbe()
@@ -284,8 +283,6 @@ private struct PreviewRow: View {
     @State private var resumeTask: Task<Void, Never>?
 
     private struct ScrollMetrics: Equatable { var offset = 0.0, content = 0.0, container = 0.0 }
-    private var distanceFromBottom: Double { metrics.content - metrics.offset - metrics.container }
-    private var atBottom: Bool { PreviewFollow.isAtBottom(distance: distanceFromBottom) }
     private var scrollable: Bool { metrics.content > metrics.container + 0.5 }
     private var leaving: Bool { !(layout?.leaving.isEmpty ?? true) }
     private var userScrolling: Bool { scrollPhase == .tracking || scrollPhase == .interacting || scrollPhase == .decelerating }
@@ -324,7 +321,7 @@ private struct PreviewRow: View {
                         .textRenderer(PreviewRenderer(now: timeline.date, exits: exits, shimmers: shimmers, lifts: !reduceMotion,
                                                       probe: probe, hidden: reveal.hidden))
                 }
-                .offset(x: settleOffset, y: swoosh ? -Self.swooshLift : 0)
+                .offset(x: settleOffset + (swoosh ? Self.swooshSlide : 0))
                 .opacity(swoosh ? 0.55 : 1)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, insets.leading)
@@ -364,19 +361,17 @@ private struct PreviewRow: View {
             // leaves a short view gets cancelled, so waiting for its end would lose it. Vertical drags still scroll.
             .simultaneousGesture(
                 DragGesture(minimumDistance: CGFloat(PreviewScroll.swipeDistance), coordinateSpace: .local)
-                    .updating($drag) { value, memory, _ in
-                        if memory.startedAtBottom == nil { memory.startedAtBottom = atBottom }
-                        guard !memory.fired else { return }
-                        switch PreviewScroll.swipe(dx: Double(value.translation.width), dy: Double(value.translation.height),
-                                                   startedAtBottom: memory.startedAtBottom ?? false) {
+                    .updating($fired) { value, fired, _ in
+                        guard !fired else { return }
+                        switch PreviewScroll.swipe(dx: Double(value.translation.width), dy: Double(value.translation.height)) {
                         case .sendRaw? where canSend:
-                            memory.fired = true
+                            fired = true
                             Task { @MainActor in
                                 onSendRaw()
                                 playSwoosh()
                             }
                         case .clear? where canDiscard:
-                            memory.fired = true
+                            fired = true
                             Task { @MainActor in
                                 clear()
                             }
@@ -453,9 +448,9 @@ private struct PreviewRow: View {
         return result
     }
 
-    private static let swooshLift: CGFloat = 10
+    private static let swooshSlide: CGFloat = 10
 
-    /// A brief upward lift of the text, dimmed, then back; the letters leave as they type, as for a tap. Reduce Motion: none.
+    /// A brief slide of the text to the right, dimmed, then back; the letters leave as they type, as for a tap. Reduce Motion: none.
     private func playSwoosh() {
         guard !reduceMotion else { return }
         withAnimation(.easeOut(duration: 0.12)) { swoosh = true }
