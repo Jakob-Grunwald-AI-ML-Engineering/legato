@@ -69,7 +69,7 @@ final class KeyboardController {
     /// typing makes a version swap possible again, and the swap is guarded by what the field holds.
     /// The version of the last dictation the field holds, when known.
     var shownVersionIndex: Int? { nil }
-    /// The keyboard's own edits, for ↶ ↷ (`EditHistory`); `undoAvailable` and `redoAvailable` mirror it for the views.
+    /// The keyboard's own edits, for undo and redo (`EditHistory`); `undoAvailable` and `redoAvailable` mirror it.
 
     private(set) var undoAvailable = false
     private(set) var redoAvailable = false
@@ -77,11 +77,13 @@ final class KeyboardController {
     /// Fills the word row (completions, predictions, alternatives) and learns from typing.
     @ObservationIgnored private(set) var wordRow: SuggestionController!
 
-    /// Strip or full keyboard, and the chevron that switches; restores the last user choice (initially full).
+    /// Minimised or full keyboard, changed by the dictation key's swipes; restores the last user choice (initially full).
     private(set) var expansion = KeyboardExpansion()
-    /// The strip's height in points; the debug long press steps it through `StripHeight.candidates`.
-    private(set) var stripHeight = StripHeight.standard
-    /// The extension re-sizes its view when the mode or the strip height changed (`reason` is for the log).
+    /// The side of the top row the dictation key sits on (Settings > Keyboard > Dictation key).
+    private(set) var dictationKeySide = DictationKeySide.standard
+    /// The dictation key's faint swipe hints, for its first few uses.
+    private(set) var dictationKeyHints = DictationKeyHints(defaults: nil)
+    /// The extension re-sizes its view when the mode changed (`reason` is for the log).
     @ObservationIgnored var onLayoutChange: (@MainActor (_ reason: String) -> Void)?
     @ObservationIgnored private let preferences: () -> KeyboardPreferences
 
@@ -120,6 +122,7 @@ final class KeyboardController {
         document: any TextDocument, link: LinkClient, hasFullAccess: @escaping @MainActor () -> Bool,
         preferences: @escaping () -> KeyboardPreferences = { .load() },
         expansionPersistence: KeyboardExpansionPersistence? = nil,
+        dictationKeyHints: DictationKeyHints = KeyboardPreferences.dictationKeyHints(),
         correctionStore: CorrectionStore? = nil
     ) {
         self.document = document
@@ -128,7 +131,8 @@ final class KeyboardController {
         self.preferences = preferences
         let current = preferences()
         expansion = KeyboardExpansion(persistence: expansionPersistence ?? KeyboardPreferences.expansionPersistence())
-        stripHeight = current.stripHeight
+        dictationKeySide = current.dictationKeySide
+        self.dictationKeyHints = dictationKeyHints
         emojiSystemSwitcher = current.emojiSystemSwitcher
         host = link.readHost()
         link.observeHost { [weak self] in self?.hostDidChange() }
@@ -146,7 +150,7 @@ final class KeyboardController {
 
     var fullAccess: Bool { hasFullAccess() }
 
-    // MARK: Strip
+    // MARK: Layout
 
     var mode: KeyboardMode { expansion.mode }
 
@@ -157,6 +161,7 @@ final class KeyboardController {
             emojiSystemSwitcher = current.emojiSystemSwitcher
             typing?.closeEmojiPanel()
         }
+        if dictationKeySide != current.dictationKeySide { dictationKeySide = current.dictationKeySide }
         let previousMode = expansion.mode
         expansion.reload()
         guard previousMode != expansion.mode else { return }
@@ -164,26 +169,30 @@ final class KeyboardController {
         onLayoutChange?("restored")
     }
 
-    /// The chevron: strip to full keyboard and back.
+    /// Minimised to full keyboard and back.
     func toggleExpansion() {
         typing.closeEmojiPanel()
         expansion.toggle()
-        trace?("expansion mode=\(expansion.mode == .strip ? "strip" : "full")")
+        trace?("expansion mode=\(expansion.mode == .minimised ? "minimised" : "full")")
         onLayoutChange?("toggle")
     }
 
-    #if DEBUG
-    /// Debug: a long press on the strip's word row steps the strip height through the candidates.
-    func cycleStripHeight() {
-        stripHeight = StripHeight.next(after: stripHeight)
-        onLayoutChange?("cycle")
+    /// The dictation key's swipe down (`.minimised`) or up (`.full`); nothing when the keyboard already shows it.
+    func setMode(_ mode: KeyboardMode) {
+        guard mode != expansion.mode else { return }
+        toggleExpansion()
     }
-    #endif
+
+    /// A tap or swipe on the dictation key: counts toward hiding its hints.
+    func dictationKeyUsed() {
+        guard dictationKeyHints.shows else { return }
+        dictationKeyHints.noteUse()
+    }
 
     /// What the keyboard says in the word row's place while it is active: a hint, else the meeting notice or
     /// the dictation status (`dictationStatus`); nil when there is nothing to say.
     var statusText: String? {
-        liveRecoveryNotice ?? hint ?? instructionPresentation?.text ?? meetingNotice ?? takeStatus
+        liveRecoveryNotice ?? hint ?? meetingNotice ?? takeStatus
             ?? (cleanup.isActive ? (cleanup.isApplying ? Self.applyingEdits : Self.cleaningUp) : nil) ?? dictationPreview ?? dictationStatus
     }
     static let cleaningUp = "Cleaning up…"
@@ -328,7 +337,7 @@ final class KeyboardController {
     /// The word row shows the dictation preview: left aligned, two lines, anchored on its newest words (`WordRowView`).
     var isShowingPreview: Bool { dictationPreview.map { $0 == statusText } ?? false }
 
-    /// A dictation or a Refine is running: the word row is taken over and ↶ ↷ are dimmed.
+    /// A dictation or a Refine is running: the word row is taken over and undo and redo wait.
     var runActive: Bool {
         if pendingRemoteStartID != nil { return true }
         guard let host, now.timeIntervalSince(host.beatAt) < LinkChannel.beatFreshness else { return false }
@@ -356,11 +365,10 @@ final class KeyboardController {
     /// The last dictation notice (`dictationNoticeID`) already shown; the first publication seen only sets it.
     @ObservationIgnored private var seenDictationNoticeID: Int?
     /// The presence the app follows: visibility, field and the text before the cursor that the dictated lines are
-    /// cleaned against (never from a secure field), plus the magic key.
+    /// cleaned against (never from a secure field).
     private func writePresence(notify: Bool) {
         let context = fullAccess && !document.isSecureTextEntry ? typing.contextBefore : nil
-        link.writePresence(visible: true, notify: notify, documentID: document.documentID, surface: .typing, contextBefore: context,
-                           magic: magic, magicAt: magicAt)
+        link.writePresence(visible: true, notify: notify, documentID: document.documentID, surface: .typing, contextBefore: context)
     }
     /// The host is sending audio somewhere (`dictation` or `agent`): the mic key stops it.
     var routeOpen: Bool { dictationPresentation.audioRoute != .idle }
@@ -429,10 +437,6 @@ final class KeyboardController {
         typing.appeared()
         wordRow.appeared()
         writePresence(notify: true)
-        // A result, an undo or a failure from before this appearance is about a field the user has left.
-        instructionStrip = link.readInstructionStrip()
-        if instructionPresentation?.keystrokeAction != nil { settleInstructionRow() }
-        applyPendingMagic()
         trace?("visible value=1")
         heartbeat?.cancel()
         heartbeat = Task { [weak self] in
@@ -473,7 +477,6 @@ final class KeyboardController {
         pendingRemoteStartID = nil
         stopTicker()
         isVisible = false
-        magic = .off
         sessionSpan.broken()
         wordRow.interruptTyping()
         typing.disappeared()
@@ -582,8 +585,6 @@ final class KeyboardController {
         let id = document.documentID
         if id != lastDocumentID {
             sessionSpan.broken()
-            // A result, an undo or a failure belongs to the field it was about.
-            if lastDocumentID != nil, instructionPresentation?.keystrokeAction != nil { settleInstructionRow() }
             typing.closeEmojiPanel()
             lastDocumentID = id
             queue.history.clear()
@@ -594,7 +595,6 @@ final class KeyboardController {
         if wordRow.contextChanged() {
             queue.history.cursorMoved()
             wordRow.interruptTyping()
-            settleInstructionRowOnMove()
         }
         // Text typed, pasted or moved past by anything but this keyboard (a hardware keyboard, a tap): the session text no
         // longer ends at the cursor, and an instruction must read the field again rather than trust it.
@@ -1668,14 +1668,8 @@ final class KeyboardController {
         }
     }
 
-    // MARK: Instruction mode
+    // MARK: Field reads and edits for the app's instructions
 
-    /// The magic key: `latched` (tapped on), `held` (while the finger is down) or `off`. The app tags speech with it and
-    /// runs the instruction when it goes off; the change goes out at once with the presence.
-    private(set) var magic = MagicToggle.off
-    @ObservationIgnored private var magicAt: Date?
-    /// What the app wants the instruction strip to show (nil: nothing published).
-    private(set) var instructionStrip: InstructionStrip?
     /// The keyboard walks the field for an instruction: the cursor moves visibly. A key cancels the walk; it lands
     /// once the walk put the cursor back.
     private(set) var isReadingField = false
@@ -1757,91 +1751,9 @@ final class KeyboardController {
     @ObservationIgnored private var fieldRead: (instructionID: String, documentID: String?, reply: FieldReadReply)?
     @ObservationIgnored private var serving = false
 
-    /// The magic key's state changed (the key's view calls this on tap, press and release).
-    func setMagicToggle(_ value: MagicToggle) {
-        guard value != magic else { return }
-        magic = value; magicAt = Date()
-        trace?("magic value=\(value.rawValue)")
-        syncRowTakeover()
-        if isVisible { writePresence(notify: true) }
-    }
-
-    /// The magic key goes on (a tap latches it, a hold holds it): speech is an instruction from now on, and the mic
-    /// opens if it is not open, as a tap on the mic key would. Without Full Access the app cannot hear the key.
-    func engageMagic(_ value: MagicToggle) {
-        guard value.isOn else { return releaseMagic() }
-        guard fullAccess else { return show("Turn on Allow Full Access for Legato in Settings > General > Keyboard to give instructions.") }
-        dismissLiveRecovery()
-        setMagicToggle(value)
-        guard !isCapturing, pendingRemoteStartID == nil else { return }
-        reloadHost()
-        switch micMode {
-        case .remote(.start), .needsFullAccess: micTapped()
-        // Opening the app takes a real tap on the mic key's link. The key stays on, and comes back on when the keyboard
-        // returns from the app (a new keyboard), so the first words after the wake are the instruction, never typed.
-        case .openApp:
-            Self.pendingMagic = Date()
-            show("Tap the mic to wake Legato. Your next words are the instruction.")
-        case .remote(.stop): break
-        }
-    }
-
-    /// A wand tap that had to wake the app first, kept across the keyboard's recreation (the app opens in between).
-    private static var pendingMagic: Date? {
-        get { UserDefaults.standard.object(forKey: "magic.pending") as? Date }
-        set { UserDefaults.standard.set(newValue, forKey: "magic.pending") }
-    }
-
-    /// On appearing: a wand tap from the last two minutes that woke the app latches the key again.
-    private func applyPendingMagic() {
-        guard let at = Self.pendingMagic else { return }
-        Self.pendingMagic = nil
-        guard Date().timeIntervalSince(at) < 120, fullAccess, !magic.isOn else { return }
-        setMagicToggle(.latched)
-    }
-
-    /// The magic key goes off (tapped off, or the hold let go): the app runs the instruction once its last words are in.
-    /// The mic stays as it is: dictation goes on after the instruction.
-    func releaseMagic() { Self.pendingMagic = nil; setMagicToggle(.off) }
-
-    /// What the word row shows for instruction mode, nil when it shows words.
-    var instructionPresentation: InstructionStripPresentation? {
-        InstructionStripPresentation(strip: instructionStrip, isReadingField: isReadingField, magic: magic)
-    }
-
-    /// The first key after a result or a failure keeps (or lets go of) it, as a tap on the strip's button would.
-    private func settleInstructionRow() {
-        guard let action = instructionPresentation?.keystrokeAction, let strip = instructionStrip,
-              settledInstructionID != strip.instructionID, fullAccess else { return }
-        settledInstructionID = strip.instructionID
-        instructionIntent(action)
-    }
-    @ObservationIgnored private var settledInstructionID: String?
-    @ObservationIgnored private var instructionStripAt = Date.distantPast
-
-    /// The user moved the cursor or selected text: a status that no longer applies goes ("Undone.", a failure with
-    /// nothing to undo). A result stays (its Undo still works), and so does a row that is still working. A strip that
-    /// just arrived is kept: the field's late notes for the keyboard's own read or edit are no move of the user's.
-    private func settleInstructionRowOnMove() {
-        guard let presentation = instructionPresentation, Date().timeIntervalSince(instructionStripAt) > 0.7 else { return }
-        switch presentation.kind {
-        case .undone: settleInstructionRow()
-        case .failed where !presentation.showsUndo: settleInstructionRow()
-        default: break
-        }
-    }
-
-    /// A tap on the instruction strip: run (again), undo, accept, or dismiss what it shows.
-    func instructionIntent(_ action: InstructionIntent.Action) {
-        guard fullAccess else { show("Allow Full Access to use instructions."); return }
-        link.sendInstructionIntent(InstructionIntent(action: action, instructionID: instructionStrip?.instructionID))
-    }
-
-    /// The app's notes and the poll: the strip, a read to serve, an edit to land.
+    /// The app's notes and the poll: a read to serve, an edit to land.
     private func receiveInstruction() {
         guard !isTornDown else { return }
-        let strip = link.readInstructionStrip()
-        if strip != instructionStrip { instructionStrip = strip; instructionStripAt = Date(); syncRowTakeover() }
         guard isVisible, !serving, !draftEvidence.isPending else { return }
         #if DEBUG || LEGATO_INTERNAL
         if let request = link.takeFieldProbe() {
@@ -2372,7 +2284,7 @@ final class KeyboardController {
 
     // MARK: Undo and redo
 
-    /// ↶ ↷ undo and redo the keyboard's own edits; dimmed while a run is active.
+    /// The dictation key's swipes left and right undo and redo the keyboard's own edits; not while a run is active.
     var canUndo: Bool { undoAvailable && !runActive }
     var canRedo: Bool { redoAvailable && !runActive }
 
@@ -2432,7 +2344,6 @@ final class KeyboardController {
 
     private func beforeUserEdit() {
         dismissLiveRecovery()
-        settleInstructionRow()
     }
 
     // MARK: Mic key

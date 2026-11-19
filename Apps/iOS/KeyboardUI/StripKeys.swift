@@ -1,8 +1,8 @@
 import LegatoKeyboardCore
 import SwiftUI
 
-/// A key of the strip that acts on touch-down and touch-up itself (delete repeats while held), drawn like the
-/// full keyboard's keys: fill, radius, pressed fill. Not a `Button`: a button gives no touch-down. It fills
+/// A key of the minimised keyboard (`TopRowLayout`) that acts on touch-down and touch-up itself (delete repeats while
+/// held), drawn like the full keyboard's keys: fill, radius, pressed fill. Not a `Button`: a button gives no touch-down. It fills
 /// the touch area it is given; the key is drawn inset by `insets`, so the area around it takes touches too.
 ///
 /// - `onPress`: the finger went down (feedback, delete).
@@ -17,8 +17,8 @@ struct StripKey<Label: View>: View {
     let onTap: () -> Void
     @ViewBuilder let label: (_ pressed: Bool) -> Label
 
-    /// The most a finger may travel and still be a tap.
-    private static var tapSlop: CGFloat { 10 }
+    /// The most a finger may travel and still be a tap (the dictation key's too).
+    private static var tapSlop: CGFloat { CGFloat(DictationKeyGesture.tapSlop) }
 
     @GestureState private var down = false
 
@@ -46,7 +46,7 @@ struct StripKey<Label: View>: View {
     }
 }
 
-/// The strip's delete key: one character on touch-down, then repeating while held, exactly the full
+/// The minimised keyboard's delete key: one character on touch-down, then repeating while held, exactly the full
 /// keyboard's (`TypingModel.beginDelete`, `DeleteRepeater`).
 struct StripDeleteKey: View {
     let typing: TypingModel
@@ -77,7 +77,7 @@ struct StripDeleteKey: View {
     }
 }
 
-/// The strip's return key: a newline on lift, captioned and colored by the host's return key type like the
+/// The minimised keyboard's return key: a newline on lift, captioned and colored by the host's return key type like the
 /// full keyboard's (`KeyLabels.returnSymbol`, accent fill for an action, dimmed while the field disables it).
 struct StripReturnKey: View {
     let typing: TypingModel
@@ -112,33 +112,5 @@ struct StripReturnKey: View {
         .accessibilityAddTraits(.isButton)
         .accessibilityIdentifier("key.return")
         .accessibilityAction { typing.tapReturn() }
-    }
-}
-
-/// An undo or redo key of the strip: dimmed, and not acting, while there is nothing to do.
-struct StripHistoryKey: View {
-    let label: String
-    let symbol: String
-    let id: String
-    let enabled: Bool
-    let feedback: KeyFeedback
-    let insets: EdgeInsets
-    let action: () -> Void
-
-    var body: some View {
-        StripKey(
-            insets: insets,
-            onPress: { if enabled { feedback.tick() } },
-            onTap: { if enabled { action() } }
-        ) { _ in
-            Image(systemName: symbol)
-                .font(.system(size: 17))
-                .foregroundStyle(Color(uiColor: KeyColors.ink).opacity(enabled ? 1 : 0.35))
-        }
-        .accessibilityElement()
-        .accessibilityLabel(label)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityIdentifier(id)
-        .accessibilityAction { if enabled { action() } }
     }
 }

@@ -34,6 +34,10 @@ import Testing
         #expect(drag.moved(startX: 10, startY: 10, dx: -60, dy: 2) == nil)
         // Back where it started: still no tap.
         #expect(drag.ended(dx: 0, dy: 0) == nil)
+        #expect(drag.swiped, "the link acting on the same lift still sees the swipe")
+        #expect(drag.moved(startX: 10, startY: 10, dx: 0, dy: 0) == nil)
+        #expect(!drag.swiped, "a new touch starts clean, even from the same point")
+        #expect(drag.ended(dx: 0, dy: 0) == .tap)
     }
 
     @Test func aWanderingTouchDoesNothing() {

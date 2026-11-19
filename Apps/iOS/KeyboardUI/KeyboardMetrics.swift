@@ -29,9 +29,8 @@ import UIKit
 ///    top, radius 12; the highlighted cell is system blue (0,136,255) with white text.
 /// Landscape, 874 pt screen: side margin 79 including system insets, gap 6, key height 27.33, pitch 35.33, row 1 at 50.
 ///
-/// Legato adds a native-sized tool key row between predictions and the typing grid.
-/// Portrait predictions span the full width at 44 visible pt (27 in the extension plus the system's 17 pt top area); tools have 43 pt faces and a 54 pt pitch.
-/// The compact layout contains only predictions and one tool key row.
+/// Legato puts one top row above the native grid (#315): the dictation key, as wide as the return key and as tall as a grid
+/// key, beside the transcript (`TopRowLayout`, `KeyboardHeights`). Minimised, delete and return go under the key.
 struct KeyGeometry {
     let size: CGSize
     let landscapeScreenWidth: CGFloat?
@@ -52,11 +51,14 @@ struct KeyGeometry {
     static func isLandscape(width: CGFloat) -> Bool { width > 500 }
 
     /// The vertical metrics below are the measured ones at the requested height; when the keyboard gets
-    /// less (a system that grants less height, a small phone), rows, bar and pill shrink with it so every
+    /// less (a system that grants less height, a small phone), the rows shrink with it so every
     /// row stays inside the view. Never above 1: extra height stays empty under the rows.
-    var vScale: CGFloat {
+    var vScale: CGFloat { vScale(for: .full) }
+
+    /// The same for a layout's own requested height (the minimised keyboard is shorter).
+    func vScale(for mode: KeyboardMode) -> CGFloat {
         guard size.height > 0 else { return 1 }
-        return min(1, max(0.5, size.height / Self.height(landscape: landscape)))
+        return min(1, max(0.5, size.height / CGFloat(KeyboardHeights.requested(mode: mode, landscape: landscape))))
     }
 
     /// iOS may already inset the extension window (75 pt per side on iPhone 17).
@@ -68,8 +70,8 @@ struct KeyGeometry {
     var gap: CGFloat { 6 }
     /// A letter key's width.
     var keyWidth: CGFloat { (size.width - 2 * marginX - 9 * gap) / 10 }
-    var keyHeight: CGFloat { (landscape ? 27.33 : 43) * vScale }
-    var rowPitch: CGFloat { (landscape ? 35.33 : 54) * vScale }
+    var keyHeight: CGFloat { CGFloat(KeyboardHeights.keyHeight(landscape: landscape)) * vScale }
+    var rowPitch: CGFloat { CGFloat(KeyboardHeights.rowPitch(landscape: landscape)) * vScale }
     /// Distance from the top of the keyboard view to the first row.
     var firstRowTop: CGFloat { Self.firstRowTop(landscape: landscape) * vScale }
     static let keyRadius: CGFloat = 8.5
@@ -98,50 +100,24 @@ struct KeyGeometry {
     }
     var labelSize: CGFloat { landscape ? 16 : 18 }
 
-    // MARK: Prediction and tool rows
+    // MARK: Top row
 
-    var pillSize: CGSize { CGSize(width: 81, height: keyHeight) }
-    /// The tool row between the side margins; its keys split it equally, `gap` apart.
-    var toolRowFrame: CGRect {
-        CGRect(x: marginX, y: CGFloat(KeyboardHeights.toolRowTop(landscape: landscape)) * vScale,
-               width: size.width - 2 * marginX, height: keyHeight)
-    }
-
-    var wordRowFrame: CGRect {
-        CGRect(x: 0, y: 0, width: size.width,
-               height: CGFloat(KeyboardHeights.wordRowHeight(landscape: landscape)) * vScale)
+    /// The top row (#315) for this keyboard: the dictation key on `side` beside the transcript; minimised, delete and return
+    /// (and the globe key) under the key. The key is as wide as the native return key; the minimised keys as the emoji key.
+    func topRow(mode: KeyboardMode, side: DictationKeySide, showsGlobe: Bool = false, returnStyle: TopRowReturnStyle = .glyph) -> TopRowLayout {
+        TopRowLayout.make(mode: mode, side: side, width: Double(size.width), landscape: landscape, margin: Double(marginX), gap: Double(gap),
+                          keyWidth: Double(smallKeyWidth), columnWidth: Double(wideKeyWidth), showsGlobe: showsGlobe,
+                          returnStyle: returnStyle, scale: Double(vScale(for: mode)))
     }
 
     // MARK: Popups
 
     /// The popup's scale against portrait (the keys are shorter in landscape).
-    var popupScale: CGFloat { (landscape ? 0.78 : 1) * vScale }
+    var popupScale: CGFloat { CGFloat(KeyboardHeights.popupScale(landscape: landscape)) * vScale }
 }
 
-/// The strip's vertical geometry for a view of `size` and a strip row height (`StripHeight`): the word row on
-/// top, then the row of keys, each key drawn at the full keyboard's native key height (the strip's own height
-/// would scale it down) and centered in the row with the same gap above and below as the grid has.
-struct StripGeometry {
-    let landscape: Bool
-    /// The word row above the key row; 0 for the debug heights that leave nothing to touch.
-    let wordRowHeight: CGFloat
-    /// The row of keys: what the view has left under the word row.
-    let rowHeight: CGFloat
-    /// A key's drawn height, and the space above and below it inside the row.
-    let controlHeight: CGFloat
-    let top: CGFloat
-    let bottom: CGFloat
-
-    init(size: CGSize, stripHeight: Double) {
-        landscape = KeyGeometry.isLandscape(width: size.width)
-        let keyRow = StripHeight.keyRowHeight(row: stripHeight, landscape: landscape)
-        wordRowHeight = CGFloat(StripHeight.requested(row: stripHeight, landscape: landscape) - keyRow)
-        rowHeight = max(size.height - wordRowHeight, 0)
-        let pill = KeyGeometry(size: CGSize(width: size.width, height: KeyGeometry.height(landscape: landscape))).pillSize
-        controlHeight = max(min(rowHeight - (landscape ? 10 : 11), pill.height), 0)
-        bottom = min(landscape ? 4 : 3, max(rowHeight - controlHeight, 0))
-        top = max(rowHeight - controlHeight - bottom, 0)
-    }
+extension KeyRect {
+    var cgRect: CGRect { CGRect(x: x, y: y, width: width, height: height) }
 }
 
 /// The key colors, light and dark, from the system keyboard.

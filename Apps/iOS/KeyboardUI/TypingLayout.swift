@@ -150,5 +150,5 @@ struct TypingLayout: Equatable {
 }
 
 extension KeyFrame {
-    var cgRect: CGRect { CGRect(x: rect.x, y: rect.y, width: rect.width, height: rect.height) }
+    var cgRect: CGRect { rect.cgRect }
 }

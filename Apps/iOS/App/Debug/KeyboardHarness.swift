@@ -16,7 +16,7 @@ import UIKit
 /// - `-LegatoHarnessAutocap NO`: no auto-capitalization (lowercase letters, to compare with the system keyboard).
 /// - `-LegatoHarnessSuggestions a,b,c`: fill the word row's slots, whatever is typed.
 /// - `-LegatoHarnessGlobe YES`: show the globe key.
-/// - `-LegatoHarnessStrip YES`: start collapsed to the compact strip (the harness always starts with the full keyboard otherwise).
+/// - `-LegatoHarnessStrip YES`: start minimised (the harness always starts with the full keyboard otherwise).
 /// - `-LegatoHarnessLandscape YES`: lay the keyboard out 874 pt wide (landscape height), turned a quarter
 ///   turn so it fits the portrait screen (the screenshot is turned back).
 ///
@@ -233,11 +233,10 @@ final class KeyboardHarnessModel {
 
     // MARK: Bridge drive (scripts/e2e/ios-sim.sh)
 
-    /// What the scenarios read: the field, the held take and the instruction strip's phase.
+    /// What the scenarios read: the field and the held take.
     var state: [String: Any] {
         let published = controller.dictationPresentation
         return ["text": document.text, "visible": controller.isVisible,
-                "magic": controller.magic.rawValue, "instruction": controller.instructionStrip?.phase.rawValue ?? "idle",
                 "takePhase": published.dictationTakePhase?.rawValue ?? "", "takeText": published.dictationTake ?? "",
                 "takeFailed": controller.takeFailed, "status": controller.statusText ?? ""]
     }
@@ -360,10 +359,7 @@ struct KeyboardHarness: View {
 
     /// The harness uses the extension's height for the layout shown (`KeyboardViewController.requestedHeight`).
     private func keyboardHeight(landscape: Bool) -> CGFloat {
-        let controller = model.controller
-        return CGFloat(controller.mode == .strip
-            ? StripHeight.requested(row: controller.stripHeight, landscape: landscape)
-            : KeyboardHeights.height(landscape: landscape))
+        CGFloat(KeyboardHeights.requested(mode: model.controller.mode, landscape: landscape))
     }
 
     private var keyboard: some View {

@@ -37,10 +37,10 @@ public struct DictationKeyDrag: Sendable, Equatable {
         lhs.fired == rhs.fired && lhs.start?.x == rhs.start?.x && lhs.start?.y == rhs.start?.y
     }
 
-    /// The finger moved: the swipe to perform now, once per touch. A new start point is a new touch (a cancelled one never
-    /// reported its end).
+    /// The finger moved: the swipe to perform now, once per touch. A touch after a lift, or from a new start point, is a new
+    /// touch (a cancelled one never reported its end).
     public mutating func moved(startX: Double, startY: Double, dx: Double, dy: Double) -> DictationKeyGesture.Direction? {
-        if start?.x != startX || start?.y != startY { start = (startX, startY); fired = false }
+        if start == nil || start?.x != startX || start?.y != startY { start = (startX, startY); fired = false }
         guard !fired, let direction = DictationKeyGesture.swipe(dx: dx, dy: dy) else { return nil }
         fired = true
         return direction
@@ -48,12 +48,13 @@ public struct DictationKeyDrag: Sendable, Equatable {
 
     /// The finger lifted: a tap, or nothing (a swipe already acted, or the finger wandered).
     public mutating func ended(dx: Double, dy: Double) -> DictationKeyGesture? {
-        defer { start = nil; fired = false }
+        defer { start = nil }
         guard !fired, hypot(dx, dy) < DictationKeyGesture.tapSlop else { return nil }
         return .tap
     }
 
-    /// Whether this touch already swiped (the key's link must not open the app then).
+    /// Whether the last touch swiped, until the next one begins: the key's link, which acts on the same lift in no fixed
+    /// order with `ended`, must not open the app then.
     public var swiped: Bool { fired }
 }
 
