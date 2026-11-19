@@ -69,6 +69,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         return snapshot
     }
     public func acknowledgeDelivery(_ ack: LiveDictationAck) {
+        if ack.ended == true, ack.runID == liveRun?.runID { keyboardLeftRun(ack.runID) }
         if ack.runID == liveRun?.runID, ack.delivered != nil, let version = ack.version,
            version >= (liveDeliveryAck?.version ?? -1) { liveDeliveryAck = ack }
         guard ack.complete, let first = outbox.first, first.lineID == ack.runID,
@@ -389,6 +390,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         }
         let runID = run.runID
         sendCut = (runID, streamTime(), raw, nil)
+        // Paused (#313): no recognizer holds words back, so there is nothing to cut.
+        if pausedRunID == runID { return sendCutThrough("paused") }
         let timeout = Task { [weak self, clock] in
             do { try await clock.sleep(for: Self.sendCutWait) } catch { return }
             self?.sendCutThrough("timeout")
@@ -407,14 +410,72 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         let ms = Int(waited.seconds * 1000 + waited.attoseconds / 1_000_000_000_000_000)
         guard var run = liveRun, run.runID == cut.runID, !run.complete else { return }
         let open = run.flush()
+        // A send from a paused run (#313) sends everything there is: the run ends like a Stop after a tap, once the unit is out.
+        let endsRun = pausedRunID == run.runID
+        if endsRun { pausedRunID = nil; liveTakeOpen = false; run.setPaused(false) }
         liveRun = run
         diagnostics?("live2.send", ["run": String(run.runID.prefix(8)), "via": via, "ms": ms, "sent": open != nil, "raw": cut.raw])
         if cut.raw {
             if standRaw(&run, open: open) { publishLive(run) } else { liveRun = run }
+            if endsRun { Task { [weak self] in await self?.finishLive() } }
             return
         }
-        guard let open else { return }
-        Task { [weak self] in await self?.submitLive(open.text, key: open.key, run: run) }
+        guard let open else {
+            if endsRun { Task { [weak self] in await self?.finishLive() } }
+            return
+        }
+        Task { [weak self] in
+            await self?.submitLive(open.text, key: open.key, run: run)
+            if endsRun { await self?.finishLive() }
+        }
+    }
+
+    /// The run a manual Stop left open (#313): its words wait in the keyboard's preview. Words after the next start append to
+    /// its open unit. It ends at a send that empties it, at the session's end or when an instruction needs the field.
+    @ObservationIgnored private var pausedRunID: String?
+    /// The keyboard stopped following this run (`LiveDictationAck.ended`): it is never paused or resumed, so the next start is a new
+    /// run the keyboard shows. A paused run ends now (open unit cleaned, History).
+    @ObservationIgnored private var unfollowedRunID: String?
+    private func keyboardLeftRun(_ runID: String) {
+        unfollowedRunID = runID
+        guard pausedRunID == runID else { return }
+        pausedRunID = nil
+        liveTakeOpen = false
+        Task { [weak self] in await self?.finishLive() }
+    }
+    /// A manual run is paused with words pending (`pauseTake()`).
+    public var isPaused: Bool { pausedRunID != nil && liveRun?.runID == pausedRunID && liveRun?.complete == false }
+
+    /// The mic key's Stop. A manual staged run with words waiting does not end: nothing is cleaned or sent, the words stay
+    /// pending in the preview and the next `beginTake()` continues the same run. Any other take ends as `finishTake()` does:
+    /// sentence-end mode, nothing pending, a held run, another mode.
+    public func pauseTake() async {
+        guard stagedLive, mode == .live, held == nil, let run = liveRun, run.manual, !run.complete, !liveTakeEnding, run.runID != unfollowedRunID,
+              run.peekOpen() != nil || run.isSpeaking else { return await finishTake() }
+        liveTakeOpen = false
+        pausedRunID = run.runID
+        var paused = run
+        paused.setPaused(true)
+        publishLive(paused)
+        setVoiceActive(false)
+        diagnostics?("live2.run.pause", ["run": String(run.runID.prefix(8))])
+        // Cleaned while paused, so a tap later finds the result (the pause may be long; an unchanged text is reused).
+        speculateOpenUnit()
+    }
+    private var liveTakeEnding: Bool { liveFinishing != nil }
+
+    /// The next start continues the paused run. False: nothing paused (or it ended meanwhile), a new take begins as usual.
+    private func resumePausedRun() -> Bool {
+        guard let id = pausedRunID else { return false }
+        pausedRunID = nil
+        guard held == nil, var run = liveRun, run.runID == id, !run.complete, !liveTakeEnding else { return false }
+        run.setPaused(false)
+        publishLive(run)
+        setVoiceActive(true)
+        liveTakeOpen = true
+        liveFinishedAt = nil
+        diagnostics?("live2.run.resume", ["run": String(id.prefix(8))])
+        return true
     }
 
     /// Raw send: the open unit (just flushed) and the closed units still in cleanup stand as raw words. True when the run changed.
@@ -719,6 +780,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// still ends (its stop waits for its last words and cleanup) has the new take's speech wait until it is complete.
     public func beginTake() {
         guard mode == .live else { return }
+        if resumePausedRun() { return }
         setVoiceActive(true)
         if held != nil { held?.append(.begin); return }
         let stopComing = liveTakeOpen
@@ -875,6 +937,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     }
 
     private func endLive() async {
+        pausedRunID = nil
         let stoppedAt = ContinuousClock.now
         // The keyboard holds the user's keys until the take is complete (its final words, still on their way, first).
         if var run = liveRun, run.stop() { publishLive(run) }
@@ -1079,7 +1142,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     private func endLiveRun() {
         wholePause?.cancel(); wholePause = nil
         liveSubmitted = [:]; liveKeys = [:]; rawSent = []; liveFinishedAt = nil
-        held = nil; heldAwaitsStop = false; liveTakeOpen = false
+        held = nil; heldAwaitsStop = false; liveTakeOpen = false; pausedRunID = nil
         guard liveRun != nil else { return }
         liveRun = nil; liveDeliveryAck = nil
         onLiveChange?(nil)

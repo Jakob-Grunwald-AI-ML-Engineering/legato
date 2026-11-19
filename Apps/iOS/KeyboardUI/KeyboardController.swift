@@ -1315,12 +1315,13 @@ final class KeyboardController {
     }
 
     /// What the field shows of the take, for the app: the last unit typed, and the end once nothing is left.
-    private func acknowledgeStaged() {
+    /// `ended`: the keyboard stops following the run, so a paused manual take is not resumed under it (`LiveDictationAck.ended`).
+    private func acknowledgeStaged(ended: Bool = false) {
         guard let snapshot = liveSnapshot, snapshot.runID == stagedTake.runID else { return }
         let finished = stagedTake.isFinished || stagedTake.held
         if stagedTake.isFinished { liveAckedVersion = snapshot.version }
         link.writeLiveDictationAck(.init(runID: snapshot.runID, version: snapshot.version, complete: snapshot.complete && finished, stats: liveStats,
-                                         delivered: !stagedTake.held, deliveredThrough: stagedTake.handledThrough))
+                                         delivered: !stagedTake.held, deliveredThrough: stagedTake.handledThrough, ended: ended ? true : nil))
     }
 
     /// The run stops here: what it typed stays, nothing more of it is typed, and the take is recovered from History.
@@ -1334,6 +1335,7 @@ final class KeyboardController {
                 // first pieces, if typed, stay in the field as a short fragment; the take is in History. Noted here, since nothing else sees it.
                 if let unit = stagedTake.inFlight { trace?("staged unit interrupted by hide unit=\(unit): typed fragment may remain") }
                 holdStaged()
+                acknowledgeStaged(ended: true)
             }
             liveSnapshot = nil
             setLiveRunning(false)
@@ -1361,9 +1363,16 @@ final class KeyboardController {
     /// The live run is no longer this keyboard's to edit: what it typed stays, and nothing more of it is typed.
     private func forgetLiveRun() {
         updateCleanup { $0.clear() }
+        if let snapshot = liveSnapshot, snapshot.paused == true, stagedTake.runID == snapshot.runID {
+            // A manual take that is paused (#313) keeps its words pending: the draft was cleared (sent), not the words. They go in
+            // at the caret when the person sends them, and a new start continues the same run.
+            holdStaged()
+            queue.cancelRun(snapshot.runID); handle(queue.drainEvents())
+            return
+        }
         if let runID = liveSnapshot?.runID {
             // A staged take that is cleared with the draft (sent) ends here: what is not in the field is in History only.
-            if stagedTake.runID == runID { holdStaged() }
+            if stagedTake.runID == runID { holdStaged(); acknowledgeStaged(ended: true) }
             queue.cancelRun(runID); handle(queue.drainEvents())
         }
         ignoredLiveRunID = liveSnapshot?.runID ?? ignoredLiveRunID

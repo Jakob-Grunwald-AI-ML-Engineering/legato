@@ -98,5 +98,6 @@ public struct SpeechModeRouter: Sendable, Equatable {
     func warm() async { await dictation.warm() }
     func beginTake() { dictation.beginTake() }
     func finishTake() async { await dictation.finishTake() }
+    func pauseTake() async { await dictation.pauseTake() }
     var backgroundText: String { dictation.backgroundText }
 }

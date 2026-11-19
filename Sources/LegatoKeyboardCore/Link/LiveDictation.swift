@@ -69,13 +69,16 @@ public struct LiveDictationSnapshot: Codable, Equatable, Sendable {
     /// ones whose text is final) and the speaking head. The keyboard shows them in its preview and types each ready unit into
     /// the field once, in order; it never edits typed text. Nil: the snapshot is the whole text the keyboard types and edits.
     public var staged: Bool?
+    /// A manual staged take (#313) whose mic key was pressed to pause: nothing is listening, the words wait in the preview and
+    /// a send or the next start goes on with this run. Nil: not paused.
+    public var paused: Bool?
     public init(runID: String, version: Int, segments: [LiveSegment], complete: Bool = false, stopped: Bool? = nil, rawText: String? = nil,
-                shadowAsk: String? = nil, staged: Bool? = nil) {
+                shadowAsk: String? = nil, staged: Bool? = nil, paused: Bool? = nil) {
         self.runID = runID; self.version = version; self.segments = segments; self.complete = complete; self.stopped = stopped
         self.rawText = rawText ?? LiveSegment.joined(segments.map { $0.raw ?? $0.text }); self.text = LiveSegment.joined(segments.map(\.text))
-        self.shadowAsk = shadowAsk; self.staged = staged
+        self.shadowAsk = shadowAsk; self.staged = staged; self.paused = paused
     }
-    private enum CodingKeys: String, CodingKey { case runID, version, text, segments, complete, stopped, rawText, shadowAsk, staged }
+    private enum CodingKeys: String, CodingKey { case runID, version, text, segments, complete, stopped, rawText, shadowAsk, staged, paused }
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         runID = try values.decode(String.self, forKey: .runID)
@@ -87,6 +90,7 @@ public struct LiveDictationSnapshot: Codable, Equatable, Sendable {
         rawText = try values.decodeIfPresent(String.self, forKey: .rawText)
         shadowAsk = try values.decodeIfPresent(String.self, forKey: .shadowAsk)
         staged = try values.decodeIfPresent(Bool.self, forKey: .staged)
+        paused = try values.decodeIfPresent(Bool.self, forKey: .paused)
     }
 }
 
@@ -156,10 +160,13 @@ public struct LiveDictationAck: Codable, Equatable, Sendable {
     /// Staged takes: the id of the last segment the keyboard typed into the field (segments go in order, so every earlier one
     /// is in). Nil: none yet, or not a staged take.
     public var deliveredThrough: Int?
+    /// Staged takes: the keyboard no longer follows this run (it went to another field, the draft was cleared mid-take): nothing more
+    /// of it is typed or shown. A manual take that is paused never resumes such a run; its next start is a new one (#313).
+    public var ended: Bool?
     public init(runID: String, version: Int?, complete: Bool = false, stats: LiveDictationStats, pieces: [Int]? = nil, delivered: Bool? = nil,
-                deliveredThrough: Int? = nil) {
+                deliveredThrough: Int? = nil, ended: Bool? = nil) {
         self.runID = runID; self.version = version; self.complete = complete; self.stats = stats; self.pieces = pieces; self.delivered = delivered
-        self.deliveredThrough = deliveredThrough
+        self.deliveredThrough = deliveredThrough; self.ended = ended
     }
 }
 
@@ -283,7 +290,7 @@ public struct LiveDictationRun: Sendable, Equatable {
         let speaking = LiveSegment.joined(open + [head])
         if !speaking.isEmpty { segments.append(.init(id: finals.count, text: speaking, final: false)) }
         return .init(runID: runID, version: version, segments: segments, complete: complete, stopped: stopped && !complete ? true : nil,
-                     rawText: complete ? LiveSegment.joined(finals.map(\.text)) : nil, staged: true)
+                     rawText: complete ? LiveSegment.joined(finals.map(\.text)) : nil, staged: true, paused: paused && !complete ? true : nil)
     }
     public var isEmpty: Bool { finals.isEmpty && head.isEmpty && open.isEmpty }
     public var finalCount: Int { finals.count }
@@ -455,6 +462,14 @@ public struct LiveDictationRun: Sendable, Equatable {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !complete, text != head else { return }
         head = text
+        version += 1
+    }
+
+    /// A manual run whose mic key paused it (#313): see `LiveDictationSnapshot.paused`. Published, so the keyboard knows.
+    public private(set) var paused = false
+    public mutating func setPaused(_ value: Bool) {
+        guard !complete, paused != value else { return }
+        paused = value
         version += 1
     }
 

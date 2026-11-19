@@ -189,4 +189,141 @@ private func line(_ sequence: Int, _ text: String) -> DictationRouteLine {
         pipeline.boundary("finalize")
         await pipeline.reset()
     }
+
+    // MARK: Pause (the mic key in manual mode)
+
+    @Test func aPausedManualRunKeepsItsWordsPendingAndTheNextStartAppendsToTheSameUnit() async throws {
+        let cleaner = Upper()
+        let pipeline = manual(cleaner)
+        pipeline.cutRecognizer = { true }
+        pipeline.beginTake()
+        await pipeline.receive(line(0, "ship it friday"))
+        let runID = try #require(pipeline.liveRun?.runID)
+        await pipeline.pauseTake()
+        var snapshot = try #require(pipeline.liveRun?.snapshot)
+        #expect(pipeline.isPaused && snapshot.paused == true && !snapshot.complete)
+        #expect(snapshot.segments.map(\.ready) == [false], "Nothing is cleaned or sent by the pause")
+        #expect(cleaner.inputs.withLock { $0.isEmpty })
+        // The next start continues the run: same id, no new run, and the words join the open unit.
+        pipeline.beginTake()
+        snapshot = try #require(pipeline.liveRun?.snapshot)
+        #expect(!pipeline.isPaused && snapshot.paused == nil && snapshot.runID == runID)
+        await pipeline.receive(line(1, "and the budget"))
+        #expect(pipeline.liveRun?.snapshot.segments.count == 1)
+        await pipeline.sendNow()
+        pipeline.boundary("finalize")
+        try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
+        #expect(cleaner.inputs.withLock { $0 } == ["ship it friday and the budget"], "Both parts are cleaned as one unit")
+        #expect(pipeline.liveRun?.runID == runID && pipeline.liveRun?.complete == false, "The take goes on after the send")
+        await pipeline.reset()
+    }
+
+    @Test func aTapWhilePausedCleansTheWordsAndEndsTheRun() async throws {
+        let cleaner = Upper()
+        let pipeline = manual(cleaner)
+        pipeline.cutRecognizer = { Issue.record("Nothing listens while paused: there is no cut"); return true }
+        pipeline.beginTake()
+        await pipeline.receive(line(0, "ship it friday"))
+        await pipeline.pauseTake()
+        await pipeline.sendNow()
+        try await until { pipeline.liveRun?.complete == true }
+        let snapshot = try #require(pipeline.liveRun?.snapshot)
+        #expect(snapshot.segments.map(\.text) == ["Ship it friday"] && snapshot.segments.allSatisfy { $0.ready == true })
+        #expect(snapshot.paused == nil && !pipeline.isPaused)
+        // The next start is a new run.
+        pipeline.beginTake()
+        await pipeline.receive(line(1, "next take"))
+        #expect(pipeline.liveRun?.runID != snapshot.runID)
+        await pipeline.reset()
+    }
+
+    @Test func aSwipeWhilePausedInsertsTheWordsRawWithNoCleanup() async throws {
+        let cleaner = Upper()
+        let pipeline = manual(cleaner)
+        pipeline.beginTake()
+        await pipeline.receive(line(0, "ship it friday"))
+        await pipeline.pauseTake()
+        await pipeline.sendRawNow()
+        try await until { pipeline.liveRun?.complete == true }
+        let segment = try #require(pipeline.liveRun?.snapshot.segments.first)
+        #expect(segment.text == "ship it friday" && !segment.cleaned && segment.ready == true)
+        #expect(cleaner.inputs.withLock { $0.isEmpty })
+        await pipeline.reset()
+    }
+
+    @Test func theSessionEndingCompletesAPausedRunWithItsWordsCleaned() async throws {
+        let cleaner = Upper()
+        let pipeline = manual(cleaner)
+        pipeline.beginTake()
+        await pipeline.receive(line(0, "ship it friday"))
+        await pipeline.pauseTake()
+        await pipeline.finishTake()
+        let snapshot = try #require(pipeline.liveRun?.snapshot)
+        #expect(snapshot.complete && snapshot.paused == nil && !pipeline.isPaused)
+        #expect(snapshot.segments.map(\.text) == ["Ship it friday"], "End of take cleans what was pending, as a Stop does")
+        await pipeline.reset()
+    }
+
+    @Test func aPauseWithNothingPendingEndsTheTakeLikeAStopAndSentenceModeStopsAsBefore() async throws {
+        let cleaner = Upper()
+        let pipeline = manual(cleaner)
+        pipeline.cutRecognizer = { false }
+        pipeline.beginTake()
+        await pipeline.receive(line(0, "ship it friday"))
+        await pipeline.sendNow()
+        try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
+        await pipeline.pauseTake()
+        #expect(pipeline.liveRun?.complete == true && !pipeline.isPaused, "Everything was sent: nothing to hold")
+        await pipeline.reset()
+
+        let sentence = staged(Upper())
+        sentence.beginTake()
+        await sentence.receive(line(0, "ship it friday"))
+        await sentence.pauseTake()
+        #expect(sentence.liveRun?.complete == true && !sentence.isPaused && sentence.liveRun?.snapshot.paused == nil)
+        await sentence.reset()
+    }
+
+    @Test func aSpeculativeCleanupStartedAtThePauseIsReusedAfterTheResume() async throws {
+        let cleaner = Upper()
+        let pipeline = manual(cleaner)
+        pipeline.cutRecognizer = { true }
+        pipeline.beginTake()
+        await pipeline.receive(line(0, "we should ship it friday"))
+        await pipeline.pauseTake()
+        try await until { cleaner.inputs.withLock { $0.count } == 1 }
+        pipeline.beginTake()
+        await pipeline.sendNow()
+        pipeline.boundary("finalize")
+        try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
+        #expect(cleaner.inputs.withLock { $0.count } == 1, "An unchanged text keeps its request across pause and resume")
+        await pipeline.reset()
+    }
+
+    @Test func aRunTheKeyboardStoppedFollowingIsNeverPausedOrResumed() async throws {
+        let cleaner = Upper()
+        let pipeline = manual(cleaner)
+        pipeline.beginTake()
+        await pipeline.receive(line(0, "ship it friday"))
+        let runID = try #require(pipeline.liveRun?.runID)
+        // The keyboard went to another field before the stop: the stop ends the run.
+        pipeline.acknowledgeDelivery(.init(runID: runID, version: 1, stats: .init(), delivered: false, ended: true))
+        await pipeline.pauseTake()
+        #expect(pipeline.liveRun?.complete == true && !pipeline.isPaused)
+        await pipeline.reset()
+
+        // Or while paused: it ends at once.
+        pipeline.beginTake()
+        await pipeline.receive(line(1, "next thing here"))
+        let second = try #require(pipeline.liveRun?.runID)
+        await pipeline.pauseTake()
+        #expect(pipeline.isPaused)
+        pipeline.acknowledgeDelivery(.init(runID: second, version: 1, stats: .init(), delivered: false, ended: true))
+        try await until { pipeline.liveRun?.complete == true }
+        #expect(!pipeline.isPaused)
+        pipeline.beginTake()
+        await pipeline.receive(line(2, "third take"))
+        #expect(pipeline.liveRun?.runID != second)
+        await pipeline.reset()
+    }
 }

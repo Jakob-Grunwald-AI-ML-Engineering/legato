@@ -145,6 +145,24 @@ import LegatoSoniox
         #expect(sink.begins == 2)
     }
 
+    /// Manual send (#313): the mic key's Stop is a pause for the sink, and only the keyboard going away ends the take.
+    @Test func stopPausesTheTakeAndOnlyHidingTheKeyboardEndsIt() async throws {
+        sink.keepsPausedTake = true
+        let (_, keyboard) = try await openOnTyping()
+        let socket = try #require(sockets.last)
+        #expect(await keyboard.openGate())
+        await mic.emit()
+        await keyboard.closeGate()
+        try await until { await socket.sent.contains(.text(#"{"type":"finalize"}"#)) }
+        await socket.feed(#"{"tokens":[{"text":"<fin>","is_final":true}]}"#)
+        await socket.feed(#"{"finished":true}"#)
+        try await until { sink.pauses == 1 }
+        #expect(sink.finishes == 0, "A paused take stays open")
+        keyboard.update(visible: false, surface: .dictation)
+        await keyboard.settle()
+        try await until { sink.finishes == 1 }
+    }
+
     @Test func aTapWithoutSonioxKeyStaysClosedAndSaysWhy() async throws {
         let composer = MicrophoneHost(microphone: mic, activateAudioSession: {})
         await composer.arm()
@@ -306,10 +324,14 @@ import LegatoSoniox
     var warms = 0
     var begins = 0
     var finishes = 0
+    var pauses = 0
+    /// The sink keeps a paused take open (the iPhone's manual send): Stop does not end it.
+    var keepsPausedTake = false
     func reset() async { resets += 1 }
     func warm() async { warms += 1 }
     func beginTake() { begins += 1 }
     func finishTake() async { finishes += 1 }
+    func pauseTake() async { pauses += 1; if !keepsPausedTake { await finishTake() } }
 }
 
 actor GateMicrophone: AudioSource {

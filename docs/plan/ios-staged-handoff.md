@@ -125,3 +125,9 @@ The unverified 2 s bound counts only while the unit has not started.
 - The swipe between the compact strip and the full keyboard is gone; the chevron is the only switch.
 - A swipe up on the preview inserts what is not typed yet without cleanup (`RequestCommand.sendRaw`, `DictationPipeline.sendRawNow`); a tap still sends for cleanup. A subtle upward swoosh, none with Reduce Motion; a second accessibility action "Insert without cleanup".
 - The kept-text row is removed. When delivery is held, the undelivered units return to the preview as pending; a tap or swipe sends them again at the caret. A keyboard that goes away leaves the take in History only.
+
+## Round 3 (2026-11-19): the mic key pauses (manual mode)
+
+- In manual mode Stop does not send: `DictationPipeline.pauseTake` keeps the run open ("paused", published as `LiveDictationSnapshot.paused`), the words stay pending in the preview with tap (cleaned) and swipe up (raw) live. The next start resumes the same run (`beginTake`), new words join the open unit and are cleaned with it as one.
+- A send while paused skips the recognizer cut and ends the run once the unit is out. The run also ends at the keyboard session's close or hide (History records the cleaned take; the raw finals are checkpointed as they arrive), at a Stop with nothing pending, or when the keyboard reports it left the run (`LiveDictationAck.ended`). Sentence-end mode is unchanged.
+- `HostLink` accepts `send`/`sendRaw` while no phase runs (a paused take has none); the app ignores a send with nothing to send.

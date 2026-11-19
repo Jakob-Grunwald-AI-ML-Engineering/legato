@@ -49,6 +49,9 @@ import LegatoSoniox
 
     func beginTake() { modeSink.beginTake() }
 
+    /// A manual take is paused with words pending (`DictationPipeline.pauseTake`): a send still works without a take running.
+    var isPaused: Bool { pipeline?.isPaused ?? false }
+
     /// The user's send of a staged take: the words so far go to the field now (`DictationPipeline.sendNow`). Dictation only.
     func sendNow() async {
         guard modeSink.target == .dictation else { return }

@@ -31,6 +31,9 @@ public struct DictationRouteLine: Sendable, Equatable {
     func tailChanged(_ text: String)
     /// The take ended (stop): whatever was buffered is cleaned and written now.
     func finishTake() async
+    /// The mic key's Stop while the keyboard stays: like `finishTake`, except a sink may keep the take's words pending for
+    /// the next start (iPhone manual send, #313). Defaults to `finishTake`.
+    func pauseTake() async
     /// The stream reached a boundary of its own (`finalize`: a requested cut is through; `finished`: the stream ended).
     /// Every segment spoken before it has been received.
     func boundary(_ reason: String)
@@ -44,6 +47,7 @@ public extension DictationRouteSink {
     func speechActivity() {}
     func tailChanged(_ text: String) {}
     func finishTake() async {}
+    func pauseTake() async { await finishTake() }
     func boundary(_ reason: String) {}
 }
 

@@ -24,6 +24,9 @@ import LegatoVocabulary
         await serial { [self] in
             if gate.route != .idle { await perform(gate.close()) }
             await takeFinish?.value
+            // A paused manual take ends here: the microphone is leaving.
+            finishDictationTake(waitingForWords: false)
+            await takeFinish?.value
             await closeDictation()
             isOpen = false
             microphone.dictationAudio = nil
@@ -265,13 +268,16 @@ import LegatoVocabulary
     /// The keyboard's send (a tap on the preview): a staged take sends the words so far to the field now and keeps listening.
     /// Ignored without a take running; it needs no gate change, so it works from the background like Stop.
     public func sendNow() async {
-        guard isOpen, gate.route == .dictation || dictation.hasActiveTake || dictation.isReplaying else { return }
+        guard isOpen, canSend else { return }
         await speechRoute.sendNow()
     }
 
+    /// A take is running, or a manual one is paused with words waiting (Stop keeps them pending, #313).
+    private var canSend: Bool { gate.route == .dictation || dictation.hasActiveTake || dictation.isReplaying || speechRoute.isPaused }
+
     /// The keyboard's raw send (a swipe up on the preview): like `sendNow()`, but the words are typed as spoken, uncleaned.
     public func sendRawNow() async {
-        guard isOpen, gate.route == .dictation || dictation.hasActiveTake || dictation.isReplaying else { return }
+        guard isOpen, canSend else { return }
         await speechRoute.sendRawNow()
     }
 
@@ -282,7 +288,7 @@ import LegatoVocabulary
         case .finalize(.dictation):
             microphone.setRoute(.idle)
             await dictation.finalizeTake()
-            finishDictationTake(waitingForWords: true)
+            finishDictationTake(waitingForWords: true, pausing: true)
         case .abandon(.dictation):
             microphone.setRoute(.idle)
             // Drop half-spoken words: close without finalizing. Delivered lines stay with the sink.
@@ -319,14 +325,15 @@ import LegatoVocabulary
     private func openDictation() { dictation.open() }
     /// Ends a take: after its last words (bounded), the sink cleans and writes it. Ends run in take order, and a later
     /// stop never cancels an earlier take's end (that take would never complete); only closing the session does.
-    private func finishDictationTake(waitingForWords: Bool) {
+    /// `pausing`: the mic key's Stop; a manual take with words waiting stays open (`DictationRouteSink.pauseTake`).
+    private func finishDictationTake(waitingForWords: Bool, pausing: Bool = false) {
         let dictation = self.dictation, sink = self.sink
         let previous = takeFinish, generation = takeGeneration
         takeFinish = Task { [weak self] in
             if waitingForWords { await dictation.waitForFinish(timeout: Self.takeEndWait) }
             await previous?.value
             guard !Task.isCancelled, self?.takeGeneration == generation else { return }
-            await sink.finishTake()
+            if pausing { await sink.pauseTake() } else { await sink.finishTake() }
         }
     }
     private func closeDictation() async { await dictation.close() }

@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import LegatoKeyboardCore
 
@@ -32,5 +33,24 @@ import Testing
         // Words after the send start the next unit.
         run.addFinal(key: 2, text: "next thing")
         #expect(run.unitCount == 2)
+    }
+
+    /// A paused run (the mic key in manual mode) is told to the keyboard, and its pending words stay in the preview.
+    @Test func aPausedRunIsPublishedAndItsWordsStayInThePreview() throws {
+        var run = LiveDictationRun(staged: true, manual: true)
+        run.addFinal(key: 0, text: sentence)
+        #expect(run.snapshot.paused == nil)
+        run.setPaused(true)
+        let snapshot = run.snapshot
+        #expect(snapshot.paused == true && !snapshot.complete)
+        #expect(try JSONDecoder().decode(LiveDictationSnapshot.self, from: JSONEncoder().encode(snapshot)).paused == true)
+        var take = StagedDictation()
+        take.receive(snapshot)
+        #expect(take.preview == sentence && !take.isFinished)
+        run.setPaused(false)
+        #expect(run.snapshot.paused == nil)
+        run.setPaused(true)
+        run.finish()
+        #expect(run.snapshot.paused == nil, "A finished run is no longer paused")
     }
 }
