@@ -274,7 +274,7 @@ final class KeyboardController {
     /// Hands the row `Self.listening` when nothing is said yet.
     var dictationPreview: String? {
         if stagedTake.runID != nil, !stagedTake.isFinished {
-            if stagedTake.previewDraft?.released == false { return editablePreview?.text }
+            if stagedTake.previewDraft?.released == false { return composedPreview?.text }
             let spoken = stagedTake.preview
             // A unit being typed keeps its start: the row anchors on the exit point, so its head is never cut away.
             let leaving = stagedTake.inFlight != nil
@@ -292,39 +292,38 @@ final class KeyboardController {
     var dictationPreviewLayout: StagedDictation.PreviewLayout? {
         guard stagedTake.runID != nil, !stagedTake.isFinished else { return nil }
         let layout = stagedTake.previewLayout
-        if layout.caret != nil { return layout }
+        if composedPreview != nil { return layout }
         guard !layout.text.isEmpty else { return nil }
         let shown = dictationPreview.map { $0.hasPrefix("…") ? $0.count - 1 : $0.count } ?? layout.text.count
         return layout.dropping(layout.text.count - shown)
     }
 
-    var editablePreview: StagedDictation.PreviewDraft? {
+    var composedPreview: StagedDictation.PreviewDraft? {
         guard let draft = stagedTake.previewDraft, !draft.released, let field = document.documentID, field == liveDocumentID else { return nil }
         return draft
     }
 
     var canSendPreview: Bool {
         guard fullAccess, !stagedTake.isAwaitingPreview else { return false }
-        if stagedTake.previewDraft?.released == false { return editablePreview != nil }
+        if stagedTake.previewDraft?.released == false { return composedPreview != nil }
         return stagedTake.runID != nil && (!stagedTake.complete || stagedTake.held) && !stagedTake.preview.isEmpty
     }
 
     func previewTapped() {
-        guard canSendPreview, editablePreview == nil, !stagedTake.complete else { return }
-        trace?("preview tapped: edit")
+        guard canSendPreview, composedPreview == nil, !stagedTake.complete else { return }
+        trace?("preview tapped: compose")
         link.send(.editPreview, id: UUID().uuidString)
     }
 
     /// A swipe left on the preview clears what is still in it and not yet sent for cleanup: the open unit and the speaking head
     /// (`RequestCommand.discard`). The app keeps it for a short undo window (`undoDiscard`). Units already sent for cleanup,
     /// ready ones and the one being typed stay.
-    var canDiscardPreview: Bool { canSendPreview && (editablePreview != nil || stagedTake.hasDiscardable) }
+    var canDiscardPreview: Bool { canSendPreview && (composedPreview != nil || stagedTake.hasDiscardable) }
 
     func discardPreview() {
         guard canDiscardPreview else { return }
-        if editablePreview != nil {
+        if composedPreview != nil {
             stagedTake.discardPreviewDraft()
-            typing.hostEdited()
             acknowledgeStaged()
             driveStaged()
             syncRowTakeover()
@@ -351,17 +350,16 @@ final class KeyboardController {
         link.send(.undoDiscard, id: UUID().uuidString)
     }
 
-    /// A swipe right on the preview row sends what is not typed yet as spoken, without cleanup (`RequestCommand.sendRaw`).
+    /// A swipe right inserts the composed draft or sends the pending speech without cleanup (`RequestCommand.sendRaw`).
     func previewSwiped() {
         guard canSendPreview else { return }
-        if editablePreview != nil {
+        if composedPreview != nil {
             guard !document.isSecureTextEntry, !draftEvidence.isPending else {
                 show("Return to the original text field to insert this draft.")
                 return
             }
             stagedTake.resume()
             stagedTake.releasePreview()
-            typing.hostEdited()
             acknowledgeStaged()
             driveStaged()
             syncRowTakeover()
@@ -371,8 +369,7 @@ final class KeyboardController {
         sendPreview(.sendRaw)
     }
 
-    /// Held delivery (`holdStaged`) resumes here: the pending units go in at the caret as they stand. A take still running also
-    /// sends its words so far to the app (cleaned for a tap, raw for a swipe); a finished one has nothing more to ask.
+    /// Held delivery (`holdStaged`) resumes here. An active take also sends pending speech to the app as raw words.
     private func sendPreview(_ command: RequestCommand) {
         if stagedTake.held {
             stagedTake.resume()
@@ -427,7 +424,7 @@ final class KeyboardController {
     /// The presence the app follows: visibility, field and the text before the cursor that the dictated lines are
     /// cleaned against (never from a secure field).
     private func writePresence(notify: Bool) {
-        let context = fullAccess && !document.isSecureTextEntry ? (editablePreview == nil ? typing.contextBefore : document.contextBefore) : nil
+        let context = fullAccess && !document.isSecureTextEntry ? typing.contextBefore : nil
         link.writePresence(visible: true, notify: notify, documentID: document.documentID, surface: .typing, contextBefore: context)
     }
     /// The host is sending audio somewhere (`dictation` or `agent`): the mic key stops it.
@@ -1272,7 +1269,7 @@ final class KeyboardController {
             return
         }
         if snapshot.staged == true, let current = stagedTake.runID, current != snapshot.runID, !stagedTake.held, stagedTake.hasUndelivered {
-            if editablePreview != nil { return }
+            if composedPreview != nil { return }
             // The take before still has units to type. A finished one is typed first (the next poll takes this snapshot); one
             // whose end was never seen cannot be waited for: what is left of it stays in History.
             if stagedTake.complete {
@@ -1298,16 +1295,11 @@ final class KeyboardController {
         liveSnapshot = snapshot
         setLiveRunning(!snapshot.complete)
         if snapshot.staged == true {
-            let wasEditing = editablePreview != nil
             stagedTake.receive(snapshot)
             if newRun, let receipt = link.readLiveDictationAck(), receipt.runID == snapshot.runID {
                 // An earlier appearance of the keyboard followed this run: what it typed is not typed again.
                 stagedTake.adopt(receipt)
                 noteLive(snapshot, "adopted", detail: "receipt through=\(receipt.deliveredThrough.map(String.init) ?? "none") held=\(stagedTake.held)")
-            }
-            if !wasEditing, editablePreview != nil {
-                setMode(.full)
-                typing.hostEdited()
             }
             if !isVisible { noteLive(snapshot, "hidden") }
             else if !stagedTake.preview.isEmpty { noteLive(snapshot, "shown") }
@@ -2254,7 +2246,6 @@ final class KeyboardController {
     }
 
     func cursorPanBegan() {
-        guard editablePreview == nil else { return }
         userPreemptsFieldRead()
         queue.history.cursorMoved()
         wordRow.cursorPanBegan()
@@ -2265,21 +2256,12 @@ final class KeyboardController {
     /// characters within the text it knows (a selection collapses first).
     func moveCursor(by characters: Int) {
         guard characters != 0 else { return }
-        if let draft = editablePreview {
-            movePreviewCaret(to: draft.caret + characters)
-            return
-        }
         userPreemptsFieldRead()
         enqueue(.move(characters))
         pump()
     }
 
     func cursorPanEnded() { pump() }
-
-    func movePreviewCaret(to position: Int) {
-        stagedTake.movePreviewCaret(to: position)
-        typing.hostEdited()
-    }
 
     // MARK: Typing
 
@@ -2289,10 +2271,6 @@ final class KeyboardController {
     /// dictation was revealing is finished in front of it). Returns false: the key itself is all that was typed.
     @discardableResult
     func type(_ text: String, contextBefore: String? = nil) -> Bool {
-        if editablePreview != nil {
-            stagedTake.insertInPreview(text)
-            return false
-        }
         userPreemptsFieldRead()
         beforeUserEdit()
         let before = contextBefore ?? typing.contextBefore
@@ -2312,10 +2290,6 @@ final class KeyboardController {
     }
 
     func deleteBackward(contextBefore: String? = nil) {
-        if editablePreview != nil {
-            stagedTake.deleteInPreview()
-            return
-        }
         userPreemptsFieldRead()
         beforeUserEdit()
         let before = contextBefore ?? typing.contextBefore

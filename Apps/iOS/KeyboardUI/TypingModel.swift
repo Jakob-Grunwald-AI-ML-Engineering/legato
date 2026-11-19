@@ -91,7 +91,6 @@ final class TypingModel {
     }
 
     private var returnEnabled: Bool {
-        if controller?.editablePreview != nil { return true }
         guard controller?.enablesReturnKeyAutomatically == true else { return true }
         if let shadow, now().timeIntervalSince(shadow.at) < Self.settleWindow, !shadow.text.isEmpty { return true }
         return controller?.hasText ?? false
@@ -348,7 +347,6 @@ final class TypingModel {
     // MARK: Context
 
     private func context() -> TextContext {
-        if let draft = controller?.editablePreview { return TextContext(documentContextBeforeInput: draft.beforeCaret) }
         if let shadow, now().timeIntervalSince(shadow.at) < Self.settleWindow {
             return TextContext(documentContextBeforeInput: shadow.text)
         }

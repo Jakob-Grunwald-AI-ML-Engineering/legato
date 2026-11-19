@@ -35,34 +35,14 @@ public struct StagedDictation: Sendable, Equatable {
     public struct PreviewDraft: Sendable, Equatable {
         public let unitID: Int
         public let original: String
-        public private(set) var text: String
-        public private(set) var caret: Int
+        public let text: String
         public fileprivate(set) var released = false
 
         fileprivate init(unit: LiveSegment) {
             unitID = unit.id
             original = unit.raw ?? unit.text
             text = unit.text
-            caret = text.count
         }
-
-        public var beforeCaret: String { String(text.prefix(caret)) }
-
-        fileprivate mutating func insert(_ addition: String) {
-            let prefix = beforeCaret + addition
-            text = prefix + text.dropFirst(caret)
-            // Adjacent code points can join into one grapheme at the seam.
-            caret = min(prefix.count, text.count)
-        }
-
-        fileprivate mutating func deleteBackward() {
-            guard caret > 0 else { return }
-            let prefix = String(text.prefix(caret - 1))
-            text = prefix + text.dropFirst(caret)
-            caret = min(prefix.count, text.count)
-        }
-
-        fileprivate mutating func moveCaret(to position: Int) { caret = min(text.count, max(0, position)) }
     }
 
     public private(set) var previewDraft: PreviewDraft?
@@ -124,8 +104,6 @@ public struct StagedDictation: Sendable, Equatable {
         public var exited = 0
         /// Closed units whose cleanup has not landed: sent for cleanup, not yet typed ("thinking"). The open unit is not among them.
         public var waiting: [Range<Int>] = []
-        /// The editable view shows just the reviewed unit. Later speech remains in the run below it.
-        public var caret: Int?
 
         /// The layout of the text without its first `count` characters (the row shows only the end of a long preview).
         public func dropping(_ count: Int) -> PreviewLayout {
@@ -139,18 +117,13 @@ public struct StagedDictation: Sendable, Equatable {
             result.leaving = shifted(leaving) ?? 0..<0
             result.exited = max(0, exited - count)
             result.waiting = waiting.compactMap(shifted)
-            result.caret = caret.map { max(0, $0 - count) }
             return result
         }
     }
 
     /// The units not typed yet, in order (raw words until their cleanup landed).
     public var pending: [LiveSegment] {
-        var pending = units.filter { $0.id > (deliveredThrough ?? -1) }
-        if let draft = previewDraft, draft.released, pending.first?.id == draft.unitID {
-            pending[0].text = draft.text
-        }
-        return pending
+        units.filter { $0.id > (deliveredThrough ?? -1) }
     }
 
     /// The undelivered text the preview shows: units (cleaned text replaces raw in place), then the speaking head, with the
@@ -159,7 +132,6 @@ public struct StagedDictation: Sendable, Equatable {
         var layout = PreviewLayout()
         if let draft = previewDraft, !draft.released {
             layout.text = draft.text
-            layout.caret = draft.caret
             return layout
         }
         for unit in pending + [LiveSegment(id: -1, text: head, final: false)] {
@@ -228,16 +200,6 @@ public struct StagedDictation: Sendable, Equatable {
             return
         }
         if previewDraft?.unitID != first.id { previewDraft = PreviewDraft(unit: first) }
-    }
-
-    public mutating func insertInPreview(_ text: String) {
-        if previewDraft?.released == false { previewDraft?.insert(text) }
-    }
-    public mutating func deleteInPreview() {
-        if previewDraft?.released == false { previewDraft?.deleteBackward() }
-    }
-    public mutating func movePreviewCaret(to position: Int) {
-        if previewDraft?.released == false { previewDraft?.moveCaret(to: position) }
     }
 
     public mutating func releasePreview() {
