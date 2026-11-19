@@ -1325,9 +1325,11 @@ public struct FieldQueue: Sendable {
     }
 
     private mutating func plannedNext() -> Action {
-        // A chunk's insert still entering goes on first, even before a user's key: it ends within `ChunkEntrance.capMs`.
+        // A chunk's insert still entering goes on first, even before a user's key: it ends within `ChunkEntrance.capMs`. A
+        // staged unit's typewriter burst runs longer: a user's key queued behind it lands the rest of the burst as one write
+        // and goes in right after, so a key waits for one write at most.
         if burst != nil {
-            if inFlight != nil { return nextBurst() }
+            if inFlight != nil { return keyIsQueued ? flushBurst() : nextBurst() }
             burst = nil
         }
         if hasUnverifiedInput { return inFlight == nil ? heldSpeechNext() : .wait }
@@ -1763,7 +1765,9 @@ public struct FieldQueue: Sendable {
                 return send(.deleteBackward(count), lane: lane(of: current.owner), owner: owner) { q in q.removeRange(q.cursor - count, q.cursor, owner: owner) }
             case .insert(let chars, let owner):
                 current.ops.removeFirst(); unit = current
-                return sendInsert(chars, lane: lane(of: current.owner), owner: owner)
+                var staged = false
+                if case .edit(let state, _) = current.owner { staged = state.edit.isSpeech == true }
+                return sendInsert(chars, lane: lane(of: current.owner), owner: owner, staged: staged)
             }
         }
         return next()
@@ -2898,8 +2902,11 @@ public struct FieldQueue: Sendable {
 
     /// An insert at the caret as a chunk's op: one piece, or a burst of pieces (`ChunkEntrance`) of which the first goes now
     /// and the rest from `nextBurst`, the model taking each piece as it is sent so it always shows what the host was given.
-    private mutating func sendInsert(_ text: String, lane: Lane, owner: Int?, followsUser: Bool = false, entrance: Bool = true) -> Action {
-        var plan = ChunkEntrance.plan(text, enabled: entrance && config.chunkEntrance)
+    /// A staged unit (`staged`: an edit with `isSpeech`) enters at the typewriter pace, one grapheme per piece, uncapped.
+    private mutating func sendInsert(_ text: String, lane: Lane, owner: Int?, followsUser: Bool = false, entrance: Bool = true,
+                                     staged: Bool = false) -> Action {
+        var plan = staged ? ChunkEntrance.typewriterPlan(text, enabled: entrance && config.chunkEntrance)
+                          : ChunkEntrance.plan(text, enabled: entrance && config.chunkEntrance)
         guard !plan.pieces.isEmpty else { return .wait }
         let first = plan.pieces.removeFirst()
         burst = plan.pieces.isEmpty ? nil : Burst(pieces: plan.pieces, gapMs: plan.gapMs, lane: lane, owner: owner, followsUser: followsUser)
@@ -2911,6 +2918,19 @@ public struct FieldQueue: Sendable {
             q.insertAtCursor(Array(piece), owner: owner)
             if followsUser { q.userCursor = q.cursor }
         }
+    }
+
+    private var keyIsQueued: Bool {
+        userLane.contains { if case .input = $0 { true } else { false } }
+    }
+
+    /// The rest of the running burst as one piece, now.
+    private mutating func flushBurst() -> Action {
+        guard let current = burst else { return .wait }
+        burst = nil
+        let rest = current.pieces.joined()
+        guard !rest.isEmpty else { return .wait }
+        return sendPiece(rest, lane: current.lane, owner: current.owner, followsUser: current.followsUser, continuing: true)
     }
 
     /// The next piece of the running burst once it is due (`Burst.clockMs`).

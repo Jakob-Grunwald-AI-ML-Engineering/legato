@@ -23,6 +23,7 @@ import LegatoSoniox
         modeSink = SpeechModeSink(dictation: sink)
         engine = DictationEngine(sink: modeSink, sonioxKey: sonioxKey, makeSocket: makeSocket,
                                  vocabularyURL: vocabularyURL, now: now)
+        pipeline?.cutRecognizer = { [engine] in await engine.finalizeChunk() }
         modeSink.onInstructionLine = { instruction.hear($0) }
         modeSink.onInstructionTail = { instruction.hearTail($0) }
         modeSink.onTransition = { [weak self] transition in
@@ -47,6 +48,12 @@ import LegatoSoniox
     }
 
     func beginTake() { modeSink.beginTake() }
+
+    /// The user's send of a staged take: the words so far go to the field now (`DictationPipeline.sendNow`). Dictation only.
+    func sendNow() async {
+        guard modeSink.target == .dictation else { return }
+        await pipeline?.sendNow()
+    }
 
     /// Whether audio is still arriving is a host fact (including replay); cut ordering is shared.
     func setMagic(_ enabled: Bool, cut: Bool) {

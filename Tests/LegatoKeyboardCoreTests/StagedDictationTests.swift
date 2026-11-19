@@ -26,6 +26,37 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         #expect(take.nextReady?.text == "Hello there!")
     }
 
+    /// #313: how much of the unit's own text is in the field drives the row's exit; the separator is not the unit's.
+    @Test func exitProgressCountsTheUnitsOwnGraphemesAndNotItsSeparator() {
+        var take = StagedDictation()
+        take.receive(snapshot(1, [unit(0, "One two."), unit(1, "Next.", ready: false)], head: "more"))
+        #expect(take.previewLayout.leaving == 0..<0 && take.previewLayout.waiting == [9..<14])
+        take.begin(0, typed: " One two.")
+        take.sent(" ")
+        #expect(take.exited == 0 && take.started)
+        take.sent("O"); take.sent("n")
+        var layout = take.previewLayout
+        #expect(layout.text == "One two. Next. more" && layout.leaving == 0..<8 && layout.exited == 2 && layout.waiting == [9..<14])
+        take.sent("e two.") // a flushed rest, then the trailing separator past the unit's end
+        take.sent(" ")
+        layout = take.previewLayout
+        #expect(layout.exited == 8 && take.preview == layout.text)
+        #expect(layout.dropping(4).leaving == 0..<4 && layout.dropping(4).exited == 4 && layout.dropping(4).text == "two. Next. more")
+        take.delivered(0)
+        #expect(take.exited == 0 && !take.started && take.previewLayout.leaving == 0..<0 && take.preview == "Next. more")
+    }
+
+    @Test func aLongBurstNeverStallsAndTheUnverifiedBoundCountsOnlyBeforeTheUnitStarts() {
+        var take = StagedDictation()
+        take.receive(snapshot(1, [unit(0, "A long unit.")], complete: true))
+        take.begin(0, typed: "A long unit.")
+        #expect(take.isStalled(inFlightMs: 2_000, unverifiedInput: true), "Not started: the unverified bound holds")
+        take.sent("A")
+        // The caller counts from the latest piece: a burst of any length keeps resetting it, and once started the short bound is gone.
+        #expect(!take.isStalled(inFlightMs: 35, unverifiedInput: false) && !take.isStalled(inFlightMs: 9_999, unverifiedInput: true))
+        #expect(take.isStalled(inFlightMs: StagedDictation.stallMs, unverifiedInput: false))
+    }
+
     @Test func unitsAreTypedInOrderAndLeaveThePreviewOnceInTheField() throws {
         var take = StagedDictation()
         // Unit 1 is ready before unit 0: it waits behind it.

@@ -26,6 +26,10 @@ public struct StagedDictation: Sendable, Equatable {
     /// What this take typed, in order, exactly as it went into the field.
     public private(set) var record = ""
     private var inFlightText = ""
+    /// How many graphemes of the in-flight unit's own text have gone into the field (its separator and capital prefix excluded).
+    public private(set) var exited = 0
+    /// The unit's first piece has gone out: it is no longer waiting to start.
+    public private(set) var started = false
 
     public init() {}
 
@@ -34,16 +38,18 @@ public struct StagedDictation: Sendable, Equatable {
     /// The record keeps only what a separator or a capital can need.
     static let recordCharacters = 400
 
-    /// A unit never stays held: it is typed and confirmed within a few hundred milliseconds. While the queue cannot verify the
+    /// A unit is confirmed a moment after its last piece went out (its typewriter burst can last seconds). While the queue cannot verify the
     /// field (`hasUnverifiedInput`: after the keyboard came back or the host reported text the proxy had not caught up with)
     /// it will not start it, and nothing in the field may lift that: past this the unit and the rest go to the kept-text row.
     public static let unverifiedStallMs = 2_000.0
     /// Whatever else keeps a unit from being confirmed (a busy host) is bounded too.
     public static let stallMs = 10_000.0
 
-    /// The unit being typed has waited `inFlightMs` without the queue confirming or dropping it.
+    /// The unit being typed has waited `inFlightMs` without the queue confirming or dropping it: counted from when it began, or
+    /// from its latest piece once it started, so a long burst is never cut short. The unverified bound applies only before the
+    /// unit starts.
     public func isStalled(inFlightMs: Double, unverifiedInput: Bool) -> Bool {
-        inFlight != nil && inFlightMs >= (unverifiedInput ? Self.unverifiedStallMs : Self.stallMs)
+        inFlight != nil && inFlightMs >= (unverifiedInput && !started ? Self.unverifiedStallMs : Self.stallMs)
     }
 
     // MARK: Snapshots
@@ -63,15 +69,58 @@ public struct StagedDictation: Sendable, Equatable {
         return nil
     }
 
+    /// The preview as one text, with where its parts are (character offsets into `text`).
+    public struct PreviewLayout: Sendable, Equatable {
+        public var text = ""
+        /// The unit being typed (a prefix of `text`) and how many of its characters are in the field.
+        public var leaving: Range<Int> = 0..<0
+        public var exited = 0
+        /// Closed units whose cleanup has not landed: sent for cleanup, not yet typed.
+        public var waiting: [Range<Int>] = []
+
+        /// The layout of the text without its first `count` characters (the row shows only the end of a long preview).
+        public func dropping(_ count: Int) -> PreviewLayout {
+            guard count > 0 else { return self }
+            func shifted(_ range: Range<Int>) -> Range<Int>? {
+                let lower = max(0, range.lowerBound - count), upper = max(0, range.upperBound - count)
+                return lower < upper ? lower..<upper : nil
+            }
+            var result = PreviewLayout()
+            result.text = String(text.dropFirst(count))
+            result.leaving = shifted(leaving) ?? 0..<0
+            result.exited = max(0, exited - count)
+            result.waiting = waiting.compactMap(shifted)
+            return result
+        }
+    }
+
     /// The units not typed yet, in order (raw words until their cleanup landed).
     public var pending: [LiveSegment] {
         if held { return [] }
         return units.filter { $0.id > (deliveredThrough ?? -1) }
     }
 
-    /// The undelivered text the preview shows: units (cleaned text replaces raw in place), then the speaking head.
-    /// The one derivation of what the keyboard says while dictating.
-    public var preview: String { LiveSegment.joined(pending.map(\.text) + [head]) }
+    /// The undelivered text the preview shows: units (cleaned text replaces raw in place), then the speaking head, with the
+    /// parts the row animates. The one derivation of what the keyboard says while dictating.
+    public var previewLayout: PreviewLayout {
+        var layout = PreviewLayout()
+        for unit in pending + [LiveSegment(id: -1, text: head, final: false)] {
+            let piece = unit.text.trimmingCharacters(in: .whitespaces)
+            guard !piece.isEmpty else { continue }
+            layout.text = LiveSegment.joined([layout.text, piece])
+            let range = (layout.text.count - piece.count)..<layout.text.count
+            if unit.id == inFlight {
+                layout.leaving = range
+                layout.exited = min(exited, piece.count)
+            } else if unit.id >= 0, unit.ready != true {
+                layout.waiting.append(range)
+            }
+        }
+        return layout
+    }
+
+    /// What the preview shows (`previewLayout`).
+    public var preview: String { previewLayout.text }
 
     /// Words are waiting to be typed or still being spoken.
     public var hasUndelivered: Bool { !pending.isEmpty || inFlight != nil }
@@ -105,6 +154,18 @@ public struct StagedDictation: Sendable, Equatable {
     public mutating func begin(_ unit: Int, typed: String) {
         inFlight = unit
         inFlightText = typed
+        exited = 0; started = false
+    }
+
+    /// A piece of the in-flight unit went into the field. Its leading separator is not the unit's own text; every grapheme after
+    /// it counts (the capital replaces a letter and adds none; the trailing separator is past the unit's end and is clamped).
+    public mutating func sent(_ piece: String) {
+        guard inFlight != nil else { return }
+        started = true
+        for character in piece {
+            if exited == 0, character.isWhitespace { continue }
+            exited += 1
+        }
     }
 
     /// The unit is in the field (the queue confirmed it).
@@ -112,6 +173,7 @@ public struct StagedDictation: Sendable, Equatable {
     public mutating func delivered(_ unit: Int, typed: String? = nil) {
         guard inFlight == unit else { return }
         inFlight = nil
+        exited = 0; started = false
         deliveredThrough = unit
         record += typed ?? inFlightText
         if record.count > Self.recordCharacters { record = String(record.suffix(Self.recordCharacters)) }
@@ -128,6 +190,7 @@ public struct StagedDictation: Sendable, Equatable {
         keptThrough = pending.last?.id ?? deliveredThrough
         held = true
         inFlight = nil; inFlightText = ""
+        exited = 0; started = false
         return keep(texts)
     }
 

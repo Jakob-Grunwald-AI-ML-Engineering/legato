@@ -186,7 +186,8 @@ public struct LiveDictationLink: Sendable {
 /// A *staged* run (iPhone, #312) publishes its units instead: each unit is a segment that is `ready` once its cleanup
 /// landed (or failed: the raw words stand), at once and not at the end. The keyboard shows the units that are not typed yet
 /// in its preview and types each ready one into the field once, in order. An admitted pause or the stop closes the open unit
-/// early (`flush()`); `finish()` makes every unit ready.
+/// early (`flush()`); `finish()` makes every unit ready. A *manual* staged run (#313) never closes a unit by itself: the open
+/// unit grows across sentences, pauses and any length, and only `flush()` (the user's send, the stop) closes it.
 public struct LiveDictationRun: Sendable, Equatable {
     /// A unit ends a sentence only with this many words; shorter ones ("Um.", "Yeah.", "I think.") join the next.
     public static let minUnitWords = 6
@@ -223,7 +224,12 @@ public struct LiveDictationRun: Sendable, Equatable {
     /// Units (by index) whose text is final in a staged run: cleaned, or cleanup failed and the raw words stand.
     private var ready: Set<Int> = []
 
-    public init(runID: String = UUID().uuidString, staged: Bool = false) { self.runID = runID; self.staged = staged }
+    /// Only `flush()` closes a unit: `addFinal` never does (not at a sentence end, not at `maxUnitWords`). Fixed for the run.
+    public let manual: Bool
+
+    public init(runID: String = UUID().uuidString, staged: Bool = false, manual: Bool = false) {
+        self.runID = runID; self.staged = staged; self.manual = manual
+    }
 
     /// The cleanup pass waiting for the field's text (`LiveDictationSnapshot.shadowAsk`).
     public private(set) var shadowAsk: String?
@@ -302,7 +308,7 @@ public struct LiveDictationRun: Sendable, Equatable {
         if openUnit, let last = units.last { units[units.count - 1] = last.lowerBound..<finals.count }
         else { units.append((finals.count - 1)..<finals.count); openUnit = true }
         let unit = rawText(units.count - 1)
-        guard complete || Self.endsUnit(unit) else { return nil }
+        guard complete || (!manual && Self.endsUnit(unit)) else { return nil }
         openUnit = false
         return unit
     }

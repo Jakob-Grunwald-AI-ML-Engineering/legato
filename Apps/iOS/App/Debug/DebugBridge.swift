@@ -93,6 +93,17 @@ import UIKit
             AppGroup.defaults.set(mode.rawValue, forKey: DictationSendSetting.modeKey)
             return AppController.shared.dictation.takeState
         }
+        // The "Send to field" setting of "As you speak" (App Group): `manual` or `sentence`.
+        harness.register("dictation-debug-live-send") { command in
+            guard command.args.count == 1, let send = DictationSendSetting.LiveSend(rawValue: command.args[0]) else { throw Usage.invalid }
+            AppGroup.defaults.set(send.rawValue, forKey: DictationSendSetting.liveSendKey)
+            return AppController.shared.dictation.takeState
+        }
+        // The preview's tap, as the keyboard sends it: a staged take sends its words so far (no keyboard needed).
+        harness.register("dictation-debug-send") { _ in
+            await AppController.shared.keyboardSession.sendNow()
+            return AppController.shared.dictation.takeState
+        }
         // The cleanup model of the sentence/line cleanup (App Group): `haiku` or `sonnet`.
         harness.register("dictation-debug-model") { command in
             guard command.args.count == 1, let model = ModelChoice(settingValue: command.args[0]) else { throw Usage.invalid }

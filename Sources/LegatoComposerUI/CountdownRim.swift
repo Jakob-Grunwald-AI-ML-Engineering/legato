@@ -1,5 +1,10 @@
 import SwiftUI
 
+/// The magic gradient's colours: the countdown rim, and the keyboard preview's shimmer and touch bloom.
+public enum MagicGradient {
+    public static let colors: [Color] = [.purple, .blue, .pink, .purple]
+}
+
 /// A rim that fills toward a deadline (host `systemUptime`): the automatic-send countdown of the instruction Send
 /// button, the dictation pill and the keyboard's word row. Draws nothing without a countdown.
 public struct CountdownRim<S: Shape>: View {
@@ -24,7 +29,7 @@ public struct CountdownRim<S: Shape>: View {
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: deadline == nil)) { _ in
             if let progress = Self.progress(now: ProcessInfo.processInfo.systemUptime, start: start, deadline: deadline) {
                 shape.trim(from: 0, to: progress).rotation(.degrees(startsAtTop ? -90 : 0))
-                    .stroke(AngularGradient(colors: [.purple, .blue, .pink, .purple], center: .center),
+                    .stroke(AngularGradient(colors: MagicGradient.colors, center: .center),
                             style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                     .shadow(color: .purple.opacity(0.6), radius: 3)
                     .allowsHitTesting(false)

@@ -19,6 +19,11 @@ public enum ChunkEntrance {
     /// The key-wait budget is 500 ms; a key waits at most `capMs` behind a burst.
     public static let capMs = 250.0
 
+    /// The iPhone staged units' typewriter gap (#313): one grapheme per piece at this pace, however long the unit. An
+    /// estimate, to tune on the phone with the preview's exit animation, which follows the pieces. The Mac and every other
+    /// chunk keep the frame pace and cap above.
+    public static let typewriterGapMs = 35.0
+
     public struct Plan: Sendable, Equatable {
         /// The insert's pieces in order; joined they are exactly the text.
         public var pieces: [String]
@@ -38,6 +43,14 @@ public enum ChunkEntrance {
         let count = min(n, max(2, Int(capMs / gap) + 1))
         let pieces = group(graphemes, into: count)
         return Plan(pieces: pieces, gapMs: gap)
+    }
+
+    /// The staged typewriter pace (`typewriterGapMs`): one grapheme per piece, no cap, so the burst lasts as long as the text
+    /// takes. Disabled (Reduce Motion), the insert is one piece with no gap, as in `plan`.
+    public static func typewriterPlan(_ text: String, enabled: Bool = true) -> Plan {
+        let graphemes = Array(text)
+        guard enabled, graphemes.count > 1 else { return Plan(pieces: text.isEmpty ? [] : [text], gapMs: 0) }
+        return Plan(pieces: graphemes.map(String.init), gapMs: typewriterGapMs)
     }
 
     /// `graphemes` in `count` even groups (the first `n % count` carry one more), in order, never inside a cluster.

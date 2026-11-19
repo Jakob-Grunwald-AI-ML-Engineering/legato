@@ -98,6 +98,8 @@ final class AppController {
             case .stop where self.keyboardSession.isOpen: await self.keyboardSession.closeGate()
             case .start: await self.readyMicrophone()
             case .stop: await self.keyboardSession.closeGate()
+            // The preview's tap: a staged take sends its words so far, with no hop and no change to the microphone.
+            case .send: await self.keyboardSession.sendNow()
             case .arm: await self.readyMicrophone()
             default: await self.microphone.releaseMicrophone()
             }

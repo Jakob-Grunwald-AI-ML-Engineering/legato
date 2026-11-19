@@ -31,6 +31,59 @@ private func line(_ sequence: Int, _ text: String) -> DictationRouteLine {
         DictationPipeline(cleaner: cleaner, sendMode: { .live }, supportsLive: true, liveTimeout: timeout, stagedLive: true)
     }
 
+    private func manual(_ cleaner: any SentenceCleaning, clock: any Clock<Duration> = ContinuousClock()) -> DictationPipeline {
+        DictationPipeline(cleaner: cleaner, sendMode: { .live }, clock: clock, supportsLive: true, liveSend: { .manual },
+                          liveTimeout: .milliseconds(200), stagedLive: true)
+    }
+
+    @Test func aManualRunIgnoresPausesAndSentenceEndsUntilSendNowFlushesAfterTheFinalizeBoundary() async throws {
+        let cleaner = Upper()
+        let pipeline = manual(cleaner)
+        pipeline.cutRecognizer = { true }
+        await pipeline.receive(line(0, "we should ship it on friday after the review."))
+        pipeline.boundary("endpoint")
+        #expect(cleaner.inputs.withLock { $0.isEmpty }, "Neither a sentence end nor a pause sends in manual mode")
+        await pipeline.sendNow()
+        #expect(cleaner.inputs.withLock { $0.isEmpty }, "The unit waits for the finalize boundary")
+        // The words the cut made final arrive before the boundary and belong to the sent unit.
+        await pipeline.receive(.init(sequence: 1, text: "and the budget", words: [], reason: "finalize"))
+        pipeline.boundary("finalize")
+        try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
+        #expect(cleaner.inputs.withLock { $0 } == ["we should ship it on friday after the review. and the budget"])
+        // Words after the cut start the next unit.
+        await pipeline.receive(line(2, "next thing"))
+        #expect(pipeline.liveRun?.snapshot.segments.map(\.id) == [0, 2])
+        await pipeline.reset()
+    }
+
+    @Test func sendNowSendsAfterTheTimeoutWhenNoFinalizeBoundaryComes() async throws {
+        let cleaner = Upper()
+        let clock = VirtualClock()
+        let pipeline = manual(cleaner, clock: clock)
+        pipeline.cutRecognizer = { true }
+        await pipeline.receive(line(0, "ship it friday"))
+        await pipeline.sendNow()
+        try await until { clock.sleeperCount > 0 }
+        #expect(cleaner.inputs.withLock { $0.isEmpty })
+        clock.advance(by: DictationPipeline.sendCutWait)
+        try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
+        #expect(cleaner.inputs.withLock { $0 } == ["ship it friday"])
+        await pipeline.reset()
+    }
+
+    @Test func sendNowSendsAtOnceWhenThereIsNothingToCutAndIsIgnoredWithoutAnOpenUnit() async throws {
+        let cleaner = Upper()
+        let pipeline = manual(cleaner)
+        pipeline.cutRecognizer = { false }
+        await pipeline.sendNow()
+        #expect(pipeline.liveRun == nil)
+        await pipeline.receive(line(0, "ship it friday"))
+        await pipeline.sendNow()
+        try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
+        #expect(cleaner.inputs.withLock { $0 } == ["ship it friday"])
+        await pipeline.reset()
+    }
+
     @Test func aPauseClosesTheOpenUnitEarlyAndItsCleanedTextIsPublishedWhileTheTakeGoesOn() async throws {
         let cleaner = Upper()
         let pipeline = staged(cleaner)

@@ -262,6 +262,13 @@ import LegatoVocabulary
         }
     }
 
+    /// The keyboard's send (a tap on the preview): a staged take sends the words so far to the field now and keeps listening.
+    /// Ignored without a take running; it needs no gate change, so it works from the background like Stop.
+    public func sendNow() async {
+        guard isOpen, gate.route == .dictation || dictation.hasActiveTake || dictation.isReplaying else { return }
+        await speechRoute.sendNow()
+    }
+
     private func perform(_ action: AudioGate.Action) async {
         routeClosedAt = now()
         switch action {

@@ -62,4 +62,19 @@ import Testing
         #expect(ChunkEntrance.plan("h") == .init(pieces: ["h"], gapMs: 0))
         #expect(ChunkEntrance.plan("").pieces.isEmpty)
     }
+
+    /// #313: the iPhone staged units type at 35 ms (an estimate), one grapheme per piece, however long the text.
+    @Test func theStagedTypewriterIsOneGraphemePerPieceAtItsOwnPaceWithoutACap() {
+        let family = "👨‍👩‍👧‍👦", accent = "e\u{301}"
+        let plan = ChunkEntrance.typewriterPlan("ab" + family + accent + "\r\n")
+        #expect(plan.pieces == ["a", "b", family, accent, "\r\n"] && plan.gapMs == ChunkEntrance.typewriterGapMs)
+        let long = String(repeating: "word ", count: 80)
+        let burst = ChunkEntrance.typewriterPlan(long)
+        #expect(burst.pieces.count == long.count && burst.durationMs == Double(long.count - 1) * 35 && burst.durationMs > ChunkEntrance.capMs)
+        // Reduce Motion, one grapheme and nothing: whole, no gap.
+        #expect(ChunkEntrance.typewriterPlan(long, enabled: false) == ChunkEntrance.Plan(pieces: [long], gapMs: 0))
+        #expect(ChunkEntrance.typewriterPlan("a").pieces == ["a"] && ChunkEntrance.typewriterPlan("").pieces.isEmpty)
+        // Every other chunk keeps the frame pace and the cap.
+        #expect(ChunkEntrance.plan(long).durationMs <= ChunkEntrance.capMs)
+    }
 }

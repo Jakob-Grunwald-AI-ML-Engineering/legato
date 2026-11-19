@@ -368,6 +368,27 @@ final class KeyboardController {
         let spoken = [(dictationPresentation.dictationTake ?? "").trimmingCharacters(in: .whitespacesAndNewlines), tail].filter { !$0.isEmpty }.joined(separator: " ")
         return spoken.isEmpty ? Self.listening : Self.previewTail(spoken)
     }
+    /// The preview's parts for the row's exit and shimmer, offsets into `dictationPreview` without its leading ellipsis.
+    /// Nil unless a staged take owns the preview.
+    var dictationPreviewLayout: StagedDictation.PreviewLayout? {
+        guard stagedTake.runID != nil, !stagedTake.isFinished else { return nil }
+        let layout = stagedTake.previewLayout
+        guard !layout.text.isEmpty else { return nil }
+        let shown = dictationPreview.map { $0.hasPrefix("…") ? $0.count - 1 : $0.count } ?? layout.text.count
+        return layout.dropping(layout.text.count - shown)
+    }
+
+    /// A tap on the preview row sends what is spoken so far to the field (`RequestCommand.send`); listening continues. Only
+    /// while a staged take shows words: the placeholder and a finished take do nothing.
+    var canSendPreview: Bool {
+        stagedTake.runID != nil && !stagedTake.complete && !stagedTake.held && !stagedTake.preview.isEmpty && fullAccess
+    }
+
+    func previewTapped() {
+        guard canSendPreview else { return }
+        trace?("preview tapped: send")
+        link.send(.send, id: UUID().uuidString)
+    }
     static let listening = "Listening…"
     /// Only the end of a long text is kept (cut at a word), so the row renders a bounded text and keeps the newest words.
     static let previewCharacters = 400
@@ -1052,7 +1073,12 @@ final class KeyboardController {
         journal.write(EditJournal.entries(for: events, t: Self.uptimeMs, field: queueDocumentID))
         for event in events {
             switch event {
-            case .sent(_, let lane):
+            case .sent(let op, let lane):
+                if lane != .user, case .insert(let piece) = op, stagedTake.inFlight != nil {
+                    // A piece of the staged unit typed into the field: the preview's letters leave in step with it.
+                    stagedTake.sent(piece)
+                    stagedActivity = ContinuousClock.now
+                }
                 if lane == .user {
                     correctionCapture?.userWrite()
                 }
@@ -1291,6 +1317,9 @@ final class KeyboardController {
     private(set) var stagedTake = StagedDictation()
     /// The unit in the queue now, for the stall bound (`StagedDictation.isStalled`).
     @ObservationIgnored private var stagedBegan: (editID: String, origin: String, at: ContinuousClock.Instant)?
+    /// When the in-flight unit began or its latest piece went into the field: the stall bound counts from here, so a long
+    /// typewriter burst is never cut short.
+    @ObservationIgnored private var stagedActivity = ContinuousClock.now
     /// Since when a finished take has waited for the one before it to be typed (bounded the same way).
     @ObservationIgnored private var stagedWaitingSince: ContinuousClock.Instant?
 
@@ -1299,7 +1328,7 @@ final class KeyboardController {
     private func driveStaged() {
         guard let runID = stagedTake.runID, runID == liveSnapshot?.runID else { return }
         if stagedTake.isFinished { return acknowledgeStaged() }
-        if let began = stagedBegan, stagedTake.isStalled(inFlightMs: Self.milliseconds(ContinuousClock.now - began.at),
+        if let began = stagedBegan, stagedTake.isStalled(inFlightMs: Self.milliseconds(ContinuousClock.now - stagedActivity),
                                                          unverifiedInput: queue.hasUnverifiedInput) {
             // The queue holds the unit (it cannot verify the field) or never confirmed it: the unit leaves the queue and it and
             // the rest of the take go to the kept-text row, so the next take is not blocked behind it.
@@ -1327,6 +1356,7 @@ final class KeyboardController {
         var edit = FieldQueue.Edit(kind: .typist, target: unit.text, atCursor: true, requiresVerifiedInsertion: true, isSpeech: true)
         edit.unit = .init(text: unit.text, capitalization: autocapitalization, contextFallback: fallback)
         stagedBegan = (edit.id, origin, ContinuousClock.now)
+        stagedActivity = ContinuousClock.now
         enqueue(edit) { [weak self] event in self?.stagedUnitFinished(runID: runID, unit: unit.id, origin: origin, event: event) }
         pump()
     }

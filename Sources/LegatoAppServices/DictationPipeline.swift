@@ -129,6 +129,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     @ObservationIgnored private var terms: [String]?
     @ObservationIgnored private var lastWarm: Date?
     @ObservationIgnored private let sendMode: @MainActor () -> DictationSendSetting.Mode
+    /// What sends a staged run's words (#313), read when the run starts: its unit rules stay fixed for the run.
+    @ObservationIgnored private let liveSend: @MainActor () -> DictationSendSetting.LiveSend
     @ObservationIgnored private let pauseSeconds: @MainActor () -> Double
     @ObservationIgnored private let clock: any Clock<Duration>
     @ObservationIgnored private let takeTimeout: (@Sendable (Int) -> Duration)?
@@ -308,6 +310,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     }
 
     public func boundary(_ reason: String) {
+        if reason == "finalize" { sendCutThrough("finalize") }
         guard mode == .live, reason == "endpoint" else { return }
         setVoiceActive(false)
         if cleanupDuringPauses { fieldCleanup?.request() }
@@ -318,9 +321,51 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// An admitted pause (`DictationActivity`: an endpoint, then 200 ms at -55 dBFS or below) closes the open unit of a staged
     /// run, whatever its length, and cleans it now, so the keyboard types what was said before the pause. Stop closes it too
     /// (`endLive`). The unit is not cut short by a forced split: those words wait in the head until their sentence ends.
+    /// A manual run (#313) has no pauses to close at: only `sendNow()` and the stop close its unit.
     private func closeUnitAtPause() {
-        guard stagedLive, var run = liveRun, !run.complete, let open = run.flush() else { return }
+        guard stagedLive, var run = liveRun, !run.complete, !run.manual, let open = run.flush() else { return }
         liveRun = run
+        Task { [weak self] in await self?.submitLive(open.text, key: open.key, run: run) }
+    }
+
+    /// How long `sendNow()` waits for the recognizer's `finalize` boundary before it sends what it has. An estimate: the
+    /// latency is logged (`live2.send`) to be measured on the phone.
+    public static let sendCutWait = Duration.milliseconds(1500)
+    /// A `sendNow()` cut in flight: the run it belongs to, when it began (on the pipeline's clock) and the fallback timer.
+    @ObservationIgnored private var sendCut: (runID: String, started: Duration, timeout: Task<Void, Never>?)?
+    /// Cuts the recognizer without ending the take (`DictationEngine.finalizeChunk`); false when nothing would answer. Set by
+    /// the route session that owns the engine.
+    @ObservationIgnored public var cutRecognizer: (@MainActor () async -> Bool)?
+
+    /// The user's send (a tap on the preview): everything spoken so far goes to cleanup as one unit and then to the field,
+    /// and listening continues. The recognizer is cut first so the words still in its head become final; the unit closes when
+    /// the `finalize` boundary arrives, after `sendCutWait`, or at once when there is nothing to cut. Words spoken after the
+    /// cut start the next unit. Ignored without a staged run in progress.
+    public func sendNow() async {
+        guard stagedLive, mode == .live, let run = liveRun, !run.complete, sendCut == nil else { return }
+        let runID = run.runID
+        sendCut = (runID, streamTime(), nil)
+        let timeout = Task { [weak self, clock] in
+            do { try await clock.sleep(for: Self.sendCutWait) } catch { return }
+            self?.sendCutThrough("timeout")
+        }
+        sendCut?.timeout = timeout
+        let cut = await cutRecognizer?() ?? false
+        if !cut { sendCutThrough("nocut") }
+    }
+
+    /// The cut is through (or gave up): the open unit closes and is cleaned. One call per `sendNow()`.
+    private func sendCutThrough(_ via: String) {
+        guard let cut = sendCut else { return }
+        sendCut = nil
+        cut.timeout?.cancel()
+        let waited = (streamTime() - cut.started).components
+        let ms = Int(waited.seconds * 1000 + waited.attoseconds / 1_000_000_000_000_000)
+        guard var run = liveRun, run.runID == cut.runID, !run.complete else { return }
+        let open = run.flush()
+        liveRun = run
+        diagnostics?("live2.send", ["run": String(run.runID.prefix(8)), "via": via, "ms": ms, "sent": open != nil])
+        guard let open else { return }
         Task { [weak self] in await self?.submitLive(open.text, key: open.key, run: run) }
     }
 
@@ -391,7 +436,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
                   cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore()), model: { DictationSendSetting.cleanupModel(in: store) }),
                   vocabulary: { (try? await VocabularyStore(fileURL: vocabularyURL).snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? [] },
                   sendMode: { DictationSendSetting.mode(in: defaults) }, pauseSeconds: { DictationSendSetting.pause(in: defaults) },
-                  supportsLive: supportsLive, groupsLiveHistory: groupsLiveHistory, stagedLive: stagedLive)
+                  supportsLive: supportsLive, liveSend: { DictationSendSetting.liveSend(in: defaults) },
+                  groupsLiveHistory: groupsLiveHistory, stagedLive: stagedLive)
     }
     public init(recentTakes: RecentTakesStore = RecentTakesStore(), history: (any HistoryStore)? = nil, cleaner: any SentenceCleaning, vocabulary: @escaping @Sendable () async -> [String] = { [] },
                 timeout: Duration = .milliseconds(2500),
@@ -400,7 +446,9 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
                 clock: any Clock<Duration> = ContinuousClock(),
                 takeTimeout: (@Sendable (Int) -> Duration)? = nil,
                 supportsLive: Bool = false,
+                liveSend: @escaping @MainActor () -> DictationSendSetting.LiveSend = { .sentence },
                 liveTimeout: Duration = .seconds(6), groupsLiveHistory: Bool = false, stagedLive: Bool = false) {
+        self.liveSend = liveSend
         self.groupsLiveHistory = groupsLiveHistory
         self.stagedLive = stagedLive
         self.supportsLive = supportsLive; self.liveTimeout = liveTimeout
@@ -869,7 +917,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         if let run = liveRun, !run.complete || late { return run }
         fieldCleanup?.reset()
         liveHistoryFallbacks = []
-        let run = LiveDictationRun(staged: stagedLive)
+        let run = LiveDictationRun(staged: stagedLive, manual: stagedLive && liveSend() == .manual)
         liveDeliveryAck = nil
         liveRun = run
         liveAnchor = String(contextBefore().suffix(600))

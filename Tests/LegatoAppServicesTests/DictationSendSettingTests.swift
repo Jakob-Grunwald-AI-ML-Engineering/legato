@@ -18,6 +18,15 @@ import LegatoAgent
         #expect(DictationSendSetting.cleanupModel(in: store) == .haiku)
     }
 
+    @Test func theLiveSendDefaultsToManualAndUnknownValuesFallBack() {
+        let store = defaults()
+        #expect(DictationSendSetting.liveSend(in: store) == .manual)
+        store.set("sentence", forKey: DictationSendSetting.liveSendKey)
+        #expect(DictationSendSetting.liveSend(in: store) == .sentence)
+        store.set("nonsense", forKey: DictationSendSetting.liveSendKey)
+        #expect(DictationSendSetting.liveSend(in: store) == .manual)
+    }
+
     @Test func theCleanupModelIsHaikuOrSonnet() {
         let store = defaults()
         store.set("sonnet", forKey: DictationSendSetting.cleanupModelKey)

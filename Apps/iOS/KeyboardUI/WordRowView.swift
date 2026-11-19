@@ -88,9 +88,13 @@ struct WordRowView: View {
     /// top and nothing re-centres or jumps. The row keeps its height; the font is the largest that fits two lines with air
     /// between them and clear of the row's edges (`WordRowHeight`, an estimate to measure on the phone).
     private func previewRow(_ text: String) -> some View {
-        PreviewRow(text: text)
+        PreviewRow(text: text, layout: controller.dictationPreviewLayout, canSend: controller.canSendPreview,
+                   onSend: { controller.previewTapped() })
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(text)
+        .accessibilityHint(controller.canSendPreview ? "Tap to send what you have said so far." : "")
+        .accessibilityAddTraits(controller.canSendPreview ? .isButton : [])
+        .accessibilityAction { if controller.canSendPreview { controller.previewTapped() } }
         .accessibilityIdentifier("keyboard.hint")
         .transition(.identity)
     }
@@ -399,11 +403,87 @@ private struct AutoFillSwitchKey: UIViewRepresentable {
     func updateUIView(_ button: UIButton, context: Context) {}
 }
 
+/// How a run of the preview text is drawn (`PreviewRenderer`): the unit being typed into the field, or closed words waiting
+/// for their cleanup.
+private enum PreviewRole: TextAttribute { case leaving, waiting }
+
+/// Draws the preview with per-glyph effects, by role, and leaves every glyph in its place so nothing reflows:
+/// - leaving glyphs lift `lift` and fade over `fadeSeconds` from their own exit time (the unit's letters, as the field types them);
+/// - waiting glyphs carry a slow magic-coloured shimmer.
+/// The lift, fade length and shimmer period are estimates, to tune on the phone.
+private struct PreviewRenderer: TextRenderer {
+    /// The clock of this frame.
+    var now: Date
+    /// When each leaving glyph (in order) went into the field; glyphs past the end have not.
+    var exits: [Date]
+    var shimmers: Bool
+    var lifts: Bool
+
+    static let lift: CGFloat = 6
+    static let fadeSeconds = 0.22
+    static let shimmerPeriod = 3.2
+
+    func draw(layout: Text.Layout, in context: inout GraphicsContext) {
+        var glyph = 0
+        var waiting: [Text.Layout.RunSlice] = []
+        for line in layout {
+            for run in line {
+                switch run[PreviewRole.self] {
+                case .leaving?:
+                    for slice in run {
+                        let progress = glyph < exits.count ? min(1, max(0, now.timeIntervalSince(exits[glyph]) / Self.fadeSeconds)) : 0
+                        glyph += 1
+                        guard progress < 1 else { continue }
+                        var copy = context
+                        copy.opacity = 1 - progress
+                        if lifts { copy.translateBy(x: 0, y: -Self.lift * CGFloat(1 - (1 - progress) * (1 - progress))) }
+                        copy.draw(slice)
+                    }
+                case .waiting?:
+                    context.draw(run)
+                    if shimmers { waiting.append(contentsOf: run) }
+                case nil:
+                    context.draw(run)
+                }
+            }
+        }
+        guard !waiting.isEmpty else { return }
+        // The waiting glyphs once more, filled with a magic gradient that drifts across the row.
+        let bounds = layout.reduce(CGRect.null) { $0.union($1.typographicBounds.rect) }
+        let phase = now.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: Self.shimmerPeriod) / Self.shimmerPeriod
+        var overlay = context
+        overlay.opacity = 0.6
+        overlay.clipToLayer { mask in for slice in waiting { mask.draw(slice) } }
+        let width = max(bounds.width, 1)
+        overlay.fill(Path(bounds), with: .linearGradient(Gradient(colors: MagicGradient.colors),
+                                                         startPoint: CGPoint(x: bounds.minX - width + 2 * width * phase, y: bounds.midY),
+                                                         endPoint: CGPoint(x: bounds.minX + 2 * width * phase, y: bounds.midY)))
+    }
+}
+
 /// The dictation preview text: a clearly readable secondary colour, one line centred vertically, two lines filling the row, and
-/// a soft fade at the first line's leading edge when the head of the text is cut off.
+/// a soft fade at the first line's leading edge when the head of the text is cut off. While a staged take shows it: the unit
+/// being typed leaves letter by letter, words waiting for cleanup shimmer, and a tap (which sends them) blooms from the
+/// touch point (`canSend`; a tap on nothing to send does nothing).
 private struct PreviewRow: View {
     let text: String
+    let layout: StagedDictation.PreviewLayout?
+    let canSend: Bool
+    let onSend: () -> Void
     @State private var textHeight = 0.0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// When each letter of the leaving unit went into the field (`PreviewRenderer.exits`).
+    @State private var exits: [Date] = []
+    /// The unit that just left, so the rest can settle into its place.
+    @State private var lastLeaving = ""
+    @State private var settleOffset: CGFloat = 0
+    @State private var bloom: (point: CGPoint, start: Date)?
+
+    private var leavingText: String {
+        guard let layout else { return "" }
+        return String(Array(layout.text)[layout.leaving.clamped(to: 0..<layout.text.count)])
+    }
+    private var exited: Int { layout?.exited ?? 0 }
 
     var body: some View {
         GeometryReader { proxy in
@@ -411,31 +491,113 @@ private struct PreviewRow: View {
             let size = WordRowHeight.previewFontSize(rowHeight: height)
             let single = WordRowHeight.previewIsSingleLine(textHeight: textHeight, size: size)
             let truncated = WordRowHeight.previewTruncated(textHeight: textHeight, rowHeight: height, prefixed: text.hasPrefix("…"))
-            Text(text)
-                .font(.system(size: CGFloat(size)))
-                .lineSpacing(CGFloat(WordRowHeight.previewLineSpacing(size: size)))
-                .foregroundStyle(Color(uiColor: .secondaryLabel))
-                .multilineTextAlignment(.leading)
-                .fixedSize(horizontal: false, vertical: true)
-                .onGeometryChange(for: Double.self) { Double($0.size.height) } action: { textHeight = $0 }
-                .frame(width: max(proxy.size.width - 2 * CGFloat(WordRowLayout.previewInset), 0), alignment: .leading)
-                .padding(.horizontal, CGFloat(WordRowLayout.previewInset))
-                .padding(.bottom, single ? 0 : CGFloat(WordRowHeight.previewPadding(rowHeight: height, size: size)))
-                .frame(width: proxy.size.width, height: proxy.size.height, alignment: single ? .leading : .bottomLeading)
-                .clipped()
-                .mask {
-                    VStack(spacing: 0) {
-                        // The first line's leading edge; the second line is solid.
-                        HStack(spacing: 0) {
-                            Color.black.frame(width: CGFloat(WordRowLayout.previewInset))
-                            LinearGradient(colors: [truncated ? .clear : .black, .black], startPoint: .leading, endPoint: .trailing)
-                                .frame(width: CGFloat(WordRowHeight.previewFadeWidth))
-                            Color.black
-                        }
-                        .frame(height: proxy.size.height / 2)
+            let animating = exits.contains { Date().timeIntervalSince($0) < PreviewRenderer.fadeSeconds + 0.1 }
+            let shimmers = !reduceMotion && !(layout?.waiting.isEmpty ?? true)
+            TimelineView(.animation(minimumInterval: 1.0 / 60, paused: !animating && !shimmers)) { timeline in
+                composed
+                    .font(.system(size: CGFloat(size)))
+                    .lineSpacing(CGFloat(WordRowHeight.previewLineSpacing(size: size)))
+                    .foregroundStyle(Color(uiColor: .secondaryLabel))
+                    .multilineTextAlignment(.leading)
+                    .textRenderer(PreviewRenderer(now: timeline.date, exits: exits, shimmers: shimmers, lifts: !reduceMotion))
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .onGeometryChange(for: Double.self) { Double($0.size.height) } action: { textHeight = $0 }
+            .offset(x: settleOffset)
+            .frame(width: max(proxy.size.width - 2 * CGFloat(WordRowLayout.previewInset), 0), alignment: .leading)
+            .padding(.horizontal, CGFloat(WordRowLayout.previewInset))
+            .padding(.bottom, single ? 0 : CGFloat(WordRowHeight.previewPadding(rowHeight: height, size: size)))
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: single ? .leading : .bottomLeading)
+            .clipped()
+            .mask {
+                VStack(spacing: 0) {
+                    // The first line's leading edge; the second line is solid.
+                    HStack(spacing: 0) {
+                        Color.black.frame(width: CGFloat(WordRowLayout.previewInset))
+                        LinearGradient(colors: [truncated ? .clear : .black, .black], startPoint: .leading, endPoint: .trailing)
+                            .frame(width: CGFloat(WordRowHeight.previewFadeWidth))
                         Color.black
                     }
+                    .frame(height: proxy.size.height / 2)
+                    Color.black
                 }
+            }
+            .overlay { bloomOverlay(size: proxy.size) }
+            .contentShape(Rectangle())
+            .onTapGesture(coordinateSpace: .local) { point in
+                guard canSend else { return }
+                bloom = (point, Date())
+                onSend()
+                Task { try? await Task.sleep(for: .milliseconds(450)); bloom = nil }
+            }
+            .onChange(of: exited) { old, new in
+                if new > old { exits.append(contentsOf: Array(repeating: Date(), count: new - old)) } else { exits = [] }
+            }
+            .onChange(of: leavingText) { old, new in
+                if new.isEmpty {
+                    exits = []
+                    settle(after: old, fontSize: CGFloat(size), width: proxy.size.width)
+                }
+            }
+        }
+    }
+
+    /// The text with its roles marked (`PreviewRole`); a plain text when no staged take owns it.
+    private var composed: Text {
+        let prefix = text.hasPrefix("…") ? "…" : ""
+        guard let layout, layout.text == String(text.dropFirst(prefix.count)) else { return Text(text) }
+        let body = Array(layout.text)
+        var roles = [PreviewRole?](repeating: nil, count: body.count)
+        for range in layout.waiting { for index in range.clamped(to: 0..<body.count) { roles[index] = .waiting } }
+        for index in layout.leaving.clamped(to: 0..<body.count) { roles[index] = .leaving }
+        var result = Text(prefix)
+        var start = 0
+        while start < body.count {
+            var end = start + 1
+            while end < body.count, roles[end] == roles[start] { end += 1 }
+            var piece = Text(String(body[start..<end]))
+            if let role = roles[start] { piece = piece.customAttribute(role) }
+            result = Text("\(result)\(piece)")
+            start = end
+        }
+        return result
+    }
+
+    /// The unit has left: the rest was laid out behind it and now starts where the unit did, so it slides from where it stood
+    /// (a short move; the distance is the unit's width, at most `maxSettle`, an estimate). Reduce Motion: no move.
+    private static let maxSettle: CGFloat = 48
+    private func settle(after unit: String, fontSize: CGFloat, width: CGFloat) {
+        guard !reduceMotion, !unit.isEmpty else { return }
+        let measured = unit.size(withAttributes: [.font: UIFont.systemFont(ofSize: fontSize)]).width
+        var instant = Transaction(animation: nil)
+        instant.disablesAnimations = true
+        withTransaction(instant) { settleOffset = min(Self.maxSettle, measured) }
+        Task { @MainActor in
+            withAnimation(.easeOut(duration: 0.22)) { settleOffset = 0 }
+        }
+    }
+
+    /// A soft bloom of the magic colours growing from the touch point across the whole row (350 ms, low opacity); with Reduce
+    /// Motion a brief plain highlight.
+    @ViewBuilder
+    private func bloomOverlay(size: CGSize) -> some View {
+        if let bloom {
+            TimelineView(.animation) { timeline in
+                let t = min(1, max(0, timeline.date.timeIntervalSince(bloom.start) / (reduceMotion ? 0.2 : 0.35)))
+                Canvas { context, canvas in
+                    if reduceMotion {
+                        context.fill(Path(CGRect(origin: .zero, size: canvas)), with: .color(Color.primary.opacity(0.1 * (1 - t))))
+                        return
+                    }
+                    let reach = max(hypot(bloom.point.x, bloom.point.y), hypot(canvas.width - bloom.point.x, bloom.point.y),
+                                    hypot(bloom.point.x, canvas.height - bloom.point.y), hypot(canvas.width - bloom.point.x, canvas.height - bloom.point.y))
+                    let radius = max(1, reach * (1 - (1 - t) * (1 - t)))
+                    let colors = MagicGradient.colors.map { $0.opacity(0.28 * (1 - t * t)) }
+                    context.fill(Path(CGRect(origin: .zero, size: canvas)),
+                                 with: .radialGradient(Gradient(colors: colors + [.clear]), center: bloom.point, startRadius: 0, endRadius: radius))
+                }
+            }
+            .allowsHitTesting(false)
         }
     }
 }

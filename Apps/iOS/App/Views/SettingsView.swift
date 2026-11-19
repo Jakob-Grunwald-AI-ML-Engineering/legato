@@ -11,6 +11,7 @@ struct SettingsView: View {
     @AppStorage("microphone.liveModel") private var liveModel = ModelChoice.haiku.rawValue
     @AppStorage("microphone.personalPrompt") private var personalPrompt = ""
     @AppStorage(DictationSendSetting.modeKey, store: AppGroup.defaults) private var dictationSend = DictationSendSetting.defaultMode.rawValue
+    @AppStorage(DictationSendSetting.liveSendKey, store: AppGroup.defaults) private var liveSend = DictationSendSetting.defaultLiveSend.rawValue
     @AppStorage(DictationSendSetting.pauseKey, store: AppGroup.defaults) private var dictationPause = DictationSendSetting.defaultPause
     @AppStorage(DictationSendSetting.cleanupModelKey, store: AppGroup.defaults) private var cleanupModel = DictationSendSetting.defaultCleanupModel.settingValue
     @AppStorage("voiceIsolation.enabled") private var onlyMyVoice = false
@@ -83,12 +84,16 @@ struct SettingsView: View {
                     }.accessibilityIdentifier("settings.dictationPause")
                 }
                 if dictationSend == DictationSendSetting.Mode.live.rawValue {
+                    Picker("Send to field", selection: $liveSend) {
+                        Text("When I tap the preview").tag(DictationSendSetting.LiveSend.manual.rawValue)
+                        Text("At each sentence end").tag(DictationSendSetting.LiveSend.sentence.rawValue)
+                    }.accessibilityIdentifier("settings.liveSend")
                     Picker("Dictation cleanup model", selection: $cleanupModel) {
                         ForEach(ModelChoice.cleanupChoices, id: \.settingValue) { Text($0.label).tag($0.settingValue) }
                     }.accessibilityIdentifier("settings.dictationCleanupModel")
                 }
             } header: { Text("Dictation") } footer: {
-                Text("As you speak types your words into the field at once and corrects single words as they firm up; each finished sentence is then tidied in place. On stop holds the whole take and types it once, cleaned as one text, when you stop. After a pause also types when you stop speaking for the pause. Haiku is quicker, Sonnet more careful.")
+                Text("As you speak keeps your words in the preview above the keys; tapping it (or Stop) sends them to the field, cleaned, or each finished sentence is sent automatically. On stop holds the whole take and types it once, cleaned as one text, when you stop. After a pause also types when you stop speaking for the pause. Haiku is quicker, Sonnet more careful.")
             }
             Section {
                 ProviderKeyRow(name: "Claude", service: "de.gruenwald.legato.claude")
