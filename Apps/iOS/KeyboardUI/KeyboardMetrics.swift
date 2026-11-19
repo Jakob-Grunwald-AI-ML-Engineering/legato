@@ -73,12 +73,9 @@ struct KeyGeometry {
     var keyHeight: CGFloat { CGFloat(KeyboardHeights.keyHeight(landscape: landscape)) * vScale }
     var rowPitch: CGFloat { CGFloat(KeyboardHeights.rowPitch(landscape: landscape)) * vScale }
     /// Distance from the top of the keyboard view to the first row.
-    var firstRowTop: CGFloat { Self.firstRowTop(landscape: landscape) * vScale }
+    var firstRowTop: CGFloat { CGFloat(KeyboardHeights.firstRowTop(landscape: landscape)) * vScale }
     static let keyRadius: CGFloat = 8.5
     var radius: CGFloat { Self.keyRadius }
-
-    static func firstRowTop(landscape: Bool) -> CGFloat { CGFloat(KeyboardHeights.firstRowTop(landscape: landscape)) }
-    static func height(landscape: Bool) -> CGFloat { CGFloat(KeyboardHeights.height(landscape: landscape)) }
 
     /// Key widths relative to the portrait or landscape reference.
     private var unit: CGFloat { keyWidth / (landscape ? 66.2 : 33.6) }

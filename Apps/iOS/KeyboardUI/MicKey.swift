@@ -87,22 +87,31 @@ struct MicKey: View {
         .accessibilityHint("Swipe left to undo, right to redo, down or up to resize the keyboard.")
     }
 
-    /// The swipes, faintly at the key's edges: undo and redo at the sides, and the way to the other layout.
+    /// The swipes, faintly at the key's edges: undo and redo at the sides, and the way to the other layout under or over the
+    /// glyph (only on a key tall enough to keep it clear of the glyph: not the 27 pt landscape key).
     private func hints(ink: Color) -> some View {
         let full = controller.mode == .full
-        return ZStack {
-            hint("chevron.left").frame(maxWidth: .infinity, alignment: .leading)
-            hint("chevron.right").frame(maxWidth: .infinity, alignment: .trailing)
-            hint(full ? "chevron.down" : "chevron.up").frame(maxHeight: .infinity, alignment: full ? .bottom : .top)
+        return GeometryReader { proxy in
+            ZStack {
+                hint("chevron.left").frame(maxWidth: .infinity, alignment: .leading)
+                hint("chevron.right").frame(maxWidth: .infinity, alignment: .trailing)
+                if proxy.size.height >= Self.verticalHintHeight {
+                    hint(full ? "chevron.down" : "chevron.up").frame(maxHeight: .infinity, alignment: full ? .bottom : .top)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .frame(width: proxy.size.width, height: proxy.size.height)
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
         .foregroundStyle(ink.opacity(0.3))
         .accessibilityHidden(true)
         .allowsHitTesting(false)
     }
 
+    /// The least key height with room for a vertical hint beside the 20 pt glyph.
+    private static let verticalHintHeight: CGFloat = 38
+
     private func hint(_ symbol: String) -> some View {
-        Image(systemName: symbol).font(.system(size: 9, weight: .semibold))
+        Image(systemName: symbol).font(.system(size: 8, weight: .semibold))
     }
 }

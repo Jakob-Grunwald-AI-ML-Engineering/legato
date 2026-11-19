@@ -48,7 +48,7 @@ public struct TopRowLayout: Sendable, Equatable {
     public let transcript: KeyRect
     public let side: DictationKeySide
 
-    public static let textReturnWidth = 60.0
+    public static let textReturnWidth = 72.0
 
     public func cell(_ slot: Slot) -> Cell? { cells.first { $0.slot == slot } }
 

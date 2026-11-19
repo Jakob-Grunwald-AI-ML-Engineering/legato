@@ -70,7 +70,7 @@ import Testing
     @Test func aWordedReturnGetsItsWidth() {
         let mini = layout(.minimised, returnStyle: .text)
         #expect(close(mini.cell(.returnKey)!.face.width, TopRowLayout.textReturnWidth))
-        #expect(close(mini.cell(.dictation)!.face.width, 43.33 + 6 + 60))
+        #expect(close(mini.cell(.dictation)!.face.width, 43.33 + 6 + TopRowLayout.textReturnWidth))
     }
 
     @Test func minimisedTouchAreasTileTheKeyColumn() {
