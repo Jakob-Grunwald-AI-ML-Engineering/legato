@@ -1525,8 +1525,11 @@ private struct SeededRandom {
             queue.paced = { true }
             queue.onDrop = { drops.append($0) }
             let words = point.split(separator: " ").map(String.init)
-            let script = words.indices.map { (ms: 400 + 150 * $0, text: words[...$0].joined(separator: " ")) }
-                + [(ms: 400 + 150 * words.count + 900, text: point.prefix(1).uppercased() + point.dropFirst() + ".")]
+            var script: [(ms: Int, text: String)] = words.indices.map { index -> (ms: Int, text: String) in
+                (ms: 400 + 150 * index, text: words[...index].joined(separator: " "))
+            }
+            let cleaned: String = point.prefix(1).uppercased() + String(point.dropFirst()) + "."
+            script.append((ms: 400 + 150 * words.count + 900, text: cleaned))
             await replay(queue, field: field, run: "take\(index)", script: script,
                          events: [(ms: 400 + 150 * words.count / 2, act: { field.recreate() })])
         }

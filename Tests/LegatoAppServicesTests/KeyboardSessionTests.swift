@@ -434,7 +434,7 @@ private final class HeldCleaner: SentenceCleaning {
 
     private func session(_ cleaner: any SentenceCleaning, manual: Bool) async throws -> (DictationPipeline, KeyboardSession) {
         let pipeline = DictationPipeline(history: history, cleaner: cleaner, sendMode: { .live }, supportsLive: true,
-                                         liveSend: { manual ? .manual : .sentence }, liveTimeout: .milliseconds(500),
+                                         liveSend: { manual ? .manual : .sentence }, liveTimeout: .seconds(30),
                                          groupsLiveHistory: true, stagedLive: true)
         let logged = self.logged
         pipeline.diagnostics = { event, _ in logged.add(event) }

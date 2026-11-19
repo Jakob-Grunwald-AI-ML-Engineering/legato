@@ -13,14 +13,26 @@ private final class ScriptedCleaner: SentenceCleaning {
     let delays: [Int: Duration]
     let failing: Set<Int>
     let override: [Int: String]
-    init(delays: [Int: Duration] = [:], failing: Set<Int> = [], override: [Int: String] = [:]) {
-        self.delays = delays; self.failing = failing; self.override = override
+    /// When set, every call is held until this many are in flight at once (or a 20 s hang guard), so the peak
+    /// is reached by arrival, not by timing.
+    let barrier: Int?
+    private let arrived = AsyncStream<Void>.makeStream()
+    init(delays: [Int: Duration] = [:], failing: Set<Int> = [], override: [Int: String] = [:], holdUntilInFlight barrier: Int? = nil) {
+        self.delays = delays; self.failing = failing; self.override = override; self.barrier = barrier
     }
     func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence {
         calls.withLock { $0.append(.init(sequence: input.sequence, context: input.dictation)) }
         let now = running.withLock { $0 += 1; return $0 }
         peak.withLock { $0 = max($0, now) }
         defer { running.withLock { $0 -= 1 } }
+        if let barrier {
+            if now >= barrier { arrived.continuation.finish() }
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { for await _ in self.arrived.stream {} }
+                group.addTask { try? await Task.sleep(for: .seconds(20)) }
+                await group.next(); group.cancelAll()
+            }
+        }
         try await Task.sleep(for: delays[input.sequence] ?? .milliseconds(1))
         if failing.contains(input.sequence) { throw SentenceCleanupError.providerError }
         return .init(sentenceID: input.sentenceID, sequence: input.sequence, text: override[input.sequence] ?? input.text.uppercased())
@@ -50,8 +62,9 @@ private func waitFor(_ count: Int, _ collected: Collected) async throws {
 @Test func unitsAreCleanedConcurrentlyUpToTheLimitAndDeliveredInOrder() async throws {
     let out = Collected()
     // Earlier units are slower: a later unit must neither wait for a slot nor overtake in delivery.
-    let cleaner = ScriptedCleaner(delays: Dictionary(uniqueKeysWithValues: (0..<8).map { ($0, Duration.milliseconds(120 - 10 * $0)) }))
-    let pipeline = DictationCleanupPipeline(cleaner: cleaner, timeout: .seconds(2)) { out.add($0) }
+    let cleaner = ScriptedCleaner(delays: Dictionary(uniqueKeysWithValues: (0..<8).map { ($0, Duration.milliseconds(120 - 10 * $0)) }),
+                                  holdUntilInFlight: 4)
+    let pipeline = DictationCleanupPipeline(cleaner: cleaner, timeout: .seconds(60)) { out.add($0) }
     for i in 0..<8 { await pipeline.submit(sequence: i, lineID: "l\(i)", raw: "w\(i)", textBefore: "") }
     try await waitFor(8, out)
     #expect(cleaner.peak.withLock { $0 } == 4, "The default is four requests at once")

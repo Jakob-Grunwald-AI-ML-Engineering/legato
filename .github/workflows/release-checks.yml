@@ -1,5 +1,5 @@
 # Release-path checks, three parallel jobs. Budget 10 minutes cold, except the iOS Release build + scan (~11 min:
-# a Release build of MLX is slow, and the scan needs Release). They run only on a push to `live`, never per merge.
+# a Release build of MLX is slow, and the scan needs Release) and real-deps (over 12 min cold on 2026-11-19). They run only on a push to `live`, never per merge.
 # Called by release.yml before `ship`; dispatch this workflow directly to run only the checks (it cannot ship,
 # push, tag or publish).
 name: release-checks
@@ -31,7 +31,7 @@ jobs:
   real-deps:
     # `swift test` against the real MLX, FluidAudio and Hugging Face libraries (the gate uses stubs).
     runs-on: macos-26
-    timeout-minutes: 12
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - run: scripts/ci/release.sh real-deps
