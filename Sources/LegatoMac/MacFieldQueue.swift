@@ -990,11 +990,13 @@ public final class MacFieldQueue {
         /// there is one (it usually landed), `.any` takes either.
         func shows(_ region: Region, at start: Int, _ pass: ShiftPass) -> Bool {
             let texts = pass == .landed ? [region.landing ?? region.current] : [region.current] + (region.landing.map { [$0] } ?? [])
-            return texts.contains { text in
+            // Loops, not closures: the release toolchain treats a closure capturing `doc` as a sending risk.
+            for text in texts {
                 let length = String(text).utf16.count
-                guard text.isEmpty || doc.string(start, length) == String(text) else { return false }
-                return pass != .fitted && !text.isEmpty || fits(region, at: start, length: length)
+                guard text.isEmpty || doc.string(start, length) == String(text) else { continue }
+                if pass != .fitted && !text.isEmpty || fits(region, at: start, length: length) { return true }
             }
+            return false
         }
         /// The text around the region (`before` ending at `start`, `after` following its text) is what it was. Before it:
         /// all the element's text there ends what was before it (a nested element starts later), or the same full context.
@@ -1032,7 +1034,9 @@ public final class MacFieldQueue {
         // Edits not placed yet were read in the old element: their scope shows under the same shift.
         func placed(_ edit: Edit, _ delta: Int) -> Bool { doc.string(edit.range.location + delta, edit.range.length) == edit.scope }
         func holds(_ delta: Int, _ pass: ShiftPass) -> Bool {
-            anchored.allSatisfy { shows($0, at: $0.start + delta, pass) } && edits.allSatisfy { placed($0.edit, delta) }
+            for region in anchored where !shows(region, at: region.start + delta, pass) { return false }
+            for pending in edits where !placed(pending.edit, delta) { return false }
+            return true
         }
         let shift = anchored.isEmpty && edits.isEmpty ? nil
             : ShiftPass.allCases.lazy.compactMap { pass in candidates.first { holds($0, pass) } }.first
