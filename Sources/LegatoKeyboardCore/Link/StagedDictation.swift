@@ -5,7 +5,7 @@ import Foundation
 /// - the preview (`preview`): the units not typed yet, then the head, as one text;
 /// - the next unit to type (`nextReady`): the first undelivered unit, once its text is final, one at a time;
 /// - the take's own record of what it typed (`record`): the context for the separator when the proxy's cannot be trusted;
-/// - recovery (`hold`): what goes to the kept-text row when delivery stops.
+/// - recovery (`hold`, `resume`): when delivery stops the undelivered units stay in the preview as pending, and the person sends them again.
 /// It never edits typed text and it never types anything itself: the controller types each unit through the field queue.
 public struct StagedDictation: Sendable, Equatable {
     public private(set) var runID: String?
@@ -18,11 +18,8 @@ public struct StagedDictation: Sendable, Equatable {
     public private(set) var deliveredThrough: Int?
     /// The unit being typed now.
     public private(set) var inFlight: Int?
-    /// Delivery stopped: nothing more is typed, what remains went to recovery (`hold`).
+    /// Delivery stopped: nothing more is typed until `resume`; the undelivered units stay in the preview (`hold`).
     public private(set) var held = false
-    private var keptThrough: Int?
-    /// Everything handed to recovery so far, in order: what the kept-text row shows for this take.
-    public private(set) var kept = ""
     /// What this take typed, in order, exactly as it went into the field.
     public private(set) var record = ""
     private var inFlightText = ""
@@ -40,7 +37,7 @@ public struct StagedDictation: Sendable, Equatable {
 
     /// A unit is confirmed a moment after its last piece went out (its typewriter burst can last seconds). While the queue cannot verify the
     /// field (`hasUnverifiedInput`: after the keyboard came back or the host reported text the proxy had not caught up with)
-    /// it will not start it, and nothing in the field may lift that: past this the unit and the rest go to the kept-text row.
+    /// it will not start it, and nothing in the field may lift that: past this delivery is held and the unit and the rest stay pending in the preview.
     public static let unverifiedStallMs = 2_000.0
     /// Whatever else keeps a unit from being confirmed (a busy host) is bounded too.
     public static let stallMs = 10_000.0
@@ -54,19 +51,15 @@ public struct StagedDictation: Sendable, Equatable {
 
     // MARK: Snapshots
 
-    /// A snapshot of the run. Returns `kept` when delivery is held and units that became ready after the hold were added to
-    /// it, else nil. A snapshot of another run starts the take over; an older one of the same run is ignored.
-    @discardableResult
-    public mutating func receive(_ snapshot: LiveDictationSnapshot) -> String? {
+    /// A snapshot of the run. A snapshot of another run starts the take over; an older one of the same run is ignored.
+    public mutating func receive(_ snapshot: LiveDictationSnapshot) {
         if snapshot.runID != runID { self = StagedDictation(); runID = snapshot.runID }
-        guard snapshot.version >= version else { return nil }
+        guard snapshot.version >= version else { return }
         version = snapshot.version
         units = snapshot.segments.filter(\.final)
         head = snapshot.segments.last(where: { !$0.final })?.text ?? ""
         complete = snapshot.complete
-        if held { return keepReady() }
-        skipEmpty()
-        return nil
+        if !held { skipEmpty() }
     }
 
     /// The preview as one text, with where its parts are (character offsets into `text`).
@@ -96,8 +89,7 @@ public struct StagedDictation: Sendable, Equatable {
 
     /// The units not typed yet, in order (raw words until their cleanup landed).
     public var pending: [LiveSegment] {
-        if held { return [] }
-        return units.filter { $0.id > (deliveredThrough ?? -1) }
+        units.filter { $0.id > (deliveredThrough ?? -1) }
     }
 
     /// The undelivered text the preview shows: units (cleaned text replaces raw in place), then the speaking head, with the
@@ -143,12 +135,9 @@ public struct StagedDictation: Sendable, Equatable {
 
     // MARK: Delivery
 
-    /// The last unit that is dealt with: typed, or (once held) handed to the kept-text row. The receipt carries it, so a later
-    /// keyboard appearance knows which units of the take are still unhandled.
-    public var handledThrough: Int? {
-        guard held, let keptThrough else { return deliveredThrough }
-        return max(keptThrough, deliveredThrough ?? -1)
-    }
+    /// The last unit that is in the field. The receipt carries it, so a later keyboard appearance knows which units of the take
+    /// are still unhandled.
+    public var handledThrough: Int? { deliveredThrough }
 
     /// `unit` is being typed as `typed`.
     public mutating func begin(_ unit: Int, typed: String) {
@@ -181,39 +170,25 @@ public struct StagedDictation: Sendable, Equatable {
         skipEmpty()
     }
 
-    /// Stops delivery: the units not in the field (the one being typed included, it may not have landed) go to `kept`, which
-    /// is returned. Units that become ready later are added by `receive`. Nil when nothing is left.
-    @discardableResult
-    public mutating func hold() -> String? {
-        guard !held else { return nil }
-        let texts = pending.map(\.text)
-        keptThrough = pending.last?.id ?? deliveredThrough
+    /// Stops delivery: nothing more is typed. The units not in the field (the one being typed included, it may not have landed)
+    /// stay pending, so the preview shows them and `resume` can send them again.
+    public mutating func hold() {
+        guard !held else { return }
         held = true
         inFlight = nil; inFlightText = ""
         exited = 0; started = false
-        return keep(texts)
     }
 
-    private mutating func keepReady() -> String? {
-        var texts: [String] = []
-        for unit in units where unit.id > (keptThrough ?? -1) {
-            guard unit.ready == true else { break }
-            texts.append(unit.text)
-            keptThrough = unit.id
-        }
-        return keep(texts)
-    }
-
-    private mutating func keep(_ texts: [String]) -> String? {
-        let text = LiveSegment.joined(texts)
-        guard !text.isEmpty else { return nil }
-        kept = LiveSegment.joined([kept, text])
-        return kept
+    /// Delivery goes on from the first unit not in the field (the person moved the caret and sent them again).
+    public mutating func resume() {
+        guard held else { return }
+        held = false
+        skipEmpty()
     }
 
     /// A unit the queue dropped may still be in the field (a key, a tap or a late report spoiled its check after the text went
-    /// out). Typing it again, or keeping it for Insert, would put it there twice: it counts as delivered when a mutation was
-    /// issued and the scope shows all of it, or the field's window shows its words. Anything less certain is kept, never retyped.
+    /// out). Typing it again would put it there twice: it counts as delivered when a mutation was
+    /// issued and the scope shows all of it, or the field's window shows its words. Anything less certain stays pending for the person to send again, never retyped on its own.
     public static func landed(_ drop: FieldQueue.Drop, report: FieldQueue.Report) -> Bool {
         guard drop.issuedMutation else { return false }
         if let partial = drop.partial, partial == drop.text { return true }

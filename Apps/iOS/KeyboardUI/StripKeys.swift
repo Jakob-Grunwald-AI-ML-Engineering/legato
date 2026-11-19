@@ -7,8 +7,7 @@ import SwiftUI
 ///
 /// - `onPress`: the finger went down (feedback, delete).
 /// - `onRelease`: the touch is over, however it ended (lifted, cancelled by iOS, the view left); may come without a press.
-/// - `onTap`: lifted without having moved; a swipe that starts on the key does not tap it.
-/// The parent adds the strip's `.simultaneousGesture(swipe)`.
+/// - `onTap`: lifted within `tapSlop` of where it went down; a drag across the key does not tap it.
 struct StripKey<Label: View>: View {
     var insets: EdgeInsets
     var fill: UIColor = KeyColors.key

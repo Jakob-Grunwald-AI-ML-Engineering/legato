@@ -104,6 +104,11 @@ import UIKit
             await AppController.shared.keyboardSession.sendNow()
             return AppController.shared.dictation.takeState
         }
+        // The preview's swipe up: the words so far are sent as spoken, uncleaned.
+        harness.register("dictation-debug-send-raw") { _ in
+            await AppController.shared.keyboardSession.sendRawNow()
+            return AppController.shared.dictation.takeState
+        }
         // The cleanup model of the sentence/line cleanup (App Group): `haiku` or `sonnet`.
         harness.register("dictation-debug-model") { command in
             guard command.args.count == 1, let model = ModelChoice(settingValue: command.args[0]) else { throw Usage.invalid }

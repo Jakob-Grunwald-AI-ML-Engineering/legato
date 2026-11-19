@@ -77,7 +77,7 @@ final class KeyboardViewController: UIInputViewController {
         return landscape ? Self.landscapeHeight : Self.portraitHeight
     }
 
-    /// The layout changed (the chevron, a swipe, the debug height): resize
+    /// The layout changed (the chevron, the debug height): resize
     /// with the content's cross-fade, and log the height asked for against the one laid out.
     private func layoutChanged(reason: String) {
         #if DEBUG

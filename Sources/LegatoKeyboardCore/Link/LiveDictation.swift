@@ -421,10 +421,10 @@ public struct LiveDictationRun: Sendable, Equatable {
         let text = text.trimmingCharacters(in: .whitespaces)
         guard let unit = unitIndex(ofKey: key) else { return false }
         let shown = shownText(unit)
+        // A staged unit is published the moment its cleanup lands (or its raw words stand), and not changed again.
+        if staged, ready.contains(unit) { return false }
         cleaned[unit] = text
         if staged {
-            // A staged unit is published the moment its cleanup lands, and not changed again.
-            guard !ready.contains(unit) else { return false }
             ready.insert(unit); version += 1
             return true
         }

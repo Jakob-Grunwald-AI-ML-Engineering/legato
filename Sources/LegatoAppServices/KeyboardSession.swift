@@ -168,7 +168,7 @@ import LegatoVocabulary
         if let action = gate.abandon() { await perform(action) }
         isOpen = false; probe.cancel()
         // The take is the keyboard appearance's: it ends as a stop would, in the
-        // background, so its final words are cleaned, written to History and offered to the keyboard's kept-text row. Closing
+        // background, so its final words are cleaned and written to History. Closing
         // used to cancel the end and leave the run open for good, and nothing of it was recorded past its first words.
         let earlierFinish = takeFinish; takeFinish = nil; takeGeneration += 1
         let sink = self.sink
@@ -267,6 +267,12 @@ import LegatoVocabulary
     public func sendNow() async {
         guard isOpen, gate.route == .dictation || dictation.hasActiveTake || dictation.isReplaying else { return }
         await speechRoute.sendNow()
+    }
+
+    /// The keyboard's raw send (a swipe up on the preview): like `sendNow()`, but the words are typed as spoken, uncleaned.
+    public func sendRawNow() async {
+        guard isOpen, gate.route == .dictation || dictation.hasActiveTake || dictation.isReplaying else { return }
+        await speechRoute.sendRawNow()
     }
 
     private func perform(_ action: AudioGate.Action) async {

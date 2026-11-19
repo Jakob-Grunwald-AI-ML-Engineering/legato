@@ -55,6 +55,12 @@ import LegatoSoniox
         await pipeline?.sendNow()
     }
 
+    /// The user's raw send (`DictationPipeline.sendRawNow`): the same, with no cleanup. Dictation only.
+    func sendRawNow() async {
+        guard modeSink.target == .dictation else { return }
+        await pipeline?.sendRawNow()
+    }
+
     /// Whether audio is still arriving is a host fact (including replay); cut ordering is shared.
     func setMagic(_ enabled: Bool, cut: Bool) {
         let mode: SpeechMode = enabled ? .instruction : .dictation

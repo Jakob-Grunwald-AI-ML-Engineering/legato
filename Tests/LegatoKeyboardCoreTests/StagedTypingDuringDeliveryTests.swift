@@ -34,7 +34,7 @@ import Testing
                     delivered.append(result)
                 } else if rig.drops.contains(where: { $0.id == id }) {
                     editID = nil
-                    _ = take.hold()
+                    take.hold()
                 }
             }
             guard editID == nil, !take.held, let unit = take.nextReady else { return }
@@ -135,7 +135,7 @@ import Testing
     // MARK: Insert at the end of a note, a unit the check lost
 
     @Test(arguments: [FakeField.Host.notes, .safari, .whatsApp])
-    func aKeptTextInsertGoesInAtTheEndOfANoteAfterATapThatLeftTheCaretThere(host: FakeField.Host) {
+    func aUnitGoesInAtTheEndOfANoteAfterATapThatLeftTheCaretThere(host: FakeField.Host) {
         var rig = QueueRig(FakeField.host(host, "Then it is coffee and cake on the terrace."))
         rig.run(ms: 200)
         // The tap in the empty area below the text: the caret stays at the end, the host calls back with the same report.
@@ -172,7 +172,7 @@ import Testing
 
     @Test func aUnitThatMayNotHaveLandedIsNeverCountedAsDelivered() {
         let report = FieldQueue.Report(before: "Later.")
-        #expect(!StagedDictation.landed(drop(" Then it is coffee.", issued: true), report: report), "Not shown: kept, not retyped")
+        #expect(!StagedDictation.landed(drop(" Then it is coffee.", issued: true), report: report), "Not shown: pending, not retyped")
         #expect(!StagedDictation.landed(drop(" Then it is coffee.", partial: " Then it", issued: true), report: report))
         #expect(!StagedDictation.landed(drop(" Then it is coffee.", issued: false), report: .init(before: "Then it is coffee.")), "Nothing was written")
     }

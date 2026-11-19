@@ -120,6 +120,24 @@ private func line(_ sequence: Int, _ text: String) -> DictationRouteLine {
         await pipeline.reset()
     }
 
+    @Test func sendRawNowPublishesTheOpenAndTheWaitingUnitsRawAndIgnoresTheirLateCleanup() async throws {
+        let cleaner = Upper(slow: ["first unit stays slow"])
+        let pipeline = manual(cleaner)
+        pipeline.cutRecognizer = { true }
+        await pipeline.receive(line(0, "first unit stays slow"))
+        await pipeline.sendNow()
+        pipeline.boundary("finalize")
+        try await until { cleaner.inputs.withLock { $0 } == ["first unit stays slow"] }
+        await pipeline.receive(line(1, "second unit raw"))
+        await pipeline.sendRawNow()
+        pipeline.boundary("finalize")
+        try await until { pipeline.liveRun?.snapshot.segments.allSatisfy { $0.ready == true } == true }
+        let segments = try #require(pipeline.liveRun?.snapshot.segments)
+        #expect(segments.map(\.text) == ["first unit stays slow", "second unit raw"])
+        #expect(cleaner.inputs.withLock { $0 } == ["first unit stays slow"], "The open unit is never sent for cleanup")
+        await pipeline.reset()
+    }
+
     @Test func sendNowSendsAtOnceWhenThereIsNothingToCutAndIsIgnoredWithoutAnOpenUnit() async throws {
         let cleaner = Upper()
         let pipeline = manual(cleaner)

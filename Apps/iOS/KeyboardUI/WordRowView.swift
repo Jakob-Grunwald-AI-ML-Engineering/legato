@@ -23,10 +23,8 @@ struct WordRowView: View {
     var body: some View {
         Group {
             if controller.isShowingPreview, let preview = controller.statusText {
-                // A take in progress owns the row; kept text (an earlier one or this take's own) returns when it ends.
+                // A take in progress owns the row.
                 previewRow(preview)
-            } else if let kept = controller.keptText, kept.isShowable {
-                keptRow(kept)
             } else if let recovery = controller.liveRecoveryNotice {
                 HStack(spacing: 8) {
                     // Plain text (nothing to tap but Dismiss); it fits in two lines, shrinking rather than cutting off.
@@ -129,12 +127,14 @@ struct WordRowView: View {
     /// between them and clear of the row's edges (`WordRowHeight`, an estimate to measure on the phone).
     private func previewRow(_ text: String) -> some View {
         PreviewRow(text: text, layout: controller.dictationPreviewLayout, canSend: controller.canSendPreview,
-                   onSend: { point in bloom = (point, Date()); controller.previewTapped() })
+                   onSend: { point in bloom = (point, Date()); controller.previewTapped() },
+                   onSendRaw: { controller.previewSwiped() })
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(text)
         .accessibilityHint(controller.canSendPreview ? "Tap to send what you have said so far." : "")
         .accessibilityAddTraits(controller.canSendPreview ? .isButton : [])
         .accessibilityAction { if controller.canSendPreview { controller.previewTapped() } }
+        .accessibilityAction(named: "Insert without cleanup") { if controller.canSendPreview { controller.previewSwiped() } }
         .accessibilityIdentifier("keyboard.hint")
         .transition(.identity)
     }
@@ -150,58 +150,6 @@ struct WordRowView: View {
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.5)
         .accessibilityIdentifier(id)
-    }
-
-    /// Text the keyboard could not place: its end, then Insert and Copy (Copy needs Full Access), and a small close.
-    private func keptRow(_ kept: KeptText) -> some View {
-        HStack(spacing: 8) {
-            if let notice = controller.keptInsertNotice {
-                // Short and readable; it gives the sentence's place back after a moment.
-                Text(notice)
-                    .font(.system(size: fontSize - 4, weight: .medium))
-                    .foregroundStyle(Color(uiColor: KeyColors.suggestion))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("keyboard.kept.notice")
-            } else {
-                // Unsent dictation: a quiet cue, then the start of the sentence so it is recognisable.
-                Image(systemName: "waveform")
-                    .font(.system(size: fontSize - 6, weight: .medium))
-                    .foregroundStyle(Color(uiColor: KeyColors.suggestion).opacity(0.7))
-                    .accessibilityHidden(true)
-                Text(kept.preview(maxCharacters: 120))
-                    .font(.system(size: fontSize - 4))
-                    .foregroundStyle(Color(uiColor: KeyColors.suggestion))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityLabel("Unsent dictation: \(kept.preview(maxCharacters: 120))")
-                    .accessibilityIdentifier("keyboard.kept.text")
-            }
-            if kept.offersInsertion, kept.insertion == nil || controller.insertingKeptText {
-                takeButton(controller.insertingKeptText ? "Inserting…" : "Insert", id: "keyboard.kept.insert",
-                           enabled: controller.canInsertKeptText) { controller.insertKeptText() }
-                    .accessibilityLabel("Insert at cursor")
-            } else if kept.offersInsertion {
-                Text("Check the field").font(.system(size: fontSize - 5))
-                    .accessibilityLabel("Previous insertion could not be confirmed. You can still copy or dismiss the recovery text.")
-            }
-            if controller.fullAccess, controller.keptInsertNotice == nil {
-                takeButton("Copy", id: "keyboard.kept.copy") { controller.copyKeptText() }
-            }
-            Button { controller.dismissKeptText() } label: {
-                Image(systemName: "xmark").font(.system(size: fontSize - 6, weight: .semibold))
-                    .foregroundStyle(Color(uiColor: KeyColors.suggestion).opacity(0.7))
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Discard kept text")
-            .accessibilityIdentifier("keyboard.kept.dismiss")
-        }
-        .padding(.horizontal, CGFloat(WordRowLayout.contentInset))
-        .accessibilityIdentifier("keyboard.kept")
     }
 
     private var row: some View {
@@ -599,13 +547,20 @@ private struct PreviewRenderer: TextRenderer {
 /// The dictation preview text: a clearly readable secondary colour, one line centred vertically, two lines filling the row, and
 /// a soft fade at the first line's leading edge when the head of the text is cut off. While a staged take shows it: the unit
 /// being typed leaves letter by letter, words waiting for cleanup shimmer, and a tap (which sends them) blooms from the
-/// touch point (`canSend`; a tap on nothing to send does nothing).
+/// touch point (`canSend`; a tap on nothing to send does nothing). A swipe up sends the words as spoken, and the text swooshes
+/// up once (no colours, no bloom; none with Reduce Motion).
 private struct PreviewRow: View {
     let text: String
     let layout: StagedDictation.PreviewLayout?
     let canSend: Bool
     /// A tap that sends, at the touch point (the row's own coordinates).
     let onSend: (CGPoint) -> Void
+    /// A swipe up: send without cleanup.
+    let onSendRaw: () -> Void
+    /// Whether the current drag already sent; resets when the drag ends or is cancelled (iOS may cancel an upward touch at once).
+    @GestureState private var swipeFired = false
+    /// The swoosh: the text lifts and dims a little, then settles back.
+    @State private var swoosh = false
     @State private var scroll = ExitScroll()
     @State private var reveal = PreviewReveal()
     /// Flips when a reveal finishes, so the timeline pauses again.
@@ -647,7 +602,8 @@ private struct PreviewRow: View {
             }
             .fixedSize(horizontal: false, vertical: true)
             .onGeometryChange(for: Double.self) { Double($0.size.height) } action: { textHeight = $0 }
-            .offset(x: settleOffset)
+            .offset(x: settleOffset, y: swoosh ? -Self.swooshLift : 0)
+            .opacity(swoosh ? 0.55 : 1)
             .frame(width: max(proxy.size.width - 2 * CGFloat(WordRowLayout.previewInset), 0), alignment: .leading)
             .padding(.horizontal, CGFloat(WordRowLayout.previewInset))
             .padding(.bottom, single ? 0 : CGFloat(WordRowHeight.previewPadding(rowHeight: height, size: size)))
@@ -671,6 +627,19 @@ private struct PreviewRow: View {
                 guard canSend else { return }
                 onSend(point)
             }
+            // A drag never also taps: the tap fails once the finger has moved. It fires while moving, once per drag.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: Self.swipeDistance, coordinateSpace: .local)
+                    .updating($swipeFired) { value, fired, _ in
+                        guard !fired, canSend else { return }
+                        let dx = value.translation.width, dy = value.translation.height
+                        guard dy <= -Self.swipeDistance, abs(dy) > 2 * abs(dx) else { return }
+                        fired = true
+                        Task { @MainActor in
+                            onSendRaw()
+                            playSwoosh()
+                        }
+                    })
             .onChange(of: exited) { old, new in
                 if new > old { exits.append(contentsOf: Array(repeating: Date(), count: new - old)) } else { exits = [] }
             }
@@ -702,6 +671,20 @@ private struct PreviewRow: View {
             start = end
         }
         return result
+    }
+
+    /// The least upward travel, in points, that is a swipe (an estimate to tune on the phone).
+    private static let swipeDistance: CGFloat = 20
+    private static let swooshLift: CGFloat = 10
+
+    /// A brief upward lift of the text, dimmed, then back; the letters leave as they type, as for a tap. Reduce Motion: none.
+    private func playSwoosh() {
+        guard !reduceMotion else { return }
+        withAnimation(.easeOut(duration: 0.12)) { swoosh = true }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            withAnimation(.easeIn(duration: 0.2)) { swoosh = false }
+        }
     }
 
     /// The unit has left: the rest was laid out behind it and now starts where the unit did, so it slides from where it stood

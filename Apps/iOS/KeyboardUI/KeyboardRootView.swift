@@ -2,7 +2,7 @@ import LegatoKeyboardCore
 import SwiftUI
 
 /// The keyboard: the full layout (`TypingFallbackView`: the word row, the tool row and the native key grid) or
-/// the compact strip (`StripView`), switched by the chevron or a swipe (`KeyboardController.toggleExpansion`).
+/// the compact strip (`StripView`), switched by the chevron (`KeyboardController.toggleExpansion`).
 struct KeyboardRootView: View {
     let controller: KeyboardController
 

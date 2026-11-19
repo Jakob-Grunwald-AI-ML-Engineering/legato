@@ -103,21 +103,23 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         #expect(take.deliveredThrough == 0 && take.nextReady?.id == 1)
     }
 
-    @Test func aFieldChangeHoldsTheRestForRecoveryAndKeepsLaterUnitsToo() {
+    @Test func aFieldChangeHoldsDeliveryAndTheRestStaysInThePreviewUntilResumed() {
         var take = StagedDictation()
         take.receive(snapshot(1, [unit(0, "One."), unit(1, "Two.", ready: false), unit(2, "Three.", ready: false)], head: "four"))
         take.begin(0, typed: "One.")
         take.delivered(0)
         take.begin(1, typed: " Two.")
-        // The insert of unit 1 did not stand: it may not have landed, so it is kept with the rest (raw where no cleanup came).
-        #expect(take.hold() == "Two. Three.")
+        // The insert of unit 1 did not stand: it may not have landed, so it stays pending with the rest (raw where no cleanup came).
+        take.hold()
         #expect(take.held && take.nextReady == nil && take.inFlight == nil)
-        #expect(take.preview == "four", "Only the head is still being spoken")
-        // A unit that becomes ready after the hold joins what is kept; the unit that was kept raw does not come again.
-        let more = take.receive(snapshot(2, [unit(0, "One."), unit(1, "Two."), unit(2, "Three."), unit(3, "Four.")], complete: true))
-        #expect(more == "Two. Three. Four.")
-        #expect(take.kept == "Two. Three. Four.")
-        #expect(take.receive(snapshot(2, [unit(0, "One.")])) == nil, "An older snapshot changes nothing")
+        #expect(take.preview == "Two. Three. four", "Back in the preview as pending, nothing typed")
+        // A unit that becomes ready after the hold joins them; an older snapshot changes nothing.
+        take.receive(snapshot(2, [unit(0, "One."), unit(1, "Two."), unit(2, "Three."), unit(3, "Four.")], complete: true))
+        take.receive(snapshot(1, [unit(0, "One.")]))
+        #expect(take.preview == "Two. Three. Four." && take.nextReady == nil)
+        // Sent again by the person: delivery resumes with the first unit not in the field.
+        take.resume()
+        #expect(!take.held && take.nextReady?.id == 1)
     }
 
     @Test func aStagedUnitIsTypedAsSpeechWhileInputIsUnverified() {
@@ -136,7 +138,7 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         #expect(applied, "Confirmed, so the take records it as delivered")
     }
 
-    @Test func aUnitTheQueueHoldsOnUnverifiedInputIsKeptAfterABoundAndTheNextTakeIsNotBlocked() {
+    @Test func aUnitTheQueueHoldsOnUnverifiedInputIsHeldAfterABoundAndTheNextTakeIsNotBlocked() {
         // A unit that is not speech (or any unit the queue cannot place) stays queued under unverified input: the bound keeps it.
         var queue = FieldQueue()
         let report = FieldQueue.Report(before: "If the weather holds.")
@@ -156,13 +158,13 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         queue.cancelEdit(edit.id)
         let dropped = queue.drainEvents().contains { if case .dropped(let drop) = $0 { drop.id == edit.id } else { false } }
         #expect(dropped)
-        #expect(take.hold() == "The plan. Then coffee.")
-        #expect(!take.hasUndelivered && take.nextReady == nil && !take.isStalled(inFlightMs: 60_000, unverifiedInput: true))
+        take.hold()
+        #expect(take.hasUndelivered && take.preview == "The plan. Then coffee." && take.nextReady == nil && !take.isStalled(inFlightMs: 60_000, unverifiedInput: true))
         take.receive(snapshot(1, [unit(0, "Fresh start.")], complete: true, run: "next"))
         #expect(!take.held && take.nextReady?.text == "Fresh start.")
     }
 
-    @Test func keptTextInsertsWithTheSeparatorOfTheFieldAtTheCaret() {
+    @Test func aUnitInsertedAtTheCaretTakesTheSeparatorOfTheFieldThere() {
         // The field says "...simple." with the caret right after it: the space comes from the shared rule.
         #expect(FieldInsertion.prepare("I think so.", contextBefore: "It is simple.", capitalization: .none) == " I think so.")
         #expect(FieldInsertion.prepare("I think so.", contextBefore: "It is simple. ", capitalization: .none) == "I think so.")
@@ -250,5 +252,16 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         #expect(segment.ready == true && segment.cleaned == false && segment.text == "this is raw but long enough to close.")
         let twice = run.setRaw(key: 0)
         #expect(!twice)
+    }
+
+    @Test func aCleanupResultThatArrivesAfterTheRawWordsStoodChangesNothing() {
+        var run = LiveDictationRun(runID: "r", staged: true, manual: true)
+        run.addFinal(key: 0, text: "send this raw please")
+        let open = run.flush()
+        #expect(open != nil && run.setRaw(key: open!.key))
+        let version = run.version
+        let late = run.setCleaned(key: 0, text: "Send this, raw please.")
+        #expect(!late)
+        #expect(run.version == version && run.snapshot.segments[0].text == "send this raw please")
     }
 }

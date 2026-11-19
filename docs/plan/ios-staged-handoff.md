@@ -119,3 +119,9 @@ The unverified 2 s bound counts only while the unit has not started.
 - Screenshots or a screen recording of the hand-off.
 - The longest key delay during typing.
 - Whether it looks good and reads as intuitive.
+
+## Round 2 (2026-11-19, after the phone test)
+
+- The swipe between the compact strip and the full keyboard is gone; the chevron is the only switch.
+- A swipe up on the preview inserts what is not typed yet without cleanup (`RequestCommand.sendRaw`, `DictationPipeline.sendRawNow`); a tap still sends for cleanup. A subtle upward swoosh, none with Reduce Motion; a second accessibility action "Insert without cleanup".
+- The kept-text row is removed. When delivery is held, the undelivered units return to the preview as pending; a tap or swipe sends them again at the caret. A keyboard that goes away leaves the take in History only.
