@@ -206,6 +206,8 @@ public actor DictationCleanupPipeline {
     private func settle(speculation id: UUID) { if speculation?.id == id { speculation?.settled = true } }
     /// The speculative request's raw text, while one is running or landed and unused.
     public var speculativeText: String? { speculation?.raw }
+    /// The speculative request finished and its result waits for its line.
+    public var speculationLanded: Bool { speculation?.settled ?? false }
     public func cancelSpeculation() { speculation?.task.cancel(); speculation = nil }
 
     /// Drops everything pending: a new keyboard session starts with no context.

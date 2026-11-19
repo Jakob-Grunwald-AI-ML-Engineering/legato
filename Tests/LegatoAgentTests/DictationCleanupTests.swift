@@ -84,7 +84,9 @@ private func waitFor(_ count: Int, _ collected: Collected) async throws {
     #expect(out.all[0].text == "SHIP IT ON FRIDAY" && out.all[0].speculation == "inflight")
     // Landed before the send: instant.
     await pipeline.speculate(lineID: "l", sequence: 6, raw: "and the budget too", textBefore: "")
-    try await Task.sleep(for: .milliseconds(40))
+    // Wait for the speculation to land (a hang guard, not a timing): a slow runner may take longer than any fixed sleep.
+    let deadline = ContinuousClock.now + .seconds(20)
+    while !(await pipeline.speculationLanded), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
     await pipeline.submit(sequence: 6, lineID: "l", raw: "and the budget too", textBefore: "")
     try await waitFor(2, out)
     #expect(cleaner.calls.withLock { $0.count } == 2)
