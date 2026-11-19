@@ -3,6 +3,7 @@ import Synchronization
 import Testing
 import LegatoAgent
 import LegatoCore
+import LegatoKeyboardCore
 import LegatoSoniox
 @testable import LegatoAppServices
 
@@ -421,7 +422,9 @@ private final class HeldCleaner: SentenceCleaning {
     init(holdFirst: ConnectGate? = nil) { gate = holdFirst }
     func clean(_ input: SentenceCleanupInput) async throws -> ValidatedSentence {
         if first.withLock({ let was = $0; $0 = false; return was }) { await gate?.wait() }
-        return .init(sentenceID: input.sentenceID, sequence: input.sequence, text: input.text.prefix(1).uppercased() + input.text.dropFirst())
+        let text = input.dictation?.instructions == "uppercase" ? input.text.uppercased() :
+            input.text.prefix(1).uppercased() + input.text.dropFirst()
+        return .init(sentenceID: input.sentenceID, sequence: input.sequence, text: text)
     }
 }
 
@@ -453,6 +456,43 @@ private final class HeldCleaner: SentenceCleaning {
         try await until {
             await self.history.recent(limit: 10).contains { $0.text == expected }
         }
+    }
+
+    @Test func previewPressOpensOnlyInstructionAudioAndRestoresThePausedDraft() async throws {
+        let (pipeline, keyboard) = try await session(HeldCleaner(), manual: true)
+        let draftStream = try #require(sockets.last)
+        #expect(await keyboard.openGate())
+        await draftStream.feed(#"{"tokens":[{"text":"meet at the ferry","is_final":true},{"text":"<end>","is_final":true}]}"#)
+        try await until { pipeline.liveRun?.snapshot.text == "meet at the ferry" }
+        let runID = try #require(pipeline.liveRun?.runID)
+        await keyboard.closeGate()
+        await draftStream.feed(#"{"tokens":[{"text":"<fin>","is_final":true}]}"#)
+        await draftStream.feed(#"{"finished":true}"#)
+        try await until { pipeline.isPaused && sockets.count >= 2 }
+
+        let hold = KeyboardRequest.PreviewHold(id: "preview-press", runID: runID)
+        keyboard.handlePreviewHold(.init(id: hold.id, command: .beginPreviewHold, at: Date(), previewHold: hold))
+        try await until { keyboard.previewInstructionReadyID == hold.id }
+        #expect(keyboard.route == .dictation && pipeline.isPaused)
+        let instructionStream = try #require(sockets.at(1))
+        await mic.emit()
+        try await until { await instructionStream.audioFrames == 1 }
+        keyboard.handlePreviewHold(.init(id: "release", command: .releasePreviewHold, at: Date(), previewHold: hold))
+        await keyboard.settle()
+        #expect(keyboard.route == .idle && keyboard.previewInstructionReadyID == nil)
+
+        await instructionStream.feed(#"{"tokens":[{"text":"uppercase","is_final":true},{"text":"<fin>","is_final":true}]}"#)
+        await instructionStream.feed(#"{"finished":true}"#)
+        try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
+        #expect(pipeline.isPaused && pipeline.liveRun?.runID == runID)
+        #expect(pipeline.liveRun?.snapshot.text == "MEET AT THE FERRY")
+        #expect(pipeline.liveRun?.wholeRaw.text == "meet at the ferry")
+
+        #expect(await keyboard.openGate())
+        let resumedStream = try #require(sockets.at(2))
+        await resumedStream.feed(#"{"tokens":[{"text":"bring a spare key","is_final":true},{"text":"<end>","is_final":true}]}"#)
+        try await until { pipeline.liveRun?.snapshot.text == "MEET AT THE FERRY bring a spare key" }
+        #expect(pipeline.liveRun?.runID == runID && !pipeline.isPaused)
     }
 
     @Test(arguments: [true, false]) func hidingMidTakeCleansTheOpenUnitIntoHistory(manual: Bool) async throws {

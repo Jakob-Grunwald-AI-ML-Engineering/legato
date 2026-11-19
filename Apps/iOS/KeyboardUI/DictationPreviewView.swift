@@ -5,7 +5,7 @@ import UIKit
 
 /// The dictation preview in its own frame (`TopRowLayout.preview`, taller than the transcript band): the words not in the field
 /// yet, scrollable with no scrollbar and anchored on the newest words, with the Magic glow and the undo chip over it.
-/// Hold to speak composition instructions, swipe right to insert, or swipe left to clear.
+/// Tap to clean up, press to speak composition instructions, swipe right to insert, or swipe left to clear.
 struct DictationPreviewView: View {
     let controller: KeyboardController
     let text: String
@@ -35,7 +35,7 @@ struct DictationPreviewView: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(draft == nil ? text : "Dictation draft")
                 .accessibilityValue(draft == nil ? "" : text)
-                .accessibilityHint(controller.canComposePreview ? "Hold to speak Magic instructions. Swipe right to insert, left to clear." : draft != nil ? "Swipe right to insert, left to clear." : "")
+                .accessibilityHint(controller.canComposePreview ? "Tap to clean up. Press to speak Magic instructions. Swipe right to insert, left to clear." : draft != nil ? "Swipe right to insert, left to clear." : "")
                 .accessibilityAddTraits(controller.canComposePreview ? .isButton : [])
                 .accessibilityAction(named: "Compose draft") { controller.composePreviewWithoutInstructions() }
                 .accessibilityAction(named: draft == nil ? "Insert without cleanup" : "Insert draft") { if controller.canSendPreview { controller.previewSwiped() } }
@@ -69,30 +69,48 @@ struct DictationPreviewView: View {
     }
 
     private var holdGlow: some View {
+        let listening = controller.isPreviewInstructionReady
         let rim = RoundedRectangle(cornerRadius: WordRowLayout.contentInset)
             .strokeBorder(LinearGradient(colors: MagicGradient.colors, startPoint: .topLeading, endPoint: .bottomTrailing),
                           lineWidth: 1.5)
         return rim
             .background { rim.blur(radius: 5) }
             .padding(2)
-            .opacity(controller.isHoldingPreview ? 0.9 : 0)
-            .scaleEffect(controller.isHoldingPreview || reduceMotion ? 1 : 0.97)
-            .animation(reduceMotion ? nil : .smooth, value: controller.isHoldingPreview)
+            .opacity(listening ? 0.9 : 0)
+            .scaleEffect(listening || reduceMotion ? 1 : 0.97)
+            .animation(reduceMotion ? nil : .smooth, value: listening)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
     }
 }
 
-/// UIKit's standard hold takes precedence once recognized. Movement that starts first still
-/// goes to the preview's existing scrolling and swipe gestures.
+/// A single recognizer distinguishes a tap from a press. Native movement cancellation lets
+/// a scrolling or swiping finger leave before the press is recognized.
 private struct PreviewHoldGesture: UIGestureRecognizerRepresentable {
     let controller: KeyboardController
 
-    func makeUIGestureRecognizer(context: Context) -> UILongPressGestureRecognizer {
-        UILongPressGestureRecognizer()
+    final class Recognizer: UILongPressGestureRecognizer {
+        var tapped: (() -> Void)?
+
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+            let wasTap = state == .possible && touches.count == 1 && numberOfTouches == 1
+            super.touchesEnded(touches, with: event)
+            if wasTap { tapped?() }
+        }
     }
 
-    func handleUIGestureRecognizerAction(_ recognizer: UILongPressGestureRecognizer, context: Context) {
+    func makeUIGestureRecognizer(context: Context) -> Recognizer {
+        let recognizer = Recognizer()
+        // A short grace period distinguishes a quick tap from a deliberate press.
+        recognizer.minimumPressDuration = 0.12
+        return recognizer
+    }
+
+    func updateUIGestureRecognizer(_ recognizer: Recognizer, context: Context) {
+        recognizer.tapped = { [weak controller] in controller?.composePreviewWithoutInstructions() }
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: Recognizer, context: Context) {
         switch recognizer.state {
         case .began: _ = controller.beginPreviewHold()
         case .ended: controller.endPreviewHold(apply: true)

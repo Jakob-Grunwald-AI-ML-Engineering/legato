@@ -111,7 +111,11 @@ final class LinkClient {
 
     func send(_ command: RequestCommand, id: String, preview: KeyboardRequest.PreviewAnchor? = nil,
               previewHold: KeyboardRequest.PreviewHold? = nil) {
-        let key = command == .beginPreviewHold ? LinkChannel.Key.previewHoldStart : LinkChannel.Key.request
+        let key = switch command {
+        case .beginPreviewHold: LinkChannel.Key.previewHoldStart
+        case .releasePreviewHold, .cancelPreviewHold: LinkChannel.Key.previewHoldEnd
+        default: LinkChannel.Key.request
+        }
         store?.write(KeyboardRequest(id: id, command: command, at: Date(), preview: preview, previewHold: previewHold), forKey: key)
         DarwinObserver.post(LinkChannel.Note.request)
     }

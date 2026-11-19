@@ -22,6 +22,7 @@ import LegatoSoniox
     private var previewCapture: PreviewCapture?
     var afterDictationSettled: @MainActor () async -> Void = {}
     var speechMode: SpeechMode { modeSink.target }
+    var isFinishingPreviewHold: Bool { previewCapture != nil && modeSink.target == .dictation }
 
     init(sink: any DictationRouteSink, instruction: InstructionSession,
          sonioxKey: @escaping @MainActor () -> String,
@@ -100,17 +101,27 @@ import LegatoSoniox
         changeSpeechMode(to: mode, cut: cut)
     }
 
-    func beginPreviewHold(_ hold: KeyboardRequest.PreviewHold, anchor: KeyboardRequest.PreviewAnchor?, cut: Bool) {
+    @discardableResult
+    func beginPreviewHold(_ hold: KeyboardRequest.PreviewHold, anchor: KeyboardRequest.PreviewAnchor?, cut: Bool) -> Bool {
         guard modeSink.target == .dictation, modeSink.mode == .dictation, previewCapture == nil,
-              pipeline?.beginPreviewHold(hold, anchor: anchor) == true else { return }
+              pipeline?.beginPreviewHold(hold, anchor: anchor) == true else { return false }
         previewCapture = PreviewCapture(hold: hold, anchor: anchor)
         changeSpeechMode(to: .previewInstruction, cut: cut)
+        return true
     }
 
     func endPreviewHold(_ hold: KeyboardRequest.PreviewHold, apply: Bool, cut: Bool) {
         guard previewCapture?.hold == hold, modeSink.target == .previewInstruction else { return }
         previewCapture?.apply = apply
         changeSpeechMode(to: .dictation, cut: cut)
+    }
+
+    /// The temporary input stream itself is stopping. Its final boundary closes the instruction
+    /// before the draft is composed, without issuing a second finalize on the same stream.
+    func endPreviewHoldWithTake(_ hold: KeyboardRequest.PreviewHold, apply: Bool) {
+        guard previewCapture?.hold == hold, modeSink.target == .previewInstruction else { return }
+        previewCapture?.apply = apply
+        modeSink.toggle(to: .dictation, cut: true)
     }
 
     func finishPreviewHold() {

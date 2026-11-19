@@ -149,6 +149,10 @@ public final class HostLink {
            start.command == .beginPreviewHold, !ledger.contains(id: start.id) {
             await process(start)
         }
+        if let end = store.read(KeyboardRequest.self, forKey: LinkChannel.Key.previewHoldEnd),
+           end.command == .releasePreviewHold || end.command == .cancelPreviewHold, !ledger.contains(id: end.id) {
+            await process(end)
+        }
         if let request = store.read(KeyboardRequest.self, forKey: LinkChannel.Key.request) { await process(request) }
     }
 

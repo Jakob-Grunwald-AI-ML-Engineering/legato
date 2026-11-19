@@ -21,6 +21,8 @@ public struct DictationStatus: Codable, Equatable, Sendable {
     public var dictationCountdownDeadline: Double?
     public var dictationNotice: String?
     public var dictationNoticeID: Int?
+    /// Correlates the glow with the press whose speech is being captured.
+    public var previewInstructionReadyID: String?
     public init() {}
 }
 

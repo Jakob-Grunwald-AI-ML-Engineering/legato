@@ -320,6 +320,10 @@ final class KeyboardController {
 
     private var previewHold: (request: KeyboardRequest.PreviewHold, documentID: String?)?
     var isHoldingPreview: Bool { previewHold != nil }
+    var isPreviewInstructionReady: Bool {
+        guard let previewHold else { return false }
+        return dictationPresentation.previewInstructionReadyID == previewHold.request.id
+    }
 
     func beginPreviewHold() -> Bool {
         guard canComposePreview, let runID = stagedTake.runID else { return false }
@@ -338,7 +342,7 @@ final class KeyboardController {
         link.send(valid ? .releasePreviewHold : .cancelPreviewHold, id: UUID().uuidString, previewHold: hold.request)
     }
 
-    /// Plain cleanup remains available as an accessibility action without requiring a sustained touch.
+    /// A quick tap or an accessibility action composes the current draft without separate instructions.
     func composePreviewWithoutInstructions() {
         guard canComposePreview else { return }
         let anchor = previewAnchor
