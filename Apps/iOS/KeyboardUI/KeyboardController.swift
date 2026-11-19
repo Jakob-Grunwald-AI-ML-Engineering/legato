@@ -917,7 +917,12 @@ final class KeyboardController {
         lastHold = reason
         var entry = EditJournal.Entry(t: Self.uptimeMs, kind: .hold, field: queueDocumentID)
         entry.reason = reason ?? "released"
-        entry.detail = detail ?? "idle=\(queue.isIdle) cursorRead=\(cursorReadID != nil) probe=\(probeLease != nil) live=\(liveRunning)"
+        #if DEBUG || LEGATO_INTERNAL
+        let probing = probeLease != nil
+        #else
+        let probing = false
+        #endif
+        entry.detail = detail ?? "idle=\(queue.isIdle) cursorRead=\(cursorReadID != nil) probe=\(probing) live=\(liveRunning)"
         journal.write(entry)
     }
 

@@ -1038,8 +1038,12 @@ public final class MacFieldQueue {
             for pending in edits where !placed(pending.edit, delta) { return false }
             return true
         }
-        let shift = anchored.isEmpty && edits.isEmpty ? nil
-            : ShiftPass.allCases.lazy.compactMap { pass in candidates.first { holds($0, pass) } }.first
+        var shift: Int?
+        if !anchored.isEmpty || !edits.isEmpty {
+            search: for pass in ShiftPass.allCases {
+                for delta in candidates where holds(delta, pass) { shift = delta; break search }
+            }
+        }
         if let shift {
             for index in edits.indices {
                 edits[index].edit.range.location += shift
