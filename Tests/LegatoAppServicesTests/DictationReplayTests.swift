@@ -77,7 +77,8 @@ import LegatoSoniox
         let pcm = try DictationReplayPCM(Data(repeating: 32, count: 32_000))
         let replay = Task { try await engine.debugReplay(timeline, pcm: pcm) }
         // Let original PCM enter the real activity classifier, then close while token pacing is suspended.
-        let deadline = ContinuousClock.now + .seconds(2)
+        // The deadline only guards a hang; a loaded runner can take far longer than any expected timing.
+        let deadline = ContinuousClock.now + .seconds(20)
         while sink.activityCount == 0, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
         #expect(sink.activityCount > 0)
         if cancelCaller { replay.cancel() } else { await engine.close() }
