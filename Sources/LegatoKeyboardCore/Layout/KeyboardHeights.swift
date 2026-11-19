@@ -1,24 +1,15 @@
 import Foundation
 
-/// iOS 26 prediction geometry. The system may add a rounded area above portrait extensions, counted
-/// in Apple's 44 pt prediction view. Landscape adds none. On a phone it measured 0, 17 and about 33 pt,
-/// and 0 and 17 in the same field, with the extension's settled geometry identical: it cannot be read,
-/// so the words center in the extension's own row and never lean on that area.
+/// The dictation preview's type in the transcript area (#312): two lines, the largest size that fits the area as it is. The
+/// area never grows or shrinks for a take.
 public enum WordRowHeight {
-    public static let visible = 44.0
-    public static let portraitSystemTop = 17.0
-    /// Room added to the portrait row beyond the native prediction row (#313), so the two-line dictation preview breathes. The
-    /// whole keyboard grows by it: the row sits above the tool row and the typing grid keeps its place on the screen.
-    public static let portraitPreviewRoom = 3.0
-    public static let portrait = visible - portraitSystemTop + portraitPreviewRoom
-    public static let strip = portrait
+    /// The smallest transcript area: two lines of the smallest size with their air (2 x 13.2 + 1.1 + 2 x 1 = 29.5 pt). The
+    /// full keyboard's top row is at least this tall (landscape keys are shorter).
+    public static let minimumRow = 30.0
 
-    public static func content(landscape: Bool) -> Double { landscape ? visible : portrait }
-
-    /// Two lines of the dictation preview (#312) must fit the row as it is: the row never grows or shrinks for a take (the
-    /// compact strip stays reachable). The largest size whose two lines, a line spacing of 0.1 x the size and `previewMinPadding`
-    /// above and below fit: 11 pt in portrait (30 pt row: 26.4 + 1.1 + 2 x 1.25 pt of air; 12 pt would need 32 pt), 13 pt in
-    /// landscape (44 pt row). The line height is an ESTIMATE (1.2 x the size, SF's usual), not measured.
+    /// The largest size whose two lines, a line spacing of 0.1 x the size and `previewMinPadding` above and below fit: 13 pt in
+    /// the portrait top row (43 pt: 31.2 + 1.3 + 2) and minimised, 11 pt in landscape (30 pt). The line height is an ESTIMATE
+    /// (1.2 x the size, SF's usual), not measured.
     public static let previewSizes: [Double] = [13, 12, 11]
     public static func previewLineHeight(size: Double) -> Double { size * 1.2 }
     public static func previewLineSpacing(size: Double) -> Double { 0.1 * size }
@@ -39,26 +30,39 @@ public enum WordRowHeight {
     }
 }
 
-/// Predictions, one tool key row, then the unchanged native typing grid.
+/// The keyboard's heights (#315): one top row (the dictation key beside the transcript) above the unchanged native typing
+/// grid, or minimised to two rows of keys beside the transcript.
 public enum KeyboardHeights {
-    // The extension ends above iOS's globe/dictation area.
-    private static let rowsBelow = 3 * 54.0 + 43 + 3
+    public static func keyHeight(landscape: Bool) -> Double { landscape ? 27.33 : 43 }
+    public static func rowPitch(landscape: Bool) -> Double { landscape ? 35.33 : 54 }
+    /// Under the last row of keys, as on the native keyboard.
+    public static func bottomGap(landscape: Bool) -> Double { landscape ? 4 : 3 }
 
-    public static func pillHeight(landscape: Bool) -> Double { landscape ? 27.33 : 43 }
-    public static func pillGapToRow(landscape: Bool) -> Double { landscape ? 8 : 11 }
-    public static func wordRowHeight(landscape: Bool) -> Double { WordRowHeight.content(landscape: landscape) }
+    /// The key popup's scale against portrait (the landscape keys are shorter).
+    public static func popupScale(landscape: Bool) -> Double { landscape ? 0.78 : 1 }
+    /// How far a key's popup head reaches above its key's top: one row pitch plus 12.3 pt (measured, `KeyboardMetrics`).
+    public static func popupReach(landscape: Bool) -> Double { rowPitch(landscape: landscape) + 12.3 * popupScale(landscape: landscape) }
 
-    /// The native prediction-to-first-face gap: 8 pt portrait, 6 pt landscape.
-    public static func toolRowTop(landscape: Bool) -> Double {
-        wordRowHeight(landscape: landscape) + (landscape ? 6 : 8)
-    }
+    /// The first row of the typing grid sits as high as its popups allow: an extension cannot draw above its own view, so the
+    /// top row's letter popups must fit (67 pt portrait, 45 landscape). The top row's key sits one row pitch above it.
+    public static func firstRowTop(landscape: Bool) -> Double { popupReach(landscape: landscape).rounded(.up) }
 
-    public static func firstRowTop(landscape: Bool) -> Double {
-        toolRowTop(landscape: landscape) + (landscape ? 35.33 : 54)
-    }
+    /// The top of the top row's key faces, in both layouts: one pitch above the grid (13 pt portrait, 9.67 landscape).
+    public static func keyFaceTop(landscape: Bool) -> Double { firstRowTop(landscape: landscape) - rowPitch(landscape: landscape) }
 
+    /// The full keyboard: the top row, then the native grid (275 pt portrait).
     public static func height(landscape: Bool) -> Double {
-        firstRowTop(landscape: landscape) + (landscape ? 3 * 35.33 + 27.33 + 4 : rowsBelow)
+        firstRowTop(landscape: landscape) + 3 * rowPitch(landscape: landscape) + keyHeight(landscape: landscape) + bottomGap(landscape: landscape)
+    }
+
+    /// Minimised: the dictation key's row and one more row of keys (113 pt portrait).
+    public static func minimisedHeight(landscape: Bool) -> Double {
+        keyFaceTop(landscape: landscape) + rowPitch(landscape: landscape) + keyHeight(landscape: landscape) + bottomGap(landscape: landscape)
+    }
+
+    /// The height the keyboard asks the system for in `mode`.
+    public static func requested(mode: KeyboardMode, landscape: Bool) -> Double {
+        mode == .minimised ? minimisedHeight(landscape: landscape) : height(landscape: landscape)
     }
 }
 
