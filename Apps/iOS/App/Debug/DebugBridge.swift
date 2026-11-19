@@ -104,9 +104,18 @@ import UIKit
             await AppController.shared.keyboardSession.sendNow()
             return AppController.shared.dictation.takeState
         }
-        // The preview's swipe up: the words so far are sent as spoken, uncleaned.
+        // The preview's swipe right: the words so far are sent as spoken, uncleaned.
         harness.register("dictation-debug-send-raw") { _ in
             await AppController.shared.keyboardSession.sendRawNow()
+            return AppController.shared.dictation.takeState
+        }
+        // The preview's swipe left: the words still in it are dropped, kept for the undo window.
+        harness.register("dictation-debug-discard") { _ in
+            await AppController.shared.keyboardSession.discardNow()
+            return AppController.shared.dictation.takeState
+        }
+        harness.register("dictation-debug-undo-discard") { _ in
+            await AppController.shared.keyboardSession.undoDiscardNow()
             return AppController.shared.dictation.takeState
         }
         // The cleanup model of the sentence/line cleanup (App Group): `haiku` or `sonnet`.

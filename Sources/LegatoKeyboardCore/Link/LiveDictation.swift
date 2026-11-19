@@ -20,10 +20,14 @@ public struct LiveSegment: Codable, Equatable, Sendable {
     /// Staged takes only: the unit is closed, sent for cleanup. The open unit (still collecting words) is not; only a closed
     /// unit that is not ready is "thinking". Nil (older snapshots) counts as closed.
     public var closed: Bool?
+    /// Staged takes only: the person swiped the unit away from the preview and its undo window is open (`RequestCommand.discard`).
+    /// The unit is closed and not ready, its text kept for the undo; the keyboard hides it and waits. When the window ends it
+    /// becomes empty text and ready (nothing to type). Nil: not discarded.
+    public var discarded: Bool?
     public init(id: Int, text: String, cleaned: Bool = false, final: Bool, unit: Int? = nil, raw: String? = nil, ready: Bool? = nil,
-                closed: Bool? = nil) {
+                closed: Bool? = nil, discarded: Bool? = nil) {
         self.id = id; self.text = text; self.cleaned = cleaned; self.final = final; self.unit = unit; self.raw = raw; self.ready = ready
-        self.closed = closed
+        self.closed = closed; self.discarded = discarded
     }
 
     /// Pieces of a take's text joined as a reader expects: trimmed, a space between them, none before closing
@@ -268,6 +272,9 @@ public struct LiveDictationRun: Sendable, Equatable {
     public let staged: Bool
     /// Units (by index) whose text is final in a staged run: cleaned, or cleanup failed and the raw words stand.
     private var ready: Set<Int> = []
+    /// Closed units (by index) the person discarded and whose undo window is open: kept as raw text, never cleaned or ready.
+    private var discarded: Set<Int> = []
+    public var hasDiscarded: Bool { !discarded.isEmpty }
 
     /// Only `flush()` closes a unit: `addFinal` never does (not at a sentence end, not at `maxUnitWords`). Fixed for the run.
     public let manual: Bool
@@ -317,8 +324,9 @@ public struct LiveDictationRun: Sendable, Equatable {
     /// The units in speaking order (the open one too, not ready), then the speaking head.
     private var stagedSnapshot: LiveDictationSnapshot {
         var segments = units.indices.map { index in
-            LiveSegment(id: units[index].lowerBound, text: shownText(index), cleaned: cleaned[index] != nil, final: true, ready: ready.contains(index),
-                        closed: !(openUnit && index == units.count - 1))
+            LiveSegment(id: units[index].lowerBound, text: discarded.contains(index) ? rawText(index) : shownText(index), cleaned: cleaned[index] != nil,
+                        final: true, ready: ready.contains(index), closed: !(openUnit && index == units.count - 1),
+                        discarded: discarded.contains(index) ? true : nil)
         }
         let speaking = LiveSegment.joined(open + [head])
         if !speaking.isEmpty { segments.append(.init(id: finals.count, text: speaking, final: false)) }
@@ -367,13 +375,45 @@ public struct LiveDictationRun: Sendable, Equatable {
         return peekOpenUnit()
     }
 
+    /// The person discarded the unit `key` belongs to (just flushed, never sent for cleanup): its text stays for the undo and it
+    /// is not ready. Staged runs only. True when the target changed.
+    @discardableResult
+    public mutating func discard(key: Int) -> Bool {
+        guard staged, let unit = unitIndex(ofKey: key), !ready.contains(unit), !discarded.contains(unit) else { return false }
+        discarded.insert(unit); version += 1
+        return true
+    }
+
+    /// The undo: every discarded unit is a normal closed unit again; returns (cleanup key, raw text) of each to clean, in order.
+    public mutating func restoreDiscarded() -> [(key: Int, text: String)] {
+        guard !discarded.isEmpty else { return [] }
+        let restored = discarded.sorted()
+        discarded = []
+        version += 1
+        return restored.compactMap { unit in closingKey(unit).map { ($0, rawText(unit)) } }
+    }
+
+    /// The undo window ended: every discarded unit becomes empty text and ready (nothing to type). True when the target changed.
+    @discardableResult
+    public mutating func expireDiscarded() -> Bool {
+        guard !discarded.isEmpty else { return false }
+        for unit in discarded { cleaned[unit] = ""; ready.insert(unit) }
+        discarded = []
+        version += 1
+        return true
+    }
+
     /// What `flush()` would return, without closing the unit: the open unit's cleanup key and raw text (a speculative cleanup
     /// reads it). Nil when no unit is open.
     public func peekOpen() -> (key: Int, text: String)? { openUnit ? peekOpenUnit() : nil }
     private func peekOpenUnit() -> (key: Int, text: String)? {
-        guard let range = units.last else { return nil }
-        guard let key = keys.filter({ $0.value == range.upperBound - 1 }).map(\.key).max() else { return nil }
+        guard let key = closingKey(units.count - 1) else { return nil }
         return (key, rawText(units.count - 1))
+    }
+    /// The cleanup key of a unit: the key of its last segment.
+    private func closingKey(_ unit: Int) -> Int? {
+        guard units.indices.contains(unit) else { return nil }
+        return keys.filter { $0.value == units[unit].upperBound - 1 }.map(\.key).max()
     }
 
     /// The keyboard started a new piece of the run at segment `index` (the user typed or moved between it and the words
@@ -393,6 +433,7 @@ public struct LiveDictationRun: Sendable, Equatable {
         // Cleaned text by unit index: the later units move up one; the cut unit's cleanup fits neither part. Nothing is
         // published for the cut itself (the field keeps what it shows): the parts' cleanups change the target when they land.
         cleaned = Dictionary(uniqueKeysWithValues: cleaned.compactMap { k, text in k == unit ? nil : (k > unit ? k + 1 : k, text) })
+        discarded = Set(discarded.map { $0 > unit ? $0 + 1 : $0 })
         if let whole, index < whole.end { self.whole = nil }
         for part in [unit, unit + 1] {
             guard let key = keys.filter({ $0.value == units[part].upperBound - 1 }).map(\.key).max() else { continue }
@@ -432,7 +473,8 @@ public struct LiveDictationRun: Sendable, Equatable {
         return units.firstIndex { $0.contains(index) }
     }
     private func rawText(_ unit: Int) -> String { LiveSegment.joined(finals[units[unit]].map(\.text)) }
-    private func shownText(_ unit: Int) -> String { cleaned[unit] ?? rawText(unit) }
+    /// What a unit stands for in the text around it (a later unit's cleanup context): a discarded unit stands for nothing.
+    private func shownText(_ unit: Int) -> String { discarded.contains(unit) ? "" : cleaned[unit] ?? rawText(unit) }
 
     /// The raw words of every final so far, and how many finals and words that is: what `setWhole` replaces.
     public var wholeRaw: (finals: Int, words: Int, text: String) {
@@ -522,6 +564,8 @@ public struct LiveDictationRun: Sendable, Equatable {
     public mutating func finish() {
         guard !complete else { return }
         complete = true
+        // A discard is final once the take ends, whatever is left of its undo window.
+        expireDiscarded()
         // Staged: a unit still in cleanup at the end stands raw (the stop waited for it, bounded).
         if staged { ready.formUnion(units.indices) }
         version += 1

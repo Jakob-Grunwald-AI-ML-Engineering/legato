@@ -10,7 +10,7 @@ public enum DictationKeyGesture: Sendable, Equatable {
 
     /// The most a finger may travel and still tap (as the other keys).
     public static let tapSlop = 10.0
-    /// The least travel along one axis that is a swipe: an ESTIMATE (as the preview's swipe up), to tune on the phone.
+    /// The least travel along one axis that is a swipe: an ESTIMATE (as the preview's swipes), to tune on the phone.
     public static let swipeDistance = 20.0
     /// A swipe's axis must be at least this many times the other one; a diagonal drag does nothing.
     public static let dominance = 1.5

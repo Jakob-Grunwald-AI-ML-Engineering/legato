@@ -138,6 +138,44 @@ private func line(_ sequence: Int, _ text: String) -> DictationRouteLine {
         await pipeline.reset()
     }
 
+    @Test func discardNowKeepsTheOpenUnitForTheUndoWindowThenEmptiesItAndNeverCleansIt() async throws {
+        let cleaner = Upper()
+        let clock = VirtualClock()
+        let pipeline = manual(cleaner, clock: clock)
+        pipeline.cutRecognizer = { true }
+        await pipeline.discardNow()
+        #expect(pipeline.liveRun == nil, "Nothing to discard")
+        await pipeline.receive(line(0, "never mind all of this"))
+        await pipeline.discardNow()
+        pipeline.boundary("finalize")
+        try await until { pipeline.liveRun?.snapshot.segments.first?.discarded == true }
+        var unit = try #require(pipeline.liveRun?.snapshot.segments.first)
+        #expect(unit.text == "never mind all of this" && unit.closed == true && unit.ready == false)
+        try await until { clock.sleeperCount > 0 }
+        clock.advance(by: .seconds(DictationPipeline.discardUndoSeconds))
+        try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
+        unit = try #require(pipeline.liveRun?.snapshot.segments.first)
+        #expect(unit.text.isEmpty && unit.discarded == nil)
+        #expect(cleaner.inputs.withLock { $0.isEmpty })
+        await pipeline.reset()
+    }
+
+    @Test func undoDiscardNowCleansTheUnitLikeASend() async throws {
+        let cleaner = Upper()
+        let pipeline = manual(cleaner)
+        pipeline.cutRecognizer = { true }
+        await pipeline.receive(line(0, "bring it back"))
+        await pipeline.discardNow()
+        pipeline.boundary("finalize")
+        try await until { pipeline.liveRun?.snapshot.segments.first?.discarded == true }
+        await pipeline.undoDiscardNow()
+        try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
+        let unit = try #require(pipeline.liveRun?.snapshot.segments.first)
+        #expect(unit.text == "Bring it back" && unit.discarded == nil)
+        #expect(cleaner.inputs.withLock { $0 } == ["bring it back"])
+        await pipeline.reset()
+    }
+
     @Test func sendNowSendsAtOnceWhenThereIsNothingToCutAndIsIgnoredWithoutAnOpenUnit() async throws {
         let cleaner = Upper()
         let pipeline = manual(cleaner)

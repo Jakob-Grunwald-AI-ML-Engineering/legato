@@ -277,7 +277,9 @@ final class KeyboardController {
             let spoken = stagedTake.preview
             // A unit being typed keeps its start: the row anchors on the exit point, so its head is never cut away.
             let leaving = stagedTake.inFlight != nil
-            return spoken.isEmpty ? (routeOpen ? Self.listening : nil) : (leaving ? spoken : Self.previewTail(spoken))
+            // Cleared words wait out their undo window in the app: the row stays up (the undo chip is on it) with a placeholder.
+            let placeholder = routeOpen ? Self.listening : (stagedTake.hasDiscarded ? Self.cleared : nil)
+            return spoken.isEmpty ? placeholder : (leaving ? spoken : Self.previewTail(spoken))
         }
         guard routeOpen else { return nil }
         let tail = (dictationPresentation.dictationTail ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -294,7 +296,7 @@ final class KeyboardController {
         return layout.dropping(layout.text.count - shown)
     }
 
-    /// A tap on the preview row sends what is spoken so far to the field (`RequestCommand.send`), cleaned; a swipe up sends it
+    /// A tap on the preview row sends what is spoken so far to the field (`RequestCommand.send`), cleaned; a swipe right sends it
     /// as spoken (`previewSwiped`). Listening continues. Only
     /// while a staged take shows words: the placeholder and a finished take do nothing.
     var canSendPreview: Bool {
@@ -307,7 +309,35 @@ final class KeyboardController {
         sendPreview(.send)
     }
 
-    /// A swipe up on the preview row sends what is not typed yet as spoken, without cleanup (`RequestCommand.sendRaw`).
+    /// A swipe left on the preview clears what is still in it and not yet sent for cleanup: the open unit and the speaking head
+    /// (`RequestCommand.discard`). The app keeps it for a short undo window (`undoDiscard`). Units already sent for cleanup,
+    /// ready ones and the one being typed stay.
+    var canDiscardPreview: Bool { canSendPreview && stagedTake.hasDiscardable }
+
+    func discardPreview() {
+        guard canDiscardPreview else { return }
+        trace?("preview swiped left: discard")
+        stagedTake.clearOpen()
+        link.send(.discard, id: UUID().uuidString)
+        // If the app never answers (nothing to discard, a slow link) the words come back rather than stay hidden.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.clearAnswerWait)
+            self?.stagedTake.endClear()
+        }
+    }
+    /// How long a cleared preview stays hidden without the app's answer: the recognizer's cut can take up to `sendCutWait` (1.5 s). An estimate.
+    static let clearAnswerWait = Duration.milliseconds(2000)
+
+    /// The undo chip is offered while the latest snapshot has a discarded unit (the app's window is open).
+    var canUndoDiscard: Bool { stagedTake.runID != nil && stagedTake.hasDiscarded && fullAccess }
+
+    func undoDiscard() {
+        guard canUndoDiscard else { return }
+        trace?("preview undo discard")
+        link.send(.undoDiscard, id: UUID().uuidString)
+    }
+
+    /// A swipe right on the preview row sends what is not typed yet as spoken, without cleanup (`RequestCommand.sendRaw`).
     func previewSwiped() {
         guard canSendPreview else { return }
         trace?("preview swiped: send raw")
@@ -326,15 +356,18 @@ final class KeyboardController {
         if !stagedTake.complete { link.send(command, id: UUID().uuidString) }
     }
     static let listening = "Listening…"
-    /// Only the end of a long text is kept (cut at a word), so the row renders a bounded text and keeps the newest words.
-    static let previewCharacters = 400
+    /// The preview's placeholder while cleared words wait out their undo window and nothing else is in it.
+    static let cleared = "Cleared"
+    /// Only the end of a long text is kept (cut at a word), so the row renders a bounded text and keeps the newest words. The
+    /// preview scrolls, so this is generous (about two thousand words); an estimate of what a take ever holds unsent.
+    static let previewCharacters = 4000
     static func previewTail(_ text: String) -> String {
         guard text.count > previewCharacters else { return text }
         let tail = text.suffix(previewCharacters)
         guard let space = tail.firstIndex(where: \.isWhitespace) else { return "…" + tail }
         return "…" + tail[tail.index(after: space)...]
     }
-    /// The word row shows the dictation preview: left aligned, two lines, anchored on its newest words (`WordRowView`).
+    /// The preview area shows the dictation preview: left aligned, scrollable, anchored on its newest words (`DictationPreviewView`).
     var isShowingPreview: Bool { dictationPreview.map { $0 == statusText } ?? false }
 
     /// A dictation or a Refine is running: the word row is taken over and undo and redo wait.
@@ -1344,7 +1377,7 @@ final class KeyboardController {
     }
 
     /// Delivery stops: nothing more is typed, and the units not in the field go back into the preview as pending (cleaned where it
-    /// landed, else raw). The person moves the caret and taps or swipes up to send them again (`resumeStaged`). History holds it all.
+    /// landed, else raw). The person moves the caret and taps or swipes right to send them again (`resumeStaged`). History holds it all.
     private func holdStaged() {
         stagedTake.hold()
         trace?("staged held")

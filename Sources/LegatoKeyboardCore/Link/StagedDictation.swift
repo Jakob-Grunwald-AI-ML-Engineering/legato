@@ -28,6 +28,10 @@ public struct StagedDictation: Sendable, Equatable {
     /// The unit's first piece has gone out: it is no longer waiting to start.
     public private(set) var started = false
 
+    /// The person cleared the preview and the app has not answered yet: the open unit and the head are hidden at once, so the
+    /// clear feels instant. It ends when a snapshot carries the discarded unit (`receive`) or at `endClear`.
+    public private(set) var clearing = false
+
     public init() {}
 
     /// How much of the record's end the field's context must show for the proxy to count as agreeing with the take.
@@ -59,6 +63,7 @@ public struct StagedDictation: Sendable, Equatable {
         units = snapshot.segments.filter(\.final)
         head = snapshot.segments.last(where: { !$0.final })?.text ?? ""
         complete = snapshot.complete
+        if units.contains(where: { $0.discarded == true }) { clearing = false }
         if !held { skipEmpty() }
     }
 
@@ -106,6 +111,9 @@ public struct StagedDictation: Sendable, Equatable {
     public var previewLayout: PreviewLayout {
         var layout = PreviewLayout()
         for unit in pending + [LiveSegment(id: -1, text: head, final: false)] {
+            // A discarded unit is not shown (its undo window is open); it is not ready, so delivery waits for it. While the app
+            // has not answered a clear, the open unit and the head are hidden the same way.
+            guard unit.discarded != true, !(clearing && (unit.id < 0 || unit.closed == false)) else { continue }
             let piece = unit.text.trimmingCharacters(in: .whitespaces)
             guard !piece.isEmpty else { continue }
             layout.text = LiveSegment.joined([layout.text, piece])
@@ -122,6 +130,19 @@ public struct StagedDictation: Sendable, Equatable {
 
     /// What the preview shows (`previewLayout`).
     public var preview: String { previewLayout.text }
+
+    /// A unit the person discarded is waiting out its undo window in the app: the preview hides it and later units wait behind it.
+    public var hasDiscarded: Bool { pending.contains { $0.discarded == true } }
+
+    /// There is something a clear would throw away: words in the open unit or the head, not already cleared.
+    public var hasDiscardable: Bool {
+        !clearing && (!head.isEmpty || pending.contains { $0.closed == false && !$0.text.isEmpty })
+    }
+
+    /// The person cleared the preview (`RequestCommand.discard`): hide what it would throw away until the app answers.
+    public mutating func clearOpen() { if hasDiscardable { clearing = true } }
+    /// The app did not answer the clear (nothing to discard, or the link is slow): the preview shows what is there.
+    public mutating func endClear() { clearing = false }
 
     /// Words are waiting to be typed or still being spoken.
     public var hasUndelivered: Bool { !pending.isEmpty || inFlight != nil }

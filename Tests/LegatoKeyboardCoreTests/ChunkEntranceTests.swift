@@ -63,7 +63,7 @@ import Testing
         #expect(ChunkEntrance.plan("").pieces.isEmpty)
     }
 
-    /// #313: the iPhone staged units type at `typewriterGapMs` (14 ms, an estimate; 35 ms was too slow on the phone), one grapheme per piece, however long the text.
+    /// #313: the iPhone staged units type at `typewriterGapMs` (10 ms, an estimate; 35 and then 14 ms were too slow on the phone), one grapheme per piece, however long the text.
     @Test func theStagedTypewriterIsOneGraphemePerPieceAtItsOwnPaceWithoutACap() {
         let family = "👨‍👩‍👧‍👦", accent = "e\u{301}"
         let plan = ChunkEntrance.typewriterPlan("ab" + family + accent + "\r\n")

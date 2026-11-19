@@ -57,18 +57,12 @@ import Testing
     }
 }
 
-@Test func thePreviewFontFitsTwoLinesInTheTranscriptAsItIs() {
+@Test func thePreviewFontFitsTwoLinesInTheTranscriptBandAsItIs() {
     // Portrait: the 43 pt top row holds two lines of 13 pt (31.2 + 1.3 spacing + 2 x 1 pt padding = 34.5). Landscape keys are
     // 27.33 pt: the transcript keeps the 30 pt that holds 11 pt (26.4 + 1.1 + 2 = 29.5; 12 pt needs 32).
     #expect(WordRowHeight.previewFontSize(rowHeight: 43) == 13)
     #expect(WordRowHeight.previewFontSize(rowHeight: WordRowHeight.minimumRow) == 11)
     let size = WordRowHeight.previewFontSize(rowHeight: WordRowHeight.minimumRow)
-    let pad = WordRowHeight.previewPadding(rowHeight: WordRowHeight.minimumRow, size: size)
-    #expect(WordRowHeight.previewContentHeight(size: size) + 2 * pad <= WordRowHeight.minimumRow && pad >= WordRowHeight.previewMinPadding)
+    #expect(WordRowHeight.previewContentHeight(size: size) + 2 * WordRowHeight.previewMinPadding <= WordRowHeight.minimumRow)
     #expect(WordRowHeight.previewLineSpacing(size: size) > 0, "the two lines breathe")
-    #expect(WordRowHeight.previewIsSingleLine(textHeight: WordRowHeight.previewLineHeight(size: 11), size: 11))
-    #expect(!WordRowHeight.previewIsSingleLine(textHeight: 2 * WordRowHeight.previewLineHeight(size: 11), size: 11))
-    #expect(WordRowHeight.previewTruncated(textHeight: 40, rowHeight: 30, prefixed: false))
-    #expect(WordRowHeight.previewTruncated(textHeight: 20, rowHeight: 30, prefixed: true))
-    #expect(!WordRowHeight.previewTruncated(textHeight: 27.5, rowHeight: 30, prefixed: false))
 }

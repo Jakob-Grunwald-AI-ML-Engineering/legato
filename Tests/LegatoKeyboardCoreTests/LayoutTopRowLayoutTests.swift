@@ -89,6 +89,26 @@ import Testing
         }
     }
 
+    // MARK: preview
+
+    @Test func thePreviewFrameReachesTheTopOfTheViewAndDownToTheKeysBelow() {
+        for side in DictationKeySide.allCases {
+            let full = layout(.full, side), mini = layout(.minimised, side)
+            for shown in [full, mini] {
+                #expect(shown.preview.y == 0 && shown.preview.x == shown.transcript.x && close(shown.preview.width, shown.transcript.width))
+                #expect(contains(shown.preview, shown.transcript), "the word slots, status and hints keep their frame inside it")
+            }
+            // Full: down to where the grid's touch area starts (67 pt first row, a gap above it). Minimised: above the bottom gap.
+            #expect(close(full.preview.maxY, 67 - 6) && full.preview.height > full.transcript.height)
+            #expect(close(mini.preview.maxY, 113 - 3))
+        }
+        // Landscape keys are shorter and the first row sits higher (45 pt); the preview follows the same rule, and the scale.
+        let landscape = layout(.full, width: 724, landscape: true)
+        #expect(close(landscape.preview.maxY, KeyboardHeights.firstRowTop(landscape: true) - 6))
+        #expect(close(layout(.full, scale: 0.8).preview.maxY, 67 * 0.8 - 6))
+        #expect(close(layout(.minimised, scale: 0.8).preview.maxY, (113 - 3) * 0.8))
+    }
+
     // MARK: mirroring
 
     @Test func theLeftSideMirrorsTheRightInBothModes() {

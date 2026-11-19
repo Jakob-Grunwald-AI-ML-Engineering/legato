@@ -219,7 +219,7 @@ public final class HostLink {
         case .stop: isRunning || pendingStartID != nil || state.leaseUntil != nil
         case .endKeepAlive: state.leaseUntil != nil
         // A manual take that is paused (#313) has no running phase but still holds words to send; the app ignores a send with nothing to send.
-        case .send, .sendRaw: true
+        case .send, .sendRaw, .discard, .undoDiscard: true
         case .arm: false // arming activates audio: only from the front, through the URL that opens the app
         }
     }

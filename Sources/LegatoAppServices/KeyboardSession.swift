@@ -286,10 +286,22 @@ import LegatoVocabulary
     /// A take is running, or a manual one is paused with words waiting (Stop keeps them pending, #313).
     private var canSend: Bool { gate.route == .dictation || dictation.hasActiveTake || dictation.isReplaying || speechRoute.isPaused }
 
-    /// The keyboard's raw send (a swipe up on the preview): like `sendNow()`, but the words are typed as spoken, uncleaned.
+    /// The keyboard's raw send (a swipe right on the preview): like `sendNow()`, but the words are typed as spoken, uncleaned.
     public func sendRawNow() async {
         guard isOpen, canSend else { return }
         await speechRoute.sendRawNow()
+    }
+
+    /// The keyboard's clear (a swipe left on the preview): the words still in the preview are dropped, kept for a short undo.
+    public func discardNow() async {
+        guard isOpen, canSend else { return }
+        await speechRoute.discardNow()
+    }
+
+    /// Takes the last clear back while its window is open. A window outlives a stop, so no take needs to be running.
+    public func undoDiscardNow() async {
+        guard isOpen else { return }
+        await speechRoute.undoDiscardNow()
     }
 
     private func perform(_ action: AudioGate.Action) async {
