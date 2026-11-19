@@ -17,7 +17,7 @@ private final class StubCleaner: SentenceCleaning {
         if slow.contains(input.sequence) { try await Task.sleep(for: .seconds(10)) }
         return .init(sentenceID: input.sentenceID, sequence: input.sequence, text: input.text.capitalized + ".")
     }
-    func warmDictation() async { warms.withLock { $0 += 1 } }
+    func warmDictation(_ style: DictationCleanupStyle) async { warms.withLock { $0 += 1 } }
 }
 /// The first two calls take 200 ms, later ones return at once; everything is upper-cased.
 private final class SlowFirstCleaner: SentenceCleaning {

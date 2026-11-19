@@ -23,6 +23,10 @@ Run `scripts/ci/test.sh` locally on the final candidate before enqueueing a PR. 
 
 `scripts/e2e/ios-sim.sh` keeps its builds under `~/Library/Caches/legato` (`LEGATO_CACHE_DIR`): SwiftPM clones shared by every worktree, one fixed DerivedData per build target (`derived/{gate,mac,ios-sim,ios-device}`) reused by every worktree, and sweeps stale `legato-e2e.*` temp dirs of killed runs. `scripts/dev/prune-build-caches.sh` lists (dry run) or, with `--delete`, removes all other Legato build output.
 
+## Cleanup prompt eval
+
+`scripts/dev/cleanup-eval/eval.py run --out results.json` sends the synthetic spoken samples through the old (line) and new (send) dictation prompts with the app's request shape (`ANTHROPIC_API_KEY`, about 90 short requests, a few cents); `eval.py report results.json` renders the comparison table.
+
 ## Device debugging
 
 `scripts/device/ctl.sh` drives a Debug build on a physical iPhone without taps (run it without arguments for the usage). A bridge in the app (`Apps/iOS/App/Debug/DebugBridge.swift`, `LEGATO_INTERNAL` builds; Debug starts it at launch, TestFlight-internal builds with `-LegatoDebugBridge YES`) polls `Library/Caches/debug-bridge/inbox/` every 0.5 s while the process lives, runs each `{id, command, args}` file on the main actor and appends `{ts, id, event, ...}` lines to `Library/Caches/debug-bridge/log.jsonl`.

@@ -668,7 +668,9 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         #if DEBUG || LEGATO_INTERNAL
         if let scripted = debugStreamCleaner { lineCleaner = scripted }
         #endif
-        let created = DictationCleanupPipeline(cleaner: lineCleaner, vocabulary: terms, timeout: mode == .live ? liveTimeout : timeout) { [weak self] line in
+        // The iPhone's staged sends are cleaned with the send prompt (#316); the Mac's live sentences keep the line cleanup.
+        let created = DictationCleanupPipeline(cleaner: lineCleaner, vocabulary: terms, style: stagedLive ? .send : .line,
+                                               timeout: mode == .live ? liveTimeout : timeout) { [weak self] line in
             await self?.deliver(line)
         }
         pipeline = created
