@@ -239,9 +239,10 @@ public struct StagedDictation: Sendable, Equatable {
 
     /// A piece of the in-flight unit went into the field. Its leading separator is not the unit's own text; every grapheme after
     /// it counts (the capital replaces a letter and adds none; the trailing separator is past the unit's end and is clamped).
-    public mutating func sent(_ piece: String) {
+    public mutating func sent(_ piece: String, revealProgress: Bool = true) {
         guard let inFlight else { return }
         started = true
+        guard revealProgress else { return }
         for character in piece {
             if previewDraft?.unitID != inFlight, exited == 0, character.isWhitespace { continue }
             exited += 1
