@@ -141,11 +141,7 @@ final class AppController {
         }
         if ShortcutActionSetting.action(in: AppGroup.defaults) == .meeting {
             if meetings.isActive { await meetings.stop(); return .stopped(nil) }
-            guard UIApplication.shared.applicationState == .active else { return .needsForeground(.backgroundStartRefused) }
-            meetings.open()
-            await meetings.prepare()
-            meetings.start()
-            return meetings.isActive ? .started : .failed(meetings.notice ?? "Meeting could not start.")
+            return await startMeeting()
         }
         guard !meetings.isActive else { return .failed("Stop the meeting before dictating.") }
         if keyboardSession.route != .idle { await keyboardSession.closeGate(); return .stopped(nil) }
@@ -159,6 +155,26 @@ final class AppController {
         }
         return .started
     }
+    func startMeetingFromActivity(holdID: String?) async throws {
+        try await IOSForegroundAdmission.waitUntilActive()
+        guard canStartMeetingFromActivity(holdID) else { return }
+        _ = await startMeeting(while: { self.canStartMeetingFromActivity(holdID) })
+    }
+
+    private func canStartMeetingFromActivity(_ holdID: String?) -> Bool {
+        holdActivity.ownsHold(holdID) && microphone.isArmed && !microphone.microphoneRecovering
+            && keyboardSession.route == .idle && !meetings.isActive
+    }
+
+    private func startMeeting(while canStart: () -> Bool = { true }) async -> ToggleOutcome {
+        guard UIApplication.shared.applicationState == .active else { return .needsForeground(.backgroundStartRefused) }
+        meetings.open()
+        await meetings.prepare()
+        guard !meetings.isActive, canStart() else { return .busy }
+        meetings.start()
+        return meetings.isActive ? .started : .failed(meetings.notice ?? "Meeting could not start.")
+    }
+
     func copy(_ text: String) { UIPasteboard.general.string = text }
     func recentEntries(limit: Int = 100) async -> [DictationEntry] { (try? await history.recent(limit: limit)) ?? [] }
     func deleteEntry(id: UUID) async { try? await history.delete(id: id) }

@@ -71,6 +71,11 @@ private struct LockScreenView: View {
             Spacer()
             if state.phase == .held {
                 ReleaseButton(holdID: holdID)
+                Button(intent: StartMeetingFromActivityIntent(holdID: holdID)) {
+                    Text("Start meeting").font(.subheadline.weight(.semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.indigo)
             } else {
                 StopButton(holdID: holdID)
             }

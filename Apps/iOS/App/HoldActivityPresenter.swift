@@ -55,9 +55,13 @@ final class HoldActivityPresenter {
         Self.log.notice("armed=\(self.microphone.isArmed, privacy: .public)")
     }
 
+    func ownsHold(_ holdID: String?) -> Bool {
+        holdID != nil && holdID == activeHoldID && !stopping
+    }
+
     /// The button and a system dismissal both end the hold that owns this activity.
     func stop(holdID: String?, release: () async -> Void) async {
-        guard let holdID, activeHoldID == holdID, !stopping else { return }
+        guard ownsHold(holdID) else { return }
         stopping = true
         armCancelled = true
         defer {
