@@ -544,6 +544,7 @@ final class KeyboardController {
         // UIKit can call `viewWillAppear` again with no disappearance between (an interrupted dismissal, a slow first launch):
         // that is the same appearance, and a take begun meanwhile is this keyboard's.
         let wasVisible = isVisible
+        if !wasVisible { liveAppearance += 1 }
         isVisible = true
         statusPoll?.cancel()
         statusPoll = Task { [weak self] in
@@ -587,6 +588,7 @@ final class KeyboardController {
     }
 
     func disappeared() {
+        guard isVisible else { return }
         endPreviewHold(apply: false)
         #if DEBUG || LEGATO_INTERNAL
         endFieldProbe()
@@ -596,7 +598,7 @@ final class KeyboardController {
         if let snapshot = liveSnapshot, !snapshot.complete || snapshot.version != liveAckedVersion || !queue.isIdle {
             // Safari's Next/Previous accessory can cycle keyboard visibility before the new field reports its ID.
             // Remember only this controller's known interrupted take; an arbitrary old publication is still ignored.
-            blockLiveRun(snapshot, reason: "hidden")
+            blockLiveRun(snapshot, reason: .hidden)
         }
         fieldOperationCancelled = true
         if let id = activeInstructionID { link.cancelInstruction(id) }
@@ -836,14 +838,14 @@ final class KeyboardController {
             }
         case .cleared:
             draftRecheck?.cancel(); draftRecheck = nil
-            if unverifiedBlankProbeOrigin != nil, let snapshot = liveSnapshot { blockLiveRun(snapshot, reason: "draft-cleared") }
-            finishDraft(reason: "draft-cleared")
+            if unverifiedBlankProbeOrigin != nil, let snapshot = liveSnapshot { blockLiveRun(snapshot, reason: .draftCleared) }
+            finishDraft(reason: .draftCleared)
         }
     }
 
     private func preserveUnverifiedDraft() {
-        if let snapshot = liveSnapshot { blockLiveRun(snapshot, reason: "draft-unverified") }
-        finishDraft(reason: "draft-unverified")
+        if let snapshot = liveSnapshot { blockLiveRun(snapshot, reason: .draftUnverified) }
+        finishDraft(reason: .draftUnverified)
     }
 
     private func beginBlankLineProbe() {
@@ -924,7 +926,7 @@ final class KeyboardController {
         return nil
     }
 
-    private func finishDraft(reason: String) {
+    private func finishDraft(reason: LiveEndReason) {
         let directInput = document.documentID != nil && document.documentID == queueDocumentID && !document.isSecureTextEntry
             ? queue.pendingDirectInput : []
         endingDraft = true
@@ -933,13 +935,13 @@ final class KeyboardController {
         if let id = activeInstructionID { link.cancelInstruction(id) }
         for instructionID in magicEditIDs.values { link.cancelInstruction(instructionID) }
         // Let the reset deliver each outstanding edit's drop and its committed recovery text.
-        forgetLiveRun()
-        resetQueue(reason: reason)
+        forgetLiveRun(reason: reason)
+        resetQueue(reason: reason.rawValue)
         draftID = UUID().uuidString
         fieldRead = nil
         sessionSpan.broken()
         for input in directInput { enqueue(input) }
-        trace?("field draft ended reason=\(reason)")
+        trace?("field draft ended reason=\(reason.rawValue)")
     }
 
     private var currentReport: FieldQueue.Report {
@@ -957,7 +959,7 @@ final class KeyboardController {
             var rebound: LiveDictationSnapshot?
             if queueDocumentID != nil {
                 if let snapshot = liveSnapshot, liveDocumentID != id {
-                    if !liveTypedRunIDs.contains(snapshot.runID), !snapshot.complete { rebound = snapshot } else { blockLiveRun(snapshot, reason: "field") }
+                    if !liveTypedRunIDs.contains(snapshot.runID), !snapshot.complete { rebound = snapshot } else { blockLiveRun(snapshot, reason: .field) }
                 }
                 resetQueue(reason: "field")
             }
@@ -1297,6 +1299,9 @@ final class KeyboardController {
             if liveSeen != nil { liveSeen = nil; liveSnapshot = nil; setLiveRunning(false) }
             return
         }
+        // UIKit can retain hidden controllers that still receive Darwin notes. They must not adopt a
+        // take or later write its shared receipt from a stale field callback.
+        guard isVisible else { return noteLive(snapshot, "hidden-skipped") }
         guard snapshot != liveSeen else { return }
         // A new take on the same field can supply pending speech to a blank-line recovery. The draft gate
         // still holds all its automatic writes until the old field is recognized or the take is preserved.
@@ -1375,15 +1380,17 @@ final class KeyboardController {
                 stagedTake.adopt(receipt)
                 noteLive(snapshot, "adopted", detail: "receipt through=\(receipt.deliveredThrough.map(String.init) ?? "none") held=\(stagedTake.held)")
             }
-            if !isVisible { noteLive(snapshot, "hidden") }
-            else if !stagedTake.preview.isEmpty { noteLive(snapshot, "shown") }
+            if !stagedTake.preview.isEmpty {
+                noteLive(snapshot, "preview-received")
+                notePreviewSelection()
+            }
             syncRowTakeover()
         }
         if !draftEvidence.isPending, document.documentID != liveDocumentID {
             // A late final or cleanup belongs to the field the take started in: it is recovered from History. A take
             // still going that typed nothing yet goes to the field the user is in now.
             guard stagedTake.previewDraft == nil, !liveTypedRunIDs.contains(snapshot.runID), !snapshot.complete else {
-                return blockLiveRun(snapshot, reason: "field")
+                return blockLiveRun(snapshot, reason: .field)
             }
             liveDocumentID = document.documentID
         }
@@ -1497,17 +1504,28 @@ final class KeyboardController {
 
     /// What the field shows of the take, for the app: the last unit typed, and the end once nothing is left.
     /// `ended`: the keyboard stops following the run, so a paused manual take is not resumed under it (`LiveDictationAck.ended`).
-    private func acknowledgeStaged(ended: Bool = false) {
+    private enum LiveEndReason: String {
+        case hidden, field
+        case draftCleared = "draft-cleared"
+        case draftUnverified = "draft-unverified"
+        case probeEnded = "probe-ended"
+        case debugForget = "debug-forget"
+    }
+
+    private func acknowledgeStaged(ending: LiveEndReason? = nil) {
         guard let snapshot = liveSnapshot, snapshot.runID == stagedTake.runID else { return }
+        if let ending {
+            noteLive(snapshot, "ending", detail: "\(ending.rawValue) fieldMatch=\(liveDocumentID != nil && liveDocumentID == document.documentID) draftPending=\(draftEvidence.isPending)")
+        }
         let finished = stagedTake.isFinished || stagedTake.held
         if stagedTake.isFinished { liveAckedVersion = snapshot.version }
         link.writeLiveDictationAck(.init(runID: snapshot.runID, version: snapshot.version, complete: snapshot.complete && finished, stats: liveStats,
-                                         delivered: !stagedTake.held, deliveredThrough: stagedTake.handledThrough, ended: ended ? true : nil))
+                                         delivered: !stagedTake.held, deliveredThrough: stagedTake.handledThrough, ended: ending == nil ? nil : true))
     }
 
     /// The run stops here: what it typed stays, nothing more of it is typed, and the take is recovered from History.
-    private func blockLiveRun(_ snapshot: LiveDictationSnapshot, reason: String) {
-        blockedLiveReason = reason
+    private func blockLiveRun(_ snapshot: LiveDictationSnapshot, reason: LiveEndReason) {
+        blockedLiveReason = reason.rawValue
         if snapshot.staged == true {
             // The take is in History; the units already typed stay where they are.
             blockedLiveRunID = snapshot.runID
@@ -1517,7 +1535,7 @@ final class KeyboardController {
                 // first pieces, if typed, stay in the field as a short fragment; the take is in History. Noted here, since nothing else sees it.
                 if let unit = stagedTake.inFlight { trace?("staged unit interrupted by hide unit=\(unit): typed fragment may remain") }
                 holdStaged()
-                acknowledgeStaged(ended: true)
+                acknowledgeStaged(ending: reason)
             }
             liveSnapshot = nil
             setLiveRunning(false)
@@ -1539,11 +1557,11 @@ final class KeyboardController {
 
     #if DEBUG
     /// Debug harness: the field is cleared; the live run typed into it is no longer this keyboard's to edit.
-    func debugForgetLiveRun() { forgetLiveRun() }
+    func debugForgetLiveRun() { forgetLiveRun(reason: .debugForget) }
     #endif
 
     /// The live run is no longer this keyboard's to edit: what it typed stays, and nothing more of it is typed.
-    private func forgetLiveRun() {
+    private func forgetLiveRun(reason: LiveEndReason) {
         updateCleanup { $0.clear() }
         if let snapshot = liveSnapshot, snapshot.paused == true, stagedTake.runID == snapshot.runID {
             // A manual take that is paused (#313) keeps its words pending: the draft was cleared (sent), not the words. They go in
@@ -1554,7 +1572,7 @@ final class KeyboardController {
         }
         if let runID = liveSnapshot?.runID {
             // A staged take that is cleared with the draft (sent) ends here: what is not in the field is in History only.
-            if stagedTake.runID == runID { holdStaged(); acknowledgeStaged(ended: true) }
+            if stagedTake.runID == runID { holdStaged(); acknowledgeStaged(ending: reason) }
             queue.cancelRun(runID); handle(queue.drainEvents())
         }
         if let runID = liveSnapshot?.runID { ignoredLiveRunID = runID; ignoredAtAppearance = nil }
@@ -1562,9 +1580,8 @@ final class KeyboardController {
         setLiveRunning(false)
     }
 
-    /// A live run that began before this appearance is not this keyboard's to type, and not offered back: hiding the keyboard
-    /// ended it and it is in History (Jakob, 2026-11-19). Two exceptions, where no hide ended it: the run this keyboard already
-    /// follows (its note came before the view appeared), and a later version still being spoken (`LiveDictationSnapshot.continues`).
+    /// An older publication belongs to its previous appearance. If the app kept capturing, a later version
+    /// can establish that the take is still active (`LiveDictationSnapshot.continues`).
     private func ignorePublishedRun() {
         guard let published = link.readLiveDictation() else { ignoredLiveRunID = nil; ignoredAtAppearance = nil; return }
         let following = published.runID == liveSnapshot?.runID && !published.complete
@@ -1579,16 +1596,36 @@ final class KeyboardController {
 
     /// Keyboard-side diagnostics (`LiveDictationNote`, the app logs `live2.kbd`): why a run is not shown or followed, and when the
     /// preview first shows its words. Once per run, event and detail (`once`), never per snapshot.
+    private let liveControllerID = String(UUID().uuidString.prefix(8))
+    @ObservationIgnored private var liveAppearance = 0
     @ObservationIgnored private var notedLive: Set<String> = []
+
+    func notePreviewPresentation(_ mounted: Bool) {
+        #if DEBUG || LEGATO_INTERNAL
+        guard let snapshot = liveSnapshot else { return }
+        noteLive(snapshot, mounted ? "preview-mounted" : "preview-unmounted", once: false)
+        #endif
+    }
+
+    func notePreviewSelection() {
+        #if DEBUG || LEGATO_INTERNAL
+        guard let snapshot = liveSnapshot else { return }
+        let selection = isShowingPreview ? "preview" : statusText == nil ? "empty" : "status"
+        noteLive(snapshot, "preview-selection", detail: selection)
+        #endif
+    }
     private func noteLive(_ snapshot: LiveDictationSnapshot, _ event: String, detail: String? = nil, once: Bool = true) {
+        #if DEBUG || LEGATO_INTERNAL
         if once {
-            let key = "\(snapshot.runID)|\(event)|\(detail ?? "")"
+            let key = "\(liveAppearance)|\(snapshot.runID)|\(event)|\(detail ?? "")"
             guard !notedLive.contains(key) else { return }
             if notedLive.count > 64 { notedLive.removeAll() }
             notedLive.insert(key)
         }
         trace?("live note \(event) \(detail ?? "") run=\(snapshot.runID.prefix(8)) v=\(snapshot.version)")
-        link.writeLiveDictationNote(.init(runID: snapshot.runID, event: event, detail: detail, version: snapshot.version))
+        let identity = "controller=\(liveControllerID) appearance=\(liveAppearance) visible=\(isVisible)"
+        link.writeLiveDictationNote(.init(runID: snapshot.runID, event: event, detail: "\(identity) \(detail ?? "")", version: snapshot.version))
+        #endif
     }
 
     private func setLiveRunning(_ value: Bool) {
@@ -1977,7 +2014,7 @@ final class KeyboardController {
         probeLease = nil; probeSessionID = nil; probeFieldID = nil; probeWritable = false; probeTrace = nil
         isReadingField = false
         fieldOperationCancelled = true
-        forgetLiveRun()
+        forgetLiveRun(reason: .probeEnded)
         resetQueue(reason: "probe-ended")
         queue.observe(currentReport, callback: .selection)
         sessionSpan.broken(); fieldRead = nil
