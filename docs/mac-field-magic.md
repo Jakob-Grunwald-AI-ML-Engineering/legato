@@ -2,9 +2,11 @@
 
 Place the cursor where the finished text belongs and start dictation with your usual shortcut. The composer opens near the caret, or near the destination window when the app cannot report the caret's position. You can stop speaking, read the draft, and dictate more.
 
-- **Magic** cleans up the whole current draft when you click it. Watch the revision in the composer. To request a particular change, speak a Magic instruction such as “make this shorter”.
-- **Insert** puts the draft into its destination. If Legato cannot confirm delivery, the draft stays available to copy. Check the destination before pasting to avoid duplicating text.
-- **Discard** clears the draft. Use **Undo** to bring back a draft you cleared by mistake.
+- **Magic** cleans up the whole current draft when you click it or tap your Magic shortcut (Right ⌘ by default). Watch the revision in the composer. Hold the same shortcut to speak an instruction such as “make this shorter”, then release it to apply the instruction.
+- **Insert** (⌘→) puts the draft into its destination. If Legato cannot confirm delivery, the draft stays available to copy. Check the destination before pasting to avoid duplicating text.
+- **Discard** (⌘←) clears the draft. **Undo Discard** (⌘Z) restores it while Undo is visible.
+
+Change these bindings in **Settings → Shortcut**. Each composer action shows its current shortcut. Composer chords belong to the focused app whenever their corresponding action is unavailable.
 
 ## Internal offline verification
 

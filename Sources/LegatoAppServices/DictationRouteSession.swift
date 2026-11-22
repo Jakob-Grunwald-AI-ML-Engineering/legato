@@ -21,6 +21,8 @@ import LegatoSoniox
         var apply = false
     }
     private var previewCapture: PreviewCapture?
+    /// ASR can still be finishing an earlier instruction when another press begins.
+    private var discardedInstructions: [Bool] = []
     var afterDictationSettled: @MainActor () async -> Void = {}
     var speechMode: SpeechMode { modeSink.target }
     var isFinishingPreviewHold: Bool { previewCapture != nil && modeSink.target == .dictation }
@@ -60,7 +62,10 @@ import LegatoSoniox
             if transition.to == .instruction {
                 instruction.begin()
                 if let pipeline { finishingDictation = Task { await pipeline.finishLiveRun() } }
-            } else if transition.from == .instruction { instruction.end() }
+            } else if transition.from == .instruction {
+                let discarded = !discardedInstructions.isEmpty && discardedInstructions.removeFirst()
+                if discarded { instruction.reset() } else { instruction.end() }
+            }
         }
         if instruction.beforeRun == nil, pipeline != nil {
             instruction.beforeRun = { [weak self] in await self?.settleBeforeInstruction() }
@@ -105,6 +110,13 @@ import LegatoSoniox
     }
 
     /// Whether audio is still arriving is a host fact (including replay); cut ordering is shared.
+    /// The trigger became part of a chord. Ignore the instruction when its last ASR words arrive.
+    func discardCurrentInstruction() {
+        if speechMode == .instruction, let open = discardedInstructions.indices.last {
+            discardedInstructions[open] = true
+        }
+    }
+
     func setMagic(_ enabled: Bool, cut: Bool) {
         guard previewCapture == nil else { return }
         let mode: SpeechMode = enabled ? .instruction : .dictation
@@ -142,6 +154,7 @@ import LegatoSoniox
 
     private func changeSpeechMode(to mode: SpeechMode, cut: Bool) {
         guard mode != modeSink.target else { return }
+        if mode == .instruction { discardedInstructions.append(false) }
         modeSink.toggle(to: mode, cut: cut)
         guard cut else { return }
         cutGeneration += 1
@@ -173,6 +186,7 @@ import LegatoSoniox
 
     /// The session's routing (mode, cut, instruction); the pipeline keeps its run, which may still be ending.
     func resetRouting() {
+        discardedInstructions.removeAll()
         cancelCut()
         previewCapture = nil
         finishingDictation?.cancel(); finishingDictation = nil

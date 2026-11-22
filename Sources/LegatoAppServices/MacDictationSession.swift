@@ -280,8 +280,9 @@ import LegatoKeyboardCore
         setMagic(true)
         return true
     }
-    public func endMagic() async {
+    public func endMagic(discard: Bool = false) async {
         guard speechMode == .instruction else { return }
+        if discard { speechRoute.discardCurrentInstruction() }
         if magicOwnsTake { magicOwnsTake = false; await stop() }
         else { setMagic(false) }
     }
