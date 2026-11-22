@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import LegatoAgent
 import LegatoKeyboardCore
 
 /// A desktop draft owns its text until a confirmed Insert or an explicit Discard. A correction
@@ -27,7 +28,8 @@ import LegatoKeyboardCore
     @ObservationIgnored var recentContext: () -> String = { "" }
     public var backgroundText: String { recentContext() }
     @ObservationIgnored var onCut: (() -> Void)?
-    public init() {}
+    @ObservationIgnored private let defaults: UserDefaults
+    public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
     public func receive(_ line: DictationRouteLine) async {
         guard acceptingSpeech else { return }
@@ -77,9 +79,10 @@ import LegatoKeyboardCore
         isCorrecting = true
         revision += 1
         let generation = revision
+        let settings = ComposerWritingSettings(in: defaults)
         correction = Task {
             do {
-                let result = try await pipeline.cleanDraft(source, instructions: instructions) { [self] visible in
+                let result = try await pipeline.cleanDraft(source, instructions: instructions, writingSettings: settings) { [self] visible in
                     guard revision == generation else { return }
                     preview = visible
                 }

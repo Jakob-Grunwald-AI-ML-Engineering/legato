@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import Synchronization
+import LegatoAgent
 import LegatoAudio
 import LegatoClaude
 import LegatoCore
@@ -74,7 +75,7 @@ public final class MeetingServices {
     public init(
         store: MeetingStore, settings: MeetingSettings, sonioxKey: @escaping @Sendable () -> String, claudeKeys: any APIKeyStore,
         claudeBackend: (any LLMBackend)? = nil, vocabularyURL: URL? = nil,
-        personalPrompt: @escaping @Sendable () -> String = { UserDefaults.standard.string(forKey: "composer.personalPrompt") ?? "" },
+        personalPrompt: @escaping @Sendable () -> String = { ComposerWritingSettings().personalPrompt },
         makeSocket: @escaping @Sendable () -> any SonioxSocket = { URLSessionSonioxSocket() },
         timing: SonioxMeetingEngine.Timing = SonioxMeetingEngine.Timing()
     ) {

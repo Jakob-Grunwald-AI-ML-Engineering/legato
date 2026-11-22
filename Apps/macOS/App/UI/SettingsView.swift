@@ -31,8 +31,8 @@ struct SettingsView: View {
         }
     }
     @Environment(MacAppController.self) private var controller
-    @AppStorage("composer.liveModel") private var liveModel = ModelChoice.haiku.rawValue
-    @AppStorage("composer.personalPrompt") private var personalPrompt = ""
+    @AppStorage(ComposerWritingSettings.modelKey) private var liveModel = ModelChoice.haiku.rawValue
+    @AppStorage(ComposerWritingSettings.promptKey) private var personalPrompt = ""
     @AppStorage("voiceIsolation.enabled") private var onlyMyVoice = false
     @State private var enrollment = VoiceEnrollmentController.shared
     @State private var page: Page? = .overview

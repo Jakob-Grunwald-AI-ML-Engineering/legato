@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import LegatoAgent
 import LegatoComposerDoc
 import LegatoRoom
 import LegatoSoniox
@@ -53,7 +54,7 @@ import LegatoVocabulary
 
     public init(sink: any DictationRouteSink, sonioxKey: @escaping @MainActor () -> String,
                 makeSocket: @escaping @Sendable () -> any SonioxSocket, vocabularyURL: URL,
-                personalPrompt: @escaping @MainActor () -> String = { UserDefaults.standard.string(forKey: "composer.personalPrompt") ?? "" },
+                personalPrompt: @escaping @MainActor () -> String = { ComposerWritingSettings().personalPrompt },
                 now: @escaping @MainActor () -> Double = { ProcessInfo.processInfo.systemUptime }) {
         self.sink = sink; self.sonioxKey = sonioxKey; self.makeSocket = makeSocket
         self.vocabularyURL = vocabularyURL; self.personalPrompt = personalPrompt; self.now = now

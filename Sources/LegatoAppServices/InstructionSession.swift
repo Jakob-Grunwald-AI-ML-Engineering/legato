@@ -64,8 +64,8 @@ extension InstructionRunner: InstructionRunning {}
         nonisolated(unsafe) let store = defaults
         self.init(runner: InstructionRunner(
             client: MessagesStream(keyStore: KeychainKeyStore()),
-            model: { ModelChoice(rawValue: store.string(forKey: "composer.liveModel") ?? "") ?? .haiku },
-            personalPrompt: { store.string(forKey: "composer.personalPrompt") ?? "" },
+            model: { ComposerWritingSettings(in: store).model },
+            personalPrompt: { ComposerWritingSettings(in: store).personalPrompt },
             vocabulary: { (try? await VocabularyStoreAccess.terms(vocabularyURL)) ?? [] }), history: history)
     }
 
