@@ -21,6 +21,7 @@ import LegatoSoniox
         var apply = false
     }
     private var previewCapture: PreviewCapture?
+    private var discardInstructionAtBoundary = false
     var afterDictationSettled: @MainActor () async -> Void = {}
     var speechMode: SpeechMode { modeSink.target }
     var isFinishingPreviewHold: Bool { previewCapture != nil && modeSink.target == .dictation }
@@ -60,7 +61,10 @@ import LegatoSoniox
             if transition.to == .instruction {
                 instruction.begin()
                 if let pipeline { finishingDictation = Task { await pipeline.finishLiveRun() } }
-            } else if transition.from == .instruction { instruction.end() }
+            } else if transition.from == .instruction {
+                if discardInstructionAtBoundary { instruction.reset() } else { instruction.end() }
+                discardInstructionAtBoundary = false
+            }
         }
         if instruction.beforeRun == nil, pipeline != nil {
             instruction.beforeRun = { [weak self] in await self?.settleBeforeInstruction() }
@@ -105,6 +109,11 @@ import LegatoSoniox
     }
 
     /// Whether audio is still arriving is a host fact (including replay); cut ordering is shared.
+    /// The trigger became part of a chord. Ignore the instruction when its last ASR words arrive.
+    func discardCurrentInstruction() {
+        if speechMode == .instruction { discardInstructionAtBoundary = true }
+    }
+
     func setMagic(_ enabled: Bool, cut: Bool) {
         guard previewCapture == nil else { return }
         let mode: SpeechMode = enabled ? .instruction : .dictation
@@ -173,6 +182,7 @@ import LegatoSoniox
 
     /// The session's routing (mode, cut, instruction); the pipeline keeps its run, which may still be ending.
     func resetRouting() {
+        discardInstructionAtBoundary = false
         cancelCut()
         previewCapture = nil
         finishingDictation?.cancel(); finishingDictation = nil

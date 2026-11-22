@@ -29,7 +29,7 @@ import Foundation
 /// Call `reset()` when events may have been lost (the event tap was restarted).
 public struct HotkeyGesture: Sendable, Equatable {
     public enum Mode: String, Sendable, Codable, CaseIterable { case hybrid, toggle, hold }
-    public enum Action: Sendable, Equatable { case start, stop, cancel }
+    public enum Action: Sendable, Equatable { case start, stop, cancel, tap }
 
     public static let defaultTapThreshold: TimeInterval = 0.35
     public static let defaultArmDelay: TimeInterval = 0.2
@@ -37,6 +37,7 @@ public struct HotkeyGesture: Sendable, Equatable {
     public let mode: Mode
     public let tapThreshold: TimeInterval
     public let armDelay: TimeInterval
+    private let tapsInHoldMode: Bool
 
     private enum Phase: Sendable, Equatable {
         /// No run owned by the gesture, trigger up.
@@ -57,11 +58,18 @@ public struct HotkeyGesture: Sendable, Equatable {
     public init(
         mode: Mode = .hybrid,
         tapThreshold: TimeInterval = HotkeyGesture.defaultTapThreshold,
-        armDelay: TimeInterval = HotkeyGesture.defaultArmDelay
+        armDelay: TimeInterval = HotkeyGesture.defaultArmDelay,
+        tapsInHoldMode: Bool = false
     ) {
         self.mode = mode
         self.tapThreshold = tapThreshold
         self.armDelay = armDelay
+        self.tapsInHoldMode = tapsInHoldMode
+    }
+
+    /// Magic cleans the draft on a tap and records an instruction once the hold threshold passes.
+    public static var magic: Self {
+        Self(mode: .hold, armDelay: defaultTapThreshold, tapsInHoldMode: true)
     }
 
     /// When the caller should call `tick(at:)` next; nil when no press is waiting to start.
@@ -120,7 +128,7 @@ public struct HotkeyGesture: Sendable, Equatable {
             switch mode {
             case .hold:
                 phase = .idle
-                return nil
+                return tapsInHoldMode ? .tap : nil
             case .toggle:
                 phase = .latched
                 return .start

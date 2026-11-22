@@ -27,10 +27,35 @@ import Observation
     @ObservationIgnored private let composerShortcuts = MacComposerShortcuts()
     private var dictationPill: DictationPillController?
     private var magicTask: Task<Void, Never>?
+    private var keyboardInstruction = false
+    @ObservationIgnored private var magicGeneration = 0
     var notice: String { dictation.notice ?? (dictation.speechMode == .instruction ? "Magic" : dictation.phase.rawValue.capitalized) }
     var isDictating: Bool { dictation.isActive }
-    enum HotkeyTarget { case magic, dictation }
-    private(set) var recordingTarget: HotkeyTarget?
+    enum HotkeyTarget: Equatable {
+        case magic, dictation, composer(MacComposerShortcut)
+
+        var title: String {
+            switch self {
+            case .magic: "Magic"
+            case .dictation: "Dictation"
+            case .composer(let action): action.actionTitle
+            }
+        }
+        @MainActor var defaultBinding: HotkeySpec {
+            switch self {
+            case .magic: MacComposerShortcut.magic.defaultBinding
+            case .dictation: MacSettings.defaultDictationHotkey
+            case .composer(let action): action.defaultBinding
+            }
+        }
+        static var all: [Self] { [.magic, .dictation] + MacComposerShortcut.chordActions.map { .composer($0) } }
+    }
+    private(set) var recordingTarget: HotkeyTarget? {
+        didSet { tap.setRecording(recordingTarget != nil || recordedKey != nil) }
+    }
+    private var recordedKey: UInt16? {
+        didSet { tap.setRecording(recordingTarget != nil || recordedKey != nil) }
+    }
     var isRecordingHotkey: Bool { recordingTarget != nil }
     var recordingPreview: String?
     var onboardingRequests = 0
@@ -42,8 +67,10 @@ import Observation
     #endif
     private let tap = HotkeyTap()
     private var recorder = HotkeyRecorderLogic()
-    private let magicGesture = GestureDriver()
+    private let magicGesture = GestureDriver(gesture: .magic)
     private let dictationGesture = GestureDriver()
+    @ObservationIgnored private var recordingMonitor: Any?
+    @ObservationIgnored private var recordingResignObserver: NSObjectProtocol?
     private var eventTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
     private var bootstrapped = false
@@ -137,9 +164,19 @@ import Observation
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             Task { @MainActor in self?.destination.invalidate() }
         }
+        // Capture inside the active Settings window and consume the event before AppKit
+        // can run its menu equivalent (e.g. Command-W). The tap marks this same event so
+        // the newly recorded binding cannot fire as soon as Settings finishes recording.
+        recordingMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
+            self?.recordLocalEvent(event) == true ? nil : event
+        }
+        recordingResignObserver = NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification,
+            object: NSApp, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.cancelRecording(); self?.recordedKey = nil }
+            }
         tap.composerAction = { [composerShortcuts] in composerShortcuts.owns($0) }
         permissions.hotkeyTapActive = hotkeysEnabled && tap.start()
-        dictationPill = DictationPillController(session: dictation, actions: DictationPillActions(
+        dictationPill = DictationPillController(session: dictation, settings: settings, actions: DictationPillActions(
             magic: { [weak self] in self?.perform(.magic) },
             instruction: { [weak self] in self?.toggleMagic() },
             insert: { [weak self] in self?.perform(.insert) },
@@ -149,7 +186,12 @@ import Observation
                 guard let self, let composer = dictation.composer, !composer.text.isEmpty else { return }
                 paster.copy(composer.text)
             }))
-        composerShortcuts.perform = { [weak self] in self?.perform($0) }
+        composerShortcuts.perform = { [weak self] action in
+            guard let self, recordingTarget == nil else { return }
+            // Carbon may deliver a registered chord before its event-tap sample.
+            magicGesture.spoil { self.dispatch($0) }
+            perform(action)
+        }
         observeComposerShortcuts()
         dictation.ensureWarm()
         meetingIsland = MeetingIslandController(controller: meetings)
@@ -185,39 +227,57 @@ import Observation
         #endif
     }
     private func perform(_ action: MacComposerShortcut) {
+        let finishingInstruction = magicTask
         Task {
+            await finishingInstruction?.value
             switch action {
             case .magic: await dictation.magicDraft()
             case .insert: await dictation.insertDraft()
             case .discard: await dictation.discardDraft()
             case .undoDiscard: dictation.undoDiscard()
             }
-            if !dictation.isActive { dictationGesture.runEnded(); magicGesture.runEnded() }
+            if !dictation.isActive { dictationGesture.runEnded() }
         }
     }
     /// Only an available composer action owns a global chord. Custom speech shortcuts take priority.
     private func observeComposerShortcuts() {
-        let available = withObservationTracking {
-            guard hotkeysEnabled, recordingTarget == nil else { return Set<MacComposerShortcut>() }
-            return Set(MacComposerShortcut.allCases.filter {
-                $0.spec != settings.hotkey && $0.spec != settings.dictationHotkey && $0.isAvailable(in: dictation)
-            })
+        let bindings = withObservationTracking {
+            var active: [MacComposerShortcut: HotkeySpec] = [:]
+            guard hotkeysEnabled, recordingTarget == nil, recordedKey == nil else { return active }
+            for action in MacComposerShortcut.chordActions where action.isAvailable(in: dictation, duringMagicHold: keyboardInstruction) {
+                if let spec = settings.binding(for: action) { active[action] = spec }
+            }
+            return active
         } onChange: { [weak self] in
             Task { @MainActor in self?.observeComposerShortcuts() }
         }
-        composerShortcuts.update(available: available)
+        for (action, spec) in composerShortcuts.update(bindings: bindings) {
+            dictationPill?.show(notice: "\(spec.displayName) is unavailable for \(action.actionTitle). Choose another shortcut in Settings.")
+        }
     }
     func toggleMagic() {
         if dictation.speechMode == .instruction { stopMagic() } else { startMagic() }
     }
-    private func startMagic() {
-        guard !refusedByMeeting() else { magicGesture.runEnded(); return }
-        guard microphoneReady() else { magicGesture.runEnded(); return }
-        magicTask = Task { if !(await dictation.startMagic()) { magicGesture.runEnded() } }
+    private func startMagic(fromKeyboard: Bool = false) {
+        guard MacComposerShortcut.magic.isAvailable(in: dictation), !refusedByMeeting(), microphoneReady() else { return }
+        magicGeneration &+= 1
+        let generation = magicGeneration, previous = magicTask
+        keyboardInstruction = fromKeyboard
+        magicTask = Task {
+            await previous?.value
+            if !(await dictation.startMagic()), magicGeneration == generation {
+                keyboardInstruction = false
+                magicGesture.runEnded()
+            }
+        }
     }
-    private func stopMagic() {
-        let starting = magicTask
-        Task { await starting?.value; await dictation.endMagic(); magicGesture.runEnded() }
+    private func stopMagic(discard: Bool = false) {
+        let starting = magicTask, generation = magicGeneration
+        magicTask = Task {
+            await starting?.value
+            await dictation.endMagic(discard: discard)
+            if magicGeneration == generation { keyboardInstruction = false }
+        }
     }
     func instructionAction(_ action: InstructionIntent.Action) {
         dictation.instruction.handle(.init(action: action, instructionID: dictation.instruction.strip.instructionID))
@@ -234,42 +294,95 @@ import Observation
         }
         return false
     }
+    func binding(for target: HotkeyTarget) -> HotkeySpec? {
+        switch target {
+        case .dictation: settings.dictationHotkey
+        case .magic: settings.hotkey
+        case .composer(let action): settings.binding(for: action)
+        }
+    }
+    private func setBinding(_ spec: HotkeySpec?, for target: HotkeyTarget) {
+        switch target {
+        case .dictation: settings.dictationHotkey = spec
+        case .magic: settings.hotkey = spec
+        case .composer(let action): settings.setBinding(spec, for: action)
+        }
+    }
+    func clearBinding(for target: HotkeyTarget) {
+        resetGestures()
+        setBinding(nil, for: target)
+        cancelRecording()
+    }
+    func restoreDefault(for target: HotkeyTarget) {
+        resetGestures()
+        if accept(target.defaultBinding, for: target), case .composer(let action) = target {
+            settings.resetBinding(for: action)
+        }
+    }
+    @discardableResult private func accept(_ spec: HotkeySpec, for target: HotkeyTarget) -> Bool {
+        let error: String?
+        if case .composer(let action) = target, !action.accepts(spec) {
+            error = "Press a key combination or a function key."
+        } else if let used = HotkeyTarget.all.first(where: { $0 != target && binding(for: $0)?.conflicts(with: spec) == true }) {
+            error = "Already used by the " + used.title + " shortcut."
+        } else if case .composer(let action) = target, !composerShortcuts.canRegister(spec, for: action) {
+            error = "This shortcut is unavailable. Try another combination."
+        } else {
+            error = nil
+        }
+        if let error {
+            recordingTarget = target
+            recordingPreview = error
+            recorder = HotkeyRecorderLogic()
+            return false
+        }
+        setBinding(spec, for: target)
+        cancelRecording()
+        return true
+    }
+    private func resetGestures() {
+        if keyboardInstruction { stopMagic(discard: true) }
+        magicGesture.reset()
+        dictationGesture.reset()
+    }
     func beginRecording(_ target: HotkeyTarget = .magic) {
         guard tap.isActive else { permissions.requestAccessibility(); return }
-        magicGesture.reset(); dictationGesture.reset()
+        resetGestures()
         recorder = HotkeyRecorderLogic(); recordingTarget = target; recordingPreview = nil
     }
     func cancelRecording() { recordingTarget = nil; recordingPreview = nil }
+    private func recordLocalEvent(_ event: NSEvent) -> Bool {
+        if event.keyCode == recordedKey {
+            if event.type == .keyUp { recordedKey = nil }
+            return true
+        }
+        guard let target = recordingTarget else { return false }
+        let kind: KeyEvent.Kind = event.type == .keyDown ? .keyDown : event.type == .keyUp ? .keyUp : .flagsChanged
+        let input = KeyEvent(kind: kind, keyCode: event.keyCode, flags: ModifierFlags(rawValue: event.modifierFlags.rawValue))
+        switch recorder.feed(input) {
+        case .none: break
+        case .preview(let text): recordingPreview = text
+        case .captured(let spec):
+            if event.type == .keyDown { recordedKey = event.keyCode }
+            accept(spec, for: target)
+        case .cancelled: cancelRecording()
+        }
+        return true
+    }
     private func handle(_ sample: TapSample) {
-        guard let event = sample.event else { magicGesture.reset(); dictationGesture.reset(); return }
+        guard let event = sample.event else { resetGestures(); return }
+        guard !sample.isRecordingBinding, recordingTarget == nil else { return }
         if event.kind == .keyDown {
             let shortcut = sample.isComposerAction || settings.hotkey?.triggerEvent(for: event) == .pressed || settings.dictationHotkey?.triggerEvent(for: event) == .pressed
             // Legato's own shortcuts are not the user's typing: a key-based shortcut must not void a typed insert.
             if !shortcut { keyPresses.count &+= 1 }
-            if !shortcut, recordingTarget == nil {
+            if !shortcut {
                 destination.invalidate()
                 if dictation.instruction.strip.phase == .result || dictation.instruction.strip.phase == .undone { instructionAction(.accept) }
             }
         }
-        if let target = recordingTarget {
-            switch recorder.feed(event) {
-            case .none: break
-            case .preview(let text): recordingPreview = text
-            case .captured(let spec):
-                let other = target == .magic ? settings.dictationHotkey : settings.hotkey
-                if let other, spec.conflicts(with: other) {
-                    recordingPreview = "Already used by the \(target == .magic ? "dictation" : "Magic") shortcut."
-                    recorder = HotkeyRecorderLogic()
-                    return
-                }
-                if target == .magic { settings.hotkey = spec } else { settings.dictationHotkey = spec }
-                cancelRecording()
-            case .cancelled: cancelRecording()
-            }
-            return
-        }
         if let trigger = settings.hotkey?.triggerEvent(for: event) {
-            magicGesture.feed(trigger, at: sample.time, mode: settings.gestureMode) { [weak self] in self?.dispatch($0) }
+            magicGesture.feed(trigger, at: sample.time, mode: .hold) { [weak self] in self?.dispatch($0) }
         }
         if let trigger = settings.dictationHotkey?.triggerEvent(for: event) {
             dictationGesture.feed(trigger, at: sample.time, mode: settings.gestureMode) { [weak self] in self?.dispatchDictation($0) }
@@ -282,7 +395,7 @@ import Observation
         case .start: startDictation()
         case .stop: stopDictation()
         case .cancel: cancelDictation()
-        case nil: break
+        case .tap, nil: break
         }
     }
     /// The dictation hotkey (or the debug bridge) starts a session when idle and stops a running one.
@@ -330,9 +443,10 @@ import Observation
     private func cancelDictation() { Task { await dictation.cancel(); dictationGesture.runEnded() } }
     private func dispatch(_ action: HotkeyGesture.Action?) {
         switch action {
-        case .start: startMagic()
-        case .stop: stopMagic()
-        case .cancel: magicTask?.cancel(); dictation.instruction.reset(); cancelDictation(); magicGesture.runEnded()
+        case .tap: perform(.magic)
+        case .start: startMagic(fromKeyboard: true)
+        case .stop: if keyboardInstruction { stopMagic() }
+        case .cancel: if keyboardInstruction { stopMagic(discard: true) }
         case nil: break
         }
     }
@@ -346,7 +460,8 @@ import Observation
 
 /// One hotkey's `HotkeyGesture` plus the timer that starts a held press.
 @MainActor private final class GestureDriver {
-    private(set) var gesture = HotkeyGesture()
+    private(set) var gesture: HotkeyGesture
+    init(gesture: HotkeyGesture = HotkeyGesture()) { self.gesture = gesture }
     private var armTask: Task<Void, Never>?
 
     func feed(_ trigger: TriggerEvent, at time: TimeInterval, mode: HotkeyGesture.Mode,
@@ -365,6 +480,10 @@ import Observation
             guard !Task.isCancelled, let self else { return }
             dispatch(gesture.tick(at: ProcessInfo.processInfo.systemUptime))
         }
+    }
+    func spoil(dispatch: (HotkeyGesture.Action?) -> Void) {
+        armTask?.cancel()
+        dispatch(gesture.otherKeyDown())
     }
     func reset() { armTask?.cancel(); armTask = nil; gesture.reset() }
     func runEnded() { gesture.runEnded() }

@@ -11,6 +11,22 @@ import Testing
         #expect(g.armDelay == 0.2)
     }
 
+    @Test func magicTapHoldAndChordAreExclusive() {
+        var gesture = HotkeyGesture.magic
+        _ = gesture.pressed(at: 0)
+        #expect(gesture.released(at: 0.1) == .tap)
+        _ = gesture.pressed(at: 1)
+        #expect(gesture.otherKeyDown() == nil)
+        #expect(gesture.released(at: 1.2) == nil)
+        _ = gesture.pressed(at: 2)
+        #expect(gesture.tick(at: 2.4) == .start)
+        #expect(gesture.otherKeyDown() == .cancel)
+        #expect(gesture.released(at: 3) == nil)
+        _ = gesture.pressed(at: 4)
+        #expect(gesture.tick(at: 4.4) == .start)
+        #expect(gesture.released(at: 5) == .stop)
+    }
+
     // MARK: arming
 
     @Test func pressDoesNotStartImmediately() {

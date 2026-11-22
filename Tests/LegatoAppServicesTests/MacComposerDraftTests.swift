@@ -129,6 +129,19 @@ private final class WritingRequestRecorder: MessagesStreaming {
         await session.debugStop()
     }
 
+    @Test func chordingDuringAnInstructionPreservesTheRunningTakeWithoutRunningMagic() async throws {
+        let cleaner = Cleaner()
+        let (session, draft) = session(cleaner)
+        try await session.debugLine("before")
+        #expect(await session.startMagic())
+        try await session.debugLine("unintended instruction")
+        await session.endMagic(discard: true)
+        #expect(session.phase == .listening && session.speechMode == .dictation)
+        try await session.debugLine("after")
+        await session.debugStop()
+        #expect(draft.text == "before after" && cleaner.inputs.withLock { $0.isEmpty })
+    }
+
     @Test func protectedDraftSkipsProvidersAndVoiceInstructions() async throws {
         let cleaner = Cleaner()
         let (session, draft) = session(cleaner)

@@ -219,7 +219,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     Label("Magic shortcut", systemImage: "command").font(.headline)
                     HotkeyRecorderView(target: .magic)
-                    Text("Tap to start a spoken instruction and tap again to run it, or hold the shortcut while speaking.")
+                    Text("Tap to revise the draft. Hold to speak an instruction, then release to apply it.")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -234,12 +234,10 @@ struct SettingsView: View {
             card {
                 VStack(alignment: .leading, spacing: 12) {
                     Label("Composer shortcuts", systemImage: "keyboard").font(.headline)
-                    ForEach(MacComposerShortcut.allCases, id: \.self) { shortcut in
-                        HStack {
-                            Text(shortcut.actionTitle)
-                            Spacer()
-                            Text(shortcut.keysLabel).monospaced().foregroundStyle(.secondary)
-                        }
+                    ForEach(MacComposerShortcut.chordActions, id: \.self) { shortcut in
+                        Divider()
+                        Text(shortcut.actionTitle).font(.body.weight(.medium))
+                        HotkeyRecorderView(target: .composer(shortcut))
                     }
                 }
             }

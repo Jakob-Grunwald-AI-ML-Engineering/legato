@@ -2,6 +2,7 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 import LegatoMac
+import Synchronization
 
 /// One key event as seen by the tap, with the time it was seen (`ProcessInfo.systemUptime`).
 /// `event` is nil for "the tap was disabled and re-enabled": key events may have been lost, so
@@ -9,6 +10,7 @@ import LegatoMac
 struct TapSample: Sendable {
     var event: KeyEvent?
     var isComposerAction = false
+    var isRecordingBinding = false
     var time: TimeInterval
 }
 
@@ -17,9 +19,11 @@ struct TapSample: Sendable {
 private final class TapContext: @unchecked Sendable {
     let continuation: AsyncStream<TapSample>.Continuation
     var port: CFMachPort?
+    let recording: @Sendable () -> Bool
     let composerAction: @Sendable (KeyEvent) -> Bool
-    init(continuation: AsyncStream<TapSample>.Continuation, composerAction: @escaping @Sendable (KeyEvent) -> Bool) {
+    init(continuation: AsyncStream<TapSample>.Continuation, composerAction: @escaping @Sendable (KeyEvent) -> Bool, recording: @escaping @Sendable () -> Bool) {
         self.continuation = continuation
+        self.recording = recording
         self.composerAction = composerAction
     }
 }
@@ -96,7 +100,7 @@ private func hotkeyTapCallback(
     // A real key: a synthetic key planned before it is refused (`RealInput`).
     if kind == .keyDown { RealInput.shared.bump() }
     // Capture ownership here: the action itself can unregister its chord before MainActor reads this sample.
-    let sample = TapSample(event: keyEvent, isComposerAction: context.composerAction(keyEvent), time: ProcessInfo.processInfo.systemUptime)
+    let sample = TapSample(event: keyEvent, isComposerAction: context.composerAction(keyEvent), isRecordingBinding: context.recording(), time: ProcessInfo.processInfo.systemUptime)
     context.continuation.yield(sample)
     return Unmanaged.passUnretained(event)
 }
@@ -107,6 +111,9 @@ private func hotkeyTapCallback(
 @MainActor
 final class HotkeyTap {
     var composerAction: @Sendable (KeyEvent) -> Bool = { _ in false }
+    private let recording = Mutex(false)
+    nonisolated private func isRecording() -> Bool { recording.withLock { $0 } }
+    func setRecording(_ active: Bool) { recording.withLock { $0 = active } }
     let samples: AsyncStream<TapSample>
     private let continuation: AsyncStream<TapSample>.Continuation
     private var port: CFMachPort?
@@ -122,7 +129,7 @@ final class HotkeyTap {
     @discardableResult
     func start() -> Bool {
         guard port == nil else { return true }
-        let context = TapContext(continuation: continuation, composerAction: composerAction)
+        let context = TapContext(continuation: continuation, composerAction: composerAction, recording: { [weak self] in self?.isRecording() == true })
         // Clicks only count as real input (`RealInput`); they are not samples.
         let mask: CGEventMask = [CGEventType.flagsChanged, .keyDown, .keyUp, .leftMouseDown, .rightMouseDown, .otherMouseDown]
             .reduce(0) { $0 | (1 << $1.rawValue) }

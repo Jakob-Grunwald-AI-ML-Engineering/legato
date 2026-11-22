@@ -39,6 +39,7 @@ private final class DictationPillHostingView<Content: View>: NSHostingView<Conte
 
 @MainActor final class DictationPillController {
     private let session: MacDictationSession
+    private let settings: MacSettings
     private let actions: DictationPillActions
     private let model = ComposerPresentation()
     private let presentation = IslandPresentation()
@@ -48,8 +49,9 @@ private final class DictationPillHostingView<Content: View>: NSHostingView<Conte
     private var caret: NSRect?
     private var hostWindow: NSRect?
 
-    init(session: MacDictationSession, actions: DictationPillActions) {
+    init(session: MacDictationSession, settings: MacSettings, actions: DictationPillActions) {
         self.session = session
+        self.settings = settings
         self.actions = actions
         lastNoticeID = session.noticeID
         track()
@@ -137,7 +139,7 @@ private final class DictationPillHostingView<Content: View>: NSHostingView<Conte
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.becomesKeyOnlyIfNeeded = true
-        let content = DictationPillView(session: session, draft: draft, actions: actions, model: model, presentation: presentation)
+        let content = DictationPillView(session: session, settings: settings, draft: draft, actions: actions, model: model, presentation: presentation)
         let hosting = DictationPillHostingView(rootView: content)
         hosting.sizingOptions = []
         hosting.autoresizingMask = [.width, .height]
@@ -177,6 +179,7 @@ private final class DictationPillHostingView<Content: View>: NSHostingView<Conte
 
 private struct DictationPillView: View {
     let session: MacDictationSession
+    let settings: MacSettings
     let draft: MacComposerDraft
     let actions: DictationPillActions
     let model: ComposerPresentation
@@ -221,9 +224,9 @@ private struct DictationPillView: View {
                 .defaultScrollAnchor(.bottom, for: .sizeChanges)
                 HStack(spacing: 6) {
                     if draft.canUndoDiscard {
-                        action(.undoDiscard, "arrow.uturn.backward", actions.undoDiscard)
+                        action(.undoDiscard, actions.undoDiscard)
                     } else {
-                        action(.discard, "trash", actions.discard)
+                        action(.discard, actions.discard)
                             .disabled(draft.isInserting || (draft.isEmpty && !session.isActive))
                     }
                     Spacer(minLength: 0)
@@ -237,9 +240,9 @@ private struct DictationPillView: View {
                         .help(instructing ? "Run spoken instruction" : "Speak an instruction")
                         .accessibilityIdentifier("composer.instruction")
                         .disabled(busy || (draft.isEmpty && !instructing))
-                        action(.magic, "wand.and.stars", actions.magic)
+                        action(.magic, actions.magic)
                             .disabled(draft.isEmpty || busy || instructing)
-                        action(.insert, "return", actions.insert)
+                        action(.insert, actions.insert)
                             .disabled(draft.isEmpty || busy || instructing)
                     }
                 }.buttonStyle(.bordered).controlSize(.small)
@@ -248,9 +251,20 @@ private struct DictationPillView: View {
         }
     }
 
-    private func action(_ shortcut: MacComposerShortcut, _ symbol: String, _ perform: @escaping @MainActor () -> Void) -> some View {
-        Button(action: perform) { Label(shortcut.actionTitle, systemImage: symbol) }
-            .help("\(shortcut.actionTitle) (\(shortcut.keysLabel))")
-            .accessibilityIdentifier("composer.\(shortcut)")
+    private func action(_ shortcut: MacComposerShortcut, _ perform: @escaping @MainActor () -> Void) -> some View {
+        let keys = settings.binding(for: shortcut)?.displayName
+        return Button(action: perform) {
+            HStack(spacing: 4) {
+                if shortcut == .discard, let keys { shortcutHint(keys) }
+                Text(shortcut.actionTitle)
+                if shortcut != .discard, let keys { shortcutHint(keys) }
+            }.lineLimit(1)
+        }
+        .help(keys.map { "\(shortcut.actionTitle) (\($0))" } ?? shortcut.actionTitle)
+        .accessibilityIdentifier("composer.\(shortcut)")
+    }
+
+    private func shortcutHint(_ keys: String) -> some View {
+        Text(keys).font(.caption).foregroundStyle(.secondary)
     }
 }
