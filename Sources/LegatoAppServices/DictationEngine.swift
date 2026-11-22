@@ -31,6 +31,7 @@ import LegatoVocabulary
     @ObservationIgnored private var sending = false
     @ObservationIgnored private var finishing: Task<Void, Never>?
     @ObservationIgnored private var lineSequence = 0
+    @ObservationIgnored private var consumedFinish = false
     @ObservationIgnored private var activity = DictationActivity()
     #if DEBUG || LEGATO_INTERNAL
     /// The scripted stream of `debugReplay` while it runs.
@@ -100,6 +101,7 @@ import LegatoVocabulary
     /// Starts the take on the held connection (or a fresh one) and holds the next connection right away.
     public func activate() async {
         voiceIsolationStatus = nil
+        consumedFinish = false
         if stream == nil { open() }
         guard active == nil, let stream else { return }
         guard let held = await stream.take() else { stream.warm(); return }
@@ -170,6 +172,18 @@ import LegatoVocabulary
         if self.finishing == finishing { self.finishing = nil }
     }
 
+    /// The provider acknowledges a stop before this route's subscriber necessarily consumed all of its
+    /// ordered word events. A composer freezes its draft only after the subscriber reached the same end.
+    func settleComposerSpeech(timeout: Duration) async {
+        let deadline = ContinuousClock.now + timeout
+        await waitForFinish(timeout: timeout)
+        while !consumedFinish && ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        // A timed-out stream must never append late words into the user's next draft.
+        if !consumedFinish { await close() }
+    }
+
     /// Stop routing and drop the take's unfinished words (surface change, keyboard gone); delivered lines stay
     /// with the sink. The route closes too; the owner reopens it for the next take.
     public func abandonTake() async {
@@ -199,6 +213,7 @@ import LegatoVocabulary
         guard room === self.room else { return }
         switch event.channel {
         case .session:
+            if event.payload["event"] == .string("asr.finished") { consumedFinish = true }
             if event.payload["event"] == .string("asr.voiceIsolation"), case .string(let state) = event.payload["status"] {
                 voiceIsolationStatus = Self.voiceIsolationMessage(state)
             }

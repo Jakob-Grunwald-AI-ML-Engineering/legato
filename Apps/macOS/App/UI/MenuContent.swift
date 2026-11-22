@@ -17,7 +17,7 @@ struct MenuContent: View {
             Button(controller.dictation.speechMode == .instruction ? "Run Magic instruction" : "Speak a Magic instruction") { controller.toggleMagic() }
                 .menuAction("menu.magic") { controller.toggleMagic() }
                 .buttonStyle(.borderedProminent).tint(.purple).controlSize(.large)
-            Button(controller.dictation.isActive ? "Stop dictation" : "Dictate into the focused field") { controller.toggleDictation() }
+            Button(controller.dictation.isActive ? "Stop dictation" : "Dictate into the composer") { controller.toggleDictation() }
                 .menuAction("menu.dictation") { controller.toggleDictation() }
                 .controlSize(.large)
             HStack(spacing: 8) {

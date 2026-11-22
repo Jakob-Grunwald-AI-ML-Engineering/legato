@@ -75,6 +75,8 @@ extension InstructionRunner: InstructionRunning {}
     }
     public var isRunning: Bool { task != nil }
 
+    @ObservationIgnored var onDraftInstruction: (@MainActor (String) -> Void)?
+
     // MARK: Speech
 
     /// Instruction mode came on: a new instruction starts (a result still on the strip counts as accepted).
@@ -104,7 +106,11 @@ extension InstructionRunner: InstructionRunning {}
         listening = false
         tail = ""
         guard !words.isEmpty else { return update(InstructionStrip()) }
-        run()
+        if let onDraftInstruction {
+            let command = transcript
+            update(InstructionStrip())
+            onDraftInstruction(command)
+        } else { run() }
     }
 
     // MARK: Intents

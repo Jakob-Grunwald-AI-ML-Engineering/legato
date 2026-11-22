@@ -24,7 +24,7 @@ import ApplicationServices
         harness.register("state") { _ in MacAppController.shared.dictation.debugState }
         #if DEBUG
         // Mac dictation hotkey without speech: a finalized line (or live partial) enters where Soniox lines do and
-        // is cleaned and typed into the focused field for real. The first one begins a microphone-free session
+        // is staged in the composer. The first one begins a microphone-free session
         // (the field in front is captured then); `dictation-debug-stop` ends it.
         harness.register("dictation-debug-line") { command in
             guard command.args.count == 1 else { throw Usage.invalid }
@@ -75,15 +75,22 @@ import ApplicationServices
             MacAppController.shared.dictation.pipeline.debugStreamCleaner = DebugStreamingCleaner(chunkMilliseconds: ms, failAfterChunks: fail)
             return MacAppController.shared.dictation.debugState
         }
-        // The pill's Retry and Insert as-is buttons, without a click.
-        harness.register("dictation-retry") { _ in
-            await MacAppController.shared.dictation.pipeline.retry()
-            return MacAppController.shared.dictation.debugState
+        harness.register("composer-state") { _ in composerState() }
+        harness.register("composer-magic") { _ in
+            await MacAppController.shared.dictation.magicDraft()
+            return composerState()
         }
-        harness.register("dictation-insert-raw") { _ in
-            await MacAppController.shared.dictation.pipeline.insertRaw()
-            try await Task.sleep(for: .milliseconds(300))
-            return MacAppController.shared.dictation.debugState
+        harness.register("composer-insert") { _ in
+            await MacAppController.shared.dictation.insertDraft()
+            return composerState()
+        }
+        harness.register("composer-discard") { _ in
+            await MacAppController.shared.dictation.discardDraft()
+            return composerState()
+        }
+        harness.register("composer-undo-discard") { _ in
+            MacAppController.shared.dictation.undoDiscard()
+            return composerState()
         }
         #endif
         harness.register("magic-toggle") { _ in
@@ -104,16 +111,12 @@ import ApplicationServices
             case .none: capture = "unavailable"
             case .password: capture = "password"
             }
-            let panel = app.fieldEditor.panel
             return ["nativeInput": NativeInputHandoff.shared.diagnostics, "capture": capture, "captureNote": AXTextTarget.lastCaptureNote, "offline": MacDictationSession.offlineFixture,
                     "axTrusted": AXIsProcessTrusted(),
                     "frontmostPID": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1,
                     "frontmostBundle": NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "",
                     "magicHotkey": app.settings.hotkey?.displayName ?? "", "dictationHotkey": app.settings.dictationHotkey?.displayName ?? "",
-                    "send": app.settings.dictationSend.rawValue, "hotkeysEnabled": app.permissions.hotkeyTapActive,
-                    "panelMode": PanelDictationSetting.mode().rawValue, "panelActive": panel.active,
-                    "panelText": panel.take.text, "panelInserting": panel.inserting,
-                    "panelRecoveryText": panel.recoveryText, "panelDeliveryText": panel.deliveryText]
+                    "hotkeysEnabled": app.permissions.hotkeyTapActive, "composer": composerState()]
         }
         harness.register("say") { command in
             guard let parsed = LegatoDevHarness.DebugMessages.parse(command.args, takesChoices: false) else { throw Usage.invalid }
@@ -130,6 +133,11 @@ import ApplicationServices
         harness.register("foreground") { _ in NSApp.unhide(nil); NSApp.activate(); return nil }
         harness.register("background") { _ in NSApp.hide(nil); return nil }
         harness.start()
+    }
+    private static func composerState() -> [String: Any] {
+        guard let composer = MacAppController.shared.dictation.composer else { return [:] }
+        return ["text": composer.text, "correcting": composer.isCorrecting, "inserting": composer.isInserting,
+                "needsCopy": composer.needsCopy, "canUndoDiscard": composer.canUndoDiscard, "message": composer.message ?? ""]
     }
     static func emit(id: String, event: String, _ fields: [String: Any] = [:]) { harness.emit(id: id, event: event, fields) }
     enum Usage: Error { case invalid }

@@ -26,6 +26,20 @@ public final class DebugStreamingCleaner: SentenceCleaning, @unchecked Sendable 
             else { input.text.capitalized }
         return .init(sentenceID: input.sentenceID, sequence: input.sequence, text: reply ?? text)
     }
+    public func clean(_ input: SentenceCleanupInput, preview: @escaping @Sendable (String) async -> Void) async throws -> ValidatedSentence {
+        let result = try await clean(input)
+        let characters = Array(result.text)
+        let fail = lock.withLock { () -> Int? in defer { failAfter = nil }; return failAfter }
+        var sent = 0
+        for offset in stride(from: 0, to: characters.count, by: chunkSize) {
+            if let fail, sent >= fail { throw SentenceCleanupError.providerError }
+            try await Task.sleep(for: chunkDelay)
+            await preview(String(characters.prefix(min(characters.count, offset + chunkSize))))
+            sent += 1
+        }
+        if let fail, sent <= fail { throw SentenceCleanupError.providerError }
+        return result
+    }
     public func cleanTake(_ input: DictationTakeInput) async throws -> String {
         try await Task.sleep(for: chunkDelay)
         return reply ?? input.text.capitalized

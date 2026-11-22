@@ -29,6 +29,10 @@ import LegatoKeyboardCore
     public var isActive: Bool { phase != .idle }
     @ObservationIgnored public let pipeline: DictationPipeline
     public let instruction: InstructionSession
+    public let composer: MacComposerDraft?
+    @ObservationIgnored public var insertDraftText: @MainActor (String) async -> Bool = { _ in false }
+    @ObservationIgnored private var discardingDraft = false
+    @ObservationIgnored private var draftActionGeneration = 0
     public var speechMode: SpeechMode { speechRoute.speechMode }
     @ObservationIgnored private let speechRoute: DictationRouteSession
     @ObservationIgnored private var magicOwnsTake = false
@@ -74,6 +78,7 @@ import LegatoKeyboardCore
     private static let warmInterval: TimeInterval = 240
 
     public init(pipeline: DictationPipeline, instruction: InstructionSession? = nil, microphone: any AudioSource, vocabularyURL: URL,
+                composer: MacComposerDraft? = nil,
                 sonioxKey: @escaping @MainActor () -> String = { (try? KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey()) ?? "" },
                 claudeKey: @escaping @MainActor () -> Bool = { ((try? KeychainKeyStore().apiKey()) ?? nil)?.isEmpty == false },
                 makeSocket: @escaping @Sendable () -> any SonioxSocket = { URLSessionSonioxSocket() },
@@ -82,8 +87,17 @@ import LegatoKeyboardCore
         self.pipeline = pipeline; mic = microphone; self.sonioxKey = sonioxKey; self.claudeKey = claudeKey
         self.warmConnection = warmConnection; self.settleTimeout = settleTimeout
         self.instruction = instruction ?? InstructionSession(vocabularyURL: vocabularyURL)
-        speechRoute = DictationRouteSession(sink: pipeline, instruction: self.instruction, sonioxKey: sonioxKey,
+        self.composer = composer
+        let sink: any DictationRouteSink = composer.map { $0 as any DictationRouteSink } ?? pipeline
+        speechRoute = DictationRouteSession(sink: sink, instruction: self.instruction, sonioxKey: sonioxKey,
                                            makeSocket: makeSocket, vocabularyURL: vocabularyURL)
+        if let composer {
+            composer.recentContext = { [weak pipeline] in pipeline?.backgroundText ?? "" }
+            self.instruction.onDraftInstruction = { [weak composer, weak pipeline] instruction in
+                guard let pipeline else { return }
+                composer?.correct(using: pipeline, instructions: instruction)
+            }
+        }
         pipeline.onChange = { [weak self] in self?.drain() }
         speechRoute.afterDictationSettled = { [weak self] in await self?.drainNow() }
     }
@@ -107,6 +121,8 @@ import LegatoKeyboardCore
 
     /// Starts dictating. False (with a `notice`) when it cannot.
     @discardableResult public func start() async -> Bool {
+        guard composer?.isInserting != true, !discardingDraft else { return false }
+        if composer?.needsCopy == true { post("Copy or discard the retained draft to start another."); return false }
         #if DEBUG || LEGATO_INTERNAL
         if Self.offlineFixture { try? await beginDebugIfIdle(); return phase == .listening }
         #endif
@@ -124,6 +140,7 @@ import LegatoKeyboardCore
         let audio: AsyncStream<AudioChunk>
         do { audio = try await mic.start(format: .init(sampleRate: 16000, channelCount: 1)) }
         catch {
+            composer?.acceptingSpeech = false
             phase = .idle
             post("Can't use the microphone. Allow Legato in System Settings, Privacy & Security, Microphone.")
             Self.log.error("mac.dictation.mic.failed \(String(describing: error), privacy: .public)")
@@ -132,13 +149,14 @@ import LegatoKeyboardCore
         await engine.activate()
         guard engine.hasActiveTake else {
             await mic.stop()
+            composer?.acceptingSpeech = false
             phase = .idle
             engine.open()
             post("Can't reach Soniox. Check your connection and key, then try again.")
             return false
         }
         phase = .listening
-        if !claudeKey() { post("No Claude key: lines are typed as heard. Add it in Legato Settings.") }
+        if !claudeKey() { post(composer == nil ? "No Claude key: lines are typed as heard. Add it in Legato Settings." : "Add a Claude key in Settings to use Magic.") }
         let engine = self.engine
         audioTask = Task {
             var converter = PCM16Converter()
@@ -147,7 +165,7 @@ import LegatoKeyboardCore
                 await engine.send(pcm)
             }
         }
-        Task { await pipeline.warm() }
+        if composer == nil { Task { await pipeline.warm() } }
         if pendingStop { pendingStop = false; await stop() }
         return true
     }
@@ -170,9 +188,18 @@ import LegatoKeyboardCore
             await mic.stop()
             await audioTask?.value; audioTask = nil
             await engine.finalizeTake()
-            await engine.waitForFinish(timeout: .seconds(3))
+            if composer != nil { await engine.settleComposerSpeech(timeout: .seconds(3)) }
+            else { await engine.waitForFinish(timeout: .seconds(3)) }
         }
         speechRoute.finishModes()
+        if let composer {
+            composer.sealTail()
+            composer.acceptingSpeech = false
+            await onEnd()
+            phase = .idle
+            stopTask = nil
+            return
+        }
         _ = await pipeline.settle(timeout: settleTimeout)
         // The whole take (on stop, or what the pause timer has not sent yet) is cleaned and written once, here.
         // The cleanup bounds itself (a timeout per attempt, one retry); a failure leaves the raw text held for the user.
@@ -207,6 +234,19 @@ import LegatoKeyboardCore
 
     /// Start of a session: the previous session's lines are written first, then the cleanup context starts empty.
     private func beginContext() async {
+        if let composer {
+            if composer.isEmpty {
+                composer.startNewDestination()
+                await onPrepare()
+                onBegin()
+            }
+            composer.acceptingSpeech = true
+            composer.needsFreshBoundary = false
+            engine.resetSequence()
+            if notice != nil { notice = nil; noticeID += 1 }
+            if !Self.offlineFixture { engine.open() }
+            return
+        }
         _ = await pipeline.settle(timeout: settleTimeout)
         await drainNow()
         await pipeline.reset(keepFailedTake: true)
@@ -228,6 +268,10 @@ import LegatoKeyboardCore
 
     /// Magic reuses an active microphone; starting Magic from idle opens a take of its own.
     public func startMagic() async -> Bool {
+        if let composer {
+            guard !composer.isEmpty, !composer.isCorrecting, !composer.isInserting, !composer.needsCopy, !discardingDraft,
+                  pipeline.keepsTakes(), composer.onCut == nil else { return false }
+        }
         guard speechMode != .instruction else { return true }
         magicOwnsTake = !isActive
         if magicOwnsTake, !(await start()) { return false }
@@ -244,6 +288,61 @@ import LegatoKeyboardCore
     private func setMagic(_ enabled: Bool) {
         speechRoute.setMagic(enabled, cut: !debugSession && engine.hasActiveTake)
     }
+
+    // MARK: Composer actions
+
+    public func magicDraft() async {
+        guard let composer, !composer.isCorrecting, !composer.isInserting, !discardingDraft, !composer.needsCopy,
+              speechMode == .dictation, composer.onCut == nil, !composer.isEmpty, phase != .starting else { return }
+        let generation = draftActionGeneration
+        if let stopTask { await stopTask.value }
+        guard generation == draftActionGeneration, !composer.isInserting, !composer.isCorrecting else { return }
+        if phase == .listening, !debugSession {
+            guard !composer.needsFreshBoundary else {
+                composer.message = "Stop dictation, then press Magic to include the final words."
+                return
+            }
+            // Finalize only this speech boundary; the mic keeps listening for the next words.
+            let cut = await composer.finalizeForMagic { await self.engine.finalizeChunk() }
+            guard cut else {
+                composer.needsFreshBoundary = true
+                if generation == draftActionGeneration { composer.message = "The words are still arriving. Stop dictation, then press Magic." }
+                return
+            }
+        } else if debugSession { composer.sealTail() }
+        guard generation == draftActionGeneration, !discardingDraft else { return }
+        composer.correct(using: pipeline, instructions: nil)
+    }
+
+    public func insertDraft() async {
+        guard let composer, !composer.isEmpty, !composer.isCorrecting, !composer.isInserting, !discardingDraft,
+              !composer.needsCopy, speechMode == .dictation, phase != .starting else { return }
+        draftActionGeneration += 1
+        composer.isInserting = true
+        defer { composer.isInserting = false }
+        if let stopTask { await stopTask.value } else { await stop() }
+        let text = composer.text
+        guard !text.isEmpty else { return }
+        guard await insertDraftText(text) else {
+            composer.needsCopy = true
+            composer.message = "Insertion couldn't be confirmed. Check the field before pasting a copy."
+            return
+        }
+        await pipeline.recordDraft(id: composer.documentID, raw: composer.original, text: text)
+        composer.clear()
+    }
+
+    public func discardDraft() async {
+        guard let composer, !composer.isInserting, !discardingDraft, phase != .starting else { return }
+        discardingDraft = true
+        defer { discardingDraft = false }
+        draftActionGeneration += 1
+        instruction.reset()
+        if let stopTask { await stopTask.value } else { await stop() }
+        composer.discard()
+    }
+
+    public func undoDiscard() { composer?.undo() }
 
     // MARK: Delivery
 
@@ -296,10 +395,12 @@ import LegatoKeyboardCore
     /// Debug bridge: a finalized line enters the route where a Soniox segment does (cleanup, field writing run for
     /// real). Without a running session this begins a microphone-free one, so acceptance needs no keys or speech.
     public func debugLine(_ text: String) async throws {
+        guard !discardingDraft, composer?.isInserting != true, composer?.needsCopy != true else { return }
         try await beginDebugIfIdle()
         guard await engine.debugLine(text) else { throw DebugError.empty }
     }
     public func debugTail(_ text: String) async throws {
+        guard !discardingDraft, composer?.isInserting != true, composer?.needsCopy != true else { return }
         try await beginDebugIfIdle()
         engine.debugTail(text)
     }

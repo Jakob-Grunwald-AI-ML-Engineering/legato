@@ -1,6 +1,6 @@
 # Dictation, Magic and the iOS companion
 
-Dictation and Magic write into the focused text field. The iOS companion has History, Meetings and Settings tabs. The dedicated Compose tab, document writer, quote-correction surface and draft Insert workflow have been retired on both platforms. The keyboard keeps its native keys, suggestions, mic and Magic controls. See [Direct field editing](field-editing.md) for the shared editing contract and [Dictation and Magic on Mac](mac-field-magic.md) for the Mac workflow.
+On Mac, dictate into a floating draft near the caret, apply Magic on demand, then insert or discard the draft. On iPhone, use the keyboard preview for dictation and Magic. The iOS companion has History, Meetings and Settings tabs. See [Dictation and Magic on Mac](mac-field-magic.md) for the desktop controls.
 
 ## Runtime ownership
 

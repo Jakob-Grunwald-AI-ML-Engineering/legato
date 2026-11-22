@@ -2,440 +2,255 @@ import AppKit
 import Observation
 import SwiftUI
 import LegatoAppServices
-import LegatoComposerUI
-import LegatoMac
 import LegatoKeyboardCore
 
-/// What the pill shows besides the session itself: a short notice that outlives the run.
-@MainActor @Observable
-final class DictationPillModel {
-    var notice: String?
-    var style = NotchIslandStyle.detached
-}
-
-/// What the pill's quick controls do (a take typing live into its field).
 struct DictationPillActions {
-    var magic: @MainActor () -> Void = {}
-    var undo: @MainActor () -> Void = {}
-    var redo: @MainActor () -> Void = {}
-    var copyRecovery: @MainActor () -> Void = {}
-    var dismissRecovery: @MainActor () -> Void = {}
+    var magic: @MainActor () -> Void
+    var instruction: @MainActor () -> Void
+    var insert: @MainActor () -> Void
+    var discard: @MainActor () -> Void
+    var undoDiscard: @MainActor () -> Void
+    var copy: @MainActor () -> Void
 }
 
-/// Never key, never main, never activating: the field underneath keeps focus. Clicks pass through except while the
-/// pill shows buttons (the quick controls, a failed cleanup's Retry / Insert as-is, Magic's actions): `ignoresMouseEvents`
-/// is off only then, and the pill's area is registered with `RealInput` so a click on it is not the user's input.
+extension MacComposerShortcut {
+    var actionTitle: String {
+        switch self {
+        case .magic: "Magic"
+        case .insert: "Insert"
+        case .discard: "Discard"
+        case .undoDiscard: "Undo Discard"
+        }
+    }
+}
+
+/// The destination keeps focus while its composer receives first-click button actions.
 private final class DictationPillPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
-    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
-
-/// A click on a button of the (never key) pill acts at once instead of first activating the window.
 private final class DictationPillHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-/// A small island growing out of the notch (a top-centre card without one) while dictation runs. A take that types
-/// live into its field shows only the listening state and quick controls (Magic, Undo, Redo); a readable notice
-/// (missing key, no field, microphone) takes the line. A panel-mode take shows all its words here, growing with them,
-/// until they were typed into the app.
-@MainActor
-final class DictationPillController {
-    let model = DictationPillModel()
+@MainActor @Observable private final class ComposerPresentation {
+    var notice: String?
+}
+
+@MainActor final class DictationPillController {
     private let session: MacDictationSession
-    private let takePanel: DictationPanel
-    private let history: FieldHistory
     private let actions: DictationPillActions
-    private var panel: NSPanel?
-    private var hideTask: Task<Void, Never>?
-    private var closeTask: Task<Void, Never>?
-    private var presentGeneration = 0
+    private let model = ComposerPresentation()
     private let presentation = IslandPresentation()
-    private let occupiedFrame: () -> NSRect?
-    private var lastNoticeID = 0
-    private static let size = NSSize(width: 460, height: 64)
-    private static let failedSize = NSSize(width: 460, height: 92)
-    private var size: NSSize {
-        let base = session.pipeline.takePhase == .failed || session.instruction.strip.phase != .idle || !takePanel.recoveryText.isEmpty ? Self.failedSize : Self.size
-        guard DictationPillView.showsPanel(session: session, panel: takePanel) else { return base }
-        return NSSize(width: base.width, height: max(base.height, panelHeight(base: base)))
-    }
+    private var panel: NSPanel?
+    private var noticeTask: Task<Void, Never>?
+    private var lastNoticeID: Int
+    private var caret: NSRect?
+    private var hostWindow: NSRect?
 
-    /// Room for every word of the panel take at the card's text width, up to half the screen. Past that the text scrolls
-    /// inside the card (the newest words in view) and its actions stay on screen.
-    private func panelHeight(base: NSSize) -> CGFloat {
-        let text = DictationPillView.panelText(session: session, panel: takePanel)
-        let width = base.width - 32 - 30 // card padding, then the symbol and its spacing
-        let bounds = (text as NSString).boundingRect(with: NSSize(width: width, height: .greatestFiniteMagnitude),
-                                                     options: [.usesLineFragmentOrigin, .usesFontLeading],
-                                                     attributes: [.font: NSFont.systemFont(ofSize: 14)])
-        let oneLine = ceil(NSFont.systemFont(ofSize: 14).boundingRectForFont.height)
-        let limit = ((NSScreen.main ?? NSScreen.screens.first)?.visibleFrame.height ?? 800) / 2
-        return min(limit, base.height + max(0, ceil(bounds.height) - oneLine))
-    }
-
-    /// `occupiedFrame` is the open composer, which a notice must not cover.
-    init(session: MacDictationSession, panel: DictationPanel = DictationPanel(), history: FieldHistory = FieldHistory(),
-         actions: DictationPillActions = DictationPillActions(), occupiedFrame: @escaping () -> NSRect? = { nil }) {
+    init(session: MacDictationSession, actions: DictationPillActions) {
         self.session = session
-        self.takePanel = panel
-        self.history = history
         self.actions = actions
-        self.occupiedFrame = occupiedFrame
         lastNoticeID = session.noticeID
         track()
     }
 
-    /// A notice that does not come from the session (hotkey pressed while the composer is open).
+    /// Held for the life of a draft, including stops, resumed dictation and Magic revisions.
+    func captureAnchor(_ witness: AXTextTarget.PasteWitness) {
+        let anchor = witness.composerAnchor()
+        caret = anchor.caret.map(Self.flipCoordinates)
+        hostWindow = anchor.window.map(Self.flipCoordinates)
+        if panel?.isVisible == true { update() }
+    }
+
+    /// Quartz uses the primary screen's top edge, AppKit its bottom edge. Flipping works in
+    /// either direction, including on monitors left of or above the primary screen.
+    private static func flipCoordinates(_ rect: CGRect) -> CGRect {
+        let top = NSScreen.screens.first?.frame.maxY ?? 0
+        return CGRect(x: rect.minX, y: top - rect.maxY, width: rect.width, height: rect.height)
+    }
+
     func show(notice: String) {
         model.notice = notice
-        present()
-        scheduleHide()
+        update()
+        noticeTask?.cancel()
+        noticeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled, let self else { return }
+            model.notice = nil
+            update()
+        }
     }
 
     private func track() {
         withObservationTracking {
-            _ = session.phase; _ = session.noticeID; _ = session.pipeline.takePhase; _ = session.instruction.strip.revision
-            _ = DictationPillView.panelText(session: session, panel: takePanel); _ = takePanel.inserting; _ = takePanel.active
+            _ = session.phase
+            _ = session.noticeID
+            _ = session.speechMode
+            _ = session.instruction.strip.revision
+            _ = session.composer?.text
+            _ = session.composer?.canUndoDiscard
+            _ = session.composer?.isCorrecting
+            _ = session.composer?.isInserting
+            _ = session.composer?.needsCopy
+            _ = session.composer?.message
         } onChange: { [weak self] in
-            Task { @MainActor in self?.update(); self?.track() }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if lastNoticeID != session.noticeID {
+                    lastNoticeID = session.noticeID
+                    if let notice = session.notice { show(notice: notice) }
+                }
+                update()
+                track()
+            }
         }
     }
 
     private func update() {
-        if session.noticeID != lastNoticeID {
-            lastNoticeID = session.noticeID
-            model.notice = session.notice
-            scheduleHide(seconds: 5)
+        guard let draft = session.composer else { return }
+        guard session.isActive || !draft.isEmpty || draft.isCorrecting || draft.isInserting
+                || draft.canUndoDiscard || draft.message != nil || model.notice != nil else {
+            panel?.orderOut(nil)
+            RealInput.shared.setOwnArea(.null)
+            presentation.jump(to: false)
+            return
         }
-        let takeShown = session.pipeline.takePhase != .buffering || session.instruction.strip.phase != .idle
-            || DictationPillView.showsPanel(session: session, panel: takePanel)
-        if session.phase != .idle || model.notice != nil || takeShown { present() } else { hide() }
-    }
-
-    /// Only a pill with buttons takes clicks (the quick controls, Retry / Insert as-is, Magic's actions); every other
-    /// state lets them through. Its area is not the user's input to the field (`RealInput`).
-    private func syncClicks(_ panel: NSPanel) {
-        let accepts = DictationPillView.takesClicks(session: session, panel: takePanel, notice: model.notice)
-        panel.ignoresMouseEvents = !accepts
-        RealInput.shared.setOwnArea(accepts ? Self.displayRect(panel.frame) : .null)
-    }
-
-    /// A window frame (origin bottom left of the primary screen) in global display coordinates (origin top left).
-    private static func displayRect(_ frame: NSRect) -> CGRect {
-        let height = NSScreen.screens.first?.frame.height ?? frame.maxY
-        return CGRect(x: frame.minX, y: height - frame.maxY, width: frame.width, height: frame.height)
-    }
-
-    private func scheduleHide(seconds: Double = 4) {
-        hideTask?.cancel()
-        hideTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(seconds))
-            guard !Task.isCancelled, let self else { return }
-            model.notice = nil
-            if session.phase == .idle, session.pipeline.takePhase == .buffering, session.instruction.strip.phase == .idle,
-               !DictationPillView.showsPanel(session: session, panel: takePanel) { hide() }
-        }
-    }
-
-    /// Shrinks back into the notch; a `present` meanwhile cancels it.
-    private func hide() {
-        guard let panel, panel.isVisible, closeTask == nil else { return }
-        panel.ignoresMouseEvents = true
-        RealInput.shared.setOwnArea(.null)
-        presentation.close()
-        closeTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(NotchIslandTokens.closeDuration + 0.05))
-            guard !Task.isCancelled, let self else { return }
-            closeTask = nil
-            panel.orderOut(nil)
-        }
-    }
-
-    private func present() {
-        presentGeneration += 1
-        closeTask?.cancel(); closeTask = nil
-        let panel = self.panel ?? makePanel()
+        let panel = self.panel ?? makePanel(draft: draft)
         self.panel = panel
-        let wasShown = panel.isVisible
-        position(panel)
-        syncClicks(panel)
-        if !wasShown { presentation.jump(to: false) }
+        position(panel, draft: draft)
+        RealInput.shared.setOwnArea(Self.flipCoordinates(panel.frame))
         panel.orderFrontRegardless()
-        if wasShown { presentation.open() } else { openSoon() }
+        presentation.open()
     }
 
-    /// One frame at the notch size first, so the grow is drawn instead of skipped.
-    private func openSoon() {
-        let generation = presentGeneration
-        Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(30))
-            guard let self, generation == presentGeneration else { return }
-            presentation.open()
-        }
-    }
-
-    private func makePanel() -> NSPanel {
-        let panel = DictationPillPanel(contentRect: NSRect(origin: .zero, size: Self.size),
-                                       styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+    private func makePanel(draft: MacComposerDraft) -> NSPanel {
+        let panel = DictationPillPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
+                                       backing: .buffered, defer: false)
         panel.animationBehavior = .none
         panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
-        panel.ignoresMouseEvents = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = false
+        panel.hasShadow = true
         panel.becomesKeyOnlyIfNeeded = true
-        let hosting = DictationPillHostingView(rootView: DictationPillView(session: session, panel: takePanel, history: history, actions: actions,
-                                                                           model: model, presentation: presentation))
-        // The controller owns the panel frame. SwiftUI's default min/max negotiation feeds
-        // the GeometryReader's proposed size back into AppKit when Magic adds its actions.
+        let content = DictationPillView(session: session, draft: draft, actions: actions, model: model, presentation: presentation)
+        let hosting = DictationPillHostingView(rootView: content)
         hosting.sizingOptions = []
-        hosting.frame = NSRect(origin: .zero, size: Self.size)
         hosting.autoresizingMask = [.width, .height]
         panel.contentView = hosting
         return panel
     }
 
-    private func position(_ panel: NSPanel) {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
-        let size = self.size
-        var style = NotchIslandStyle(screen: screen)
-        var frame = NotchGeometry.island(screen: screen.frame, visible: screen.visibleFrame, safeTop: style.safeTop, width: size.width, height: size.height)
-        if let occupied = occupiedFrame(), occupied.intersects(frame) {
-            style = .detached
-            frame = NSRect(x: frame.midX - size.width / 2, y: occupied.minY - 8 - size.height, width: size.width, height: size.height)
-        } else if !style.attached {
-            frame.origin.y -= 6
+    private func position(_ panel: NSPanel, draft: MacComposerDraft) {
+        let anchor = caret ?? hostWindow
+        let screen = anchor.flatMap { rect in
+            NSScreen.screens.first { $0.frame.contains(CGPoint(x: rect.midX, y: rect.midY)) }
+        } ?? NSScreen.main ?? NSScreen.screens.first
+        guard let screen else { return }
+        let visible = screen.visibleFrame.insetBy(dx: 8, dy: 8)
+        let width = min(460, visible.width)
+        let font = NSFont.systemFont(ofSize: 14)
+        let available = NSSize(width: max(1, width - 32), height: .greatestFiniteMagnitude)
+        let lines = [draft.text, session.speechMode == .instruction ? session.instruction.strip.transcript : "",
+                     model.notice ?? draft.message ?? ""].filter { !$0.isEmpty }.joined(separator: "\n")
+        let textHeight = (lines as NSString).boundingRect(with: available, options: [.usesLineFragmentOrigin, .usesFontLeading],
+                                                          attributes: [.font: font]).height
+        let height = min(max(104, 90 + ceil(textHeight)), visible.height / 2)
+        let origin: CGPoint
+        if let caret {
+            let below = caret.minY - height - 6
+            origin = CGPoint(x: caret.minX, y: below >= visible.minY ? below : caret.maxY + 6)
+        } else {
+            let window = hostWindow?.intersection(visible)
+            let area = window.flatMap { $0.isEmpty ? nil : $0 } ?? visible
+            origin = CGPoint(x: area.midX - width / 2, y: area.maxY - height - 12)
         }
-        if model.style != style { model.style = style }
-        if panel.frame != frame { panel.setFrame(frame, display: true) }
+        let frame = NSRect(x: min(max(origin.x, visible.minX), visible.maxX - width),
+                           y: min(max(origin.y, visible.minY), visible.maxY - height), width: width, height: height)
+        if frame != panel.frame { panel.setFrame(frame, display: true) }
     }
 }
 
-struct DictationPillView: View {
+private struct DictationPillView: View {
     let session: MacDictationSession
-    let panel: DictationPanel
-    let history: FieldHistory
+    let draft: MacComposerDraft
     let actions: DictationPillActions
-    let model: DictationPillModel
+    let model: ComposerPresentation
     let presentation: IslandPresentation
-    private var pipeline: DictationPipeline { session.pipeline }
-    private static let rim = RoundedRectangle(cornerRadius: 18)
-
-    var body: some View {
-        NotchIsland(style: model.style, presentation: presentation) { card }
-            .accessibilityElement(children: showsFailedActions || showsControls || !panel.recoveryText.isEmpty || session.instruction.strip.phase != .idle ? .contain : .combine)
-    }
-
-    private var card: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: inPanel ? .top : .center, spacing: 10) {
-                Image(systemName: symbol)
-                    .foregroundStyle(tint)
-                    .symbolEffect(.pulse, isActive: !compact && listeningNow)
-                    .symbolEffect(.variableColor.iterative, isActive: compact && listeningNow)
-                    .frame(width: 20)
-                text
-                if showsControls { quickControls }
-            }
-            if session.instruction.strip.phase != .idle { magicActions }
-            else if showsFailedActions { failedActions }
-            else if !panel.recoveryText.isEmpty { recoveryActions }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .overlay { CountdownRim(shape: Self.rim, start: pipeline.countdownStart, deadline: pipeline.countdownDeadline, lineWidth: 2).padding(5) }
-    }
-
-    private var text: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            if let caption {
-                Text(caption).font(NotchIslandTokens.caption).foregroundStyle(.secondary)
-            }
-            if inPanel {
-                // The window's height is bounded (`DictationPillController.panelHeight`): longer text scrolls here, so
-                // it never pushes the actions below the card.
-                ScrollView(.vertical) {
-                    lineText.fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .defaultScrollAnchor(.bottom)
-                .defaultScrollAnchor(.bottom, for: .sizeChanges)
-                .accessibilityIdentifier("dictation.pill.panelText")
-            } else {
-                lineText.lineLimit(caption == nil ? 2 : 1).truncationMode(.head)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var lineText: some View {
-        Text(line).font(NotchIslandTokens.body).foregroundStyle(showsPlaceholder ? .secondary : .primary)
-    }
-
-    /// Magic starts or stops a spoken instruction (the Magic hotkey); Undo and Redo take Legato's own last change in the
-    /// field back or put it again, through the field's queue. A disabled button has nothing to do.
-    private var quickControls: some View {
-        HStack(spacing: 6) {
-            Button { actions.undo() } label: { Image(systemName: "arrow.uturn.backward") }
-                .disabled(!history.canUndo).help("Undo Legato's last change").accessibilityLabel("Undo").accessibilityIdentifier("pill.undo")
-            Button { actions.redo() } label: { Image(systemName: "arrow.uturn.forward") }
-                .disabled(!history.canRedo).help("Redo").accessibilityLabel("Redo").accessibilityIdentifier("pill.redo")
-            Button { actions.magic() } label: { Label("Magic", systemImage: "wand.and.stars") }
-                .help("Speak an instruction about the text").accessibilityIdentifier("pill.magic")
-        }
-        .buttonStyle(.bordered).controlSize(.small).fixedSize()
-    }
-
-    private var magicActions: some View {
-        HStack(spacing: 8) {
-            Spacer(minLength: 0)
-            if session.instruction.strip.phase == .listening {
-                Button("Run") { MacAppController.shared.toggleMagic() }.accessibilityIdentifier("magic.run")
-            }
-            if session.instruction.strip.canUndo {
-                Button("Undo") { magic(.undo) }.accessibilityIdentifier("magic.undo")
-            }
-            if session.instruction.strip.phase == .result || session.instruction.strip.phase == .undone {
-                Button("Accept") { magic(.accept) }.accessibilityIdentifier("magic.accept")
-            } else if session.instruction.strip.phase == .failed {
-                if session.instruction.strip.canRetry != false { Button("Retry") { magic(.run) } }
-                Button("Dismiss") { magic(.dismiss) }.accessibilityIdentifier("magic.dismiss")
-            }
-        }.buttonStyle(.bordered).controlSize(.small)
-    }
-    private func magic(_ action: InstructionIntent.Action) {
-        session.instruction.handle(.init(action: action, instructionID: session.instruction.strip.instructionID))
-    }
-    private var failedActions: some View {
-        HStack(spacing: 8) {
-            Spacer(minLength: 0)
-            Button("Retry") { Task { await pipeline.retry() } }
-                .accessibilityIdentifier("dictation.pill.retry")
-            Button("Insert as-is") { Task { await pipeline.insertRaw() } }
-                .accessibilityIdentifier("dictation.pill.insertRaw")
-        }
-        .buttonStyle(.bordered).controlSize(.small)
-    }
-
-    private var recoveryActions: some View {
-        HStack(spacing: 8) {
-            Spacer(minLength: 0)
-            Button("Copy") { actions.copyRecovery() }.accessibilityIdentifier("dictation.pill.copyRecovery")
-            Button("Dismiss") { actions.dismissRecovery() }.accessibilityIdentifier("dictation.pill.dismissRecovery")
-        }.buttonStyle(.bordered).controlSize(.small)
-    }
-
-    /// A take typing live into its field: the pill holds the listening state and quick controls, not the words.
-    private var compact: Bool { Self.compact(panel: panel) }
-    private var listeningNow: Bool { session.phase == .listening && model.notice == nil && pipeline.takePhase == .buffering }
-    private var showsControls: Bool { Self.showsControls(session: session, panel: panel, notice: model.notice) }
-
-    static func compact(panel: DictationPanel) -> Bool {
-        DictationPillContent.forTake(panelActive: panel.active || !panel.recoveryText.isEmpty) == .listeningControls
-    }
-    /// The quick controls show while a take types live and nothing else (a notice, a failed cleanup, Magic's strip) owns the card.
-    static func showsControls(session: MacDictationSession, panel: DictationPanel, notice: String?) -> Bool {
-        compact(panel: panel) && session.phase != .idle && notice == nil
-            && session.pipeline.takePhase != .failed && session.instruction.strip.phase == .idle
-    }
-    static func takesClicks(session: MacDictationSession, panel: DictationPanel, notice: String?) -> Bool {
-        session.pipeline.takePhase == .failed || session.instruction.strip.phase != .idle
-            || !panel.recoveryText.isEmpty || showsControls(session: session, panel: panel, notice: notice)
-    }
-
-    private var showsFailedActions: Bool { (model.notice == nil || inPanel) && pipeline.takePhase == .failed }
-    /// What was said so far: the take's text, then the live words.
-    private var spoken: String {
-        if inPanel { return Self.panelText(session: session, panel: panel) }
-        return [pipeline.takeDisplay, session.tail].filter { !$0.isEmpty }.joined(separator: " ")
-    }
-    private var showsPlaceholder: Bool { (model.notice == nil || inPanel) && pipeline.takePhase == .buffering && (spoken.isEmpty || compact) }
-    private var inPanel: Bool { Self.showsPanel(session: session, panel: panel) }
-
-    /// A panel-mode take is on show: from the dictation start until its words were typed (or are held after a failed
-    /// cleanup). Magic's strip takes precedence while it runs.
-    static func showsPanel(session: MacDictationSession, panel: DictationPanel) -> Bool {
-        guard session.instruction.strip.phase == .idle else { return false }
-        if !panel.recoveryText.isEmpty { return true }
-        guard panel.active else { return false }
-        return session.phase != .idle || panel.inserting || !panel.take.isEmpty || session.pipeline.takePhase != .buffering
-    }
-
-    /// Every word of a panel-mode take: what reached the panel (live runs, cleaned takes, lines), then raw words still
-    /// on their way there (a take before its cleaned words stream in, buffered lines, the live line).
-    static func panelText(session: MacDictationSession, panel: DictationPanel) -> String {
-        let pipeline = session.pipeline
-        var parts = [panel.recoveryText, panel.deliveryText, panel.take.text]
-        if pipeline.mode != .live {
-            if !panel.take.isGrowing { parts.append(pipeline.failedText ?? pipeline.cleaningText ?? "") }
-            parts += pipeline.takeLines
-            parts.append(session.tail)
-        }
-        return parts.filter { !$0.isEmpty }.joined(separator: " ")
-    }
-    private var symbol: String {
-        if session.instruction.strip.phase != .idle { return session.instruction.strip.phase == .failed ? "exclamationmark.triangle.fill" : "wand.and.stars" }
-        if (model.notice != nil && !inPanel) || pipeline.takePhase == .failed { return "exclamationmark.triangle.fill" }
-        if inPanel, panel.inserting { return "keyboard" }
-        if compact, session.phase == .listening, pipeline.takePhase == .buffering { return "waveform" }
-        return session.phase == .finishing || pipeline.takePhase == .cleaning ? "ellipsis" : "mic.fill"
-    }
-    private var tint: Color {
-        if (model.notice != nil && !inPanel) || pipeline.takePhase == .failed { return .orange }
-        return session.phase == .listening && pipeline.takePhase == .buffering ? .red : .secondary
-    }
-    /// A state line above the text: the cleanup is running, or failed and the raw text is held.
-    private var caption: String? {
-        if session.instruction.strip.phase != .idle {
-            switch session.instruction.strip.phase {
-            case .listening: return "Magic · listening"
-            case .reading: return "Magic · reading the field…"
-            case .running: return "Magic · editing…"
-            case .result, .undone, .failed: return session.instruction.strip.message ?? "Magic"
-            case .idle: break
-            }
-        }
-        // In the panel the words stay; a notice takes the caption line instead.
-        if inPanel, let notice = model.notice { return notice }
-        guard model.notice == nil else { return nil }
-        if inPanel, panel.inserting { return "Typing into the app…" }
-        if inPanel, !panel.recoveryText.isEmpty { return "Text kept here. Copy it when you're ready." }
-        switch pipeline.takePhase {
-        case .failed: return "Couldn't clean up. Your text is held."
-        case .cleaning: return compact ? nil : "Cleaning…"
-        case .buffering: return nil
-        }
-    }
-    private var line: String {
-        if session.instruction.strip.phase != .idle { return session.instruction.strip.transcript.isEmpty ? "Speak an instruction about the text." : session.instruction.strip.transcript }
-        if let notice = model.notice, !inPanel { return notice }
-        // Typing live into the field: the field shows the words, the pill only the state.
-        if compact {
-            switch pipeline.takePhase {
-            case .failed: return "Retry, or insert the raw text."
-            case .cleaning: return "Cleaning…"
-            case .buffering: break
-            }
-            switch session.phase {
-            case .starting: return "Starting…"
-            case .listening: return "Listening…"
-            case .finishing: return "Finishing…"
-            case .idle: return ""
-            }
-        }
-        if pipeline.takePhase != .buffering { return spoken }
-        if !spoken.isEmpty { return spoken }
+    private var instructing: Bool { session.speechMode == .instruction }
+    private var busy: Bool { draft.isCorrecting || draft.isInserting }
+    private var status: String {
+        if draft.isInserting { return "Inserting…" }
+        if draft.isCorrecting { return "Magic is revising…" }
+        if instructing { return "Listening for an instruction…" }
         switch session.phase {
         case .starting: return "Starting…"
-        case .listening: return "Listening…"
         case .finishing: return "Finishing…"
-        case .idle: return ""
+        case .listening: return "Listening…"
+        case .idle: return draft.isEmpty && draft.canUndoDiscard ? "Draft discarded" : "Draft"
         }
+    }
+
+    var body: some View {
+        NotchIsland(style: .detached, presentation: presentation) {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 6) {
+                    Image(systemName: busy || instructing ? "wand.and.stars" : "waveform")
+                        .foregroundStyle(instructing || draft.isCorrecting ? Color.purple : .secondary)
+                    Text(status)
+                }.font(NotchIslandTokens.caption).foregroundStyle(.secondary)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if !draft.text.isEmpty {
+                            Text(draft.text).font(NotchIslandTokens.body)
+                                .accessibilityIdentifier("dictation.pill.panelText")
+                        }
+                        if instructing, !session.instruction.strip.transcript.isEmpty {
+                            Text(session.instruction.strip.transcript).font(NotchIslandTokens.body).foregroundStyle(.purple)
+                                .accessibilityLabel("Instruction: \(session.instruction.strip.transcript)")
+                        }
+                        if let notice = model.notice ?? draft.message {
+                            Text(notice).font(NotchIslandTokens.caption).foregroundStyle(.secondary)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .defaultScrollAnchor(.bottom, for: .sizeChanges)
+                HStack(spacing: 6) {
+                    if draft.canUndoDiscard {
+                        action(.undoDiscard, "arrow.uturn.backward", actions.undoDiscard)
+                    } else {
+                        action(.discard, "trash", actions.discard)
+                            .disabled(draft.isInserting || (draft.isEmpty && !session.isActive))
+                    }
+                    Spacer(minLength: 0)
+                    if draft.needsCopy {
+                        Button("Copy", action: actions.copy).accessibilityIdentifier("composer.copy")
+                    } else {
+                        Button(action: actions.instruction) {
+                            Image(systemName: instructing ? "stop.circle" : "mic")
+                        }
+                        .accessibilityLabel(instructing ? "Run spoken instruction" : "Speak an instruction")
+                        .help(instructing ? "Run spoken instruction" : "Speak an instruction")
+                        .accessibilityIdentifier("composer.instruction")
+                        .disabled(busy || (draft.isEmpty && !instructing))
+                        action(.magic, "wand.and.stars", actions.magic)
+                            .disabled(draft.isEmpty || busy || instructing)
+                        action(.insert, "return", actions.insert)
+                            .disabled(draft.isEmpty || busy || instructing)
+                    }
+                }.buttonStyle(.bordered).controlSize(.small)
+            }.padding(.horizontal, 16).padding(.vertical, 10)
+                .accessibilityElement(children: .contain)
+        }
+    }
+
+    private func action(_ shortcut: MacComposerShortcut, _ symbol: String, _ perform: @escaping @MainActor () -> Void) -> some View {
+        Button(action: perform) { Label(shortcut.actionTitle, systemImage: symbol) }
+            .help("\(shortcut.actionTitle) (\(shortcut.keysLabel))")
+            .accessibilityIdentifier("composer.\(shortcut)")
     }
 }

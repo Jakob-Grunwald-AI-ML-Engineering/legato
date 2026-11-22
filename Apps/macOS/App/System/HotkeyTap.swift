@@ -8,6 +8,7 @@ import LegatoMac
 /// whatever the consumer believes about held keys can no longer be trusted.
 struct TapSample: Sendable {
     var event: KeyEvent?
+    var isComposerAction = false
     var time: TimeInterval
 }
 
@@ -16,7 +17,11 @@ struct TapSample: Sendable {
 private final class TapContext: @unchecked Sendable {
     let continuation: AsyncStream<TapSample>.Continuation
     var port: CFMachPort?
-    init(continuation: AsyncStream<TapSample>.Continuation) { self.continuation = continuation }
+    let composerAction: @Sendable (KeyEvent) -> Bool
+    init(continuation: AsyncStream<TapSample>.Continuation, composerAction: @escaping @Sendable (KeyEvent) -> Bool) {
+        self.continuation = continuation
+        self.composerAction = composerAction
+    }
 }
 
 /// The tap's thread: owns the context for as long as the callback can run.
@@ -90,7 +95,8 @@ private func hotkeyTapCallback(
     ) else { return Unmanaged.passUnretained(event) }
     // A real key: a synthetic key planned before it is refused (`RealInput`).
     if kind == .keyDown { RealInput.shared.bump() }
-    let sample = TapSample(event: keyEvent, time: ProcessInfo.processInfo.systemUptime)
+    // Capture ownership here: the action itself can unregister its chord before MainActor reads this sample.
+    let sample = TapSample(event: keyEvent, isComposerAction: context.composerAction(keyEvent), time: ProcessInfo.processInfo.systemUptime)
     context.continuation.yield(sample)
     return Unmanaged.passUnretained(event)
 }
@@ -100,6 +106,7 @@ private func hotkeyTapCallback(
 /// Samples arrive in order on `samples`.
 @MainActor
 final class HotkeyTap {
+    var composerAction: @Sendable (KeyEvent) -> Bool = { _ in false }
     let samples: AsyncStream<TapSample>
     private let continuation: AsyncStream<TapSample>.Continuation
     private var port: CFMachPort?
@@ -115,7 +122,7 @@ final class HotkeyTap {
     @discardableResult
     func start() -> Bool {
         guard port == nil else { return true }
-        let context = TapContext(continuation: continuation)
+        let context = TapContext(continuation: continuation, composerAction: composerAction)
         // Clicks only count as real input (`RealInput`); they are not samples.
         let mask: CGEventMask = [CGEventType.flagsChanged, .keyDown, .keyUp, .leftMouseDown, .rightMouseDown, .otherMouseDown]
             .reduce(0) { $0 | (1 << $1.rawValue) }
