@@ -19,17 +19,16 @@ extension DictationAttributes.ContentState {
         if !tail.isEmpty { return tail }
         return phase.isRunning ? String(localized: "Speak now…") : ""
     }
-
-    /// Tapping a `tapToCopy` activity opens the app, which copies the last transcript.
 }
 
 struct DictationLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: DictationAttributes.self) { context in
-            LockScreenView(state: context.state)
+            LockScreenView(state: context.state, holdID: context.attributes.holdID)
         } dynamicIsland: { context in
             let state = context.state
-            if state.phase == .held || state.phase == .recovering { return heldIsland(state: state) }
+            let holdID = context.attributes.holdID
+            if state.phase == .held || state.phase == .recovering { return heldIsland(state: state, holdID: holdID) }
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     LegatoActivityGlyph()
@@ -39,7 +38,7 @@ struct DictationLiveActivity: Widget {
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     if state.phase.isRunning {
-                        StopButton()
+                        StopButton(holdID: holdID)
                     }
                 }
                 DynamicIslandExpandedRegion(.bottom) {
@@ -63,38 +62,34 @@ struct DictationLiveActivity: Widget {
 
 private struct LockScreenView: View {
     let state: DictationAttributes.ContentState
+    let holdID: String?
 
     var body: some View {
-        if state.phase == .held || state.phase == .recovering { HeldRow(state: state) } else { runBody }
-    }
-
-    private var runBody: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                LegatoActivityGlyph()
-                Text(state.title).font(.headline)
-                Spacer()
-                if state.phase.isRunning {
-                    StopButton()
-                }
+        HStack {
+            HeldGlyph(state: state)
+            Text(state.title).font(.headline)
+            Spacer()
+            if state.phase == .held {
+                ReleaseButton(holdID: holdID)
+            } else {
+                StopButton(holdID: holdID)
             }
-            Text(state.body)
-                .font(.callout)
-                .lineLimit(3)
-                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding()
     }
 }
 
-/// Stops the running dictation. A stop-only intent, not the toggle: a press that lands after the run ended
-/// (a stale activity, a double tap) must do nothing, never start a new dictation.
+/// Finishes the keyboard take and releases the microphone associated with this activity.
 private struct StopButton: View {
+    let holdID: String?
+
     var body: some View {
-        Button(intent: StopDictationIntent()) {
-            Image(systemName: "stop.circle.fill").font(.title)
+        Button(intent: StopDictationIntent(holdID: holdID)) {
+            Text("Stop").font(.subheadline.weight(.semibold))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .tint(.indigo)
     }
 }
 
@@ -102,11 +97,11 @@ private struct StopButton: View {
 
 /// The background hold: the app keeps the microphone open and no take runs. Calm and narrow on purpose; iOS
 /// keeps its own privacy dot next to it.
-private func heldIsland(state: DictationAttributes.ContentState) -> DynamicIsland {
+private func heldIsland(state: DictationAttributes.ContentState, holdID: String?) -> DynamicIsland {
     DynamicIsland {
         DynamicIslandExpandedRegion(.leading) { HeldGlyph(state: state) }
         DynamicIslandExpandedRegion(.center) { HeldTitle(state: state) }
-        DynamicIslandExpandedRegion(.trailing) { ReleaseButton() }
+        DynamicIslandExpandedRegion(.trailing) { ReleaseButton(holdID: holdID) }
     } compactLeading: {
         LegatoActivityGlyph()
     } compactTrailing: {
@@ -145,26 +140,12 @@ private struct HeldTitle: View {
     }
 }
 
-/// One slim row: glyph, title, Release.
-private struct HeldRow: View {
-    let state: DictationAttributes.ContentState
-
-    var body: some View {
-        HStack(spacing: 10) {
-            HeldGlyph(state: state).font(.title3)
-            Text(state.title).font(.headline)
-            Spacer()
-            ReleaseButton()
-        }
-        .padding(.horizontal)
-        .padding(.vertical, 10)
-    }
-}
-
 /// Lets go of the held microphone, which ends this activity.
 private struct ReleaseButton: View {
+    let holdID: String?
+
     var body: some View {
-        Button(intent: ReleaseMicrophoneIntent()) {
+        Button(intent: ReleaseMicrophoneIntent(holdID: holdID)) {
             Text("Release").font(.subheadline.weight(.semibold))
         }
         .buttonStyle(.bordered)

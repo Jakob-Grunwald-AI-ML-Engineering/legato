@@ -288,12 +288,13 @@ import LegatoVocabulary
     }
     /// Tap again: stop routing and finalize (after ~200 ms of silence, as Soniox recommends). The finalized
     /// stream ends in the background once its words are final; a held, unbilled connection waits for the next tap.
-    public func closeGate() async {
+    public func closeGate(releasingMicrophone: Bool = false) async {
         await serial { [weak self] in
             guard let self else { return }
             self.cancelPreviewMic()
             let action = self.gate.close()
             await self.perform(action)
+            if releasingMicrophone { await self.microphone.releaseMicrophone() }
         }
     }
 

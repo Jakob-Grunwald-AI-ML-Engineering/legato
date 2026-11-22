@@ -82,6 +82,9 @@ final class AppController {
         meetings = IOSMeetingController(root: root.appending(path: "Meetings"),
             vocabularyURL: root.appending(path: "vocabulary.json"), keyboard: keyboardSession, microphone: microphone,
             publishReservation: { active in host?.link.meetingChanged(active: active) })
+        holdActivity.onDismissal = { [weak self] holdID in
+            await self?.stopDictationActivity(holdID: holdID)
+        }
         keyboardHost?.onChoices = { [weak self] choices in
             for choice in choices {
                 self?.vocabulary.recordChoice(original: choice.original, chosen: choice.chosen,
@@ -160,11 +163,15 @@ final class AppController {
     func recentEntries(limit: Int = 100) async -> [DictationEntry] { (try? await history.recent(limit: limit)) ?? [] }
     func deleteEntry(id: UUID) async { try? await history.delete(id: id) }
     func stopIfRunning() async { await keyboardSession.closeGate() }
-    /// The Live Activity's Release button: the same release as the keyboard's, which ends the hold's activity.
+    func stopDictationActivity(holdID: String?) async {
+        await holdActivity.stop(holdID: holdID) { await releaseMicrophone() }
+    }
+
+    /// Closes the keyboard take before releasing the microphone and its keyboard lease.
     func releaseMicrophone() async {
         guard !meetings.isActive else { return }
-        await keyboardSession.closeGate()
-        await microphone.releaseMicrophone()
+        await keyboardSession.closeGate(releasingMicrophone: true)
+        guard !meetings.isActive, !microphone.isArmed else { return }
         keyboardHost?.link.leaseChanged(until: nil)
     }
     func prepareForBackground() async {

@@ -10,15 +10,18 @@ import Foundation
 /// widget extension; the app-only part sits inside `#if APP_TARGET`, and the widget copy refuses to run.
 struct StopDictationIntent: LiveActivityIntent {
     static let title: LocalizedStringResource = "Stop dictation"
-    static let description = IntentDescription("Stops the running dictation. Does nothing when none is running.")
+    static let description = IntentDescription("Stops dictation and releases the microphone used by this Live Activity.")
     static let isDiscoverable = false
 
+    @Parameter(title: "Microphone hold") var holdID: String?
+
     init() {}
+    init(holdID: String?) { self.holdID = holdID }
 
     @MainActor
     func perform() async throws -> some IntentResult {
         #if APP_TARGET
-        await AppController.shared.stopIfRunning()
+        await AppController.shared.stopDictationActivity(holdID: holdID)
         #else
         guard Self.runsInApp else { throw ToggleDictationError.appRequired }
         #endif

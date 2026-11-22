@@ -11,23 +11,21 @@ extension DictationAttributes.ContentState {
     }
 }
 
-/// The Live Activity port. `Activity` is not safe to send between actors, so only its `id` is kept and
-/// every call looks the activity up again inside the nonisolated helper that awaits it.
+/// Owns the system activity and its state observation for the current keyboard microphone hold.
 @MainActor
-final class ActivityKitClient: ActivityClient {
-    /// How long a finished activity stays on the Lock Screen. `tapToCopy` needs time to be tapped.
-    private static let dismissAfter: TimeInterval = 8
-    private static let tapToCopyDismissAfter: TimeInterval = 30
-
+final class ActivityKitClient {
     private var activityID: String?
+    private var dismissalObserver: Task<Void, Never>?
 
-    func request(_ content: DictationActivityContent) async throws {
+    func request(
+        _ content: DictationActivityContent, holdID: String, onDismissal: @escaping @MainActor () async -> Void
+    ) async throws {
         // A previous process may have been killed mid-run; don't leave its activity behind.
         await Self.endAll()
         let activity: Activity<DictationAttributes>
         do {
             activity = try Activity.request(
-                attributes: DictationAttributes(),
+                attributes: DictationAttributes(holdID: holdID),
                 content: ActivityContent(state: .init(content), staleDate: nil),
                 pushType: nil)
         } catch {
@@ -37,6 +35,14 @@ final class ActivityKitClient: ActivityClient {
             throw error
         }
         activityID = activity.id
+        dismissalObserver = Task { [weak self] in
+            let states = activity.activityStateUpdates
+            if activity.activityState != .dismissed {
+                for await state in states where state == .dismissed { break }
+            }
+            guard !Task.isCancelled, self?.activityID == activity.id, activity.activityState == .dismissed else { return }
+            await onDismissal()
+        }
         #if DEBUG
         E2E.log("activity.request phase=\(content.phase.rawValue) tail=\(E2E.quote(content.tail)) live=\(Activity<DictationAttributes>.activities.count)")
         #endif
@@ -50,11 +56,11 @@ final class ActivityKitClient: ActivityClient {
         #endif
     }
 
-    func end(_ content: DictationActivityContent) async { await dismiss() }
-
     func dismiss() async {
         guard let id = activityID else { return }
         activityID = nil
+        dismissalObserver?.cancel()
+        dismissalObserver = nil
         await Self.dismiss(id: id)
         #if DEBUG
         E2E.log("activity.dismiss live=\(Activity<DictationAttributes>.activities.count)")
@@ -73,12 +79,5 @@ final class ActivityKitClient: ActivityClient {
 
     nonisolated private static func update(id: String, _ content: ActivityContent<DictationAttributes.ContentState>) async {
         await Activity<DictationAttributes>.activities.first { $0.id == id }?.update(content)
-    }
-
-    nonisolated private static func end(
-        id: String, _ content: ActivityContent<DictationAttributes.ContentState>, dismissAt: Date
-    ) async {
-        await Activity<DictationAttributes>.activities.first { $0.id == id }?
-            .end(content, dismissalPolicy: .after(dismissAt))
     }
 }

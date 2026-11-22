@@ -20,6 +20,11 @@ final class HoldActivityPresenter {
     private var planner = HoldActivityPlanner()
     private var queue: Task<Void, Never>?
     private var arming = false
+    private var armCancelled = false
+    private var stopping = false
+
+    private var activeHoldID: String?
+    var onDismissal: (@MainActor (String) async -> Void)?
 
     init(microphone: MicrophoneHost, keyboard: KeyboardSession) {
         self.microphone = microphone
@@ -30,15 +35,36 @@ final class HoldActivityPresenter {
     /// Runs `arm` with the activity requested first: audio activation must not precede the request, or iOS
     /// may stop the background recording. A failed arm takes the activity down again.
     func arming(_ arm: () async -> Void) async {
+        guard !arming, !stopping else { return }
         arming = true
-        defer { arming = false }
-        if !microphone.isArmed, let step = planner.plan(armed: true, listening: false, tail: "", recovering: true) {
-            Self.log.notice("request before audio activation")
-            await enqueue(step).value
+        armCancelled = false
+        defer {
+            arming = false
+            reconcile()
         }
+        if !microphone.isArmed {
+            // The previous lease may have ended before its observation was delivered.
+            if let end = planner.plan(armed: false, listening: false, tail: "") { enqueue(end) }
+            if let request = planner.plan(armed: true, listening: false, tail: "", recovering: true) {
+                Self.log.notice("request before audio activation")
+                await enqueue(request).value
+            }
+        }
+        guard !armCancelled else { return }
         await arm()
         Self.log.notice("armed=\(self.microphone.isArmed, privacy: .public)")
-        reconcile()
+    }
+
+    /// The button and a system dismissal both end the hold that owns this activity.
+    func stop(holdID: String?, release: () async -> Void) async {
+        guard let holdID, activeHoldID == holdID, !stopping else { return }
+        stopping = true
+        armCancelled = true
+        defer {
+            stopping = false
+            if !arming { reconcile() }
+        }
+        await release()
     }
 
     private func observe() {
@@ -54,7 +80,7 @@ final class HoldActivityPresenter {
     }
 
     private func reconcile() {
-        guard let step = planner.plan(armed: microphone.isArmed, listening: keyboard.route != .idle, tail: keyboard.dictationTail,
+        guard !stopping, let step = planner.plan(armed: microphone.isArmed, listening: keyboard.route != .idle, tail: keyboard.dictationTail,
                                       recovering: microphone.microphoneRecovering) else { return }
         enqueue(step)
     }
@@ -64,26 +90,39 @@ final class HoldActivityPresenter {
     private func enqueue(_ step: HoldActivityPlanner.Step) -> Task<Void, Never> {
         // Optimistic: the next plan must see this step as done even while it is still in flight.
         planner.performed(step)
+        switch step {
+        case .request: activeHoldID = UUID().uuidString
+        case .end: activeHoldID = nil
+        case .update: break
+        }
+        let holdID = activeHoldID
         let previous = queue
         let task = Task { [weak self] in
             await previous?.value
-            await self?.run(step)
+            await self?.run(step, holdID: holdID)
         }
         queue = task
         return task
     }
 
-    private func run(_ step: HoldActivityPlanner.Step) async {
+    private func run(_ step: HoldActivityPlanner.Step, holdID: String?) async {
         switch step {
         case .request(let phase, let tail):
+            guard let holdID, holdID == activeHoldID else { return }
             do {
-                try await client.request(content(phase, tail))
+                try await client.request(content(phase, tail), holdID: holdID) { [weak self] in
+                    await self?.onDismissal?(holdID)
+                }
                 Self.log.notice("requested phase=\(phase.rawValue, privacy: .public)")
             } catch {
-                planner.performed(.end)
+                if holdID == activeHoldID {
+                    activeHoldID = nil
+                    planner.performed(.end)
+                }
                 Self.log.error("request failed: \(String(describing: error), privacy: .public)")
             }
         case .update(let phase, let tail):
+            guard let holdID, holdID == activeHoldID else { return }
             await client.update(content(phase, tail), staleDate: nil)
             Self.log.notice("update phase=\(phase.rawValue, privacy: .public)")
         case .end:
