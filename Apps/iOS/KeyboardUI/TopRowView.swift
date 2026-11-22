@@ -15,6 +15,8 @@ struct TopRowView: View {
                 place(layout.preview.cgRect) {
                     DictationPreviewView(controller: controller, text: preview, keySide: layout.side, bandHeight: layout.transcript.height)
                         .accessibilityIdentifier("typing.predictions")
+                        .onAppear { controller.notePreviewPresentation(true) }
+                        .onDisappear { controller.notePreviewPresentation(false) }
                 }
             } else {
                 place(layout.transcript.cgRect) {
@@ -34,6 +36,7 @@ struct TopRowView: View {
                 place(cell.hit.cgRect) { key(cell) }
             }
         }
+        .onChange(of: controller.isShowingPreview) { _, _ in controller.notePreviewSelection() }
     }
 
     @ViewBuilder private func key(_ cell: TopRowLayout.Cell) -> some View {
