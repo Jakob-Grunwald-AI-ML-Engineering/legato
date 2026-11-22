@@ -73,6 +73,29 @@ private actor LiveHistory: HistoryStore {
 }
 
 @MainActor @Suite(.timeLimit(.minutes(1))) struct DictationPipelineTests {
+    @Test func aSecondTapResendsTheCleanedDraftAndNewSpeechAsOneEditableText() async throws {
+        let firstDraft = "Let's meet on Tuesday at ten."
+        let revisedDraft = "Let's meet on Wednesday at ten."
+        let cleaner = FnCleaner { $0.sequence == 0 ? firstDraft : revisedDraft }
+        let pipeline = DictationPipeline(history: LiveHistory(), cleaner: cleaner, sendMode: { .live },
+                                        supportsLive: true, liveSend: { .manual }, stagedLive: true)
+        pipeline.beginTake()
+        await pipeline.receive(routeLine(0, "um let's meet Tuesday at ten"))
+        await pipeline.sendNow(editPreview: true)
+        try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
+
+        let runID = try #require(pipeline.liveRun?.runID)
+        let anchor = KeyboardRequest.PreviewAnchor(runID: runID, unitID: 0)
+        await pipeline.receive(routeLine(1, "Actually make that Wednesday."))
+        await pipeline.sendNow(editPreview: true, preview: anchor)
+        try await until { pipeline.liveRun?.snapshot.segments.first?.text == revisedDraft }
+
+        let input = try #require(cleaner.inputs.withLock { $0.last })
+        #expect(input.text == firstDraft + " Actually make that Wednesday.")
+        #expect(input.dictation?.previousLines == [])
+        #expect(pipeline.liveRun?.snapshot.segments.map(\.text) == [revisedDraft])
+    }
+
     @Test func heldInstructionsCanReviseAnExistingPreviewWithoutMoreDraftSpeech() async throws {
         let cleaner = FnCleaner { $0.dictation?.instructions == "make it uppercase" ? $0.text.uppercased() : $0.text }
         let pipeline = DictationPipeline(history: LiveHistory(), cleaner: cleaner, sendMode: { .live },
