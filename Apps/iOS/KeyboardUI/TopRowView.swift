@@ -15,7 +15,9 @@ struct TopRowView: View {
                 place(layout.preview.cgRect) {
                     DictationPreviewView(controller: controller, text: preview, keySide: layout.side, bandHeight: layout.transcript.height)
                         .accessibilityIdentifier("typing.predictions")
-                        .onAppear { controller.notePreviewPresentation(true) }
+                        .onChange(of: controller.stagedTake.runID, initial: true) { _, _ in
+                            controller.notePreviewPresentation(true)
+                        }
                         .onDisappear { controller.notePreviewPresentation(false) }
                 }
             } else {
