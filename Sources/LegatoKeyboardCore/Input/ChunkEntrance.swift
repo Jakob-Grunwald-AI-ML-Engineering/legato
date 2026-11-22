@@ -19,13 +19,15 @@ public enum ChunkEntrance {
     /// The key-wait budget is 500 ms; a key waits at most `capMs` behind a burst.
     public static let capMs = 250.0
 
-    /// The iPhone staged units' typewriter gap (#313): one grapheme per piece at this pace, however long the unit. An
-    /// estimate, to tune on the phone with the preview's exit animation, which follows the pieces. The Mac and every other
-    /// chunk keep the frame pace and cap above.
-    public static let typewriterGapMs = 10.0
-    /// The longest a staged unit takes to type (an estimate, to tune on the phone): a longer unit goes in groups of graphemes
-    /// at the same gap, so the whole unit still ends within it.
-    public static let typewriterCapMs = 1_500.0
+    /// Staged iPhone delivery settings, estimated until measured on the phone.
+    public static let typewriterGapMs = 8.0
+    /// Leave room inside the 150 ms target for the queue timer and host writes.
+    public static let typewriterCapMs = 112.0
+    public static let typewriterCharacterLimit = 48
+
+    public static func insertsStagedTextWhole(_ text: String) -> Bool {
+        text.count > typewriterCharacterLimit
+    }
 
     public struct Plan: Sendable, Equatable {
         /// The insert's pieces in order; joined they are exactly the text.
@@ -48,15 +50,11 @@ public enum ChunkEntrance {
         return Plan(pieces: pieces, gapMs: gap)
     }
 
-    /// The staged typewriter pace (`typewriterGapMs`): one grapheme per piece up to `typewriterCapMs` of typing; a longer text
-    /// groups graphemes (never inside a cluster) into pieces at the same gap, so the burst never outlasts the cap. Disabled
-    /// (Reduce Motion), the insert is one piece with no gap, as in `plan`.
-    public static func typewriterPlan(_ text: String, enabled: Bool = true) -> Plan {
-        let graphemes = Array(text)
-        guard enabled, graphemes.count > 1 else { return Plan(pieces: text.isEmpty ? [] : [text], gapMs: 0) }
-        let fitting = Int(typewriterCapMs / typewriterGapMs) + 1
-        guard graphemes.count > fitting else { return Plan(pieces: graphemes.map(String.init), gapMs: typewriterGapMs) }
-        return Plan(pieces: group(graphemes, into: fitting), gapMs: typewriterGapMs)
+    /// Fit staged text into a short burst by grouping graphemes. The cutoff uses the original text before the queue
+    /// adds capitalization and spacing. Longer units and Reduce Motion use one write.
+    public static func typewriterPlan(_ text: String, insertingWhole: Bool, enabled: Bool = true) -> Plan {
+        plan(text, enabled: enabled && !insertingWhole, gapMs: typewriterGapMs,
+             minGapMs: typewriterGapMs, capMs: typewriterCapMs)
     }
 
     /// `graphemes` in `count` even groups (the first `n % count` carry one more), in order, never inside a cluster.

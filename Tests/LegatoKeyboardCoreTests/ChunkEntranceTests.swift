@@ -63,26 +63,23 @@ import Testing
         #expect(ChunkEntrance.plan("").pieces.isEmpty)
     }
 
-    /// #313: the iPhone staged units type at `typewriterGapMs` (10 ms, an estimate; 35 and then 14 ms were too slow on the phone), one grapheme per piece, however long the text.
-    @Test func theStagedTypewriterIsOneGraphemePerPieceAtItsOwnPaceWithoutACap() {
+    @Test func stagedTypewriterGroupsLongerTextWithinItsBudget() {
         let family = "👨‍👩‍👧‍👦", accent = "e\u{301}"
-        let plan = ChunkEntrance.typewriterPlan("ab" + family + accent + "\r\n")
-        #expect(plan.pieces == ["a", "b", family, accent, "\r\n"] && plan.gapMs == ChunkEntrance.typewriterGapMs)
-        let long = String(repeating: "word ", count: 20)
-        let burst = ChunkEntrance.typewriterPlan(long)
-        #expect(burst.pieces.count == long.count && burst.durationMs == Double(long.count - 1) * ChunkEntrance.typewriterGapMs && burst.durationMs > ChunkEntrance.capMs)
-        // A very long unit groups graphemes at the same gap and ends within the typing cap, never splitting a cluster.
-        let huge = String(repeating: "word 👨‍👩‍👧‍👦 e\u{301} ", count: 200)
-        let capped = ChunkEntrance.typewriterPlan(huge)
-        #expect(capped.gapMs == ChunkEntrance.typewriterGapMs && capped.durationMs <= ChunkEntrance.typewriterCapMs && capped.pieces.joined() == huge)
-        #expect(capped.pieces.count < Array(huge).count && capped.pieces.allSatisfy { Array($0).count >= 1 })
-        var index = 0
-        let clusters = Array(huge)
-        for piece in capped.pieces { #expect(Array(piece) == Array(clusters[index..<(index + Array(piece).count)])); index += Array(piece).count }
-        // Reduce Motion, one grapheme and nothing: whole, no gap.
-        #expect(ChunkEntrance.typewriterPlan(huge, enabled: false) == ChunkEntrance.Plan(pieces: [huge], gapMs: 0))
-        #expect(ChunkEntrance.typewriterPlan("a").pieces == ["a"] && ChunkEntrance.typewriterPlan("").pieces.isEmpty)
-        // Every other chunk keeps the frame pace and the cap.
-        #expect(ChunkEntrance.plan(long).durationMs <= ChunkEntrance.capMs)
+        let short = ChunkEntrance.typewriterPlan("ab" + family + accent + "\r\n", insertingWhole: false)
+        #expect(short.pieces == ["a", "b", family, accent, "\r\n"])
+        #expect(short.gapMs < 10)
+
+        let boundary = String(repeating: family + accent, count: 24)
+        let longest = ChunkEntrance.typewriterPlan(boundary, insertingWhole: ChunkEntrance.insertsStagedTextWhole(boundary))
+        #expect(longest.pieces.joined() == boundary)
+        #expect(longest.pieces.count > 1 && longest.pieces.count < 48)
+        #expect(longest.durationMs <= 150)
+
+        let over = boundary + family
+        let bulk = ChunkEntrance.typewriterPlan(over, insertingWhole: ChunkEntrance.insertsStagedTextWhole(over))
+        #expect(bulk == .init(pieces: [over], gapMs: 0))
+        #expect(ChunkEntrance.typewriterPlan(boundary, insertingWhole: false, enabled: false) == .init(pieces: [boundary], gapMs: 0))
+        #expect(ChunkEntrance.typewriterPlan("a", insertingWhole: false).pieces == ["a"])
+        #expect(ChunkEntrance.typewriterPlan("", insertingWhole: false).pieces.isEmpty)
     }
 }

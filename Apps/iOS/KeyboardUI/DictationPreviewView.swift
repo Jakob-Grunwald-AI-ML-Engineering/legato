@@ -19,7 +19,7 @@ struct DictationPreviewView: View {
     @State private var glowOrigin: CGPoint?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var insets: EdgeInsets {
+    fileprivate static func textInsets(keySide: DictationKeySide) -> EdgeInsets {
         let i = WordRowLayout.insets(keySide: keySide)
         return EdgeInsets(top: 0, leading: CGFloat(i.leading), bottom: 0, trailing: CGFloat(i.trailing))
     }
@@ -31,7 +31,7 @@ struct DictationPreviewView: View {
         ZStack(alignment: keySide == .right ? .bottomTrailing : .bottomLeading) {
             PreviewRow(text: text, instruction: instruction, layout: controller.dictationPreviewLayout, draft: draft,
                        canSend: controller.canSendPreview,
-                       canDiscard: controller.canDiscardPreview, insets: insets, bandHeight: bandHeight, reservesChip: showsUndo,
+                       canDiscard: controller.canDiscardPreview, insets: Self.textInsets(keySide: keySide), bandHeight: bandHeight, reservesChip: showsUndo,
                        hold: PreviewHoldGesture(controller: controller, onBloom: showBloom),
                        onSendRaw: { controller.previewSwiped() },
                        onDiscard: { controller.discardPreview() })
@@ -440,7 +440,7 @@ private struct PreviewRenderer: TextRenderer {
 /// text it stops following and resumes at the bottom or after `PreviewScroll.idleResumeSeconds`; a soft fade marks older text above.
 /// While a staged take shows it: the unit being typed leaves letter by letter (the view keeps that line in view), words waiting
 /// for cleanup shimmer. Holding captures Magic instructions. A swipe right sends the draft with a swoosh; a swipe left
-/// clears the preview with a fade. Reduce Motion skips those effects.
+/// clears the preview. Reduce Motion skips the motion effects.
 private struct PreviewRow: View {
     let text: String
     let instruction: String
@@ -474,9 +474,6 @@ private struct PreviewRow: View {
     /// When each letter of the leaving unit went into the field (`PreviewRenderer.exits`).
     @State private var exits: [Date] = []
     @State private var settleOffset: CGFloat = 0
-    /// The words a clear is taking away, fading out where they were.
-    @State private var ghost: String?
-
     @State private var position = ScrollPosition(edge: .bottom)
     @State private var follow = PreviewFollow()
     @State private var metrics = ScrollMetrics()
@@ -493,14 +490,6 @@ private struct PreviewRow: View {
         return String(Array(layout.text)[layout.leaving.clamped(to: 0..<layout.text.count)])
     }
     private var exited: Int { layout?.exited ?? 0 }
-
-    /// The words a clear would take: the text after the last part the app keeps (the unit being typed, units in cleanup).
-    private var clearableText: String {
-        if let draft { return draft.text }
-        guard let layout else { return "" }
-        let kept = ([layout.leaving.upperBound] + layout.waiting.map(\.upperBound)).max() ?? 0
-        return String(Array(layout.text).dropFirst(min(kept, layout.text.count))).trimmingCharacters(in: .whitespaces)
-    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -560,7 +549,6 @@ private struct PreviewRow: View {
                 scrollChanged(from: old, to: new)
             }
             .onScrollPhaseChange { _, new in scrollPhase = new }
-            .overlay(alignment: .bottomLeading) { ghostText(size: size, bottomPadding: bottomPadding) }
             .mask {
                 VStack(spacing: 0) {
                     // Soft top edge while older text is above.
@@ -589,7 +577,7 @@ private struct PreviewRow: View {
                         case .clear? where canDiscard:
                             fired = true
                             Task { @MainActor in
-                                clear()
+                                onDiscard()
                             }
                         default: break
                         }
@@ -698,37 +686,6 @@ private struct PreviewRow: View {
         }
     }
 
-    /// The words a clear takes fade out where they were (`DictationPreviewView.fadeSeconds`); the preview itself drops them at once.
-    /// Reduce Motion: they just go.
-    private func clear() {
-        let words = clearableText
-        if !reduceMotion, !words.isEmpty {
-            ghost = words
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(30))
-                withAnimation(.easeOut(duration: DictationPreviewView.fadeSeconds)) { ghost = nil }
-            }
-        }
-        onDiscard()
-    }
-
-    @ViewBuilder
-    private func ghostText(size: Double, bottomPadding: Double) -> some View {
-        if let ghost {
-            Text(ghost)
-                .font(.system(size: CGFloat(size)))
-                .lineSpacing(CGFloat(WordRowHeight.previewLineSpacing(size: size)))
-                .foregroundStyle(Color(uiColor: .secondaryLabel))
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, insets.leading)
-                .padding(.trailing, insets.trailing)
-                .padding(.bottom, CGFloat(bottomPadding))
-                .transition(.opacity)
-                .allowsHitTesting(false)
-        }
-    }
-
     /// The unit has left: the rest was laid out behind it and now starts where the unit did, so it slides from where it stood
     /// (a short move; the distance is the unit's width, at most `maxSettle`, an estimate). Reduce Motion: no move.
     private static let maxSettle: CGFloat = 48
@@ -740,6 +697,48 @@ private struct PreviewRow: View {
         withTransaction(instant) { settleOffset = min(Self.maxSettle, measured) }
         Task { @MainActor in
             withAnimation(.easeOut(duration: 0.22)) { settleOffset = 0 }
+        }
+    }
+}
+
+/// Lives above the top row so an exit can finish when the preview gives way to the word slots.
+struct DictationPreviewExitView: View {
+    let exit: KeyboardController.PreviewExit
+    let keySide: DictationKeySide
+    let bandHeight: Double
+    let onFinished: () -> Void
+
+    @State private var departing = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        GeometryReader { geometry in
+            let size = WordRowHeight.previewFontSize(rowHeight: bandHeight)
+            let insets = DictationPreviewView.textInsets(keySide: keySide)
+            let direction: CGFloat = exit.direction == .left ? -1 : 1
+            Text(verbatim: exit.text)
+                .font(.system(size: CGFloat(size)))
+                .lineSpacing(CGFloat(WordRowHeight.previewLineSpacing(size: size)))
+                .foregroundStyle(Color(uiColor: .secondaryLabel))
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, insets.leading)
+                .padding(.trailing, insets.trailing)
+                .padding(.bottom, exit.reservesUndo ? CGFloat(PreviewScroll.undoChipHeight + 4) : 2)
+                .frame(width: geometry.size.width, height: geometry.size.height, alignment: .bottomLeading)
+                .offset(x: departing ? direction * geometry.size.width : 0)
+                .opacity(departing ? 0 : 1)
+        }
+        .clipped()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .onAppear {
+            guard !reduceMotion else { return onFinished() }
+            withAnimation(.smooth(duration: DictationPreviewView.fadeSeconds), completionCriteria: .removed) {
+                departing = true
+            } completion: {
+                onFinished()
+            }
         }
     }
 }

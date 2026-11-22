@@ -102,28 +102,40 @@ import Testing
     /// #313: a staged unit types at the typewriter pace; a key typed during it lands the rest of the burst as one write and
     /// goes in right after, so the key waits for one write, not for the burst.
     @Test func aStagedUnitTypesAtTheTypewriterPaceAndAKeyFlushesTheRestOfItsBurst() {
-        let text = String(repeating: "word ", count: 20) + "end"
+        let text = String(repeating: "word ", count: 9) + "end"
         var paced = rig()
         paced.queue.enqueue(stagedUnit(text))
         paced.drain()
         let pieces = inserts(paced)
-        #expect(pieces.map(\.text).joined() == text && pieces.count == text.count)
+        #expect(pieces.map(\.text).joined() == text && pieces.count > 1 && pieces.count < text.count)
         #expect(pieces.last!.ms - pieces.first!.ms >= Double(pieces.count - 1) * ChunkEntrance.typewriterGapMs - 1e-9)
+        #expect(pieces.last!.ms - pieces.first!.ms <= 150 + paced.tickMs)
         #expect(paced.field.string == text)
 
         var rig = rig()
         rig.queue.enqueue(stagedUnit(text))
-        while inserts(rig).count < 10 { rig.tick() }
+        rig.tick()
+        #expect(inserts(rig).count == 1)
         let asked = rig.clockMs
         rig.queue.enqueue(.insert("!"))
         rig.drain()
         let all = inserts(rig), key = all.first { $0.text == "!" }!
         let own = all.filter { $0.text != "!" }
         #expect(own.map(\.text).joined() == text)
-        #expect(own.last!.text.count > 50, "the rest of the burst went as one write: \(own.last!.text.count)")
+        #expect(own.last!.text.count > 40, "the rest of the burst went as one write: \(own.last!.text.count)")
         #expect(own.last!.ms <= asked + 2 * rig.tickMs + 1 && key.ms >= own.last!.ms, "key waited \(key.ms - asked) ms")
-        // The burst would have taken 600+ ms more; the key goes after the host's usual check wait for one write.
-        #expect(key.ms - asked < 500 && Double(text.count) * ChunkEntrance.typewriterGapMs > 1_000)
+        #expect(key.ms - asked < 500)
         #expect(rig.field.string == text + "!" && rig.queue.modelText == rig.field.string && rig.drops.isEmpty)
+    }
+
+    @Test func aStagedUnitOverTheCutoffInsertsInOneWrite() {
+        let joining = "After"
+        let text = String(repeating: "é", count: 49)
+        var rig = rig(joining)
+        rig.queue.enqueue(stagedUnit(text))
+        rig.drain()
+        #expect(inserts(rig).map(\.text) == [" " + text])
+        #expect(rig.field.string == joining + " " + text)
+        #expect(rig.applied.count == 1 && rig.drops.isEmpty)
     }
 }

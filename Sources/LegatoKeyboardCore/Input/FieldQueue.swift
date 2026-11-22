@@ -283,6 +283,7 @@ public struct FieldQueue: Sendable {
 
     private struct EditState: Sendable, Equatable {
         var edit: Edit
+        let insertsSpeechWhole: Bool
         /// The scope's intended text. Once placed, this survives rollback or partial delivery of host operations.
         var shadow: ShadowDocument.EditIntent?
         var isCleanup = false
@@ -307,7 +308,10 @@ public struct FieldQueue: Sendable {
         var plannedFrom: [Character]?
         var revision: LiveRevision?
 
-        init(edit: Edit) { self.edit = edit }
+        init(edit: Edit) {
+            self.edit = edit
+            insertsSpeechWhole = edit.isSpeech == true && ChunkEntrance.insertsStagedTextWhole(edit.unit?.text ?? edit.target)
+        }
     }
     private enum UserItem: Sendable, Equatable {
         case input(Input)
@@ -1325,9 +1329,7 @@ public struct FieldQueue: Sendable {
     }
 
     private mutating func plannedNext() -> Action {
-        // A chunk's insert still entering goes on first, even before a user's key: it ends within `ChunkEntrance.capMs`. A
-        // staged unit's typewriter burst runs longer: a user's key queued behind it lands the rest of the burst as one write
-        // and goes in right after, so a key waits for one write at most.
+        // Give a queued key priority by landing the rest of the running burst as one write.
         if burst != nil {
             if inFlight != nil { return keyIsQueued ? flushBurst() : nextBurst() }
             burst = nil
@@ -1765,9 +1767,11 @@ public struct FieldQueue: Sendable {
                 return send(.deleteBackward(count), lane: lane(of: current.owner), owner: owner) { q in q.removeRange(q.cursor - count, q.cursor, owner: owner) }
             case .insert(let chars, let owner):
                 current.ops.removeFirst(); unit = current
-                var staged = false
-                if case .edit(let state, _) = current.owner { staged = state.edit.isSpeech == true }
-                return sendInsert(chars, lane: lane(of: current.owner), owner: owner, staged: staged)
+                let lane = lane(of: current.owner)
+                if case .edit(let state, _) = current.owner, state.edit.isSpeech == true {
+                    return sendInsert(chars, lane: lane, owner: owner, entrance: !state.insertsSpeechWhole, staged: true)
+                }
+                return sendInsert(chars, lane: lane, owner: owner)
             }
         }
         return next()
@@ -2902,10 +2906,10 @@ public struct FieldQueue: Sendable {
 
     /// An insert at the caret as a chunk's op: one piece, or a burst of pieces (`ChunkEntrance`) of which the first goes now
     /// and the rest from `nextBurst`, the model taking each piece as it is sent so it always shows what the host was given.
-    /// A staged unit (`staged`: an edit with `isSpeech`) enters at the typewriter pace, one grapheme per piece, uncapped.
+    /// Staged speech uses its own shorter pacing budget.
     private mutating func sendInsert(_ text: String, lane: Lane, owner: Int?, followsUser: Bool = false, entrance: Bool = true,
                                      staged: Bool = false) -> Action {
-        var plan = staged ? ChunkEntrance.typewriterPlan(text, enabled: entrance && config.chunkEntrance)
+        var plan = staged ? ChunkEntrance.typewriterPlan(text, insertingWhole: !entrance, enabled: config.chunkEntrance)
                           : ChunkEntrance.plan(text, enabled: entrance && config.chunkEntrance)
         guard !plan.pieces.isEmpty else { return .wait }
         let first = plan.pieces.removeFirst()
