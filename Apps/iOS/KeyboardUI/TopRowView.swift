@@ -22,6 +22,14 @@ struct TopRowView: View {
                         .accessibilityIdentifier("typing.predictions")
                 }
             }
+            if let exit = controller.previewExit {
+                place(layout.preview.cgRect) {
+                    DictationPreviewExitView(exit: exit, keySide: layout.side, bandHeight: layout.transcript.height) {
+                        controller.finishPreviewExit(exit.id)
+                    }
+                    .id(exit.id)
+                }
+            }
             ForEach(layout.cells, id: \.slot) { cell in
                 place(cell.hit.cgRect) { key(cell) }
             }

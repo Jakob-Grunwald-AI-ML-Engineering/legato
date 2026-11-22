@@ -360,8 +360,35 @@ final class KeyboardController {
     /// ready ones and the one being typed stay.
     var canDiscardPreview: Bool { canSendPreview && (composedPreview != nil || stagedTake.hasDiscardable) }
 
+    struct PreviewExit: Equatable, Identifiable {
+        enum Direction: Equatable { case left, right }
+        let id = UUID()
+        let text: String
+        let direction: Direction
+        let reservesUndo: Bool
+    }
+
+    private(set) var previewExit: PreviewExit?
+
+    private func showPreviewExit(_ text: String, direction: PreviewExit.Direction) {
+        guard !UIAccessibility.isReduceMotionEnabled, !text.isEmpty else { return }
+        previewExit = PreviewExit(text: Self.previewTail(text), direction: direction, reservesUndo: canUndoDiscard)
+    }
+
+    func finishPreviewExit(_ id: UUID) {
+        if previewExit?.id == id { previewExit = nil }
+    }
+
+    private var discardablePreviewText: String {
+        if let composedPreview { return composedPreview.text }
+        guard let layout = dictationPreviewLayout else { return "" }
+        let kept = max(layout.leaving.upperBound, layout.waiting.map(\.upperBound).max() ?? 0)
+        return String(layout.text.dropFirst(kept)).trimmingCharacters(in: .whitespaces)
+    }
+
     func discardPreview() {
         guard canDiscardPreview else { return }
+        showPreviewExit(discardablePreviewText, direction: .left)
         if composedPreview != nil {
             stagedTake.discardPreviewDraft()
             acknowledgeStaged()
@@ -1115,7 +1142,7 @@ final class KeyboardController {
             case .sent(let op, let lane):
                 if lane != .user, case .insert(let piece) = op, stagedTake.inFlight != nil {
                     // A piece of the staged unit typed into the field: the preview's letters leave in step with it.
-                    stagedTake.sent(piece)
+                    stagedTake.sent(piece, revealProgress: stagedBegan?.insertsWhole != true)
                     stagedActivity = ContinuousClock.now
                 }
                 if lane == .user {
@@ -1376,7 +1403,7 @@ final class KeyboardController {
     /// shows `dictationPreview`.
     private(set) var stagedTake = StagedDictation()
     /// The unit in the queue now, for the stall bound (`StagedDictation.isStalled`).
-    @ObservationIgnored private var stagedBegan: (editID: String, origin: String, at: ContinuousClock.Instant)?
+    @ObservationIgnored private var stagedBegan: (editID: String, insertsWhole: Bool)?
     /// When the in-flight unit began or its latest piece went into the field: the stall bound counts from here, so a long
     /// typewriter burst is never cut short.
     @ObservationIgnored private var stagedActivity = ContinuousClock.now
@@ -1419,14 +1446,17 @@ final class KeyboardController {
         if unit.editPreview != true {
             edit.unit = .init(text: unit.text, capitalization: autocapitalization, contextFallback: fallback)
         }
-        stagedBegan = (edit.id, origin, ContinuousClock.now)
+        stagedBegan = (edit.id, ChunkEntrance.insertsStagedTextWhole(unit.text))
         stagedActivity = ContinuousClock.now
-        enqueue(edit) { [weak self] event in self?.stagedUnitFinished(runID: runID, unit: unit.id, origin: origin, event: event) }
+        enqueue(edit) { [weak self] event in
+            self?.stagedUnitFinished(runID: runID, unit: unit, origin: origin, event: event)
+        }
         pump()
     }
 
-    private func stagedUnitFinished(runID: String, unit: Int, origin: String, event: FieldQueue.Event?) {
-        guard stagedTake.runID == runID, stagedTake.inFlight == unit else { return }
+    private func stagedUnitFinished(runID: String, unit: LiveSegment, origin: String, event: FieldQueue.Event?) {
+        guard stagedTake.runID == runID, stagedTake.inFlight == unit.id else { return }
+        let insertsWhole = stagedBegan?.insertsWhole == true
         stagedBegan = nil
         let typed: String
         switch event {
@@ -1443,7 +1473,8 @@ final class KeyboardController {
             return holdStaged()
         }
         let expected = currentReport.before
-        stagedTake.delivered(unit, typed: typed)
+        if insertsWhole, origin == draftID { showPreviewExit(unit.text, direction: .right) }
+        stagedTake.delivered(unit.id, typed: typed)
         liveStats.applies += 1
         // One undo step per unit; the guard is the context after it when the proxy shows it.
         queue.history.record(removed: "", inserted: typed, at: Date(), contextBefore: expected)
