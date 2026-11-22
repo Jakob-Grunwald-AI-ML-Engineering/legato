@@ -1,5 +1,7 @@
 # Direct field editing
 
+The Mac direct-editing implementation and its measurements below describe the earlier field-first workflow. For current Mac dictation, Magic, insertion and recovery, see [Dictation and Magic on Mac](mac-field-magic.md).
+
 Dictation and Magic deliver through the field queues below. The retired composition document, draft Insert workflow and whole-field refine path are no longer producers; iOS uses lightweight dictation status alongside the staged dictation and instruction links.
 
 ## Shared owners

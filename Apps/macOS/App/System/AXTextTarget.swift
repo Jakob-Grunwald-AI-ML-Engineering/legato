@@ -191,6 +191,28 @@ final class AXTextTarget: TextTarget {
             }
         }
 
+        /// A point next to the captured selection, or the focused window's frame when the
+        /// host does not expose caret geometry. Both are in global display coordinates.
+        @MainActor func composerAnchor() -> (caret: CGRect?, window: CGRect?) {
+            if case .element(let target) = self,
+               let selection = try? AXTextTarget.copyAttribute(target.element, kAXSelectedTextRangeAttribute),
+               let range = try? AXTextTarget.range(from: selection),
+               range.location >= 0,
+               let argument = try? AXTextTarget.axValue(for: .init(location: range.location, length: 0)),
+               let value = try? target.parameter(kAXBoundsForRangeParameterizedAttribute, argument),
+               let rect = try? AXTextTarget.rect(from: value), rect.height > 0, rect.minX.isFinite, rect.maxY.isFinite {
+                return (rect, nil)
+            }
+            guard AXIsProcessTrusted(), let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return (nil, nil) }
+            let app = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(app, AXTextTarget.messagingTimeout)
+            guard let element = try? AXTextTarget.copyAttribute(app, kAXFocusedWindowAttribute),
+                  CFGetTypeID(element) == AXUIElementGetTypeID() else { return (nil, nil) }
+            let window = unsafeDowncast(element, to: AXUIElement.self)
+            AXUIElementSetMessagingTimeout(window, AXTextTarget.messagingTimeout)
+            return (nil, AXTextTarget.frame(of: window))
+        }
+
         /// Capture observable insertion bounds without reading any previous text. A destination that cannot provide
         /// enough evidence keeps its take in the panel before any keys are posted.
         @MainActor func prepareInsertion(text: String) -> InsertConfirmation? {

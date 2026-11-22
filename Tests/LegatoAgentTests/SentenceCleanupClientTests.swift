@@ -67,6 +67,23 @@ private func sentencePayload(id: String = "sentence-a", sequence: Int = 7, text:
     #expect(!String(decoding: requests[0], as: UTF8.self).contains("clear_composer"))
 }
 
+@Test func stagedDraftShowsValidatedTextFragmentsIncludingQuotedSpeech() async throws {
+    let output = #"She said "hello", then waved."#
+    let payload = sentencePayload(text: output)
+    let fragments = #"{"text":"She said \"hello\", then waved.","sentenceID":"sentence-a","sequence":7}"#
+    let fixture = SentenceFixtureMessages(try sentenceToolEvents(payload, fragments: fragments))
+    let received = Mutex<[String]>([])
+    let client = SentenceCleanupClient(client: fixture)
+    let result = try await client.clean(.init(sentenceID: "sentence-a", sequence: 7, text: "say hello", vocabulary: [],
+                                              dictation: .init(style: .send))) { preview in
+        received.withLock { $0.append(preview) }
+    }
+    #expect(result.text == output)
+    #expect(received.withLock { $0.last } == output)
+    #expect(SentenceCleanupClient.provisionalText(#"{"text":"Hello\uD83D"#) == nil)
+    #expect(SentenceCleanupClient.provisionalText(#"{"text":"Hello\uD83D\uDE00"#) == "Hello😀")
+}
+
 @Test(arguments: ["identity", "sequence", "empty", "control", "oversized", "extra-field", "unknown-tool", "malformed", "incomplete", "extra-tool", "provider", "truncated"])
 func sentenceCleanupRejectsUntrustedOrIncompleteSubmission(_ failure: String) async throws {
     var payload = sentencePayload(), tool = "submit_sentence", fragments: String?

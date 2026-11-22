@@ -9,6 +9,11 @@ public enum PromptLayers {
     public static func dictationTakeCleanup() -> String { read("dictation-take-cleanup") }
     /// The keyboard's instruction mode: one spoken instruction rewrites one scope of the field (`InstructionRunner`).
     public static func instructionMode() -> String { read("instruction") }
+    static func applyingPreferences(_ personal: String, to prompt: String) -> String {
+        let preference = personal.trimmingCharacters(in: .whitespacesAndNewlines)
+        return preference.isEmpty ? prompt : prompt + "\n\nPersonal preferences:\n" + preference
+    }
+
     private static func read(_ name: String) -> String {
         guard let url = Bundle.module.url(forResource: name, withExtension: "md", subdirectory: "Prompts")
             ?? Bundle.module.url(forResource: name, withExtension: "md") else { return "" }

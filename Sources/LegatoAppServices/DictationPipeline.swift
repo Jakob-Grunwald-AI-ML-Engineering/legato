@@ -1463,6 +1463,35 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         historyRevision += 1
     }
 
+    /// An explicit Magic action uses the same staged-send prompt and validation as the keyboard.
+    func cleanDraft(_ text: String, instructions: String?, writingSettings: ComposerWritingSettings, preview: @escaping @MainActor @Sendable (String) -> Void) async throws -> String {
+        var client = cleaner
+        #if DEBUG || LEGATO_INTERNAL
+        if debugFailTakes > 0 { debugFailTakes -= 1; throw SentenceCleanupError.providerError }
+        if let debugStreamCleaner { client = debugStreamCleaner }
+        #endif
+        let terms = Array(await loadTerms().prefix(200))
+        let input = SentenceCleanupInput(sentenceID: UUID().uuidString, sequence: 0, text: text, vocabulary: terms,
+                                         dictation: .init(style: .send, instructions: instructions), writingSettings: writingSettings)
+        let timeout = takeTimeout?(text.count) ?? DictationTakeLimits.timeout(characters: text.count)
+        let service = client
+        let result = try await withThrowingTaskGroup(of: String.self) { group in
+            group.addTask { try await service.clean(input) { await preview($0) }.text }
+            group.addTask { try await Task.sleep(for: timeout); throw SentenceCleanupError.incomplete }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else { throw CancellationError() }
+            return result
+        }
+        guard DictationCleanupGuard.accepts(raw: text, cleaned: result, style: .send) else { throw SentenceCleanupError.invalidText }
+        return result
+    }
+
+    func recordDraft(id: UUID, raw: String, text: String) async {
+        guard keepsTakes(), !text.isEmpty else { return }
+        recentTakes.record(raw: raw, cleaned: text, wasCleaned: raw != text)
+        await save(id: id, raw: raw, text: text)
+    }
+
     var nextOutboxSequenceForTesting: Int { nextTakeSequence }
 
     /// Debug bridge and tests: the take's state.

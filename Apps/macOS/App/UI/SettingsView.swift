@@ -31,10 +31,9 @@ struct SettingsView: View {
         }
     }
     @Environment(MacAppController.self) private var controller
-    @AppStorage("composer.liveModel") private var liveModel = ModelChoice.haiku.rawValue
-    @AppStorage("composer.personalPrompt") private var personalPrompt = ""
+    @AppStorage(ComposerWritingSettings.modelKey) private var liveModel = ModelChoice.haiku.rawValue
+    @AppStorage(ComposerWritingSettings.promptKey) private var personalPrompt = ""
     @AppStorage("voiceIsolation.enabled") private var onlyMyVoice = false
-    @AppStorage(PanelDictationSetting.key) private var panelMode = PanelDictationSetting.defaultMode.rawValue
     @State private var enrollment = VoiceEnrollmentController.shared
     @State private var page: Page? = .overview
     @State private var claudeKey = ""
@@ -128,7 +127,7 @@ struct SettingsView: View {
                     Image(systemName: "waveform.circle.fill").font(.system(size: 38)).foregroundStyle(.tint)
                     VStack(alignment: .leading, spacing: 7) {
                         Text("Speak. Shape. Send.").font(.title2.weight(.semibold))
-                        Text("Dictate straight into the focused field. Turn Magic on to speak an instruction, then turn it off to edit the text in place.")
+                        Text("Dictate into a draft beside the cursor. Click Magic to revise the whole draft, then Insert when you’re ready.")
                             .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -154,7 +153,7 @@ struct SettingsView: View {
                             Text(modelName(model)).tag(model.rawValue)
                         }
                     }.labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
-                    Text("Magic uses this model when you ask it to rewrite text in the focused field.")
+                    Text("Magic uses this model to revise your draft.")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -203,31 +202,14 @@ struct SettingsView: View {
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
-    private var dictationSend: some View {
+    private var insertionSettings: some View {
         @Bindable var settings = controller.settings
         return card {
             VStack(alignment: .leading, spacing: 14) {
-                Label("Send dictation", systemImage: "text.cursor").font(.headline)
-                Picker("Send dictation", selection: $settings.dictationSend) {
-                    Text("Live").tag(DictationSendSetting.Mode.live)
-                    Text("On stop").tag(DictationSendSetting.Mode.onStop)
-                    Text("After a pause").tag(DictationSendSetting.Mode.afterPause)
-                }.labelsHidden().pickerStyle(.segmented)
-                if settings.dictationSend == .afterPause {
-                    Stepper(value: Binding(get: { DictationSendSetting.clampedPause(settings.dictationPause) },
-                                           set: { settings.dictationPause = DictationSendSetting.clampedPause($0) }),
-                            in: DictationSendSetting.pauseRange, step: DictationSendSetting.pauseStep) {
-                        Text("Pause before sending: \(Int(DictationSendSetting.clampedPause(settings.dictationPause))) s")
-                    }
-                }
-                Picker("Where words appear", selection: $panelMode) {
-                    Text("Type into the field as I speak (panel only when needed)").tag(PanelDictationSetting.Mode.whenNeeded.rawValue)
-                    Text("Always dictate in the panel, insert when done").tag(PanelDictationSetting.Mode.always.rawValue)
-                }.pickerStyle(.radioGroup)
-                Toggle("Typewriter for paste-only editors", isOn: $settings.typewriter)
+                Label("Insert draft", systemImage: "text.cursor").font(.headline)
+                Toggle("Typewriter animation on insertion", isOn: $settings.typewriter)
                 Toggle("Restore clipboard after a paste", isOn: $settings.restoreClipboard)
-                Text("Live puts words into your field as you speak and revises them after cleanup. On stop waits for the whole take. After a pause also sends when you stop speaking; line by line sends finished sentences. In the panel, the take grows in the notch and goes into the field once it is final.")
-                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+
             }
         }
     }
@@ -237,7 +219,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     Label("Magic shortcut", systemImage: "command").font(.headline)
                     HotkeyRecorderView(target: .magic)
-                    Text("Speak an instruction about selected text, what you dictated, or the surrounding paragraph. Tap to latch Magic on and off, or hold to speak an instruction. Turning Magic off runs it. The previous composer shortcut is preserved.")
+                    Text("Tap to start a spoken instruction and tap again to run it, or hold the shortcut while speaking.")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -245,11 +227,23 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     Label("Dictation shortcut", systemImage: "mic").font(.headline)
                     HotkeyRecorderView(target: .dictation)
-                    Text("Types what you say straight into the focused field. Tap to start and stop, or hold to talk. While dictating, Magic temporarily routes speech into an instruction; ordinary dictation resumes when Magic turns off.")
+                    Text("Tap to start or stop, or hold to talk. Pausing and stopping leave your words in the composer.")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
-            dictationSend
+            card {
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("Composer shortcuts", systemImage: "keyboard").font(.headline)
+                    ForEach(MacComposerShortcut.allCases, id: \.self) { shortcut in
+                        HStack {
+                            Text(shortcut.actionTitle)
+                            Spacer()
+                            Text(shortcut.keysLabel).monospaced().foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            insertionSettings
             permissions
         }
     }

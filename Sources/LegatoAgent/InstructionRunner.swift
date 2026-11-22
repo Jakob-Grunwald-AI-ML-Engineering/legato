@@ -470,9 +470,7 @@ public struct InstructionRunner: Sendable {
     // MARK: Prompt
 
     public static func system(personal: String, vocabulary: [String]) -> String {
-        var parts = [PromptLayers.instructionMode()]
-        let personal = personal.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !personal.isEmpty { parts.append("Personal preferences:\n" + personal) }
+        var parts = [PromptLayers.applyingPreferences(personal, to: PromptLayers.instructionMode())]
         if !vocabulary.isEmpty { parts.append("Vocabulary spellings (use when context matches):\n" + vocabulary.prefix(200).joined(separator: ", ")) }
         return parts.joined(separator: "\n\n")
     }

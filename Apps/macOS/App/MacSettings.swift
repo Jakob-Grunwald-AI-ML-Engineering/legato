@@ -21,10 +21,6 @@ import Observation
         }
     }
     var gestureMode: HotkeyGesture.Mode { didSet { defaults.set(gestureMode.rawValue, forKey: "gestureMode") } }
-    /// When dictated text is written: once per take (on stop, or after a pause) or line by line. The pipeline reads
-    /// the same keys live from the standard defaults.
-    var dictationSend: DictationSendSetting.Mode { didSet { defaults.set(dictationSend.rawValue, forKey: DictationSendSetting.modeKey) } }
-    var dictationPause: Double { didSet { defaults.set(DictationSendSetting.clampedPause(dictationPause), forKey: DictationSendSetting.pauseKey) } }
     /// Types a take in word by word (Accessibility, or key events in paste-only apps); off inserts at once and pastes.
     var typewriter: Bool { didSet { defaults.set(typewriter, forKey: "typewriterInsertion") } }
     var restoreClipboard: Bool { didSet { defaults.set(restoreClipboard, forKey: "restoreClipboard") } }
@@ -34,10 +30,6 @@ import Observation
         hotkey = panel
         dictationHotkey = Self.initialDictationHotkey(defaults, panel: panel)
         gestureMode = defaults.string(forKey: "gestureMode").flatMap(HotkeyGesture.Mode.init(rawValue:)) ?? .hybrid
-        // The Mac now supports the same live field route as the keyboard.
-        let send = DictationSendSetting.mode(in: defaults)
-        dictationSend = send
-        dictationPause = DictationSendSetting.pause(in: defaults)
         typewriter = defaults.object(forKey: "typewriterInsertion") as? Bool ?? true
         restoreClipboard = defaults.object(forKey: "restoreClipboard") as? Bool ?? true
     }

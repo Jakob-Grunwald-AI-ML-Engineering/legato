@@ -64,8 +64,8 @@ extension InstructionRunner: InstructionRunning {}
         nonisolated(unsafe) let store = defaults
         self.init(runner: InstructionRunner(
             client: MessagesStream(keyStore: KeychainKeyStore()),
-            model: { ModelChoice(rawValue: store.string(forKey: "composer.liveModel") ?? "") ?? .haiku },
-            personalPrompt: { store.string(forKey: "composer.personalPrompt") ?? "" },
+            model: { ComposerWritingSettings(in: store).model },
+            personalPrompt: { ComposerWritingSettings(in: store).personalPrompt },
             vocabulary: { (try? await VocabularyStoreAccess.terms(vocabularyURL)) ?? [] }), history: history)
     }
 
@@ -74,6 +74,8 @@ extension InstructionRunner: InstructionRunning {}
         ([words.map(\.text).joined(separator: " "), tail.trimmingCharacters(in: .whitespacesAndNewlines)]).filter { !$0.isEmpty }.joined(separator: " ")
     }
     public var isRunning: Bool { task != nil }
+
+    @ObservationIgnored var onDraftInstruction: (@MainActor (String) -> Void)?
 
     // MARK: Speech
 
@@ -104,7 +106,11 @@ extension InstructionRunner: InstructionRunning {}
         listening = false
         tail = ""
         guard !words.isEmpty else { return update(InstructionStrip()) }
-        run()
+        if let onDraftInstruction {
+            let command = transcript
+            update(InstructionStrip())
+            onDraftInstruction(command)
+        } else { run() }
     }
 
     // MARK: Intents
