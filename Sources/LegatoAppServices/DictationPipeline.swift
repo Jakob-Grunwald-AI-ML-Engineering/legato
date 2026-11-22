@@ -497,7 +497,10 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             if cut.raw, endsRun { pausedRunID = nil; liveTakeOpen = false; run.setPaused(false) }
             publishLive(run)
             Task { [weak self] in
-                if !cut.raw { await self?.submitLive(draft.text, key: draft.key, run: run, instructions: instructions) }
+                if !cut.raw {
+                    // The merged draft already contains the prior cleanup as editable text.
+                    await self?.submitLive(draft.text, key: draft.key, run: run, instructions: instructions, includePreviousLines: false)
+                }
                 if cut.raw, endsRun { await self?.finishLive() }
             }
             return
@@ -992,7 +995,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     @ObservationIgnored private var liveSpecState: [Int: String] = [:]
 
     /// Sends a closed unit (`key`: its last segment) to cleanup, against the text before the run and the units so far.
-    private func submitLive(_ unit: String, key sequence: Int, run: LiveDictationRun, instructions: String? = nil) async {
+    private func submitLive(_ unit: String, key sequence: Int, run: LiveDictationRun,
+                            instructions: String? = nil, includePreviousLines: Bool = true) async {
         let id = liveCleanupSequence
         liveCleanupSequence += 1
         liveKeys[id] = (sequence, run.unitRange(key: sequence))
@@ -1002,13 +1006,13 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         // A speculative request for this unit has been started by now; the pipeline takes it when the text is the same.
         await speculationStart?.value
         let pipeline = await current()
-        let speculated = instructions == nil
+        let speculated = includePreviousLines && instructions == nil
             ? liveSpeculation.flatMap { $0.runID == run.runID ? ($0.text == unit ? "match" : "grew") : nil } ?? "none"
             : "none"
         liveSpeculation = nil
         liveSpecState[id] = speculated
         await pipeline.submit(sequence: id, lineID: "\(sessionID)-\(sequence)", raw: unit, textBefore: before,
-                              allowsEmpty: true, instructions: instructions)
+                              allowsEmpty: true, instructions: instructions, includePreviousLines: includePreviousLines)
     }
 
     /// An instruction is about to read the field: a live run's held cleanup lands now, whole-take pass and the wait for
