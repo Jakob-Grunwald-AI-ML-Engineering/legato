@@ -82,6 +82,9 @@ final class AppController {
         meetings = IOSMeetingController(root: root.appending(path: "Meetings"),
             vocabularyURL: root.appending(path: "vocabulary.json"), keyboard: keyboardSession, microphone: microphone,
             publishReservation: { active in host?.link.meetingChanged(active: active) })
+        holdActivity.onDismissal = { [weak self] holdID in
+            await self?.stopDictationActivity(holdID: holdID)
+        }
         keyboardHost?.onChoices = { [weak self] choices in
             for choice in choices {
                 self?.vocabulary.recordChoice(original: choice.original, chosen: choice.chosen,
@@ -138,11 +141,7 @@ final class AppController {
         }
         if ShortcutActionSetting.action(in: AppGroup.defaults) == .meeting {
             if meetings.isActive { await meetings.stop(); return .stopped(nil) }
-            guard UIApplication.shared.applicationState == .active else { return .needsForeground(.backgroundStartRefused) }
-            meetings.open()
-            await meetings.prepare()
-            meetings.start()
-            return meetings.isActive ? .started : .failed(meetings.notice ?? "Meeting could not start.")
+            return await startMeeting()
         }
         guard !meetings.isActive else { return .failed("Stop the meeting before dictating.") }
         if keyboardSession.route != .idle { await keyboardSession.closeGate(); return .stopped(nil) }
@@ -156,15 +155,39 @@ final class AppController {
         }
         return .started
     }
+    func startMeetingFromActivity(holdID: String?) async throws {
+        try await IOSForegroundAdmission.waitUntilActive()
+        guard canStartMeetingFromActivity(holdID) else { return }
+        _ = await startMeeting(while: { self.canStartMeetingFromActivity(holdID) })
+    }
+
+    private func canStartMeetingFromActivity(_ holdID: String?) -> Bool {
+        holdActivity.ownsHold(holdID) && microphone.isArmed && !microphone.microphoneRecovering
+            && keyboardSession.route == .idle && !meetings.isActive
+    }
+
+    private func startMeeting(while canStart: () -> Bool = { true }) async -> ToggleOutcome {
+        guard UIApplication.shared.applicationState == .active else { return .needsForeground(.backgroundStartRefused) }
+        meetings.open()
+        await meetings.prepare()
+        guard !meetings.isActive, canStart() else { return .busy }
+        meetings.start()
+        return meetings.isActive ? .started : .failed(meetings.notice ?? "Meeting could not start.")
+    }
+
     func copy(_ text: String) { UIPasteboard.general.string = text }
     func recentEntries(limit: Int = 100) async -> [DictationEntry] { (try? await history.recent(limit: limit)) ?? [] }
     func deleteEntry(id: UUID) async { try? await history.delete(id: id) }
     func stopIfRunning() async { await keyboardSession.closeGate() }
-    /// The Live Activity's Release button: the same release as the keyboard's, which ends the hold's activity.
+    func stopDictationActivity(holdID: String?) async {
+        await holdActivity.stop(holdID: holdID) { await releaseMicrophone() }
+    }
+
+    /// Closes the keyboard take before releasing the microphone and its keyboard lease.
     func releaseMicrophone() async {
         guard !meetings.isActive else { return }
-        await keyboardSession.closeGate()
-        await microphone.releaseMicrophone()
+        await keyboardSession.closeGate(releasingMicrophone: true)
+        guard !meetings.isActive, !microphone.isArmed else { return }
         keyboardHost?.link.leaseChanged(until: nil)
     }
     func prepareForBackground() async {

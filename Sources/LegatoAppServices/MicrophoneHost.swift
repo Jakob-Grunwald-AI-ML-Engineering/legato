@@ -70,9 +70,11 @@ import LegatoCore
         // A repeated ready request must not replace the stream of a running take.
         // The capture watchdog owns repair of an existing lease.
         guard !isArmed else { return }
+        let epoch = microphoneEpoch
         status = "starting"; onChange?()
         do {
             _ = try await prepareMicrophoneStream()
+            try checkMicrophoneEpoch(epoch)
             isArmed = true; error = nil; status = "ready"; onChange?()
             monitorMicrophone()
             await inputRoute.preferIdle()
@@ -200,9 +202,16 @@ import LegatoCore
         invalidateMicrophoneAdmission(); isArmed = false; await mic.stop(); deactivateMicrophoneSession(); onChange?()
     }
     public func releaseMicrophone() async {
-        invalidateMicrophoneAdmission(); isArmed = false
+        guard !microphoneReserved else { return }
+        invalidateMicrophoneAdmission()
+        isArmed = false
+        status = "idle"
         discardTakeBuffer()
-        await releaseWarmInput(); await mic.stop(); deactivateMicrophoneSession(); onChange?()
+        await releaseWarmInput()
+        await mic.stop()
+        // A meeting can reserve and activate the shared audio session while capture is stopping.
+        if !microphoneReserved { deactivateMicrophoneSession() }
+        onChange?()
     }
     func holdWarmInput() async -> Bool {
         guard !VoiceEnrollmentController.shared.isBusy else { error = "Finish or cancel voice profile setup first."; onChange?(); return false }

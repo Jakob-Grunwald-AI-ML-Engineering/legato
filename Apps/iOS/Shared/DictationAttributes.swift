@@ -25,5 +25,6 @@ struct DictationAttributes: ActivityAttributes {
         var phase: Phase
     }
 
-    /// Opened by tapping an activity in the `tapToCopy` phase; the app copies the last transcript.
+    /// Associates controls with the microphone hold that created them. Optional for activities from earlier builds.
+    var holdID: String?
 }

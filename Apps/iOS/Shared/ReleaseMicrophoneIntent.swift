@@ -10,12 +10,15 @@ struct ReleaseMicrophoneIntent: LiveActivityIntent {
     static let description = IntentDescription("Stops Legato from holding the microphone in the background.")
     static let isDiscoverable = false
 
+    @Parameter(title: "Microphone hold") var holdID: String?
+
     init() {}
+    init(holdID: String?) { self.holdID = holdID }
 
     @MainActor
     func perform() async throws -> some IntentResult {
         #if APP_TARGET
-        await AppController.shared.releaseMicrophone()
+        await AppController.shared.stopDictationActivity(holdID: holdID)
         #else
         guard Self.runsInApp else { throw ToggleDictationError.appRequired }
         #endif

@@ -108,7 +108,9 @@ struct SettingsView: View {
                     Text("Meeting").tag(ShortcutActionSetting.Action.meeting.rawValue)
                     Text("Dictation").tag(ShortcutActionSetting.Action.dictation.rawValue)
                 }.accessibilityIdentifier("settings.shortcutAction")
-            } footer: { Text("Meeting starts or stops a recording. Dictation starts a take when the keyboard is open; otherwise it readies the microphone.") }
+            } footer: {
+                Text("To assign the Action Button, open iOS Settings → Action Button → Shortcut and choose Legato’s Toggle recording shortcut. Meeting starts or stops a recording. Dictation starts a take when the keyboard is open and readies the microphone when it’s closed.")
+            }
             Section {
                 NavigationLink("Practice keyboard") { KeyboardPracticeView() }
                 Picker("Dictation key", selection: $dictationKeySide) {
