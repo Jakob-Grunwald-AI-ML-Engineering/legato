@@ -205,6 +205,7 @@ import LegatoCore
         guard !microphoneReserved else { return }
         invalidateMicrophoneAdmission()
         isArmed = false
+        status = "idle"
         discardTakeBuffer()
         await releaseWarmInput()
         await mic.stop()
