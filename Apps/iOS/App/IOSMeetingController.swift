@@ -250,9 +250,13 @@ final class IOSMeetingController {
         let state = MeetingAttributes.ContentState(phase: interrupted ? .interrupted : .stopping,
             tail: interrupted ? "Recording stopped. Open Legato to continue." : "Meeting saved")
         let dismissal: ActivityUIDismissalPolicy = interrupted ? .after(Date().addingTimeInterval(300)) : .immediate
-        await activity?.end(ActivityContent(state: state, staleDate: nil), dismissalPolicy: dismissal)
-        if let handedOffAt {
-            await handedOffActivity?.end(handoffContent(state, startedAt: handedOffAt), dismissalPolicy: dismissal)
+        if let id = activity?.id {
+            await Self.endActivity(id: id, type: MeetingAttributes.self,
+                content: ActivityContent(state: state, staleDate: nil), dismissalPolicy: dismissal)
+        }
+        if let id = handedOffActivity?.id, let handedOffAt {
+            await Self.endActivity(id: id, type: DictationAttributes.self,
+                content: handoffContent(state, startedAt: handedOffAt), dismissalPolicy: dismissal)
         }
         activity = nil
         handedOffActivity = nil
@@ -265,10 +269,22 @@ final class IOSMeetingController {
     private func updateActivity(_ phase: MeetingAttributes.ContentState.Phase) async {
         let state = MeetingAttributes.ContentState(phase: phase,
             tail: String((liveText.isEmpty ? live?.segments.last?.text ?? "" : liveText).suffix(240)))
-        await activity?.update(ActivityContent(state: state, staleDate: nil))
-        if let handedOffAt {
-            await handedOffActivity?.update(handoffContent(state, startedAt: handedOffAt))
+        if let id = activity?.id {
+            await Self.updateActivity(id: id, type: MeetingAttributes.self, content: ActivityContent(state: state, staleDate: nil))
         }
+        if let id = handedOffActivity?.id, let handedOffAt {
+            await Self.updateActivity(id: id, type: DictationAttributes.self, content: handoffContent(state, startedAt: handedOffAt))
+        }
+    }
+    private nonisolated static func updateActivity<Attributes: ActivityAttributes>(
+        id: String, type: Attributes.Type, content: ActivityContent<Attributes.ContentState>
+    ) async {
+        await Activity<Attributes>.activities.first { $0.id == id }?.update(content)
+    }
+    private nonisolated static func endActivity<Attributes: ActivityAttributes>(
+        id: String, type: Attributes.Type, content: ActivityContent<Attributes.ContentState>, dismissalPolicy: ActivityUIDismissalPolicy
+    ) async {
+        await Activity<Attributes>.activities.first { $0.id == id }?.end(content, dismissalPolicy: dismissalPolicy)
     }
     private func handoffContent(_ state: MeetingAttributes.ContentState, startedAt: Date) -> ActivityContent<DictationAttributes.ContentState> {
         ActivityContent(state: .init(startedAt: startedAt, tail: "", phase: .held, meeting: state), staleDate: nil)
