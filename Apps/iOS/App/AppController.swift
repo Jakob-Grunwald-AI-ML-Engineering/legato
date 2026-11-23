@@ -141,7 +141,8 @@ final class AppController {
         }
         if ShortcutActionSetting.action(in: AppGroup.defaults) == .meeting {
             if meetings.isActive { await meetings.stop(); return .stopped(nil) }
-            return await startMeeting()
+            await meetings.prepare()
+            return await meetings.start(fromIntent: true)
         }
         guard !meetings.isActive else { return .failed("Stop the meeting before dictating.") }
         if keyboardSession.route != .idle { await keyboardSession.closeGate(); return .stopped(nil) }
@@ -156,23 +157,16 @@ final class AppController {
         return .started
     }
     func startMeetingFromActivity(holdID: String?) async throws {
-        try await IOSForegroundAdmission.waitUntilActive()
-        guard canStartMeetingFromActivity(holdID) else { return }
-        _ = await startMeeting(while: { self.canStartMeetingFromActivity(holdID) })
-    }
-
-    private func canStartMeetingFromActivity(_ holdID: String?) -> Bool {
-        holdActivity.ownsHold(holdID) && microphone.isArmed && !microphone.microphoneRecovering
-            && keyboardSession.route == .idle && !meetings.isActive
-    }
-
-    private func startMeeting(while canStart: () -> Bool = { true }) async -> ToggleOutcome {
-        guard UIApplication.shared.applicationState == .active else { return .needsForeground(.backgroundStartRefused) }
-        meetings.open()
         await meetings.prepare()
-        guard !meetings.isActive, canStart() else { return .busy }
-        meetings.start()
-        return meetings.isActive ? .started : .failed(meetings.notice ?? "Meeting could not start.")
+        guard holdActivity.ownsHold(holdID), microphone.isArmed, !microphone.microphoneRecovering,
+              keyboardSession.route == .idle, !meetings.isActive else { return }
+        switch await meetings.start(fromIntent: true) {
+        case .failed(let message):
+            throw NSError(domain: "Meeting", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+        case .needsForeground:
+            throw NSError(domain: "Meeting", code: 1, userInfo: [NSLocalizedDescriptionKey: "Open Legato to allow microphone access."])
+        default: break
+        }
     }
 
     func copy(_ text: String) { UIPasteboard.general.string = text }
