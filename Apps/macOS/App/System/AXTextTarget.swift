@@ -175,7 +175,7 @@ final class AXTextTarget: TextTarget {
     enum PasteWitness {
         /// The focused element: the insert goes ahead only while it still has focus.
         case element(AXTextTarget)
-        /// No positively identified typing destination: retain the take in the panel instead of sending blind keys.
+        /// No positively identified typing destination. Never send blind keys.
         case unreadable
         /// A password field: the insert goes ahead while its element (when one was read) keeps focus and its length
         /// (when exposed) is unchanged. Secure input hides the user's keys from Legato's tap, so the length stands in.
@@ -213,8 +213,7 @@ final class AXTextTarget: TextTarget {
             return (nil, AXTextTarget.frame(of: window))
         }
 
-        /// Capture observable insertion bounds without reading any previous text. A destination that cannot provide
-        /// enough evidence keeps its take in the panel before any keys are posted.
+        /// Capture optional readback evidence without reading any previous text.
         @MainActor func prepareInsertion(text: String) -> InsertConfirmation? {
             switch self {
             case .element(let target):
@@ -235,7 +234,7 @@ final class AXTextTarget: TextTarget {
         /// The positively identified typing destination still has focus. An unknown destination never accepts keys.
         @MainActor func stillFocused() -> Bool {
             switch self {
-            case .element(let target): return target.editable && target.isFocused()
+            case .element(let target): return target.witnessFocused(password: false)
             case .unreadable: return false
             case .password(let target, let length):
                 guard let target else { return false }
@@ -261,10 +260,10 @@ final class AXTextTarget: TextTarget {
             return count >= minimumLength && count <= max(initialLength, expected)
         }
 
-        func verify() async -> Bool {
+        func verify(whileOwned: @MainActor () -> Bool = { true }) async -> Bool {
             let deadline = ContinuousClock.now + .milliseconds(500)
             repeat {
-                guard !Task.isCancelled, target.witnessFocused(password: password) else { return false }
+                guard !Task.isCancelled, whileOwned(), target.witnessFocused(password: password) else { return false }
                 if password {
                     if let expected = expectation.length, target.characterCount() == expected { return true }
                 } else if expectation.matches(selection: try? target.selectedRange(), length: try? target.textLength(),
@@ -313,8 +312,8 @@ final class AXTextTarget: TextTarget {
         switch security(of: element) {
         case .password: return target.editable ? .password(target, length: target.characterCount()) : .password(nil, length: nil)
         case .notPassword: return target.editable ? .element(target) : .unreadable
-        // Failed role reads never authorize blind keys; the text remains available in the panel.
-        case .unknown: return .unreadable
+        // Failed role reads never authorize blind keys. With secure input active, treat an unknown field as private.
+        case .unknown: return secureInput ? .password(nil, length: nil) : .unreadable
         }
     }
 

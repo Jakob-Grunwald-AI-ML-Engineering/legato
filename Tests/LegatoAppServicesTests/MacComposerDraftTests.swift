@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import LegatoAgent
 import LegatoClaude
+import LegatoCore
 import LegatoRoom
 import Synchronization
 @testable import LegatoAppServices
@@ -14,11 +15,29 @@ private final class WritingRequestRecorder: MessagesStreaming {
     }
 }
 
+private actor DraftHistory: HistoryStore {
+    private var entries: [DictationEntry] = []
+    private var rejectsWrites = false
+    func rejectWrites(_ rejected: Bool) { rejectsWrites = rejected }
+    func append(_ entry: DictationEntry) throws {
+        if rejectsWrites { throw CocoaError(.fileWriteOutOfSpace) }
+        entries.append(entry)
+    }
+    func upsert(_ entry: DictationEntry) throws {
+        if rejectsWrites { throw CocoaError(.fileWriteOutOfSpace) }
+        delete(id: entry.id)
+        entries.append(entry)
+    }
+    func recent(limit: Int) -> [DictationEntry] { Array(entries.reversed().prefix(limit)) }
+    func delete(id: UUID) { entries.removeAll { $0.id == id } }
+}
+
 @MainActor struct MacComposerDraftTests {
-    private func session(_ cleaner: any SentenceCleaning, defaults: UserDefaults = .standard) -> (MacDictationSession, MacComposerDraft) {
+    private func session(_ cleaner: any SentenceCleaning, defaults: UserDefaults = .standard,
+                         history: any HistoryStore = DraftHistory()) -> (MacDictationSession, MacComposerDraft) {
         let draft = MacComposerDraft(defaults: defaults)
         let sockets = SocketBox()
-        let session = MacDictationSession(pipeline: DictationPipeline(cleaner: cleaner), microphone: MacMic(),
+        let session = MacDictationSession(pipeline: DictationPipeline(history: history, cleaner: cleaner), microphone: MacMic(),
                                           vocabularyURL: URL(fileURLWithPath: "/nonexistent/vocabulary.json"), composer: draft,
                                           sonioxKey: { "" }, makeSocket: { sockets.make() }, warmConnection: {})
         return (session, draft)
@@ -56,15 +75,49 @@ private final class WritingRequestRecorder: MessagesStreaming {
         await session.magicDraft()
         #expect(draft.isCorrecting)
         await session.discardDraft()
-        #expect(draft.isEmpty && draft.canUndoDiscard && !draft.isCorrecting)
+        #expect(draft.isEmpty && session.canUndoDiscard && !draft.isCorrecting)
+        #expect(draft.dismissal == .discard && !session.isActivityInteractive)
         session.undoDiscard()
-        #expect(draft.text == "hello")
-        session.insertDraftText = { _ in false }
+        #expect(draft.text == "hello" && session.isActivityInteractive && !session.canUndoDiscard)
+    }
+
+    @Test func anUnconfirmedInsertLeavesOneExactHistoryEntryWithoutKeepingTheActivityOpen() async throws {
+        let history = DraftHistory()
+        let (session, draft) = session(Cleaner(), history: history)
+        try await session.debugLine("keep in history")
+        await session.magicDraft()
+        await draft.settleCorrection()
+        var attempts = 0
+        session.insertDraftText = { text in
+            attempts += 1
+            let stored = await history.recent(limit: 2)
+            #expect(stored.map(\.text) == [text])
+            #expect(stored.first?.rawText == "keep in history")
+            #expect(!session.isActivityInteractive)
+            return false
+        }
         await session.insertDraft()
-        #expect(draft.needsCopy && draft.text == "hello")
-        await session.discardDraft()
-        session.undoDiscard()
-        #expect(draft.needsCopy)
+        await session.insertDraft()
+        #expect(attempts == 1 && draft.isEmpty && !session.isActivityInteractive)
+        #expect(await history.recent(limit: 2).map(\.text) == ["Keep in history."])
+        try await session.debugLine("next take")
+        #expect(session.isActivityInteractive && draft.text == "next take")
+        await session.debugStop()
+    }
+
+    @Test func aFailedHistoryWritePreservesTheDraftAndDeliversOnlyAfterRetrySucceeds() async throws {
+        let history = DraftHistory()
+        await history.rejectWrites(true)
+        let (session, draft) = session(Cleaner(), history: history)
+        try await session.debugLine("recover me")
+        var delivered: [String] = []
+        session.insertDraftText = { delivered.append($0); return true }
+        await session.insertDraft()
+        #expect(delivered.isEmpty && draft.text == "recover me" && draft.message != nil && session.isActivityInteractive)
+        await history.rejectWrites(false)
+        await session.insertDraft()
+        #expect(delivered == ["recover me"] && draft.isEmpty && !session.isActivityInteractive)
+        #expect(await history.recent(limit: 2).map(\.text) == delivered)
     }
 
     @Test func lateCompletionOfFirstCutCannotConsumeTheSecondBoundary() async {
@@ -144,12 +197,17 @@ private final class WritingRequestRecorder: MessagesStreaming {
 
     @Test func protectedDraftSkipsProvidersAndVoiceInstructions() async throws {
         let cleaner = Cleaner()
-        let (session, draft) = session(cleaner)
+        let history = DraftHistory()
+        let (session, draft) = session(cleaner, history: history)
         session.pipeline.keepsTakes = { false }
         try await session.debugLine("secret")
         await session.magicDraft()
         #expect(await session.startMagic() == false)
         #expect(draft.text == "secret" && !draft.isCorrecting && cleaner.inputs.withLock { $0.isEmpty })
-        await session.debugStop()
+        var inserted: String?
+        session.insertDraftText = { inserted = $0; return true }
+        await session.insertDraft()
+        #expect(inserted == "secret" && draft.isEmpty)
+        #expect(await history.recent(limit: 1).isEmpty)
     }
 }

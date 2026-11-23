@@ -8,7 +8,7 @@ On Mac, dictate into a floating draft near the caret, apply Magic on demand, the
 
 `Room` orders ASR envelopes, publishes partial and final speech, tracks consumer acknowledgements during transcription draining and writes redacted session events. It has no mutable composition document, document tools, writer conversation, provisional edits or hint binder. Its historical channel and participant values remain decodable for old logs; document publication is rejected. `Word` remains the shared ASR word contract, including confidence and language.
 
-`LegatoAgent` retains cleanup, recent-take context, `InstructionRunner`, `ModelChoice` and the confidence-mark stripping helper. Bundled prompts cover line cleanup, whole-take cleanup and field instructions. Composition modes and document-writing prompts are removed. `LegatoComposerDoc` now contains only `Word`; `LegatoComposerUI` contains only the shared `CountdownRim` used by keyboard and Mac dictation status. These package names remain for their active consumers.
+`LegatoAgent` retains cleanup, recent-take context, `InstructionRunner`, `ModelChoice` and the confidence-mark stripping helper. Bundled prompts cover line cleanup, whole-take cleanup and field instructions. Composition modes and document-writing prompts are removed. `LegatoComposerDoc` contains `Word`. `LegatoComposerUI` owns the shared countdown rim and Magic preview effects used by iPhone and Mac.
 
 ## Keyboard delivery and Magic
 

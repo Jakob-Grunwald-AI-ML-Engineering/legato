@@ -1455,11 +1455,17 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         onChange?()
     }
 
+    private enum HistoryError: Error { case unavailable }
+
     private func save(id: UUID, raw: String, text: String, fallback: Bool = false) async {
         guard let history, keepsTakes() else { return }
-        try? await history.upsert(DictationEntry(id: id, date: Date(), text: text, rawText: text == raw ? nil : raw,
-                                                 localeIdentifier: Locale.current.identifier, engineID: "dictation", duration: 0,
-                                                 cleanupFallback: fallback ? true : nil))
+        try? await writeHistory(id: id, raw: raw, text: text, fallback: fallback, to: history)
+    }
+
+    private func writeHistory(id: UUID, raw: String, text: String, fallback: Bool = false, to history: any HistoryStore) async throws {
+        try await history.upsert(DictationEntry(id: id, date: Date(), text: text, rawText: text == raw ? nil : raw,
+                                                localeIdentifier: Locale.current.identifier, engineID: "dictation", duration: 0,
+                                                cleanupFallback: fallback ? true : nil))
         historyRevision += 1
     }
 
@@ -1486,10 +1492,11 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         return result
     }
 
-    func recordDraft(id: UUID, raw: String, text: String) async {
+    func recordDraft(id: UUID, raw: String, text: String) async throws {
         guard keepsTakes(), !text.isEmpty else { return }
+        guard let history else { throw HistoryError.unavailable }
+        try await writeHistory(id: id, raw: raw, text: text, to: history)
         recentTakes.record(raw: raw, cleaned: text, wasCleaned: raw != text)
-        await save(id: id, raw: raw, text: text)
     }
 
     var nextOutboxSequenceForTesting: Int { nextTakeSequence }

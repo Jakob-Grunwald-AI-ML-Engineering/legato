@@ -19,6 +19,41 @@ public struct ShadowPlan: Sendable, Equatable {
     }
 }
 
+/// The changed and surviving graphemes for a draft preview's Magic transition.
+public struct PreviewRewriteDiff: Equatable, Sendable {
+    public let removed: Set<Int>
+    public let inserted: Set<Int>
+    /// The original index of each surviving grapheme, keyed by its new index.
+    public let survivors: [Int: Int]
+
+    public init(original: String, target: String) {
+        let before = Array(original), after = Array(target)
+        if before.count <= 600, after.count <= 600 {
+            let changes = ShadowEditPlanner.changes(from: before, to: after)
+            var removed: Set<Int> = [], inserted: Set<Int> = []
+            var shift = 0
+            for change in changes {
+                removed.formUnion(change.start..<change.end)
+                let next = change.start + shift
+                inserted.formUnion(next..<(next + change.text.count))
+                shift += change.text.count - (change.end - change.start)
+            }
+            let kept = before.count - removed.count
+            if kept * 2 >= max(before.count, after.count) {
+                self.removed = removed
+                self.inserted = inserted
+                survivors = Dictionary(uniqueKeysWithValues: zip(after.indices.filter { !inserted.contains($0) },
+                                                                  before.indices.filter { !removed.contains($0) }))
+                return
+            }
+        }
+        // A broad rewrite poofs as a group, with a bounded diff cost on the UI thread.
+        removed = Set(before.indices)
+        inserted = Set(after.indices)
+        survivors = [:]
+    }
+}
+
 /// Exact minimal insertion/deletion diff over extended grapheme clusters. Unchanged characters
 /// stay in the host, including whitespace and punctuation. Cursor moves use UTF-16 units.
 public enum ShadowEditPlanner {

@@ -89,7 +89,7 @@ struct DictationPreviewView: View {
             // Keep the background's frame while the listening glow fades out.
             Color.clear
             if listening {
-                listeningGlow.transition(.opacity)
+                MagicPreviewGlow(origin: glowOrigin).transition(.opacity)
             }
             if let bloom {
                 TimelineView(.animation) { timeline in
@@ -117,25 +117,6 @@ struct DictationPreviewView: View {
         .animation(reduceMotion ? nil : .smooth, value: listening)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
-    }
-
-    @ViewBuilder private var listeningGlow: some View {
-        if reduceMotion {
-            Color.primary.opacity(0.08)
-        } else {
-            TimelineView(.animation(minimumInterval: 1.0 / 30)) { timeline in
-                Canvas { context, size in
-                    let origin = glowOrigin ?? CGPoint(x: size.width / 2, y: size.height / 2)
-                    let phase = timeline.date.timeIntervalSinceReferenceDate * 2 * .pi / PreviewRenderer.shimmerPeriod
-                    let center = CGPoint(x: origin.x * 0.4 + size.width * (0.3 + 0.16 * sin(phase)),
-                                         y: size.height * (0.5 + 0.2 * cos(phase)))
-                    let colors = MagicGradient.colors.map { $0.opacity(0.16) }
-                    context.fill(Path(CGRect(origin: .zero, size: size)),
-                                 with: .radialGradient(Gradient(colors: colors + [.clear]), center: center,
-                                                       startRadius: 0, endRadius: max(1, size.width * 0.75)))
-                }
-            }
-        }
     }
 }
 
@@ -226,9 +207,10 @@ private final class ExitProbe {
 private struct PreviewRewrite: Equatable {
     let original: String
     let target: String
-    let removed: Set<Int>
-    let inserted: Set<Int>
-    let survivors: [Int: Int]
+    private let diff: PreviewRewriteDiff
+    var removed: Set<Int> { diff.removed }
+    var inserted: Set<Int> { diff.inserted }
+    var survivors: [Int: Int] { diff.survivors }
     let start: Date
     var duration: Double { PreviewRenderer.fadeSeconds / 2 + ChunkEntrance.capMs / 1000 + DictationPreviewView.fadeSeconds }
     var delayPerPiece: Double { ChunkEntrance.gapMs / 1000 }
@@ -239,29 +221,7 @@ private struct PreviewRewrite: Equatable {
         self.original = original
         self.target = target
         self.start = start
-        let before = Array(original), after = Array(target)
-        if before.count <= 600, after.count <= 600 {
-            let changes = ShadowEditPlanner.changes(from: before, to: after)
-            var removed: Set<Int> = [], inserted: Set<Int> = []
-            var shift = 0
-            for change in changes {
-                removed.formUnion(change.start..<change.end)
-                let next = change.start + shift
-                inserted.formUnion(next..<(next + change.text.count))
-                shift += change.text.count - (change.end - change.start)
-            }
-            let kept = before.count - removed.count
-            if kept * 2 >= max(before.count, after.count) {
-                self.removed = removed
-                self.inserted = inserted
-                survivors = Dictionary(uniqueKeysWithValues: zip(after.indices.filter { !inserted.contains($0) },
-                                                                  before.indices.filter { !removed.contains($0) }))
-                return
-            }
-        }
-        removed = Set(before.indices)
-        inserted = Set(after.indices)
-        survivors = [:]
+        diff = PreviewRewriteDiff(original: original, target: target)
     }
 }
 
@@ -325,9 +285,8 @@ private struct PreviewRenderer: TextRenderer {
     /// Room above the text for the leaving letters' lift (the scroll view clips the rest).
     var displayPadding = EdgeInsets(top: 8, leading: 0, bottom: 0, trailing: 0)
 
-    static let lift: CGFloat = 6
-    static let fadeSeconds = 0.22
-    static let shimmerPeriod = 3.2
+    static let lift = MagicPreviewEffects.lift
+    static let fadeSeconds = MagicPreviewEffects.poofSeconds
 
     func draw(layout: Text.Layout, in context: inout GraphicsContext) {
         // The exit line: the line of the next letter to leave (the last one that left, when all have), reported to the scroll view.
@@ -395,12 +354,7 @@ private struct PreviewRenderer: TextRenderer {
                     if shimmers { waiting.append(contentsOf: shown) }
                 case .poof?:
                     position += run.count
-                    guard poof < 1 else { continue }
-                    var copy = context
-                    copy.translateBy(x: 0, y: -Self.lift * CGFloat(poof))
-                    copy.opacity = 1 - poof
-                    copy.addFilter(.blur(radius: 4 * poof))
-                    copy.draw(run)
+                    MagicPreviewEffects.drawPoof(run, progress: poof, in: context)
                 case .entering?:
                     for slice in run {
                         position += 1
@@ -421,17 +375,7 @@ private struct PreviewRenderer: TextRenderer {
             }
         }
         if capturesReference { probe.glyphs = glyphRects }
-        guard !waiting.isEmpty else { return }
-        // The waiting glyphs once more, filled with a magic gradient that drifts across the text.
-        let bounds = layout.reduce(CGRect.null) { $0.union($1.typographicBounds.rect) }
-        let phase = now.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: Self.shimmerPeriod) / Self.shimmerPeriod
-        var overlay = context
-        overlay.opacity = 0.6
-        overlay.clipToLayer { mask in for slice in waiting { mask.draw(slice) } }
-        let width = max(bounds.width, 1)
-        overlay.fill(Path(bounds), with: .linearGradient(Gradient(colors: MagicGradient.colors),
-                                                         startPoint: CGPoint(x: bounds.minX - width + 2 * width * phase, y: bounds.midY),
-                                                         endPoint: CGPoint(x: bounds.minX + 2 * width * phase, y: bounds.midY)))
+        MagicPreviewEffects.drawShimmer(waiting, in: layout, now: now, context: context)
     }
 }
 
@@ -511,13 +455,13 @@ private struct PreviewRow: View {
                     ZStack(alignment: .bottomLeading) {
                         if let transition, !transition.removed.isEmpty || !transition.survivors.isEmpty {
                             let originalDisplay = transition.original + text.dropFirst(transition.target.count)
-                            styled(marked(originalDisplay) { transition.removed.contains($0) ? .poof : .hidden }, size: size)
+                            styled(MagicPreviewEffects.marked(originalDisplay) { transition.removed.contains($0) ? PreviewRole.poof : .hidden }, size: size)
                                 .textRenderer(PreviewRenderer(now: timeline.date, exits: [], shimmers: false, lifts: true,
                                                               probe: rewriteReference, rewrite: transition, capturesReference: true))
                                 .accessibilityHidden(true)
                                 .allowsHitTesting(false)
                         }
-                        let body = styled(transition.map { change in marked(text) { change.inserted.contains($0) ? .entering : nil } } ?? composed, size: size)
+                        let body = styled(transition.map { change in MagicPreviewEffects.marked(text) { change.inserted.contains($0) ? PreviewRole.entering : nil } } ?? composed, size: size)
                         let directions = Text(verbatim: instructionSuffix)
                             .font(.system(size: CGFloat(size)))
                             .foregroundStyle(Color(uiColor: .systemPurple))
@@ -650,28 +594,12 @@ private struct PreviewRow: View {
         var roles = [PreviewRole?](repeating: nil, count: body.count)
         for range in layout.waiting { for index in range.clamped(to: 0..<body.count) { roles[index] = .waiting } }
         for index in layout.leaving.clamped(to: 0..<body.count) { roles[index] = .leaving }
-        return Text("\(Text(prefix))\(marked(layout.text) { roles[$0] })")
+        return Text("\(Text(prefix))\(MagicPreviewEffects.marked(layout.text) { roles[$0] })")
     }
 
     private func styled(_ text: Text, size: Double) -> Text {
         text.font(.system(size: CGFloat(size)))
             .foregroundStyle(Color(uiColor: .secondaryLabel))
-    }
-
-    private func marked(_ text: String, role: (Int) -> PreviewRole?) -> Text {
-        let body = Array(text)
-        let roles = body.indices.map(role)
-        var result = Text("")
-        var start = 0
-        while start < body.count {
-            var end = start + 1
-            while end < body.count, roles[end] == roles[start] { end += 1 }
-            var piece = Text(String(body[start..<end]))
-            if let role = roles[start] { piece = piece.customAttribute(role) }
-            result = Text("\(result)\(piece)")
-            start = end
-        }
-        return result
     }
 
     private static let swooshSlide: CGFloat = 10

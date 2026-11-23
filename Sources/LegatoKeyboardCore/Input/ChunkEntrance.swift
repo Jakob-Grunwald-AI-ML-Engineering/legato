@@ -29,6 +29,14 @@ public enum ChunkEntrance {
         text.count > typewriterCharacterLimit
     }
 
+    /// For hosts that require one complete paste when a staged burst would take too long.
+    /// Unlike the keyboard proxy, a synthetic-key host has a per-write cost in addition to the gaps.
+    public static func stagedBurstFits(characterCount: Int, estimatedWriteMs: Double) -> Bool {
+        guard characterCount > 0 else { return false }
+        let duration = Double(characterCount - 1) * typewriterGapMs + Double(characterCount) * estimatedWriteMs
+        return duration <= typewriterCapMs
+    }
+
     public struct Plan: Sendable, Equatable {
         /// The insert's pieces in order; joined they are exactly the text.
         public var pieces: [String]

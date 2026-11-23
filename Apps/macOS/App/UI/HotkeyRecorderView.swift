@@ -29,7 +29,7 @@ struct HotkeyRecorderView: View {
     }
 
     private var recordingWarning: HotkeySpec.Warning? {
-        // Composer chords are consumed while available. Speech shortcuts are observed globally.
+        // Only speech shortcuts are observed outside the activity.
         if case .composer = target { return nil }
         return spec?.warning
     }

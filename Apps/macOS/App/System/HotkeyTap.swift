@@ -1,6 +1,7 @@
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import IOKit.hidsystem
 import LegatoMac
 import Synchronization
 
@@ -9,9 +10,21 @@ import Synchronization
 /// whatever the consumer believes about held keys can no longer be trusted.
 struct TapSample: Sendable {
     var event: KeyEvent?
-    var isComposerAction = false
+    var composerAction: MacComposerShortcut?
+    var isCaptured = false
     var isRecordingBinding = false
     var time: TimeInterval
+}
+
+/// Bindings that the activity owns even when an action is temporarily unavailable.
+struct ActivityShortcutScope: Sendable {
+    var composer: [MacComposerShortcut: HotkeySpec]
+    var speech: [HotkeySpec]
+
+    func action(matching event: KeyEvent) -> MacComposerShortcut? {
+        guard event.kind == .keyDown else { return nil }
+        return MacComposerShortcut.chordActions.first { composer[$0]?.triggerEvent(for: event) == .pressed }
+    }
 }
 
 /// State shared with the C callback. The callback runs on the tap's own thread and only yields
@@ -20,11 +33,14 @@ private final class TapContext: @unchecked Sendable {
     let continuation: AsyncStream<TapSample>.Continuation
     var port: CFMachPort?
     let recording: @Sendable () -> Bool
-    let composerAction: @Sendable (KeyEvent) -> Bool
-    init(continuation: AsyncStream<TapSample>.Continuation, composerAction: @escaping @Sendable (KeyEvent) -> Bool, recording: @escaping @Sendable () -> Bool) {
+    let scope: @Sendable () -> ActivityShortcutScope?
+    var capture = ActivityHotkeyCapture()
+
+    init(continuation: AsyncStream<TapSample>.Continuation, scope: @escaping @Sendable () -> ActivityShortcutScope?,
+         recording: @escaping @Sendable () -> Bool) {
         self.continuation = continuation
         self.recording = recording
-        self.composerAction = composerAction
+        self.scope = scope
     }
 }
 
@@ -69,7 +85,51 @@ final class TapLoop: @unchecked Sendable {
     }
 }
 
-/// C callback: nonisolated, touches only the `Sendable` continuation.
+private extension ModifierKey {
+    var deviceMask: CGEventFlags {
+        let value: Int32
+        switch self {
+        case .leftCommand: value = NX_DEVICELCMDKEYMASK
+        case .rightCommand: value = NX_DEVICERCMDKEYMASK
+        case .leftOption: value = NX_DEVICELALTKEYMASK
+        case .rightOption: value = NX_DEVICERALTKEYMASK
+        case .leftControl: value = NX_DEVICELCTLKEYMASK
+        case .rightControl: value = NX_DEVICERCTLKEYMASK
+        case .leftShift: value = NX_DEVICELSHIFTKEYMASK
+        case .rightShift: value = NX_DEVICERSHIFTKEYMASK
+        case .function: value = 0
+        }
+        return CGEventFlags(rawValue: UInt64(value))
+    }
+
+    var aggregateMask: CGEventFlags { CGEventFlags(rawValue: UInt64(flag.rawValue)) }
+}
+
+private extension CGEventFlags {
+    func isDown(_ key: ModifierKey) -> Bool {
+        let sides = ModifierKey.allCases.filter { $0.flag == key.flag }
+        if sides.contains(where: { !$0.deviceMask.isEmpty && contains($0.deviceMask) }) {
+            return contains(key.deviceMask)
+        }
+        return contains(key.aggregateMask)
+    }
+
+    /// Keep the unowned side of a modifier available and stop a captured modifier from
+    /// also becoming an application shortcut (or a modified click).
+    func removing(_ captured: Set<ModifierKey>) -> CGEventFlags {
+        var flags = self
+        for key in captured {
+            flags.subtract(key.deviceMask)
+            let otherSideIsDown = ModifierKey.allCases.contains {
+                $0 != key && $0.flag == key.flag && !$0.deviceMask.isEmpty && flags.contains($0.deviceMask)
+            }
+            if !otherSideIsDown { flags.subtract(key.aggregateMask) }
+        }
+        return flags
+    }
+}
+
+/// C callback: decides consumption synchronously before Quartz forwards the event.
 private func hotkeyTapCallback(
     proxy: CGEventTapProxy,
     type: CGEventType,
@@ -81,11 +141,15 @@ private func hotkeyTapCallback(
     let kind: KeyEvent.Kind
     switch type {
     case .tapDisabledByTimeout, .tapDisabledByUserInput:
+        context.capture.reset()
         if let port = context.port { CGEvent.tapEnable(tap: port, enable: true) }
         context.continuation.yield(TapSample(event: nil, time: ProcessInfo.processInfo.systemUptime))
         return Unmanaged.passUnretained(event)
     case .leftMouseDown, .rightMouseDown, .otherMouseDown:
-        if !SyntheticEvent.isLegato(event.getIntegerValueField(.eventSourceUserData)) { RealInput.shared.bump(at: event.location) }
+        if !SyntheticEvent.isLegato(event.getIntegerValueField(.eventSourceUserData)) {
+            RealInput.shared.bump(at: event.location)
+            event.flags = event.flags.removing(context.capture.modifiers)
+        }
         return Unmanaged.passUnretained(event)
     case .flagsChanged: kind = .flagsChanged
     case .keyDown: kind = .keyDown
@@ -93,24 +157,41 @@ private func hotkeyTapCallback(
     default: return Unmanaged.passUnretained(event)
     }
     // Legato's own synthetic key events (typing, ⌘V) never count as the user's keys or chords.
-    guard let keyEvent = HotkeyTapFilter.keyEvent(
+    guard var keyEvent = HotkeyTapFilter.keyEvent(
         kind: kind, keyCode: UInt16(truncatingIfNeeded: event.getIntegerValueField(.keyboardEventKeycode)),
         flagsRaw: event.flags.rawValue, userData: event.getIntegerValueField(.eventSourceUserData)
     ) else { return Unmanaged.passUnretained(event) }
-    // A real key: a synthetic key planned before it is refused (`RealInput`).
-    if kind == .keyDown { RealInput.shared.bump() }
-    // Capture ownership here: the action itself can unregister its chord before MainActor reads this sample.
-    let sample = TapSample(event: keyEvent, isComposerAction: context.composerAction(keyEvent), isRecordingBinding: context.recording(), time: ProcessInfo.processInfo.systemUptime)
-    context.continuation.yield(sample)
+    if kind == .flagsChanged, let key = ModifierKey(keyCode: keyEvent.keyCode) {
+        keyEvent.modifierIsDown = event.flags.isDown(key)
+    }
+
+    let recording = context.recording()
+    let scope = recording ? nil : context.scope()
+    let hostFlags = event.flags.removing(context.capture.modifiers)
+    var keyWithHostModifiers = keyEvent
+    keyWithHostModifiers.flags = ModifierFlags(rawValue: UInt(hostFlags.rawValue))
+    let speechPress = scope?.speech.contains { $0.triggerEvent(for: keyEvent) == .pressed } ?? false
+    let action = speechPress ? nil : (scope?.action(matching: keyEvent) ?? scope?.action(matching: keyWithHostModifiers))
+    let isRepeat = kind == .keyDown && event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+    let decision = context.capture.route(keyEvent, matches: action != nil || speechPress, isRepeat: isRepeat)
+    guard decision != .suppressRepeat else { return nil }
+    let captured = decision == .capture
+    if !captured, kind == .keyDown { RealInput.shared.bump() }
+    context.continuation.yield(TapSample(event: keyEvent, composerAction: captured ? action : nil,
+        isCaptured: captured, isRecordingBinding: recording, time: ProcessInfo.processInfo.systemUptime))
+    if captured { return nil }
+    event.flags = hostFlags
     return Unmanaged.passUnretained(event)
 }
 
-/// A listen-only `CGEventTap` for `flagsChanged`, `keyDown` and `keyUp` (and clicks, counted in `RealInput`), on its own thread so a busy
+/// An active `CGEventTap` for `flagsChanged`, `keyDown` and `keyUp` (and clicks, counted in `RealInput`), on its own thread so a busy
 /// main thread (Accessibility calls can block for their timeout) never gets the tap disabled.
 /// Samples arrive in order on `samples`.
 @MainActor
 final class HotkeyTap {
-    var composerAction: @Sendable (KeyEvent) -> Bool = { _ in false }
+    private let scope = Mutex<ActivityShortcutScope?>(nil)
+    nonisolated private func currentScope() -> ActivityShortcutScope? { scope.withLock { $0 } }
+    func setScope(_ value: ActivityShortcutScope?) { scope.withLock { $0 = value } }
     private let recording = Mutex(false)
     nonisolated private func isRecording() -> Bool { recording.withLock { $0 } }
     func setRecording(_ active: Bool) { recording.withLock { $0 = active } }
@@ -129,14 +210,15 @@ final class HotkeyTap {
     @discardableResult
     func start() -> Bool {
         guard port == nil else { return true }
-        let context = TapContext(continuation: continuation, composerAction: composerAction, recording: { [weak self] in self?.isRecording() == true })
+        let context = TapContext(continuation: continuation, scope: { [weak self] in self?.currentScope() },
+                                 recording: { [weak self] in self?.isRecording() == true })
         // Clicks only count as real input (`RealInput`); they are not samples.
         let mask: CGEventMask = [CGEventType.flagsChanged, .keyDown, .keyUp, .leftMouseDown, .rightMouseDown, .otherMouseDown]
             .reduce(0) { $0 | (1 << $1.rawValue) }
         guard let port = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .listenOnly,
+            options: .defaultTap,
             eventsOfInterest: mask,
             callback: hotkeyTapCallback,
             userInfo: Unmanaged.passUnretained(context).toOpaque()

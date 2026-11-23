@@ -111,4 +111,9 @@ import Testing
         var r = HotkeyRecorderLogic()
         #expect(r.feed(down(123, .function)) == .none)
     }
+
+    @Test func aComposerRecorderCapturesABareArrow() {
+        var r = HotkeyRecorderLogic(allowsBareArrows: true)
+        #expect(r.feed(down(124, .function)) == .captured(.combo(keyCode: 124, modifiers: [])))
+    }
 }
