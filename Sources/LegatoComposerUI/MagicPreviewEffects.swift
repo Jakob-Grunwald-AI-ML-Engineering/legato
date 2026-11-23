@@ -27,10 +27,49 @@ public struct MagicPreviewGlow: View {
     }
 }
 
+/// The ripple at the point where Magic starts. Desktop actions originate at the center of the preview.
+public struct MagicPreviewRipple: View {
+    public static let seconds = 0.35
+    private let start: Date
+    private let origin: CGPoint?
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    public init(start: Date, origin: CGPoint? = nil) {
+        self.start = start
+        self.origin = origin
+    }
+
+    public var body: some View {
+        TimelineView(.animation) { timeline in
+            let duration = reduceMotion ? 0.2 : Self.seconds
+            let progress = min(1, max(0, timeline.date.timeIntervalSince(start) / duration))
+            Canvas { context, size in
+                let bounds = Path(CGRect(origin: .zero, size: size))
+                if reduceMotion {
+                    context.fill(bounds, with: .color(.primary.opacity(0.1 * (1 - progress))))
+                } else {
+                    let center = origin ?? CGPoint(x: size.width / 2, y: size.height / 2)
+                    let remaining = 1 - progress
+                    let reach = hypot(max(center.x, size.width - center.x),
+                                      max(center.y, size.height - center.y))
+                    let radius = max(1, reach * (1 - remaining * remaining))
+                    let colors = MagicGradient.colors.map { $0.opacity(0.4 * remaining * remaining) }
+                    context.fill(bounds, with: .radialGradient(Gradient(colors: colors + [.clear]),
+                                                               center: center, startRadius: 0, endRadius: radius))
+                }
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
 /// Drawing shared by the Mac panel and the iPhone keyboard preview.
 public enum MagicPreviewEffects {
     public static let lift: CGFloat = 6
     public static let poofSeconds = 0.22
+    public static let entranceSeconds = 0.15
     public static let shimmerPeriod = 3.2
 
     public static func marked<Attribute: TextAttribute & Equatable>(_ text: String, role: (Int) -> Attribute?) -> Text {
@@ -56,6 +95,24 @@ public enum MagicPreviewEffects {
         copy.opacity = 1 - progress
         copy.addFilter(.blur(radius: 4 * progress))
         copy.draw(run)
+    }
+
+    public static func drawSurvivor(_ glyph: Text.Layout.RunSlice, from old: CGRect, verticalAdjustment: CGFloat = 0,
+                                    progress: Double, in context: GraphicsContext) {
+        let current = glyph.typographicBounds.rect
+        let remainder = CGFloat((1 - progress) * (1 - progress))
+        var copy = context
+        copy.translateBy(x: (old.minX - current.minX) * remainder,
+                         y: (old.minY - current.minY + verticalAdjustment) * remainder)
+        copy.draw(glyph)
+    }
+
+    public static func drawEntrance(_ glyph: Text.Layout.RunSlice, progress: Double, in context: GraphicsContext) {
+        guard progress > 0 else { return }
+        var copy = context
+        copy.opacity = progress
+        copy.translateBy(x: 0, y: lift * CGFloat(1 - progress))
+        copy.draw(glyph)
     }
 
     public static func drawShimmer(_ glyphs: [Text.Layout.RunSlice], in layout: Text.Layout, now: Date, context: GraphicsContext) {

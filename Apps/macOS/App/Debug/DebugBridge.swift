@@ -81,7 +81,7 @@ import ApplicationServices
             return composerState()
         }
         harness.register("composer-insert") { _ in
-            await MacAppController.shared.dictation.insertDraft()
+            await MacAppController.shared.dictation.insertDraft()?.value
             return composerState()
         }
         harness.register("composer-discard") { _ in

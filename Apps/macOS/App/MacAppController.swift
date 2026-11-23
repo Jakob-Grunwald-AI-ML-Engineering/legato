@@ -25,6 +25,7 @@ import OSLog
     private var callDetection: CallDetectionController?
     let dictation: MacDictationSession
     @ObservationIgnored private let destination = ComposerDestination()
+    @ObservationIgnored private var secureDraftOrigin: AXTextTarget.PasteWitness?
     private var dictationPill: DictationPillController?
     private var magicTask: Task<Void, Never>?
     private var keyboardInstruction = false
@@ -114,24 +115,30 @@ import OSLog
             vocabularyURL: vocabularyURL, composer: MacComposerDraft())
         dictation.onPrepare = { [weak self] in
             guard let self else { return }
+            let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            let input = RealInput.shared.count
             let witness = AXTextTarget.capturePasteWitness()
-            destination.capture(witness)
+            secureDraftOrigin = witness.isPassword ? witness : nil
             dictationPill?.captureAnchor(witness)
             if case .unreadable = witness {
-                // Give an opening accessibility tree time to appear. A focus or input change
-                // during that wait cannot turn the new field into the original destination.
                 await AXTextTarget.prepareFocused()
-                guard destination.stillAtCapture() else { return }
+                guard pid == NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                      input == RealInput.shared.count else { return }
                 let prepared = AXTextTarget.capturePasteWitness()
-                destination.capture(prepared)
+                if prepared.isPassword { secureDraftOrigin = prepared }
                 dictationPill?.captureAnchor(prepared)
             }
         }
-        dictation.insertDraftText = { [weak self] text in
-            guard let self else { return false }
-            return await destination.insert(text, using: paster, settings: settings)
+        dictation.onResumeDraft = { [weak self] in
+            guard let self, secureDraftOrigin == nil else { return }
+            let witness = AXTextTarget.capturePasteWitness()
+            if witness.isPassword { secureDraftOrigin = witness }
         }
-        pipeline.keepsTakes = { [destination] in destination.witness?.isPassword != true }
+        dictation.prepareDraftInsertion = { [weak self] in
+            guard let self else { return .init { _ in false } }
+            return destination.captureInsertion(secureOrigin: secureDraftOrigin, using: paster, settings: settings)
+        }
+        pipeline.keepsTakes = { [weak self] in self?.secureDraftOrigin == nil }
     }
     private static func meetingsRoot(in root: URL) -> URL {
         #if LEGATO_INTERNAL
@@ -145,12 +152,12 @@ import OSLog
         guard !bootstrapped else { return }; bootstrapped = true
         focusObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
             let pid = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier
-            Task { @MainActor in
-                guard let self else { return }
-                // A Chromium app builds its tree in about a second: ask for it now, before a dictation needs it.
-                if let pid { AXTextTarget.requestTree(pid: pid) }
-                if pid != self.destination.pid { self.destination.invalidate() }
+            MainActor.assumeIsolated {
+                guard let self, pid != self.destination.pid else { return }
+                self.destination.invalidate()
             }
+            // A Chromium app builds its tree in about a second: ask for it now, before a dictation needs it.
+            if let pid { Task { @MainActor in AXTextTarget.requestTree(pid: pid) } }
         }
         terminateObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { note in
             guard let pid = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier else { return }
@@ -180,6 +187,7 @@ import OSLog
         dictationPill = DictationPillController(session: dictation, settings: settings, actions: DictationPillActions(
             magic: { [weak self] in self?.perform(.magic) },
             instruction: { [weak self] in self?.toggleMagic() },
+            dictation: { [weak self] in self?.toggleDictation() },
             insert: { [weak self] in self?.perform(.insert) },
             discard: { [weak self] in self?.perform(.discard) }))
         observeComposerShortcuts()
@@ -218,11 +226,13 @@ import OSLog
     }
     private func perform(_ action: MacComposerShortcut) {
         let finishingInstruction = magicTask
+        let insertion = action == .insert ? dictation.insertDraft(after: finishingInstruction) : nil
         Task {
-            if action != .discard { await finishingInstruction?.value }
             switch action {
-            case .magic: await dictation.magicDraft()
-            case .insert: await dictation.insertDraft()
+            case .magic:
+                await finishingInstruction?.value
+                await dictation.magicDraft()
+            case .insert: await insertion?.value
             case .discard: await dictation.discardDraft()
             }
             if !dictation.isActive { dictationGesture.runEnded() }
@@ -251,18 +261,24 @@ import OSLog
         keyboardInstruction = fromKeyboard
         magicTask = Task {
             await previous?.value
-            if !(await dictation.startMagic()), magicGeneration == generation {
+            let started = await dictation.startMagic()
+            guard magicGeneration == generation else { return }
+            magicTask = nil
+            if !started {
                 keyboardInstruction = false
                 magicGesture.runEnded()
             }
         }
     }
     private func stopMagic(discard: Bool = false) {
+        magicGeneration &+= 1
         let starting = magicTask, generation = magicGeneration
         magicTask = Task {
             await starting?.value
             await dictation.endMagic(discard: discard)
-            if magicGeneration == generation { keyboardInstruction = false }
+            guard magicGeneration == generation else { return }
+            keyboardInstruction = false
+            magicTask = nil
         }
     }
     func instructionAction(_ action: InstructionIntent.Action) {
@@ -358,7 +374,11 @@ import OSLog
         return true
     }
     private func handle(_ sample: TapSample) {
-        guard let event = sample.event else { resetGestures(); return }
+        guard let event = sample.event else {
+            destination.invalidate()
+            resetGestures()
+            return
+        }
         guard !sample.isRecordingBinding, recordingTarget == nil else { return }
         if let action = sample.composerAction {
             guard action.isAvailable(in: dictation, duringMagicHold: keyboardInstruction) else { return }
@@ -392,15 +412,16 @@ import OSLog
     /// The dictation hotkey (or the debug bridge) starts a session when idle and stops a running one.
     func toggleDictation() {
         switch dictation.phase {
-        case .idle: startDictation()
+        case .idle: startDictation(fromControl: true)
         case .starting, .listening: stopDictation()
         case .finishing: break
         }
     }
-    private func startDictation() {
+    private func startDictation(fromControl: Bool = false) {
         guard !dictation.isActive else { return }
         guard !refusedByMeeting() else { dictationGesture.runEnded(); return }
         guard microphoneReady() else { dictationGesture.runEnded(); return }
+        if fromControl { dictationGesture.latchExternalRun(mode: settings.gestureMode) }
         Task { if await !dictation.start() { dictationGesture.runEnded() } }
     }
     /// Starts a meeting, or stops the one that records. A meeting and a dictation never share the microphone.
@@ -443,7 +464,6 @@ import OSLog
     }
     func undoDiscard() {
         guard dictation.canUndoDiscard else { return }
-        destination.revalidateAfterUndo()
         dictation.undoDiscard()
     }
 
@@ -481,81 +501,62 @@ import OSLog
         dispatch(gesture.otherKeyDown())
     }
     func reset() { armTask?.cancel(); armTask = nil; gesture.reset() }
+    func latchExternalRun(mode: HotkeyGesture.Mode) {
+        if gesture.mode != mode { gesture = HotkeyGesture(mode: mode) }
+        gesture.latchExternalRun()
+    }
     func runEnded() { gesture.runEnded() }
 }
 
-/// Owns one destination across all takes and revisions of a composer draft.
+/// Revokes an accepted insertion when the user leaves its editor or begins another insertion.
 @MainActor private final class ComposerDestination {
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "MacComposerDelivery")
     private(set) var pid: pid_t?
-    private(set) var witness: AXTextTarget.PasteWitness?
-    private var selection: UTF16Range?
-    private var length: Int?
-    private var capturedInput = (total: 0, keys: 0)
     private var generation = 0
-    private var valid = false
 
-    func capture(_ witness: AXTextTarget.PasteWitness) {
-        self.witness = witness
-        pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        capturedInput = RealInput.shared.stamp
-        generation &+= 1
-        valid = true
-        selection = nil
-        length = nil
-        if case .element(let target) = witness {
-            selection = try? target.selectedRange()
-            length = try? target.textLength()
-        }
-    }
-    func invalidate() { valid = false }
+    func invalidate() { generation &+= 1 }
 
-    func stillAtCapture() -> Bool {
-        valid && capturedInput.total == RealInput.shared.count
-            && pid == NSWorkspace.shared.frontmostApplication?.processIdentifier
-    }
-
-    /// Clicking the status-menu Undo may advance the pointer count. Keep the original editor and caret.
-    func revalidateAfterUndo() {
-        let current = RealInput.shared.stamp
-        guard valid, current.keys == capturedInput.keys, let witness,
-              pid == NSWorkspace.shared.frontmostApplication?.processIdentifier, witness.stillFocused() else { return }
-        if case .element(let target) = witness {
-            guard let selection, (try? target.selectedRange()) == selection,
-                  let length, (try? target.textLength()) == length else { return }
-        }
-        guard RealInput.shared.count == current.total else { return }
-        capturedInput = current
-    }
-
-    func insert(_ text: String, using paster: PasteService, settings: MacSettings) async -> Bool {
-        guard stillAtCapture(), let pid, let witness else { return false }
+    func captureInsertion(secureOrigin: AXTextTarget.PasteWitness?, using paster: PasteService,
+                          settings: MacSettings) -> MacDictationSession.DraftInsertion {
+        invalidate()
         let generation = self.generation
-        let confirmation = witness.prepareInsertion(text: text)
-        if witness.isPassword && confirmation == nil { return false }
-        let canBegin = { @MainActor in
-            guard self.generation == generation, self.stillAtCapture(), witness.stillFocused() else { return false }
-            guard case .element(let target) = witness else { return true }
-            return (self.selection == nil || (try? target.selectedRange()) == self.selection)
-                && (self.length == nil || (try? target.textLength()) == self.length)
+        let input = RealInput.shared.count
+        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        self.pid = pid
+
+        let witness = AXTextTarget.capturePasteWitness()
+        let isPrivate = secureOrigin != nil || witness.isPassword
+        guard let pid, let start = witness.insertionStart(), start.pid == pid,
+              secureOrigin.map({ witness.isSamePasswordField(as: $0) }) ?? true else {
+            return .init(isPrivate: isPrivate) { _ in false }
         }
-        let owned = { @MainActor in
-            guard self.generation == generation, self.stillAtCapture() else { return false }
-            let focused = confirmation?.stillFocused() ?? witness.stillFocused()
-            return focused && self.stillAtCapture()
+
+        let ownsInput: @MainActor @Sendable () -> Bool = {
+            self.generation == generation && input == RealInput.shared.count
+                && NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
         }
-        let started = ContinuousClock.now
-        let posted = await paster.insert(text, targetPID: pid, passwordField: witness.isPassword,
-            restoreClipboard: settings.restoreClipboard,
-            paced: settings.typewriter && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
-            canBegin: canBegin, stillOwned: owned)
-        Self.log.debug("Draft events posted: \(posted), elapsed: \(String(describing: started.duration(to: .now)), privacy: .public)")
-        if posted, let confirmation {
-            Task { @MainActor in
-                let verified = await confirmation.verify(whileOwned: owned)
-                Self.log.debug("Draft readback verified: \(verified)")
+        return .init(isPrivate: isPrivate) { text in
+            guard ownsInput() else { return false }
+            let confirmation = start.confirmation(for: text)
+            if isPrivate && confirmation == nil { return false }
+            let owned: @MainActor @Sendable () -> Bool = {
+                guard ownsInput() else { return false }
+                let focused = confirmation?.stillFocused() ?? start.stillFocused()
+                return focused && ownsInput()
             }
+            let started = ContinuousClock.now
+            let posted = await paster.insert(text, targetPID: pid, passwordField: isPrivate,
+                restoreClipboard: settings.restoreClipboard,
+                paced: settings.typewriter && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+                canBegin: { ownsInput() && start.matchesInitialPosition() && ownsInput() }, stillOwned: owned)
+            Self.log.debug("Draft events posted: \(posted), elapsed: \(String(describing: started.duration(to: .now)), privacy: .public)")
+            if posted, let confirmation {
+                Task { @MainActor in
+                    let verified = await confirmation.verify(whileOwned: owned)
+                    Self.log.debug("Draft readback verified: \(verified)")
+                }
+            }
+            return posted
         }
-        return posted
     }
 }

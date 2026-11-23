@@ -1,9 +1,10 @@
 # Dictation and Magic on Mac
 
-Place the cursor where the finished text belongs and start dictation with your usual shortcut. The composer opens near the caret, or near the destination window when the app cannot report the caret's position. You can stop speaking, read the draft, and dictate more.
+Start dictation with your usual shortcut. The activity opens near the original caret, focused field, or editor window depending on what the app exposes. The draft grows with your speech and scrolls when it reaches the edge of the display.
 
-- **Magic** cleans up the whole current draft when you click it or tap your Magic shortcut (Right ⌘ by default). Watch the revision in the composer. Hold the same shortcut to speak an instruction such as “make this shorter”, then release it to apply the instruction.
-- **Insert** (→) sends the draft to its destination and closes the activity. Short drafts can type in and longer drafts paste in one go. If text is missing from the destination, copy the draft from **History**. Password drafts are private and do not appear in History.
+- **Microphone** pauses or resumes dictation. The filled red microphone shows that Legato is listening.
+- **Magic** cleans up the draft when you click it or tap your Magic shortcut (Right ⌘ by default). Click the waveform beside Magic or hold the same shortcut to speak an instruction such as “make this shorter.” Click the stop icon or release the held shortcut to apply it.
+- **Insert** (→) sends the draft to the focused editor’s current caret or selection and closes the activity. Short drafts can type in and longer drafts paste in one go. If text is missing from the editor, copy the draft from **History**. Password drafts are private and do not appear in History.
 - **Discard** (←) clears the draft and closes the activity. **Undo Discard** is briefly available from the Legato menu bar icon.
 
 Change these bindings in **Settings → Shortcut**. Each activity action shows its current shortcut. The activity owns its shortcuts while interactive and releases them on dismissal.

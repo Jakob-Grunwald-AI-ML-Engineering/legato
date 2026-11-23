@@ -11,6 +11,17 @@ import Testing
         #expect(g.armDelay == 0.2)
     }
 
+    @Test(arguments: [HotkeyGesture.Mode.hybrid, .toggle])
+    func aShortcutTapStopsDictationStartedByTheMicrophoneButton(mode: HotkeyGesture.Mode) {
+        var gesture = HotkeyGesture(mode: mode)
+        gesture.latchExternalRun()
+        #expect(gesture.pressed(at: 0) == nil)
+        #expect(gesture.otherKeyDown() == nil)
+        #expect(gesture.released(at: 0.1) == nil)
+        #expect(gesture.pressed(at: 1) == nil)
+        #expect(gesture.released(at: 1.1) == .stop)
+    }
+
     @Test func magicTapHoldAndChordAreExclusive() {
         var gesture = HotkeyGesture.magic
         _ = gesture.pressed(at: 0)

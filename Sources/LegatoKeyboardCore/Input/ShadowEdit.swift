@@ -28,29 +28,19 @@ public struct PreviewRewriteDiff: Equatable, Sendable {
 
     public init(original: String, target: String) {
         let before = Array(original), after = Array(target)
-        if before.count <= 600, after.count <= 600 {
-            let changes = ShadowEditPlanner.changes(from: before, to: after)
-            var removed: Set<Int> = [], inserted: Set<Int> = []
-            var shift = 0
-            for change in changes {
-                removed.formUnion(change.start..<change.end)
-                let next = change.start + shift
-                inserted.formUnion(next..<(next + change.text.count))
-                shift += change.text.count - (change.end - change.start)
-            }
-            let kept = before.count - removed.count
-            if kept * 2 >= max(before.count, after.count) {
-                self.removed = removed
-                self.inserted = inserted
-                survivors = Dictionary(uniqueKeysWithValues: zip(after.indices.filter { !inserted.contains($0) },
-                                                                  before.indices.filter { !removed.contains($0) }))
-                return
-            }
+        let changes = ShadowEditPlanner.diff(before, after, previewBudget: 360_000)
+        var removed: Set<Int> = [], inserted: Set<Int> = []
+        var shift = 0
+        for change in changes {
+            removed.formUnion(change.start..<change.end)
+            let next = change.start + shift
+            inserted.formUnion(next..<(next + change.text.count))
+            shift += change.text.count - (change.end - change.start)
         }
-        // A broad rewrite poofs as a group, with a bounded diff cost on the UI thread.
-        removed = Set(before.indices)
-        inserted = Set(after.indices)
-        survivors = [:]
+        self.removed = removed
+        self.inserted = inserted
+        survivors = Dictionary(uniqueKeysWithValues: zip(after.indices.lazy.filter { !inserted.contains($0) },
+                                                          before.indices.lazy.filter { !removed.contains($0) }))
     }
 }
 
@@ -178,7 +168,8 @@ public enum ShadowEditPlanner {
 
     /// Hirschberg LCS: exact shortest edit script, linear auxiliary memory. Common boundaries
     /// and disjoint alphabets avoid the quadratic work for typical streaming appends and rewrites.
-    static func diff(_ old: [Character], _ new: [Character]) -> [Hunk] {
+    static func diff(_ old: [Character], _ new: [Character], previewBudget: Int? = nil) -> [Hunk] {
+        var remaining = previewBudget ?? 0
         var pairs: [(Int, Int)] = []
         func lengths(_ ar: Range<Int>, _ br: Range<Int>, reversed: Bool) -> [Int] {
             var row = [Int](repeating: 0, count: br.count + 1)
@@ -194,7 +185,32 @@ public enum ShadowEditPlanner {
             }
             return row
         }
-        func match(_ ar: Range<Int>, _ br: Range<Int>) {
+        // For large previews, find unique unchanged windows and spend the exact diff budget between them.
+        // The source windows never overlap, so we can use increasing matches without moving text backwards.
+        let window = 12
+        func anchors(_ ar: Range<Int>, _ br: Range<Int>) -> [(Int, Int)] {
+            guard ar.count >= window, br.count >= window else { return [] }
+            var source: [String: Int] = [:]
+            for start in stride(from: ar.lowerBound, through: ar.upperBound - window, by: window) {
+                let key = String(old[start..<(start + window)])
+                source[key] = source[key] == nil ? start : -1
+            }
+            var target: [Int: Int] = [:]
+            for start in br.lowerBound...(br.upperBound - window) {
+                if let index = source[String(new[start..<(start + window)])], index >= 0 {
+                    target[index] = target[index] == nil ? start : -1
+                }
+            }
+            var next = br.lowerBound
+            var matches: [(Int, Int)] = []
+            for index in target.keys.sorted() {
+                guard let start = target[index], start >= next else { continue }
+                matches.append((index, start))
+                next = start + window
+            }
+            return matches
+        }
+        func match(_ ar: Range<Int>, _ br: Range<Int>, exact: Bool, searchAnchors: Bool = true) {
             var lo = ar.lowerBound, ln = br.lowerBound
             var hi = ar.upperBound, hn = br.upperBound
             while lo < hi, ln < hn, old[lo] == new[ln] { pairs.append((lo, ln)); lo += 1; ln += 1 }
@@ -204,25 +220,38 @@ public enum ShadowEditPlanner {
                 if hi - lo == 1 {
                     if let j = (ln..<hn).first(where: { new[$0] == old[lo] }) { pairs.append((lo, j)) }
                 } else if !Set(old[lo..<hi]).isDisjoint(with: new[ln..<hn]) {
-                    let mid = lo + (hi - lo) / 2
-                    // Keep the row buffers outside recursive frames: auxiliary storage stays linear.
-                    let split: Int = {
-                        let left = lengths(lo..<mid, ln..<hn, reversed: false)
-                        let right = lengths(mid..<hi, ln..<hn, reversed: true)
-                        var best = 0, score = -1
-                        for j in 0...(hn - ln) {
-                            let candidate = left[j] + right[hn - ln - j]
-                            if candidate > score { score = candidate; best = j }
+                    let width = hn - ln
+                    if exact || hi - lo <= remaining / width {
+                        if !exact { remaining -= (hi - lo) * width }
+                        let mid = lo + (hi - lo) / 2
+                        // Keep the row buffers outside recursive frames: auxiliary storage stays linear.
+                        let split: Int = {
+                            let left = lengths(lo..<mid, ln..<hn, reversed: false)
+                            let right = lengths(mid..<hi, ln..<hn, reversed: true)
+                            var best = 0, score = -1
+                            for j in 0...(hn - ln) {
+                                let candidate = left[j] + right[hn - ln - j]
+                                if candidate > score { score = candidate; best = j }
+                            }
+                            return ln + best
+                        }()
+                        match(lo..<mid, ln..<split, exact: true)
+                        match(mid..<hi, split..<hn, exact: true)
+                    } else if searchAnchors {
+                        var oldStart = lo, newStart = ln
+                        for (oldIndex, newIndex) in anchors(lo..<hi, ln..<hn) {
+                            match(oldStart..<oldIndex, newStart..<newIndex, exact: false, searchAnchors: false)
+                            for offset in 0..<window { pairs.append((oldIndex + offset, newIndex + offset)) }
+                            oldStart = oldIndex + window
+                            newStart = newIndex + window
                         }
-                        return ln + best
-                    }()
-                    match(lo..<mid, ln..<split)
-                    match(mid..<hi, split..<hn)
+                        match(oldStart..<hi, newStart..<hn, exact: false, searchAnchors: false)
+                    }
                 }
             }
             for k in 0..<suffix { pairs.append((hi + k, hn + k)) }
         }
-        match(0..<old.count, 0..<new.count)
+        match(0..<old.count, 0..<new.count, exact: previewBudget == nil)
         var hunks: [Hunk] = []
         var po = 0, pn = 0
         for (mo, mn) in pairs + [(old.count, new.count)] {

@@ -189,6 +189,12 @@ public struct HotkeyGesture: Sendable, Equatable {
         }
     }
 
+    /// A microphone control started the run. The next toggle or hybrid tap can stop it.
+    public mutating func latchExternalRun() {
+        guard mode != .hold, phase == .idle else { return }
+        phase = .latched
+    }
+
     /// The run ended without the gesture asking for it.
     public mutating func runEnded() {
         switch phase {
