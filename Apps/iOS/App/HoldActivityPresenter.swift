@@ -60,6 +60,12 @@ final class HoldActivityPresenter {
         holdID != nil && holdID == activeHoldID && !stopping
     }
 
+    var meetingHandoffID: String? {
+        guard !stopping, !arming, microphone.isArmed, !microphone.microphoneRecovering,
+              keyboard.route == .idle else { return nil }
+        return activeHoldID
+    }
+
     func transferToMeeting(holdID: String?) -> Activity<DictationAttributes>? {
         guard ownsHold(holdID), !arming, let activity = client.transfer() else { return nil }
         activeHoldID = nil

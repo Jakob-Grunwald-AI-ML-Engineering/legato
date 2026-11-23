@@ -39,8 +39,7 @@ struct ToggleDictationIntent: AudioRecordingIntent, LiveActivityIntent {
         #if APP_TARGET
         var outcome = await AppController.shared.toggle()
         if case .needsForeground(let reason) = outcome {
-            // Other audio plays, or the system refused a background start: nothing was started and
-            // nothing is left behind. Come to the foreground and press again, once.
+            // Retry the refused background start once after the app reaches the foreground.
             guard systemContext.currentMode.canContinueInForeground else {
                 throw ToggleDictationError.foregroundRequired
             }
@@ -101,7 +100,7 @@ enum ToggleDictationError: Error, CustomLocalizedStringResourceConvertible {
         switch self {
         case .appRequired: "Legato must run in the app."
         case .setupRequired: "Open Legato to finish setup."
-        case .foregroundRequired: "Open Legato to dictate while audio is playing."
+        case .foregroundRequired: "Open Legato to start recording."
         }
     }
 }
