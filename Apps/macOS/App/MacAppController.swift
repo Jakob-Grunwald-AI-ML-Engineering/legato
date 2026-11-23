@@ -412,15 +412,16 @@ import OSLog
     /// The dictation hotkey (or the debug bridge) starts a session when idle and stops a running one.
     func toggleDictation() {
         switch dictation.phase {
-        case .idle: startDictation()
+        case .idle: startDictation(fromControl: true)
         case .starting, .listening: stopDictation()
         case .finishing: break
         }
     }
-    private func startDictation() {
+    private func startDictation(fromControl: Bool = false) {
         guard !dictation.isActive else { return }
         guard !refusedByMeeting() else { dictationGesture.runEnded(); return }
         guard microphoneReady() else { dictationGesture.runEnded(); return }
+        if fromControl { dictationGesture.latchExternalRun(mode: settings.gestureMode) }
         Task { if await !dictation.start() { dictationGesture.runEnded() } }
     }
     /// Starts a meeting, or stops the one that records. A meeting and a dictation never share the microphone.
@@ -500,6 +501,10 @@ import OSLog
         dispatch(gesture.otherKeyDown())
     }
     func reset() { armTask?.cancel(); armTask = nil; gesture.reset() }
+    func latchExternalRun(mode: HotkeyGesture.Mode) {
+        if gesture.mode != mode { gesture = HotkeyGesture(mode: mode) }
+        gesture.latchExternalRun()
+    }
     func runEnded() { gesture.runEnded() }
 }
 

@@ -16,7 +16,7 @@ enum NotchIslandTokens {
     static let spring = Animation.spring(duration: 0.3, bounce: 0.12)
     static let closeDuration = 0.3
     // Initial Mac panel tuning, to verify at native editor sizes.
-    static let departureSpring = Animation.spring(duration: 0.18, bounce: 0)
+    static let departureSpring = Animation.spring(duration: 0.14, bounce: 0)
     static let departureTextLift: CGFloat = 12
     static let panelWidth: CGFloat = 520
     static let panelHorizontalInset: CGFloat = 14
