@@ -67,6 +67,17 @@ final class ActivityKitClient {
         #endif
     }
 
+    /// The recording intent continues to own the activity that invoked it.
+    func transfer() -> Activity<DictationAttributes>? {
+        guard let activityID, let activity = Activity<DictationAttributes>.activities.first(where: {
+            $0.id == activityID && $0.activityState == .active
+        }) else { return nil }
+        dismissalObserver?.cancel()
+        dismissalObserver = nil
+        self.activityID = nil
+        return activity
+    }
+
     nonisolated private static func dismiss(id: String) async {
         await Activity<DictationAttributes>.activities.first { $0.id == id }?.end(nil, dismissalPolicy: .immediate)
     }

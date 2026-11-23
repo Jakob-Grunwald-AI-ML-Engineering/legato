@@ -39,7 +39,10 @@ final class IOSMeetingController {
     @ObservationIgnored private var stopRequested = false
     @ObservationIgnored private var interruptedStart = false
     @ObservationIgnored private var audioWasActivated = false
-    @ObservationIgnored private var activityID: String?
+    @ObservationIgnored private var activity: Activity<MeetingAttributes>?
+    @ObservationIgnored private var handedOffActivity: Activity<DictationAttributes>?
+    @ObservationIgnored private var handedOffAt: Date?
+    @ObservationIgnored private var activityObserver: Task<Void, Never>?
     @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
     @ObservationIgnored private var backgroundTasks: [UUID: UIBackgroundTaskIdentifier] = [:]
 
@@ -96,7 +99,7 @@ final class IOSMeetingController {
     }
 
     @discardableResult
-    func start(fromIntent: Bool = false) async -> AppController.ToggleOutcome {
+    func start(fromIntent: Bool = false, handoff: (() -> Activity<DictationAttributes>?)? = nil) async -> AppController.ToggleOutcome {
         let inForeground = UIApplication.shared.applicationState == .active
         guard ready, !isActive, fromIntent || inForeground else { return .busy }
         guard !VoiceEnrollmentController.shared.isBusy else {
@@ -121,9 +124,14 @@ final class IOSMeetingController {
         // The intent must keep its Live Activity alive throughout capture. Request it before
         // surrendering the dictation hold so a refused request leaves the hold usable.
         do {
-            if fromIntent || ActivityAuthorizationInfo().areActivitiesEnabled {
+            if let handoff {
+                guard let current = handoff() else { return .busy }
+                handedOffActivity = current
+                handedOffAt = Date()
+                audioWasActivated = true
+            } else if fromIntent || ActivityAuthorizationInfo().areActivitiesEnabled {
                 let content = ActivityContent(state: MeetingAttributes.ContentState(phase: .starting, tail: ""), staleDate: nil)
-                activityID = try Activity.request(attributes: MeetingAttributes(startedAt: Date()), content: content).id
+                activity = try Activity.request(attributes: MeetingAttributes(startedAt: Date()), content: content)
             }
         } catch {
             if fromIntent { return refuseStart(error.localizedDescription) }
@@ -133,12 +141,21 @@ final class IOSMeetingController {
         // Reserve synchronously before any await: keyboard requests cannot slip into the handoff.
         microphone.microphoneReserved = true
         publishReservation(true)
+        if let handedOffActivity {
+            activityObserver = Task { [weak self] in
+                for await state in handedOffActivity.activityStateUpdates where state == .ended || state == .dismissed {
+                    await self?.stop(interrupted: true)
+                    break
+                }
+            }
+            await updateActivity(.starting)
+        }
         await keyboard.suspendForMeeting()
         do {
             try Task.checkCancellation()
             guard !stopRequested else { throw CancellationError() }
             if needsAudio {
-                if inForeground {
+                if inForeground, handedOffActivity == nil {
                     guard await AVAudioApplication.requestRecordPermission() else {
                         throw NSError(domain: "Meeting", code: 1, userInfo: [NSLocalizedDescriptionKey: "Allow microphone access in iOS Settings to record a meeting."])
                     }
@@ -147,7 +164,11 @@ final class IOSMeetingController {
                 try Task.checkCancellation()
                 guard !stopRequested else { throw CancellationError() }
                 let audio = AVAudioSession.sharedInstance()
-                try audio.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
+                // A handed-off session already has a recording category. Reconfiguring an
+                // active AVAudioSession from the background can be refused by iOS.
+                if handedOffActivity == nil {
+                    try audio.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
+                }
                 try audio.setActive(true)
                 audioWasActivated = true
             }
@@ -222,29 +243,51 @@ final class IOSMeetingController {
     }
 
     private func finishCapture(interrupted: Bool) async {
-        if let activityID {
-            await Self.endActivity(id: activityID, content: ActivityContent(state: .init(phase: interrupted ? .interrupted : .stopping, tail: interrupted ? "Recording stopped. Open Legato to continue." : "Meeting saved"), staleDate: nil),
-                dismissalPolicy: interrupted ? .after(Date().addingTimeInterval(300)) : .immediate)
-        }
-        activityID = nil
         if audioWasActivated { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
         audioWasActivated = false
+        activityObserver?.cancel()
+        activityObserver = nil
+        let state = MeetingAttributes.ContentState(phase: interrupted ? .interrupted : .stopping,
+            tail: interrupted ? "Recording stopped. Open Legato to continue." : "Meeting saved")
+        let dismissal: ActivityUIDismissalPolicy = interrupted ? .after(Date().addingTimeInterval(300)) : .immediate
+        if let id = activity?.id {
+            await Self.endActivity(id: id, type: MeetingAttributes.self,
+                content: ActivityContent(state: state, staleDate: nil), dismissalPolicy: dismissal)
+        }
+        if let id = handedOffActivity?.id, let handedOffAt {
+            await Self.endActivity(id: id, type: DictationAttributes.self,
+                content: handoffContent(state, startedAt: handedOffAt), dismissalPolicy: dismissal)
+        }
+        activity = nil
+        handedOffActivity = nil
+        handedOffAt = nil
         input = nil
         live = nil; phase = .idle
         keyboard.finishMeeting()
         publishReservation(false)
     }
     private func updateActivity(_ phase: MeetingAttributes.ContentState.Phase) async {
-        guard let activityID else { return }
-        await Self.updateActivity(id: activityID, content: ActivityContent(state: .init(phase: phase, tail: String((liveText.isEmpty ? live?.segments.last?.text ?? "" : liveText).suffix(240))), staleDate: nil))
+        let state = MeetingAttributes.ContentState(phase: phase,
+            tail: String((liveText.isEmpty ? live?.segments.last?.text ?? "" : liveText).suffix(240)))
+        if let id = activity?.id {
+            await Self.updateActivity(id: id, type: MeetingAttributes.self, content: ActivityContent(state: state, staleDate: nil))
+        }
+        if let id = handedOffActivity?.id, let handedOffAt {
+            await Self.updateActivity(id: id, type: DictationAttributes.self, content: handoffContent(state, startedAt: handedOffAt))
+        }
     }
-    private nonisolated static func updateActivity(id: String, content: ActivityContent<MeetingAttributes.ContentState>) async {
-        guard let activity = Activity<MeetingAttributes>.activities.first(where: { $0.id == id }) else { return }
-        await activity.update(content)
+    private nonisolated static func updateActivity<Attributes: ActivityAttributes>(
+        id: String, type: Attributes.Type, content: ActivityContent<Attributes.ContentState>
+    ) async {
+        await Activity<Attributes>.activities.first { $0.id == id }?.update(content)
     }
-    private nonisolated static func endActivity(id: String, content: ActivityContent<MeetingAttributes.ContentState>, dismissalPolicy: ActivityUIDismissalPolicy) async {
-        guard let activity = Activity<MeetingAttributes>.activities.first(where: { $0.id == id }) else { return }
-        await activity.end(content, dismissalPolicy: dismissalPolicy)
+    private nonisolated static func endActivity<Attributes: ActivityAttributes>(
+        id: String, type: Attributes.Type, content: ActivityContent<Attributes.ContentState>, dismissalPolicy: ActivityUIDismissalPolicy
+    ) async {
+        await Activity<Attributes>.activities.first { $0.id == id }?.end(content, dismissalPolicy: dismissalPolicy)
+    }
+    private func handoffContent(_ state: MeetingAttributes.ContentState, startedAt: Date) -> ActivityContent<DictationAttributes.ContentState> {
+        ActivityContent(state: .init(startedAt: startedAt, tail: "", phase: .held, meeting: state), staleDate: nil)
     }
     private func beginBackgroundTime() -> UUID {
         let id = UUID()
@@ -290,7 +333,8 @@ final class IOSMeetingController {
         var value: [String: Any] = ["phase": String(describing: phase), "appState": UIApplication.shared.applicationState.rawValue,
             "fixture": fixtureMode, "elapsed": elapsed, "activeMeetingID": (services.activeMeetingID?.uuidString as Any?) ?? NSNull(),
             "microphoneReserved": microphone.microphoneReserved, "keyboardSuspended": keyboard.meetingSuspended,
-            "activityState": activityID.flatMap { id in Activity<MeetingAttributes>.activities.first(where: { $0.id == id }).map { String(describing: $0.activityState) } } ?? "none"]
+            "activityState": (handedOffActivity?.activityState ?? activity?.activityState).map { String(describing: $0) } ?? "none",
+            "activityID": (handedOffActivity?.id ?? activity?.id) as Any? ?? NSNull()]
         if let diagnostics = input?.diagnostics ?? lastInputDiagnostics,
            let data = try? JSONEncoder().encode(diagnostics) {
             value["microphone"] = try? JSONSerialization.jsonObject(with: data)

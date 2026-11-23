@@ -24,10 +24,15 @@ extension DictationAttributes.ContentState {
 struct DictationLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: DictationAttributes.self) { context in
-            LockScreenView(state: context.state, holdID: context.attributes.holdID)
+            if let meeting = context.state.meeting {
+                MeetingActivityView(state: meeting, startedAt: context.state.startedAt)
+            } else {
+                LockScreenView(state: context.state, holdID: context.attributes.holdID)
+            }
         } dynamicIsland: { context in
             let state = context.state
             let holdID = context.attributes.holdID
+            if let meeting = state.meeting { return MeetingActivityView(state: meeting, startedAt: state.startedAt).island }
             if state.phase == .held || state.phase == .recovering { return heldIsland(state: state, holdID: holdID) }
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
