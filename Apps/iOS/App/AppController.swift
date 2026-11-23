@@ -160,7 +160,7 @@ final class AppController {
         await meetings.prepare()
         guard holdActivity.ownsHold(holdID), microphone.isArmed, !microphone.microphoneRecovering,
               keyboardSession.route == .idle, !meetings.isActive else { return }
-        switch await meetings.start(fromIntent: true) {
+        switch await meetings.start(fromIntent: true, handoff: { self.holdActivity.transferToMeeting(holdID: holdID) }) {
         case .failed(let message):
             throw NSError(domain: "Meeting", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
         case .needsForeground:

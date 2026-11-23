@@ -7,7 +7,7 @@ import AppIntents
 import Foundation
 
 struct MeetingAttributes: ActivityAttributes {
-    struct ContentState: Codable, Hashable {
+    struct ContentState: Codable, Hashable, Sendable {
         enum Phase: String, Codable, Hashable { case starting, recording, stopping, interrupted }
         var phase: Phase
         var tail: String

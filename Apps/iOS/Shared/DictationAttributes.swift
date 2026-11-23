@@ -23,6 +23,7 @@ struct DictationAttributes: ActivityAttributes {
         /// The end of the text so far, sized for the activity.
         var tail: String
         var phase: Phase
+        var meeting: MeetingAttributes.ContentState? = nil
     }
 
     /// Associates controls with the microphone hold that created them. Optional for activities from earlier builds.

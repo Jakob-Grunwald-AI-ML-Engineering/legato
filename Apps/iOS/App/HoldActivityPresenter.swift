@@ -1,4 +1,5 @@
 import Foundation
+import ActivityKit
 import LegatoAppServices
 import LegatoCore
 import Observation
@@ -59,6 +60,13 @@ final class HoldActivityPresenter {
         holdID != nil && holdID == activeHoldID && !stopping
     }
 
+    func transferToMeeting(holdID: String?) -> Activity<DictationAttributes>? {
+        guard ownsHold(holdID), !arming, let activity = client.transfer() else { return nil }
+        activeHoldID = nil
+        planner.performed(.end)
+        return activity
+    }
+
     /// The button and a system dismissal both end the hold that owns this activity.
     func stop(holdID: String?, release: () async -> Void) async {
         guard ownsHold(holdID) else { return }
@@ -84,7 +92,8 @@ final class HoldActivityPresenter {
     }
 
     private func reconcile() {
-        guard !stopping, let step = planner.plan(armed: microphone.isArmed, listening: keyboard.route != .idle, tail: keyboard.dictationTail,
+        guard !stopping, !microphone.microphoneReserved || activeHoldID != nil,
+              let step = planner.plan(armed: microphone.isArmed, listening: keyboard.route != .idle, tail: keyboard.dictationTail,
                                       recovering: microphone.microphoneRecovering) else { return }
         enqueue(step)
     }
