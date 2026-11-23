@@ -25,7 +25,7 @@ struct MeetingsView: View {
                         Label(controller.phase == .starting ? "Cancel start" : "Stop recording", systemImage: "stop.fill")
                     }.disabled(controller.phase == .stopping)
                 } else {
-                    Button { controller.start() } label: { Label("Record a meeting", systemImage: "mic.badge.plus") }
+                    Button { Task { await controller.start() } } label: { Label("Record a meeting", systemImage: "mic.badge.plus") }
                         .disabled(!controller.ready)
                         .accessibilityIdentifier("meetings.record")
                 }

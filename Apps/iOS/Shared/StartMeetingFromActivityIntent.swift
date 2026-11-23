@@ -1,10 +1,10 @@
 import AppIntents
 
-/// Starts a meeting from the idle dictation activity after iOS opens Legato.
+/// Replaces the idle dictation activity with a meeting recording.
 struct StartMeetingFromActivityIntent: AudioRecordingIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "Start meeting"
     static let isDiscoverable = false
-    static var supportedModes: IntentModes { .foreground(.immediate) }
+    static var supportedModes: IntentModes { .background }
 
     @Parameter(title: "Microphone hold") var holdID: String?
 

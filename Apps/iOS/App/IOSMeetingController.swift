@@ -36,7 +36,6 @@ final class IOSMeetingController {
     @ObservationIgnored private var ticker: Task<Void, Never>?
     @ObservationIgnored private var searchTask: Task<Void, Never>?
     @ObservationIgnored private var preparation: Task<Void, Never>?
-    @ObservationIgnored private var startTask: Task<Void, Never>?
     @ObservationIgnored private var stopRequested = false
     @ObservationIgnored private var interruptedStart = false
     @ObservationIgnored private var audioWasActivated = false
@@ -96,76 +95,100 @@ final class IOSMeetingController {
         return nil
     }
 
-    func start() {
+    @discardableResult
+    func start(fromIntent: Bool = false) async -> AppController.ToggleOutcome {
+        let inForeground = UIApplication.shared.applicationState == .active
+        guard ready, !isActive, fromIntent || inForeground else { return .busy }
         guard !VoiceEnrollmentController.shared.isBusy else {
-            notice = "Finish or cancel voice profile setup first."; return
+            return refuseStart("Finish or cancel voice profile setup first.")
         }
-        guard ready, phase == .idle, UIApplication.shared.applicationState == .active else { return }
         guard !microphone.isListening, microphone.status != "starting", keyboard.route == .idle else {
-            notice = "Stop dictation before starting a meeting. Your draft will be kept."; return
+            return refuseStart("Stop dictation before starting a meeting. Your draft will be kept.")
         }
+
+        var mic: any AudioSource = AutomaticInputSource()
+        var needsAudio = true
+        #if LEGATO_INTERNAL
+        if let fixture = IOSMeetingFixture.current { mic = fixture.microphone(); needsAudio = fixture.realMicrophone }
+        #endif
+        if needsAudio, !inForeground, AVAudioApplication.shared.recordPermission != .granted {
+            if AVAudioApplication.shared.recordPermission == .undetermined {
+                return .needsForeground(.backgroundStartRefused)
+            }
+            return refuseStart("Allow microphone access in iOS Settings to record a meeting.")
+        }
+
+        // The intent must keep its Live Activity alive throughout capture. Request it before
+        // surrendering the dictation hold so a refused request leaves the hold usable.
+        do {
+            if fromIntent || ActivityAuthorizationInfo().areActivitiesEnabled {
+                let content = ActivityContent(state: MeetingAttributes.ContentState(phase: .starting, tail: ""), staleDate: nil)
+                activityID = try Activity.request(attributes: MeetingAttributes(startedAt: Date()), content: content).id
+            }
+        } catch {
+            if fromIntent { return refuseStart(error.localizedDescription) }
+        }
+
         phase = .starting; notice = nil; stopRequested = false; interruptedStart = false
         // Reserve synchronously before any await: keyboard requests cannot slip into the handoff.
         microphone.microphoneReserved = true
         publishReservation(true)
-        startTask = Task {
-            await keyboard.suspendForMeeting()
-            do {
-                try Task.checkCancellation()
-                guard !stopRequested else { throw CancellationError() }
-                // ActivityKit must precede AVAudioSession activation. Its availability is optional.
-                if ActivityAuthorizationInfo().areActivitiesEnabled {
-                    activityID = (try? Activity.request(attributes: MeetingAttributes(startedAt: Date()),
-                        content: ActivityContent(state: .init(phase: .starting, tail: ""), staleDate: nil)))?.id
-                }
-                var mic: any AudioSource = AutomaticInputSource()
-                var needsAudio = true
-                #if LEGATO_INTERNAL
-                if let fixture = IOSMeetingFixture.current { mic = fixture.microphone(); needsAudio = fixture.realMicrophone }
-                #endif
-                if needsAudio {
+        await keyboard.suspendForMeeting()
+        do {
+            try Task.checkCancellation()
+            guard !stopRequested else { throw CancellationError() }
+            if needsAudio {
+                if inForeground {
                     guard await AVAudioApplication.requestRecordPermission() else {
                         throw NSError(domain: "Meeting", code: 1, userInfo: [NSLocalizedDescriptionKey: "Allow microphone access in iOS Settings to record a meeting."])
                     }
                     try await foregroundAfterPermission()
-                    let audio = AVAudioSession.sharedInstance()
-                    try audio.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
-                    try audio.setActive(true)
-                    audioWasActivated = true
                 }
+                try Task.checkCancellation()
                 guard !stopRequested else { throw CancellationError() }
-                input = mic as? AutomaticInputSource
-                lastInputDiagnostics = nil
-                let session = try await services.startMeeting(mic: mic)
-                selectedID = session.meetingID
-                if stopRequested {
-                    phase = .recording
-                    await stop(interrupted: interruptedStart)
-                    return
-                }
-                phase = .recording
-                elapsed = 0; live = nil
-                snapshots = Task {
-                    for await snapshot in session.snapshots {
-                        live = snapshot
-                        await updateActivity(.recording)
-                        if snapshot.audioError != nil { await stop(interrupted: true); break }
-                    }
-                }
-                ticker = Task {
-                    while !Task.isCancelled {
-                        elapsed = session.elapsed
-                        try? await Task.sleep(for: .seconds(1))
-                    }
-                }
-                await updateActivity(.recording)
-                await refresh()
-            } catch {
-                await finishCapture(interrupted: interruptedStart)
-                if !(error is CancellationError) { notice = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription }
+                let audio = AVAudioSession.sharedInstance()
+                try audio.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
+                try audio.setActive(true)
+                audioWasActivated = true
             }
-            startTask = nil
+            guard !stopRequested else { throw CancellationError() }
+            input = mic as? AutomaticInputSource
+            lastInputDiagnostics = nil
+            let session = try await services.startMeeting(mic: mic)
+            selectedID = session.meetingID
+            if stopRequested || Task.isCancelled {
+                phase = .recording
+                await stop(interrupted: interruptedStart)
+                return .stopped(nil)
+            }
+            phase = .recording
+            elapsed = 0; live = nil
+            snapshots = Task {
+                for await snapshot in session.snapshots {
+                    live = snapshot
+                    await updateActivity(.recording)
+                    if snapshot.audioError != nil { await stop(interrupted: true); break }
+                }
+            }
+            ticker = Task {
+                while !Task.isCancelled {
+                    elapsed = session.elapsed
+                    try? await Task.sleep(for: .seconds(1))
+                }
+            }
+            await updateActivity(.recording)
+            await refresh()
+            return .started
+        } catch {
+            await finishCapture(interrupted: interruptedStart)
+            if error is CancellationError { return .stopped(nil) }
+            return refuseStart((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
         }
+    }
+
+    private func refuseStart(_ message: String) -> AppController.ToggleOutcome {
+        notice = message
+        return .failed(message)
     }
 
     /// The system permission alert can return before UIKit has finished reactivating the app.
