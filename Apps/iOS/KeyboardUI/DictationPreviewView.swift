@@ -51,14 +51,13 @@ struct DictationPreviewView: View {
         .background { magicBackground }
         .task(id: bloom?.start) {
             guard let start = bloom?.start else { return }
-            try? await Task.sleep(for: .seconds(Self.bloomSeconds))
+            try? await Task.sleep(for: .seconds(MagicPreviewRipple.seconds))
             if !Task.isCancelled, bloom?.start == start { bloom = nil }
         }
         .onDisappear { controller.endPreviewHold(apply: false) }
     }
 
     nonisolated static let fadeSeconds = 0.15
-    private static let bloomSeconds = 0.35
 
     /// "Undo" while the app keeps the cleared words (`KeyboardController.canUndoDiscard`), on the dictation key's side.
     private var undoChip: some View {
@@ -91,27 +90,7 @@ struct DictationPreviewView: View {
             if listening {
                 MagicPreviewGlow(origin: glowOrigin).transition(.opacity)
             }
-            if let bloom {
-                TimelineView(.animation) { timeline in
-                    let duration = reduceMotion ? 0.2 : Self.bloomSeconds
-                    let age = timeline.date.timeIntervalSince(bloom.start)
-                    let progress = min(1, max(0, age / duration))
-                    Canvas { context, size in
-                        let bounds = Path(CGRect(origin: .zero, size: size))
-                        if reduceMotion {
-                            context.fill(bounds, with: .color(.primary.opacity(0.1 * (1 - progress))))
-                        } else {
-                            let remaining = 1 - progress
-                            let reach = hypot(max(bloom.point.x, size.width - bloom.point.x),
-                                              max(bloom.point.y, size.height - bloom.point.y))
-                            let radius = max(1, reach * (1 - remaining * remaining))
-                            let colors = MagicGradient.colors.map { $0.opacity(0.4 * remaining * remaining) }
-                            context.fill(bounds, with: .radialGradient(Gradient(colors: colors + [.clear]),
-                                                                      center: bloom.point, startRadius: 0, endRadius: radius))
-                        }
-                    }
-                }
-            }
+            if let bloom { MagicPreviewRipple(start: bloom.start, origin: bloom.point) }
         }
         .clipShape(RoundedRectangle(cornerRadius: WordRowLayout.contentInset))
         .animation(reduceMotion ? nil : .smooth, value: listening)
@@ -202,8 +181,7 @@ private final class ExitProbe {
     var glyphs: [CGRect] = []
 }
 
-/// A single cleanup result. Keep the shared grapheme diff for small changes, and poof as a group
-/// when most of the draft is new or the diff would be too costly to run on the keyboard's main thread.
+/// A single cleanup result and the shared grapheme diff that drives its transition.
 private struct PreviewRewrite: Equatable {
     let original: String
     let target: String
@@ -212,7 +190,7 @@ private struct PreviewRewrite: Equatable {
     var inserted: Set<Int> { diff.inserted }
     var survivors: [Int: Int] { diff.survivors }
     let start: Date
-    var duration: Double { PreviewRenderer.fadeSeconds / 2 + ChunkEntrance.capMs / 1000 + DictationPreviewView.fadeSeconds }
+    var duration: Double { PreviewRenderer.fadeSeconds / 2 + ChunkEntrance.capMs / 1000 + MagicPreviewEffects.entranceSeconds }
     var delayPerPiece: Double { ChunkEntrance.gapMs / 1000 }
     var glyphsPerPiece: Int { max(1, (inserted.count + pieceLimit - 1) / pieceLimit) }
     private var pieceLimit: Int { Int(ChunkEntrance.capMs / ChunkEntrance.gapMs) + 1 }
@@ -318,16 +296,15 @@ private struct PreviewRenderer: TextRenderer {
             var shown: [Text.Layout.RunSlice] = []
             for slice in run {
                 if position < visible {
-                    var copy = context
                     if let reference, let oldIndex = rewrite?.survivors[position], reference.glyphs.indices.contains(oldIndex) {
                         let old = reference.glyphs[oldIndex], current = slice.typographicBounds.rect
                         let oldBottom = reference.glyphs.last?.maxY ?? old.maxY
                         let newBottom = lines.last?.typographicBounds.rect.maxY ?? current.maxY
-                        let remainder = CGFloat((1 - poof) * (1 - poof))
-                        copy.translateBy(x: (old.minX - current.minX) * remainder,
-                                         y: (old.minY - oldBottom - current.minY + newBottom) * remainder)
+                        MagicPreviewEffects.drawSurvivor(slice, from: old, verticalAdjustment: newBottom - oldBottom,
+                                                         progress: poof, in: context)
+                    } else {
+                        context.draw(slice)
                     }
-                    copy.draw(slice)
                     shown.append(slice)
                 }
                 position += 1
@@ -360,12 +337,8 @@ private struct PreviewRenderer: TextRenderer {
                         position += 1
                         let delay = Double(entrance / glyphsPerPiece) * entranceGap
                         entrance += 1
-                        let reveal = min(1, max(0, (elapsed - Self.fadeSeconds / 2 - delay) / DictationPreviewView.fadeSeconds))
-                        guard reveal > 0 else { continue }
-                        var copy = context
-                        copy.opacity = reveal
-                        copy.translateBy(x: 0, y: Self.lift * CGFloat(1 - reveal))
-                        copy.draw(slice)
+                        let reveal = min(1, max(0, (elapsed - Self.fadeSeconds / 2 - delay) / MagicPreviewEffects.entranceSeconds))
+                        MagicPreviewEffects.drawEntrance(slice, progress: reveal, in: context)
                     }
                 case .hidden?:
                     position += run.count

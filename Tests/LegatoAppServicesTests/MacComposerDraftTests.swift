@@ -48,7 +48,7 @@ private actor DraftHistory: HistoryStore {
         let (session, draft) = session(cleaner)
         var captures = 0, inserts: [String] = []
         session.onBegin = { captures += 1 }
-        session.insertDraftText = { inserts.append($0); return true }
+        session.prepareDraftInsertion = { .init { inserts.append($0); return true } }
         try await session.debugLine("one")
         await session.debugStop()
         try await session.debugLine("two")
@@ -63,8 +63,8 @@ private actor DraftHistory: HistoryStore {
         await draft.settleCorrection()
         #expect(cleaner.inputs.withLock { $0.map(\.text) } == ["one two", "One two. three"])
         #expect(inserts.isEmpty)
-        await session.insertDraft()
-        await session.insertDraft()
+        await session.insertDraft()?.value
+        await session.insertDraft()?.value
         #expect(inserts == ["One two. three."] && draft.isEmpty)
     }
 
@@ -88,16 +88,18 @@ private actor DraftHistory: HistoryStore {
         await session.magicDraft()
         await draft.settleCorrection()
         var attempts = 0
-        session.insertDraftText = { text in
-            attempts += 1
-            let stored = await history.recent(limit: 2)
-            #expect(stored.map(\.text) == [text])
-            #expect(stored.first?.rawText == "keep in history")
-            #expect(!session.isActivityInteractive)
-            return false
+        session.prepareDraftInsertion = {
+            .init { text in
+                attempts += 1
+                let stored = await history.recent(limit: 2)
+                #expect(stored.map(\.text) == [text])
+                #expect(stored.first?.rawText == "keep in history")
+                #expect(!session.isActivityInteractive)
+                return false
+            }
         }
-        await session.insertDraft()
-        await session.insertDraft()
+        await session.insertDraft()?.value
+        await session.insertDraft()?.value
         #expect(attempts == 1 && draft.isEmpty && !session.isActivityInteractive)
         #expect(await history.recent(limit: 2).map(\.text) == ["Keep in history."])
         try await session.debugLine("next take")
@@ -111,13 +113,38 @@ private actor DraftHistory: HistoryStore {
         let (session, draft) = session(Cleaner(), history: history)
         try await session.debugLine("recover me")
         var delivered: [String] = []
-        session.insertDraftText = { delivered.append($0); return true }
-        await session.insertDraft()
+        session.prepareDraftInsertion = { .init { delivered.append($0); return true } }
+        await session.insertDraft()?.value
         #expect(delivered.isEmpty && draft.text == "recover me" && draft.message != nil && session.isActivityInteractive)
         await history.rejectWrites(false)
-        await session.insertDraft()
+        await session.insertDraft()?.value
         #expect(delivered == ["recover me"] && draft.isEmpty && !session.isActivityInteractive)
         #expect(await history.recent(limit: 2).map(\.text) == delivered)
+    }
+
+    @Test func insertCapturesPrivateDeliveryBeforeWaitingForAnInstructionTransition() async throws {
+        let history = DraftHistory()
+        let (session, draft) = session(Cleaner(), history: history)
+        try await session.debugLine("private draft")
+        #expect(await session.startMagic())
+        var passwordFocused = true
+        var delivered: [String] = []
+        session.prepareDraftInsertion = {
+            .init(isPrivate: passwordFocused) { delivered.append($0); return true }
+        }
+
+        let transition = Task {
+            passwordFocused = false
+            await session.endMagic(discard: true)
+        }
+        let insertion = try #require(session.insertDraft(after: transition))
+        #expect(draft.isInserting && draft.dismissal == nil)
+        #expect(session.insertDraft() == nil)
+        await insertion.value
+
+        #expect(delivered == ["private draft"])
+        #expect(draft.isEmpty)
+        #expect(await history.recent(limit: 1).isEmpty)
     }
 
     @Test func lateCompletionOfFirstCutCannotConsumeTheSecondBoundary() async {
@@ -205,8 +232,8 @@ private actor DraftHistory: HistoryStore {
         #expect(await session.startMagic() == false)
         #expect(draft.text == "secret" && !draft.isCorrecting && cleaner.inputs.withLock { $0.isEmpty })
         var inserted: String?
-        session.insertDraftText = { inserted = $0; return true }
-        await session.insertDraft()
+        session.prepareDraftInsertion = { .init { inserted = $0; return true } }
+        await session.insertDraft()?.value
         #expect(inserted == "secret" && draft.isEmpty)
         #expect(await history.recent(limit: 1).isEmpty)
     }

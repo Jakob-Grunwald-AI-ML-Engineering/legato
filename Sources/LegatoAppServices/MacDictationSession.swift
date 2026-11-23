@@ -35,7 +35,17 @@ import LegatoKeyboardCore
         return isActive || !composer.isEmpty
     }
     public var canUndoDiscard: Bool { !discardingDraft && composer?.canUndoDiscard == true }
-    @ObservationIgnored public var insertDraftText: @MainActor (String) async -> Bool = { _ in false }
+    public struct DraftInsertion {
+        let isPrivate: Bool
+        let deliver: @MainActor (String) async -> Bool
+
+        public init(isPrivate: Bool = false, deliver: @escaping @MainActor (String) async -> Bool) {
+            self.isPrivate = isPrivate
+            self.deliver = deliver
+        }
+    }
+    /// Captures delivery ownership on Insert, before finalizing speech or saving the draft.
+    @ObservationIgnored public var prepareDraftInsertion: @MainActor () -> DraftInsertion = { .init { _ in false } }
     private var discardingDraft = false
     @ObservationIgnored private var draftActionGeneration = 0
     public var speechMode: SpeechMode { speechRoute.speechMode }
@@ -77,6 +87,8 @@ import LegatoKeyboardCore
     @ObservationIgnored public var onPrepare: @MainActor () async -> Void = {}
     /// A new session begins (capture the target field).
     @ObservationIgnored public var onBegin: @MainActor () -> Void = {}
+    /// A new take resumes an existing draft. Its presentation anchor stays where the draft opened.
+    @ObservationIgnored public var onResumeDraft: @MainActor () -> Void = {}
     /// The session's last line was delivered (settle anything held back).
     @ObservationIgnored public var onEnd: @MainActor () async -> Void = {}
     private static let log = Logger(subsystem: "de.gruenwald.legato", category: "mac-dictation")
@@ -132,6 +144,7 @@ import LegatoKeyboardCore
         #endif
         guard !VoiceEnrollmentController.shared.isBusy else { post("Finish or cancel voice profile setup first."); return false }
         await stopTask?.value
+        guard composer?.isInserting != true, !discardingDraft else { return false }
         guard !VoiceEnrollmentController.shared.isBusy else { post("Finish or cancel voice profile setup first."); return false }
         guard phase == .idle else { return phase == .listening }
         phase = .starting; pendingStop = false
@@ -243,6 +256,8 @@ import LegatoKeyboardCore
                 composer.startNewDestination()
                 await onPrepare()
                 onBegin()
+            } else {
+                onResumeDraft()
             }
             composer.acceptingSpeech = true
             composer.needsFreshBoundary = false
@@ -280,6 +295,10 @@ import LegatoKeyboardCore
         magicOwnsTake = !isActive
         if magicOwnsTake, !(await start()) { return false }
         guard phase == .listening else { return false }
+        if composer != nil, !pipeline.keepsTakes() {
+            if magicOwnsTake { magicOwnsTake = false; await stop() }
+            return false
+        }
         onMagicBegin()
         setMagic(true)
         return true
@@ -319,30 +338,43 @@ import LegatoKeyboardCore
         composer.correct(using: pipeline, instructions: nil)
     }
 
-    public func insertDraft() async {
+    @discardableResult
+    public func insertDraft(after instructionTransition: Task<Void, Never>? = nil) -> Task<Void, Never>? {
         guard let composer, !composer.isEmpty, !composer.isCorrecting, !composer.isInserting, !discardingDraft,
-              composer.dismissal == nil, speechMode == .dictation, phase != .starting else { return }
+              composer.dismissal == nil,
+              instructionTransition != nil || (speechMode == .dictation && phase != .starting) else { return nil }
+        let insertion = prepareDraftInsertion()
         draftActionGeneration += 1
-        composer.dismissal = .insert
         composer.isInserting = true
-        defer { composer.isInserting = false }
-        if let stopTask { await stopTask.value } else { await stop() }
-        let text = composer.text
-        guard !text.isEmpty else { return }
-        do {
-            try await pipeline.recordDraft(id: composer.documentID, raw: composer.original, text: text)
-        } catch {
-            Self.log.error("mac.dictation.history.failed")
-            composer.message = "Couldn’t save to History. Try Insert again or discard the draft."
-            composer.dismissal = nil
-            return
+        if instructionTransition == nil { composer.dismissal = .insert }
+        return Task {
+            defer { composer.isInserting = false }
+            if let instructionTransition {
+                await instructionTransition.value
+                // Let a finishing instruction update the draft before deciding whether Insert can proceed.
+                guard speechMode == .dictation, phase != .starting, !composer.isCorrecting, !composer.isEmpty else { return }
+                composer.dismissal = .insert
+            }
+            if let stopTask { await stopTask.value } else { await stop() }
+            let text = composer.text
+            guard !text.isEmpty else { return }
+            if !insertion.isPrivate {
+                do {
+                    try await pipeline.recordDraft(id: composer.documentID, raw: composer.original, text: text)
+                } catch {
+                    Self.log.error("mac.dictation.history.failed")
+                    composer.message = "Couldn’t save to History. Try Insert again or discard the draft."
+                    composer.dismissal = nil
+                    return
+                }
+            }
+            _ = await insertion.deliver(text)
+            composer.clear()
         }
-        _ = await insertDraftText(text)
-        composer.clear()
     }
 
     public func discardDraft() async {
-        guard let composer, isActivityInteractive, phase != .starting else { return }
+        guard let composer, isActivityInteractive, !composer.isInserting, phase != .starting else { return }
         discardingDraft = true
         defer { discardingDraft = false }
         draftActionGeneration += 1

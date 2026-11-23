@@ -11,19 +11,21 @@ enum NotchIslandTokens {
     static let title = Font.system(size: 12, weight: .semibold)
     static let bodyPointSize: CGFloat = 14
     static let body = Font.system(size: bodyPointSize)
-    static let caption = Font.system(size: 11, weight: .medium)
+    static let captionPointSize: CGFloat = 11
+    static let caption = Font.system(size: captionPointSize, weight: .medium)
     static let spring = Animation.spring(duration: 0.3, bounce: 0.12)
     static let closeDuration = 0.3
-    // Initial Mac panel tuning. Check the close in a native editor and on a second display.
-    static let departureDuration = 0.16
-    static let departureSpring = Animation.spring(duration: departureDuration, bounce: 0)
-    static let departureTravel: CGFloat = 36
-    static let panelWidth: CGFloat = 400
-    static let panelMaxHeight: CGFloat = 170
-    static let panelMinHeight: CGFloat = 92
-    static let panelChromeHeight: CGFloat = 64
+    // Initial Mac panel tuning, to verify at native editor sizes.
+    static let departureSpring = Animation.spring(duration: 0.18, bounce: 0)
+    static let departureTextLift: CGFloat = 12
+    static let panelWidth: CGFloat = 520
     static let panelHorizontalInset: CGFloat = 14
+    static let panelVerticalInset: CGFloat = 10
     static let panelOuterInset: CGFloat = 8
+    static let panelSectionSpacing: CGFloat = 8
+    static let draftLineSpacing: CGFloat = 4
+    static let toolbarHeight: CGFloat = 28
+    static let scrollIndicatorWidth: CGFloat = 3
     static let caretGap: CGFloat = 6
 }
 
@@ -90,11 +92,19 @@ struct NotchIslandShape: Shape {
     }
 }
 
-/// The black island around `content`. The content lays out at the full window size below `safeTop` while the shape
-/// grows from the notch and masks it.
+enum IslandAttachment {
+    case top, bottom
+
+    var alignment: Alignment { self == .top ? .top : .bottom }
+    var anchor: UnitPoint { self == .top ? .top : .bottom }
+}
+
+/// Lets the chrome shrink toward its attachment while the content keeps its original layout.
 struct NotchIsland<Content: View>: View {
     let style: NotchIslandStyle
     let presentation: IslandPresentation
+    let attachment: IslandAttachment
+    let departing: Bool
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -102,31 +112,27 @@ struct NotchIsland<Content: View>: View {
     }
 
     private func island(in size: CGSize) -> some View {
-        let box = presentation.presented ? size : style.collapsed(within: size)
+        let collapsed = style.collapsed(within: size)
+        let openingMask = presentation.presented ? size : collapsed
+        let chromeSize = departing ? collapsed : size
         let shape = NotchIslandShape(shoulder: style.shoulder)
-        return laidOut(in: size)
-            .frame(width: box.width, height: box.height, alignment: .top)
-            .background(NotchIslandTokens.surface, in: shape)
-            .overlay { hairline(shape) }
-            .clipShape(shape)
-            .contentShape(shape)
-            .animation(fade) { $0.opacity(presentation.presented ? 1 : 0) }
-            .frame(width: size.width, height: size.height, alignment: .top)
-            .environment(\.colorScheme, .dark)
-    }
-
-    /// Visible from the first frame of the grow, gone only at the end of the shrink, so the size change is what shows.
-    private var fade: Animation {
-        presentation.presented ? .linear(duration: 0.05) : .linear(duration: 0.08).delay(NotchIslandTokens.closeDuration - 0.08)
-    }
-
-    private func laidOut(in size: CGSize) -> some View {
-        content
-            .padding(.top, style.topInset)
-            .padding(.horizontal, style.shoulder)
-            .frame(width: size.width, height: size.height, alignment: .top)
-            .opacity(presentation.presented ? 1 : 0)
-            .animation(.easeOut(duration: 0.2), value: presentation.presented)
+        return ZStack(alignment: attachment.alignment) {
+            shape.fill(NotchIslandTokens.surface)
+                .overlay { hairline(shape) }
+                .frame(width: chromeSize.width, height: chromeSize.height)
+                .opacity(departing ? 0 : 1)
+            content
+                .padding(.top, style.topInset)
+                .padding(.horizontal, style.shoulder)
+                .frame(width: size.width, height: size.height, alignment: .topLeading)
+        }
+        .frame(width: size.width, height: size.height)
+        .mask(alignment: attachment.alignment) {
+            shape.frame(width: openingMask.width, height: openingMask.height)
+        }
+        .contentShape(shape)
+        .opacity(presentation.presented ? 1 : 0)
+        .environment(\.colorScheme, .dark)
     }
 
     @ViewBuilder private func hairline(_ shape: NotchIslandShape) -> some View {

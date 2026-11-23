@@ -105,6 +105,27 @@ private func run(_ shadow: String, cursor: Int? = nil, _ target: String) -> (pla
         #expect(ShadowEditPlanner.simulate(ops: plan.ops, shadow: old, cursor: old.utf16.count).text == new)
     }
 
+    @Test func previewKeepsSurvivorsEvenWhenMostOfTheDraftChanges() {
+        let diff = PreviewRewriteDiff(original: "abc👨‍👩‍👧XYZ", target: "ijk👨‍👩‍👧DEF")
+        #expect(diff.survivors == [3: 3])
+        #expect(diff.removed == [0, 1, 2, 4, 5, 6])
+        #expect(diff.inserted == [0, 1, 2, 4, 5, 6])
+    }
+
+    @Test func longPreviewKeepsAnUnchangedMiddleAndAppendedSpeech() {
+        let body = (0..<120).map { " Sentence \($0) stays." }.joined()
+        let tail = " Next dictated sentence."
+        let oldStart = "ugh"
+        let newStart = "Hello"
+        let diff = PreviewRewriteDiff(original: oldStart + body + "abc" + tail,
+                                      target: newStart + body + "DEF" + tail)
+        let middle = body.count / 2
+        #expect(diff.survivors[newStart.count + middle] == oldStart.count + middle)
+        #expect(diff.survivors[newStart.count + body.count + 3] == oldStart.count + body.count + 3)
+        #expect(diff.removed == [0, 1, 2, oldStart.count + body.count, oldStart.count + body.count + 1, oldStart.count + body.count + 2])
+        #expect(diff.inserted.count == newStart.count + 3)
+    }
+
     @Test func smallArbitraryEditsMatchAnIndependentMinimumCostOracle() {
         var samples = [""]
         var layer = [""]

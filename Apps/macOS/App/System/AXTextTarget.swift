@@ -171,7 +171,7 @@ final class AXTextTarget: TextTarget {
         return .capture(.target(target))
     }
 
-    /// What a typed insert at the end of a take can rely on in the field it started in.
+    /// The focused editor attested by Accessibility at the time of capture.
     enum PasteWitness {
         /// The focused element: the insert goes ahead only while it still has focus.
         case element(AXTextTarget)
@@ -191,56 +191,106 @@ final class AXTextTarget: TextTarget {
             }
         }
 
-        /// A point next to the captured selection, or the focused window's frame when the
-        /// host does not expose caret geometry. Both are in global display coordinates.
-        @MainActor func composerAnchor() -> (caret: CGRect?, window: CGRect?) {
+        /// Presentation geometry in global display coordinates, from the most local anchor the host exposes.
+        @MainActor func composerAnchor(caretIsVisible: (CGRect) -> Bool) -> (caret: CGRect?, field: CGRect?, window: CGRect?) {
             if case .element(let target) = self,
                let selection = try? AXTextTarget.copyAttribute(target.element, kAXSelectedTextRangeAttribute),
                let range = try? AXTextTarget.range(from: selection),
                range.location >= 0,
                let argument = try? AXTextTarget.axValue(for: .init(location: range.location, length: 0)),
                let value = try? target.parameter(kAXBoundsForRangeParameterizedAttribute, argument),
-               let rect = try? AXTextTarget.rect(from: value), rect.height > 0, rect.minX.isFinite, rect.maxY.isFinite {
-                return (rect, nil)
+               let rect = try? AXTextTarget.rect(from: value), rect.height > 0, rect.minX.isFinite, rect.maxY.isFinite,
+               caretIsVisible(rect) {
+                return (rect, nil, nil)
             }
-            guard AXIsProcessTrusted(), let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return (nil, nil) }
+            guard AXIsProcessTrusted(), let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return (nil, nil, nil) }
             let app = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(app, AXTextTarget.messagingTimeout)
-            guard let element = try? AXTextTarget.copyAttribute(app, kAXFocusedWindowAttribute),
-                  CFGetTypeID(element) == AXUIElementGetTypeID() else { return (nil, nil) }
-            let window = unsafeDowncast(element, to: AXUIElement.self)
-            AXUIElementSetMessagingTimeout(window, AXTextTarget.messagingTimeout)
-            return (nil, AXTextTarget.frame(of: window))
+            func reference(_ attribute: String) -> AXUIElement? {
+                guard let value = try? AXTextTarget.copyAttribute(app, attribute),
+                      CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+                let ref = unsafeDowncast(value, to: AXUIElement.self)
+                AXUIElementSetMessagingTimeout(ref, AXTextTarget.messagingTimeout)
+                return ref
+            }
+            let field: CGRect?
+            if case .element(let target) = self {
+                field = AXTextTarget.frame(of: target.element)
+            } else if let focus = reference(kAXFocusedUIElementAttribute),
+                      let role = (try? AXTextTarget.copyAttribute(focus, kAXRoleAttribute)) as? String,
+                      role == kAXTextAreaRole || role == kAXTextFieldRole {
+                field = AXTextTarget.frame(of: focus)
+            } else {
+                field = nil
+            }
+            if let field, caretIsVisible(field) { return (nil, field, nil) }
+            return (nil, nil, reference(kAXFocusedWindowAttribute).flatMap { AXTextTarget.frame(of: $0) })
         }
 
-        /// Capture optional readback evidence without reading any previous text.
-        @MainActor func prepareInsertion(text: String) -> InsertConfirmation? {
+        @MainActor func isSamePasswordField(as other: Self) -> Bool {
+            guard case .password(let target?, _) = self, case .password(let original?, _) = other else { return false }
+            return target.pid == original.pid && CFEqual(target.element, original.element)
+        }
+
+        /// Bind one insertion to the field, selection, and length at action acceptance.
+        @MainActor func insertionStart() -> InsertionStart? {
             switch self {
             case .element(let target):
-                guard target.witnessFocused(password: false), let selection = try? target.selectedRange(),
-                      let expectation = FieldInsertionExpectation(text: text, selection: selection, length: try? target.textLength()) else { return nil }
-                return InsertConfirmation(target: target, expectation: expectation, password: false, minimumLength: nil, initialLength: nil)
-            case .password(let target, let baseline):
-                guard let target, let baseline, target.witnessFocused(password: true), target.characterCount() == baseline else { return nil }
-                let selection = (try? target.selectedRange()) ?? (baseline == 0 ? UTF16Range(location: 0, length: 0) : nil)
-                guard let selection, let expectation = FieldInsertionExpectation(text: text, selection: selection, length: baseline),
-                      expectation.length != baseline else { return nil }
-                // Equal-length password replacement has no observable proof if the host ignores the keys.
-                return InsertConfirmation(target: target, expectation: expectation, password: true, minimumLength: baseline - selection.length, initialLength: baseline)
-            case .unreadable: return nil
+                return InsertionStart(target: target, password: false, length: try? target.textLength())
+            case .password(let target?, let length):
+                return InsertionStart(target: target, password: true, length: length)
+            case .password, .unreadable:
+                return nil
             }
+        }
+    }
+
+    @MainActor struct InsertionStart {
+        private let target: AXTextTarget
+        private let element: AXUIElement
+        private let password: Bool
+        private let selection: UTF16Range?
+        private let length: Int?
+
+        var pid: pid_t { target.pid }
+
+        fileprivate init(target: AXTextTarget, password: Bool, length: Int?) {
+            self.target = target
+            self.element = target.element
+            self.password = password
+            self.length = length
+            selection = target.insertionSelection(password: password, length: length)
         }
 
-        /// The positively identified typing destination still has focus. An unknown destination never accepts keys.
-        @MainActor func stillFocused() -> Bool {
-            switch self {
-            case .element(let target): return target.witnessFocused(password: false)
-            case .unreadable: return false
-            case .password(let target, let length):
-                guard let target else { return false }
-                return target.editable && target.hasFocus() && (length == nil || target.characterCount() == length)
-            }
+        func matchesInitialPosition() -> Bool {
+            guard CFEqual(target.element, element), target.exactWitnessFocus(password: password) else { return false }
+            if let selection, target.insertionSelection(password: password, length: length) != selection { return false }
+            guard let length else { return true }
+            return (password ? target.characterCount() : try? target.textLength()) == length
         }
+
+        func stillFocused() -> Bool { target.witnessFocused(password: password) }
+
+        func confirmation(for text: String) -> InsertConfirmation? {
+            guard let selection, let expectation = FieldInsertionExpectation(text: text, selection: selection, length: length) else { return nil }
+            if password {
+                // Equal-length password replacement has no observable proof if the host ignores the keys.
+                guard let length, expectation.length != length else { return nil }
+                return InsertConfirmation(target: target, expectation: expectation, password: true,
+                                          minimumLength: length - selection.length, initialLength: length)
+            }
+            return InsertConfirmation(target: target, expectation: expectation, password: false,
+                                      minimumLength: nil, initialLength: nil)
+        }
+    }
+
+    private func insertionSelection(password: Bool, length: Int?) -> UTF16Range? {
+        guard password else { return try? selectedRange() }
+        // The Chromium reader can access field contents to map its selection. Passwords use the masked field directly.
+        if let value = try? Self.copyAttribute(element, kAXSelectedTextRangeAttribute), let range = try? Self.range(from: value) {
+            return range
+        }
+        return length == 0 ? UTF16Range(location: 0, length: 0) : nil
     }
 
     /// Evidence for one panel insert. Normal fields confirm the inserted range and final caret; passwords confirm
@@ -276,17 +326,21 @@ final class AXTextTarget: TextTarget {
         }
     }
 
-    /// A recreated element may still identify this editor. Rebind a witness only within that identity; no text read
-    /// is required, so an empty unreadable field and a password field can still be positively witnessed.
+    private func exactWitnessFocus(password: Bool) -> Bool {
+        if password { return hasFocus() && Self.security(of: element) == .password && editable }
+        return isFocused() && editable
+    }
+
+    /// After posting begins, a recreated Chromium element may still identify the same editor.
+    /// Passwords require the original element throughout.
     private func witnessFocused(password: Bool) -> Bool {
-        if password ? hasFocus() : isFocused() { return editable }
-        guard AXIsProcessTrusted(), NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+        if exactWitnessFocus(password: password) { return true }
+        guard !password, AXIsProcessTrusted(), NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
               let value = (try? Self.copyAttribute(appElement, kAXFocusedUIElementAttribute)) ?? nil,
               CFGetTypeID(value) == AXUIElementGetTypeID() else { return false }
         let focused = unsafeDowncast(value, to: AXUIElement.self)
         AXUIElementSetMessagingTimeout(focused, Self.messagingTimeout)
-        guard Self.security(of: focused) == (password ? .password : .notPassword),
-              sameEditor(focused), Self.isEditable(focused) else { return false }
+        guard Self.security(of: focused) == .notPassword, sameEditor(focused), Self.isEditable(focused) else { return false }
         element = focused
         reader = AXFieldReader(element: AXElementText(focused))
         editor = Editor(of: focused)

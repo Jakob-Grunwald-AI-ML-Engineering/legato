@@ -1470,7 +1470,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     }
 
     /// An explicit Magic action uses the same staged-send prompt and validation as the keyboard.
-    func cleanDraft(_ text: String, instructions: String?, writingSettings: ComposerWritingSettings, preview: @escaping @MainActor @Sendable (String) -> Void) async throws -> String {
+    func cleanDraft(_ text: String, instructions: String?, writingSettings: ComposerWritingSettings) async throws -> String {
         var client = cleaner
         #if DEBUG || LEGATO_INTERNAL
         if debugFailTakes > 0 { debugFailTakes -= 1; throw SentenceCleanupError.providerError }
@@ -1482,7 +1482,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         let timeout = takeTimeout?(text.count) ?? DictationTakeLimits.timeout(characters: text.count)
         let service = client
         let result = try await withThrowingTaskGroup(of: String.self) { group in
-            group.addTask { try await service.clean(input) { await preview($0) }.text }
+            // Keep the whole-draft streaming request, with only its validated result displayed.
+            group.addTask { try await service.clean(input) { _ in }.text }
             group.addTask { try await Task.sleep(for: timeout); throw SentenceCleanupError.incomplete }
             defer { group.cancelAll() }
             guard let result = try await group.next() else { throw CancellationError() }

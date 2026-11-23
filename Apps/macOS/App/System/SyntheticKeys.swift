@@ -83,7 +83,6 @@ final class RealInput: @unchecked Sendable {
     /// they act on Legato, not on the field, so they are not the user's input.
     private var ownArea = CGRect.null
     var count: Int { lock.withLock { value } }
-    var stamp: (total: Int, keys: Int) { lock.withLock { (value, value &- clicks) } }
     var clickCount: Int { lock.withLock { clicks } }
     var lastClick: (count: Int, point: CGPoint)? { lock.withLock { clickPoint.map { (clicks, $0) } } }
     func bump(at point: CGPoint? = nil) {

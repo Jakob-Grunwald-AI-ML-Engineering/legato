@@ -9,8 +9,7 @@ import LegatoKeyboardCore
     private var base = ""
     private var additions = ""
     private var tail = ""
-    private var preview: String?
-    public var text: String { LiveSegment.joined([preview ?? base, additions, tail]) }
+    public var text: String { LiveSegment.joined([base, additions, tail]) }
     public var isEmpty: Bool { text.isEmpty }
     public private(set) var isCorrecting = false
     public internal(set) var isInserting = false
@@ -89,10 +88,7 @@ import LegatoKeyboardCore
         let settings = ComposerWritingSettings(in: defaults)
         correction = Task {
             do {
-                let result = try await pipeline.cleanDraft(source, instructions: instructions, writingSettings: settings) { [self] visible in
-                    guard revision == generation else { return }
-                    preview = visible
-                }
+                let result = try await pipeline.cleanDraft(source, instructions: instructions, writingSettings: settings)
                 guard revision == generation else { return }
                 let originalText = LiveSegment.joined([source, additions, tail])
                 let rewrittenText = LiveSegment.joined([result, additions, tail])
@@ -104,7 +100,6 @@ import LegatoKeyboardCore
                 guard revision == generation else { return }
                 message = "Magic couldn't finish. Your draft is ready to retry."
             }
-            preview = nil
             isCorrecting = false
             correction = nil
         }
@@ -158,7 +153,6 @@ import LegatoKeyboardCore
         revision += 1
         correction?.cancel()
         correction = nil
-        preview = nil
         visualRevision = nil
         base = ""; additions = ""; tail = ""; original = ""; discardedOriginal = ""
         isCorrecting = false; message = nil

@@ -21,7 +21,7 @@ final class PasteService {
 
     private static let modifiers: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift]
 
-    /// Posts a single staged draft to its original destination. History owns recovery when posting fails.
+    /// Posts a single staged draft to the destination captured on Insert. History owns recovery when posting fails.
     /// Passwords stay off the pasteboard, including when their text would normally be pasted.
     func insert(_ text: String, targetPID: pid_t, passwordField: Bool, restoreClipboard: Bool, paced: Bool,
                 canBegin: @MainActor () -> Bool, stillOwned: @MainActor () -> Bool) async -> Bool {
@@ -34,7 +34,7 @@ final class PasteService {
                 secureField: !passwordField && IsSecureEventInputEnabled()
             ) == .pasteKeystroke
         }
-        guard released, canBegin(), canPost() else { return false }
+        guard released else { return false }
         let needsPaste = TypewriterPlan.needsPaste(text)
         // Estimates for event construction and focus checks, with headroom inside the iPhone delivery target.
         let fits = ChunkEntrance.stagedBurstFits(characterCount: text.count, estimatedWriteMs: 3)
@@ -42,7 +42,12 @@ final class PasteService {
             return pasteOnce(text, restoreClipboard: restoreClipboard) { canPost() && canBegin() }
         }
         guard !needsPaste else { return false }
-        return await type(text, paced: paced && fits, canPost: canPost)
+        var began = false
+        return await type(text, paced: paced && fits) {
+            guard canPost() else { return false }
+            if !began { began = canBegin() }
+            return began
+        }
     }
 
     private func pasteOnce(_ text: String, restoreClipboard: Bool, canPost: () -> Bool) -> Bool {
