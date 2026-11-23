@@ -7,6 +7,7 @@ import LegatoVocabulary
 import LegatoAudio
 import LegatoKeyboardCore
 import Observation
+import OSLog
 
 @MainActor @Observable final class MacAppController {
     static let shared = MacAppController()
@@ -24,7 +25,6 @@ import Observation
     private var callDetection: CallDetectionController?
     let dictation: MacDictationSession
     @ObservationIgnored private let destination = ComposerDestination()
-    @ObservationIgnored private let composerShortcuts = MacComposerShortcuts()
     private var dictationPill: DictationPillController?
     private var magicTask: Task<Void, Never>?
     private var keyboardInstruction = false
@@ -77,8 +77,6 @@ import Observation
     @ObservationIgnored private var focusObserver: NSObjectProtocol?
     @ObservationIgnored private var terminateObserver: NSObjectProtocol?
     @ObservationIgnored private var mouseMonitor: Any?
-    /// Real (untagged) key presses seen by the tap; typing into a paste-only app stops when this moves.
-    let keyPresses = KeyPressCounter()
 
     private init() {
         var root = URL.applicationSupportDirectory.appending(path: "Legato", directoryHint: .isDirectory)
@@ -117,21 +115,21 @@ import Observation
         dictation.onPrepare = { [weak self] in
             guard let self else { return }
             let witness = AXTextTarget.capturePasteWitness()
-            destination.capture(witness, keyCount: keyPresses.count)
+            destination.capture(witness)
             dictationPill?.captureAnchor(witness)
             if case .unreadable = witness {
                 // Give an opening accessibility tree time to appear. A focus or input change
                 // during that wait cannot turn the new field into the original destination.
                 await AXTextTarget.prepareFocused()
-                guard destination.stillAtCapture(keyCount: keyPresses.count) else { return }
+                guard destination.stillAtCapture() else { return }
                 let prepared = AXTextTarget.capturePasteWitness()
-                destination.capture(prepared, keyCount: keyPresses.count)
+                destination.capture(prepared)
                 dictationPill?.captureAnchor(prepared)
             }
         }
         dictation.insertDraftText = { [weak self] text in
             guard let self else { return false }
-            return await destination.insert(text, using: paster, settings: settings, keys: keyPresses)
+            return await destination.insert(text, using: paster, settings: settings)
         }
         pipeline.keepsTakes = { [destination] in destination.witness?.isPassword != true }
     }
@@ -162,7 +160,11 @@ import Observation
         // Only after launch: a global monitor added before `NSApp` exists cuts the process off from every mouse event.
         assert(NSApp != nil, "Install event monitors after applicationDidFinishLaunching")
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            Task { @MainActor in self?.destination.invalidate() }
+            // The tap counts host clicks synchronously and excludes the activity's buttons.
+            Task { @MainActor in
+                guard let self, !tap.isEnabled else { return }
+                destination.invalidate()
+            }
         }
         // Capture inside the active Settings window and consume the event before AppKit
         // can run its menu equivalent (e.g. Command-W). The tap marks this same event so
@@ -174,24 +176,12 @@ import Observation
             object: NSApp, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.cancelRecording(); self?.recordedKey = nil }
             }
-        tap.composerAction = { [composerShortcuts] in composerShortcuts.owns($0) }
         permissions.hotkeyTapActive = hotkeysEnabled && tap.start()
         dictationPill = DictationPillController(session: dictation, settings: settings, actions: DictationPillActions(
             magic: { [weak self] in self?.perform(.magic) },
             instruction: { [weak self] in self?.toggleMagic() },
             insert: { [weak self] in self?.perform(.insert) },
-            discard: { [weak self] in self?.perform(.discard) },
-            undoDiscard: { [weak self] in self?.perform(.undoDiscard) },
-            copy: { [weak self] in
-                guard let self, let composer = dictation.composer, !composer.text.isEmpty else { return }
-                paster.copy(composer.text)
-            }))
-        composerShortcuts.perform = { [weak self] action in
-            guard let self, recordingTarget == nil else { return }
-            // Carbon may deliver a registered chord before its event-tap sample.
-            magicGesture.spoil { self.dispatch($0) }
-            perform(action)
-        }
+            discard: { [weak self] in self?.perform(.discard) }))
         observeComposerShortcuts()
         dictation.ensureWarm()
         meetingIsland = MeetingIslandController(controller: meetings)
@@ -229,32 +219,28 @@ import Observation
     private func perform(_ action: MacComposerShortcut) {
         let finishingInstruction = magicTask
         Task {
-            await finishingInstruction?.value
+            if action != .discard { await finishingInstruction?.value }
             switch action {
             case .magic: await dictation.magicDraft()
             case .insert: await dictation.insertDraft()
             case .discard: await dictation.discardDraft()
-            case .undoDiscard: dictation.undoDiscard()
             }
             if !dictation.isActive { dictationGesture.runEnded() }
         }
     }
-    /// Only an available composer action owns a global chord. Custom speech shortcuts take priority.
+    /// The tap needs a synchronous snapshot of activity ownership to decide whether an event reaches the host.
     private func observeComposerShortcuts() {
-        let bindings = withObservationTracking {
-            var active: [MacComposerShortcut: HotkeySpec] = [:]
-            guard hotkeysEnabled, recordingTarget == nil, recordedKey == nil else { return active }
-            for action in MacComposerShortcut.chordActions where action.isAvailable(in: dictation, duringMagicHold: keyboardInstruction) {
-                if let spec = settings.binding(for: action) { active[action] = spec }
-            }
-            return active
+        let scope: ActivityShortcutScope? = withObservationTracking {
+            guard hotkeysEnabled, dictation.isActivityInteractive else { return nil }
+            var bindings: [MacComposerShortcut: HotkeySpec] = [:]
+            for action in MacComposerShortcut.chordActions { bindings[action] = settings.binding(for: action) }
+            return ActivityShortcutScope(composer: bindings, speech: [settings.hotkey, settings.dictationHotkey].compactMap { $0 })
         } onChange: { [weak self] in
             Task { @MainActor in self?.observeComposerShortcuts() }
         }
-        for (action, spec) in composerShortcuts.update(bindings: bindings) {
-            dictationPill?.show(notice: "\(spec.displayName) is unavailable for \(action.actionTitle). Choose another shortcut in Settings.")
-        }
+        tap.setScope(scope)
     }
+
     func toggleMagic() {
         if dictation.speechMode == .instruction { stopMagic() } else { startMagic() }
     }
@@ -322,18 +308,16 @@ import Observation
     @discardableResult private func accept(_ spec: HotkeySpec, for target: HotkeyTarget) -> Bool {
         let error: String?
         if case .composer(let action) = target, !action.accepts(spec) {
-            error = "Press a key combination or a function key."
+            error = "Press an arrow key, a function key, or a key combination."
         } else if let used = HotkeyTarget.all.first(where: { $0 != target && binding(for: $0)?.conflicts(with: spec) == true }) {
             error = "Already used by the " + used.title + " shortcut."
-        } else if case .composer(let action) = target, !composerShortcuts.canRegister(spec, for: action) {
-            error = "This shortcut is unavailable. Try another combination."
         } else {
             error = nil
         }
         if let error {
             recordingTarget = target
             recordingPreview = error
-            recorder = HotkeyRecorderLogic()
+            recorder = makeRecorder(for: target)
             return false
         }
         setBinding(spec, for: target)
@@ -348,7 +332,11 @@ import Observation
     func beginRecording(_ target: HotkeyTarget = .magic) {
         guard tap.isActive else { permissions.requestAccessibility(); return }
         resetGestures()
-        recorder = HotkeyRecorderLogic(); recordingTarget = target; recordingPreview = nil
+        recorder = makeRecorder(for: target); recordingTarget = target; recordingPreview = nil
+    }
+    private func makeRecorder(for target: HotkeyTarget) -> HotkeyRecorderLogic {
+        if case .composer = target { return HotkeyRecorderLogic(allowsBareArrows: true) }
+        return HotkeyRecorderLogic()
     }
     func cancelRecording() { recordingTarget = nil; recordingPreview = nil }
     private func recordLocalEvent(_ event: NSEvent) -> Bool {
@@ -372,12 +360,15 @@ import Observation
     private func handle(_ sample: TapSample) {
         guard let event = sample.event else { resetGestures(); return }
         guard !sample.isRecordingBinding, recordingTarget == nil else { return }
+        if let action = sample.composerAction {
+            guard action.isAvailable(in: dictation, duringMagicHold: keyboardInstruction) else { return }
+            magicGesture.spoil { self.dispatch($0) }
+            perform(action)
+            return
+        }
         if event.kind == .keyDown {
-            let shortcut = sample.isComposerAction || settings.hotkey?.triggerEvent(for: event) == .pressed || settings.dictationHotkey?.triggerEvent(for: event) == .pressed
-            // Legato's own shortcuts are not the user's typing: a key-based shortcut must not void a typed insert.
-            if !shortcut { keyPresses.count &+= 1 }
+            let shortcut = sample.isCaptured || settings.hotkey?.triggerEvent(for: event) == .pressed || settings.dictationHotkey?.triggerEvent(for: event) == .pressed
             if !shortcut {
-                destination.invalidate()
                 if dictation.instruction.strip.phase == .result || dictation.instruction.strip.phase == .undone { instructionAction(.accept) }
             }
         }
@@ -450,14 +441,18 @@ import Observation
         case nil: break
         }
     }
+    func undoDiscard() {
+        guard dictation.canUndoDiscard else { return }
+        destination.revalidateAfterUndo()
+        dictation.undoDiscard()
+    }
+
     func refreshRecent() async { recent = (try? await history.recent(limit: 20)) ?? [] }
     func copy(_ entry: DictationEntry) { paster.copy(entry.displayText) }
     func delete(_ entry: DictationEntry) { Task { try? await history.delete(id: entry.id); await refreshRecent() } }
 }
 
 /// Counts real key presses, readable from the dictation writer's closures.
-@MainActor final class KeyPressCounter { var count = 0 }
-
 /// One hotkey's `HotkeyGesture` plus the timer that starts a held press.
 @MainActor private final class GestureDriver {
     private(set) var gesture: HotkeyGesture
@@ -491,20 +486,19 @@ import Observation
 
 /// Owns one destination across all takes and revisions of a composer draft.
 @MainActor private final class ComposerDestination {
+    private static let log = Logger(subsystem: "de.gruenwald.legato", category: "MacComposerDelivery")
     private(set) var pid: pid_t?
     private(set) var witness: AXTextTarget.PasteWitness?
     private var selection: UTF16Range?
     private var length: Int?
-    private var capturedKeys = 0
-    private var capturedClicks = 0
+    private var capturedInput = (total: 0, keys: 0)
     private var generation = 0
     private var valid = false
 
-    func capture(_ witness: AXTextTarget.PasteWitness, keyCount: Int) {
+    func capture(_ witness: AXTextTarget.PasteWitness) {
         self.witness = witness
         pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        capturedKeys = keyCount
-        capturedClicks = RealInput.shared.clickCount
+        capturedInput = RealInput.shared.stamp
         generation &+= 1
         valid = true
         selection = nil
@@ -516,27 +510,52 @@ import Observation
     }
     func invalidate() { valid = false }
 
-    func stillAtCapture(keyCount: Int) -> Bool {
-        valid && capturedKeys == keyCount && capturedClicks == RealInput.shared.clickCount
+    func stillAtCapture() -> Bool {
+        valid && capturedInput.total == RealInput.shared.count
             && pid == NSWorkspace.shared.frontmostApplication?.processIdentifier
     }
 
-    func insert(_ text: String, using paster: PasteService, settings: MacSettings, keys: KeyPressCounter) async -> Bool {
-        guard stillAtCapture(keyCount: keys.count), let witness else { return false }
+    /// Clicking the status-menu Undo may advance the pointer count. Keep the original editor and caret.
+    func revalidateAfterUndo() {
+        let current = RealInput.shared.stamp
+        guard valid, current.keys == capturedInput.keys, let witness,
+              pid == NSWorkspace.shared.frontmostApplication?.processIdentifier, witness.stillFocused() else { return }
         if case .element(let target) = witness {
             guard let selection, (try? target.selectedRange()) == selection,
-                  length == nil || (try? target.textLength()) == length else { return false }
+                  let length, (try? target.textLength()) == length else { return }
         }
-        guard let confirmation = witness.prepareInsertion(text: text) else { return false }
+        guard RealInput.shared.count == current.total else { return }
+        capturedInput = current
+    }
+
+    func insert(_ text: String, using paster: PasteService, settings: MacSettings) async -> Bool {
+        guard stillAtCapture(), let pid, let witness else { return false }
         let generation = self.generation
-        let owned = { @MainActor in
-            self.generation == generation && self.stillAtCapture(keyCount: keys.count) && confirmation.stillFocused()
+        let confirmation = witness.prepareInsertion(text: text)
+        if witness.isPassword && confirmation == nil { return false }
+        let canBegin = { @MainActor in
+            guard self.generation == generation, self.stillAtCapture(), witness.stillFocused() else { return false }
+            guard case .element(let target) = witness else { return true }
+            return (self.selection == nil || (try? target.selectedRange()) == self.selection)
+                && (self.length == nil || (try? target.textLength()) == self.length)
         }
-        let result = await paster.type(text, targetPID: pid, passwordField: witness.isPassword,
+        let owned = { @MainActor in
+            guard self.generation == generation, self.stillAtCapture() else { return false }
+            let focused = confirmation?.stillFocused() ?? witness.stillFocused()
+            return focused && self.stillAtCapture()
+        }
+        let started = ContinuousClock.now
+        let posted = await paster.insert(text, targetPID: pid, passwordField: witness.isPassword,
             restoreClipboard: settings.restoreClipboard,
             paced: settings.typewriter && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
-            realKeyDowns: { keys.count }, stillOwned: owned)
-        guard case .typed = result, await confirmation.verify() else { return false }
-        return owned()
+            canBegin: canBegin, stillOwned: owned)
+        Self.log.debug("Draft events posted: \(posted), elapsed: \(String(describing: started.duration(to: .now)), privacy: .public)")
+        if posted, let confirmation {
+            Task { @MainActor in
+                let verified = await confirmation.verify(whileOwned: owned)
+                Self.log.debug("Draft readback verified: \(verified)")
+            }
+        }
+        return posted
     }
 }

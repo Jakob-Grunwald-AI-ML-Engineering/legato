@@ -17,13 +17,11 @@ public struct ModifierFlags: OptionSet, Sendable, Hashable, Codable {
 extension ModifierFlags {
     /// Arrow keys and F1...F12 set the fn flag by themselves.
     public static func carriesImplicitFunction(keyCode: UInt16) -> Bool {
-        implicitFunctionKeys.contains(keyCode)
+        arrowKeys.contains(keyCode) || functionKeys.contains(keyCode)
     }
 
-    private static let implicitFunctionKeys: Set<UInt16> = [
-        123, 124, 125, 126, // arrows
-        122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, // F1...F12
-    ]
+    static let arrowKeys: Set<UInt16> = [123, 124, 125, 126]
+    static let functionKeys: Set<UInt16> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111]
 }
 
 /// A single physical modifier key, with side.
@@ -85,11 +83,19 @@ public struct KeyEvent: Sendable, Hashable {
     public var kind: Kind
     public var keyCode: UInt16
     public var flags: ModifierFlags
+    /// A flagsChanged event's physical side when the platform can supply it.
+    public var modifierIsDown: Bool?
 
-    public init(kind: Kind, keyCode: UInt16, flags: ModifierFlags) {
+    public init(kind: Kind, keyCode: UInt16, flags: ModifierFlags, modifierIsDown: Bool? = nil) {
         self.kind = kind
         self.keyCode = keyCode
         self.flags = flags
+        self.modifierIsDown = modifierIsDown
+    }
+
+    var changedModifier: (key: ModifierKey, isDown: Bool)? {
+        guard kind == .flagsChanged, let key = ModifierKey(keyCode: keyCode) else { return nil }
+        return (key, modifierIsDown ?? flags.contains(key.flag))
     }
 }
 
@@ -110,9 +116,8 @@ public enum HotkeySpec: Sendable, Hashable, Codable {
     /// Classifies an event relative to the trigger; nil when it is irrelevant.
     ///
     /// - Modifier trigger: a `flagsChanged` carrying its key code is pressed while its flag is
-    ///   set, released when it is clear. Any `keyDown`, or another modifier going down, is a
-    ///   chord key. (A flag shared with the other side's twin, e.g. both ⌘ held, cannot be told
-    ///   apart from the flag alone.)
+    ///   set on its physical side, released when it clears. Any `keyDown`, or another modifier
+    ///   going down, is a chord key.
     /// - Combo trigger: `keyDown` of the key with exactly the modifiers is pressed (auto-repeat
     ///   yields repeated presses, which the gesture ignores); `keyUp` of the key, or a required
     ///   modifier being lifted, is released; any other `keyDown` is a chord key.
@@ -121,13 +126,9 @@ public enum HotkeySpec: Sendable, Hashable, Codable {
         case .modifier(let key):
             switch event.kind {
             case .flagsChanged:
-                if event.keyCode == key.keyCode {
-                    return event.flags.contains(key.flag) ? .pressed : .released
-                }
-                if let other = ModifierKey(keyCode: event.keyCode), event.flags.contains(other.flag) {
-                    return .otherKeyDown
-                }
-                return nil
+                guard let changed = event.changedModifier else { return nil }
+                if changed.key == key { return changed.isDown ? .pressed : .released }
+                return changed.isDown ? .otherKeyDown : nil
             case .keyDown:
                 return .otherKeyDown
             case .keyUp:

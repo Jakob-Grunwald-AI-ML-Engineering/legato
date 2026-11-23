@@ -30,8 +30,13 @@ import LegatoKeyboardCore
     @ObservationIgnored public let pipeline: DictationPipeline
     public let instruction: InstructionSession
     public let composer: MacComposerDraft?
+    public var isActivityInteractive: Bool {
+        guard let composer, composer.dismissal == nil else { return false }
+        return isActive || !composer.isEmpty
+    }
+    public var canUndoDiscard: Bool { !discardingDraft && composer?.canUndoDiscard == true }
     @ObservationIgnored public var insertDraftText: @MainActor (String) async -> Bool = { _ in false }
-    @ObservationIgnored private var discardingDraft = false
+    private var discardingDraft = false
     @ObservationIgnored private var draftActionGeneration = 0
     public var speechMode: SpeechMode { speechRoute.speechMode }
     @ObservationIgnored private let speechRoute: DictationRouteSession
@@ -122,7 +127,6 @@ import LegatoKeyboardCore
     /// Starts dictating. False (with a `notice`) when it cannot.
     @discardableResult public func start() async -> Bool {
         guard composer?.isInserting != true, !discardingDraft else { return false }
-        if composer?.needsCopy == true { post("Copy or discard the retained draft to start another."); return false }
         #if DEBUG || LEGATO_INTERNAL
         if Self.offlineFixture { try? await beginDebugIfIdle(); return phase == .listening }
         #endif
@@ -269,7 +273,7 @@ import LegatoKeyboardCore
     /// Magic reuses an active microphone; starting Magic from idle opens a take of its own.
     public func startMagic() async -> Bool {
         if let composer {
-            guard !composer.isEmpty, !composer.isCorrecting, !composer.isInserting, !composer.needsCopy, !discardingDraft,
+            guard !composer.isEmpty, !composer.isCorrecting, composer.dismissal == nil,
                   pipeline.keepsTakes(), composer.onCut == nil else { return false }
         }
         guard speechMode != .instruction else { return true }
@@ -293,7 +297,7 @@ import LegatoKeyboardCore
     // MARK: Composer actions
 
     public func magicDraft() async {
-        guard let composer, !composer.isCorrecting, !composer.isInserting, !discardingDraft, !composer.needsCopy,
+        guard let composer, !composer.isCorrecting, composer.dismissal == nil,
               speechMode == .dictation, composer.onCut == nil, !composer.isEmpty, phase != .starting else { return }
         let generation = draftActionGeneration
         if let stopTask { await stopTask.value }
@@ -317,33 +321,42 @@ import LegatoKeyboardCore
 
     public func insertDraft() async {
         guard let composer, !composer.isEmpty, !composer.isCorrecting, !composer.isInserting, !discardingDraft,
-              !composer.needsCopy, speechMode == .dictation, phase != .starting else { return }
+              composer.dismissal == nil, speechMode == .dictation, phase != .starting else { return }
         draftActionGeneration += 1
+        composer.dismissal = .insert
         composer.isInserting = true
         defer { composer.isInserting = false }
         if let stopTask { await stopTask.value } else { await stop() }
         let text = composer.text
         guard !text.isEmpty else { return }
-        guard await insertDraftText(text) else {
-            composer.needsCopy = true
-            composer.message = "Insertion couldn't be confirmed. Check the field before pasting a copy."
+        do {
+            try await pipeline.recordDraft(id: composer.documentID, raw: composer.original, text: text)
+        } catch {
+            Self.log.error("mac.dictation.history.failed")
+            composer.message = "Couldn’t save to History. Try Insert again or discard the draft."
+            composer.dismissal = nil
             return
         }
-        await pipeline.recordDraft(id: composer.documentID, raw: composer.original, text: text)
+        _ = await insertDraftText(text)
         composer.clear()
     }
 
     public func discardDraft() async {
-        guard let composer, !composer.isInserting, !discardingDraft, phase != .starting else { return }
+        guard let composer, isActivityInteractive, phase != .starting else { return }
         discardingDraft = true
         defer { discardingDraft = false }
         draftActionGeneration += 1
-        instruction.reset()
-        if let stopTask { await stopTask.value } else { await stop() }
         composer.discard()
+        instruction.reset()
+        magicOwnsTake = false
+        await cancel()
+        composer.startUndoWindow()
     }
 
-    public func undoDiscard() { composer?.undo() }
+    public func undoDiscard() {
+        guard canUndoDiscard else { return }
+        composer?.undo()
+    }
 
     // MARK: Delivery
 
@@ -396,12 +409,12 @@ import LegatoKeyboardCore
     /// Debug bridge: a finalized line enters the route where a Soniox segment does (cleanup, field writing run for
     /// real). Without a running session this begins a microphone-free one, so acceptance needs no keys or speech.
     public func debugLine(_ text: String) async throws {
-        guard !discardingDraft, composer?.isInserting != true, composer?.needsCopy != true else { return }
+        guard !discardingDraft, composer?.isInserting != true else { return }
         try await beginDebugIfIdle()
         guard await engine.debugLine(text) else { throw DebugError.empty }
     }
     public func debugTail(_ text: String) async throws {
-        guard !discardingDraft, composer?.isInserting != true, composer?.needsCopy != true else { return }
+        guard !discardingDraft, composer?.isInserting != true else { return }
         try await beginDebugIfIdle()
         engine.debugTail(text)
     }

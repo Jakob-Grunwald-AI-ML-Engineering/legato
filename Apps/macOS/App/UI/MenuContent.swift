@@ -20,6 +20,10 @@ struct MenuContent: View {
             Button(controller.dictation.isActive ? "Stop dictation" : "Dictate into the composer") { controller.toggleDictation() }
                 .menuAction("menu.dictation") { controller.toggleDictation() }
                 .controlSize(.large)
+            if controller.dictation.canUndoDiscard {
+                Button("Undo Discard") { controller.undoDiscard() }
+                    .menuAction("menu.undoDiscard") { controller.undoDiscard() }
+            }
             HStack(spacing: 8) {
                 Button(controller.meetings.phase == .recording ? "Stop meeting" : "Start meeting") { controller.toggleMeeting() }
                     .controlSize(.large)

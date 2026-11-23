@@ -9,10 +9,22 @@ enum NotchIslandTokens {
     static let bottomRadius: CGFloat = 22
     static let detachedTopRadius: CGFloat = 20
     static let title = Font.system(size: 12, weight: .semibold)
-    static let body = Font.system(size: 14)
+    static let bodyPointSize: CGFloat = 14
+    static let body = Font.system(size: bodyPointSize)
     static let caption = Font.system(size: 11, weight: .medium)
     static let spring = Animation.spring(duration: 0.3, bounce: 0.12)
     static let closeDuration = 0.3
+    // Initial Mac panel tuning. Check the close in a native editor and on a second display.
+    static let departureDuration = 0.16
+    static let departureSpring = Animation.spring(duration: departureDuration, bounce: 0)
+    static let departureTravel: CGFloat = 36
+    static let panelWidth: CGFloat = 400
+    static let panelMaxHeight: CGFloat = 170
+    static let panelMinHeight: CGFloat = 92
+    static let panelChromeHeight: CGFloat = 64
+    static let panelHorizontalInset: CGFloat = 14
+    static let panelOuterInset: CGFloat = 8
+    static let caretGap: CGFloat = 6
 }
 
 /// Where an island sits: attached to the hardware notch (black to the screen top, shoulders flaring into the menu bar)

@@ -326,3 +326,36 @@ import Testing
         #expect(!HotkeySpec.modifier(.rightOption).conflicts(with: .combo(keyCode: 49, modifiers: [.option])))
     }
 }
+
+@Suite struct ActivityHotkeyCaptureTests {
+    @Test func consumedArrowDoesNotReachTheHostWhenHeldThroughDismissal() {
+        var capture = ActivityHotkeyCapture()
+        let down = KeyEvent(kind: .keyDown, keyCode: 124, flags: .function)
+        let up = KeyEvent(kind: .keyUp, keyCode: 124, flags: .function)
+        #expect(capture.route(down, matches: true, isRepeat: false) == .capture)
+        #expect(capture.route(down, matches: false, isRepeat: true) == .suppressRepeat)
+        #expect(capture.route(up, matches: false, isRepeat: false) == .capture)
+        #expect(capture.route(down, matches: false, isRepeat: false) == .pass)
+    }
+
+    @Test func anArrowAlreadyHeldByTheHostStaysWithTheHostWhenActivityOpens() {
+        var capture = ActivityHotkeyCapture()
+        let down = KeyEvent(kind: .keyDown, keyCode: 124, flags: .function)
+        let up = KeyEvent(kind: .keyUp, keyCode: 124, flags: .function)
+        #expect(capture.route(down, matches: false, isRepeat: false) == .pass)
+        #expect(capture.route(down, matches: true, isRepeat: true) == .pass)
+        #expect(capture.route(up, matches: true, isRepeat: false) == .pass)
+    }
+
+    @Test func physicalModifierReleaseStaysOwnedWhileTheOppositeSideIsStillDown() {
+        var capture = ActivityHotkeyCapture()
+        let rightCommand = ModifierKey.rightCommand.keyCode
+        let down = KeyEvent(kind: .flagsChanged, keyCode: rightCommand, flags: .command, modifierIsDown: true)
+        let up = KeyEvent(kind: .flagsChanged, keyCode: rightCommand, flags: .command, modifierIsDown: false)
+        #expect(capture.route(down, matches: true, isRepeat: false) == .capture)
+        #expect(capture.modifiers == [.rightCommand])
+        #expect(capture.route(up, matches: false, isRepeat: false) == .capture)
+        #expect(capture.modifiers.isEmpty)
+        #expect(HotkeySpec.modifier(.rightCommand).triggerEvent(for: up) == .released)
+    }
+}

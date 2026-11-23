@@ -82,4 +82,9 @@ import Testing
         #expect(ChunkEntrance.typewriterPlan("a", insertingWhole: false).pieces == ["a"])
         #expect(ChunkEntrance.typewriterPlan("", insertingWhole: false).pieces.isEmpty)
     }
+
+    @Test func aStagedBurstFitsOnlyWhenItsPausesAndWritesFitTogether() {
+        #expect(ChunkEntrance.stagedBurstFits(characterCount: 10, estimatedWriteMs: 3))
+        #expect(!ChunkEntrance.stagedBurstFits(characterCount: 11, estimatedWriteMs: 3))
+    }
 }

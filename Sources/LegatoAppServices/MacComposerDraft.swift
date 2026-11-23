@@ -3,7 +3,7 @@ import Observation
 import LegatoAgent
 import LegatoKeyboardCore
 
-/// A desktop draft owns its text until a confirmed Insert or an explicit Discard. A correction
+/// A desktop draft owns its text until Insert hands it to History and delivery, or Discard clears it. A correction
 /// replaces only the draft captured when Magic was pressed. Speech arriving afterwards appends.
 @MainActor @Observable public final class MacComposerDraft: DictationRouteSink {
     private var base = ""
@@ -14,7 +14,14 @@ import LegatoKeyboardCore
     public var isEmpty: Bool { text.isEmpty }
     public private(set) var isCorrecting = false
     public internal(set) var isInserting = false
-    public internal(set) var needsCopy = false
+    public enum Dismissal: Equatable { case insert, discard }
+    public internal(set) var dismissal: Dismissal?
+    public struct VisualRevision {
+        public let id: Int
+        public let source: String
+        public let result: String
+    }
+    public private(set) var visualRevision: VisualRevision?
     public internal(set) var message: String?
     private var discarded: String?
     public var canUndoDiscard: Bool { discarded != nil }
@@ -27,7 +34,7 @@ import LegatoKeyboardCore
     @ObservationIgnored var needsFreshBoundary = false
     @ObservationIgnored var recentContext: () -> String = { "" }
     public var backgroundText: String { recentContext() }
-    @ObservationIgnored var onCut: (() -> Void)?
+    @ObservationIgnored var onCut: ((Bool) -> Void)?
     @ObservationIgnored private let defaults: UserDefaults
     public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
@@ -39,7 +46,7 @@ import LegatoKeyboardCore
     }
     public func tailChanged(_ text: String) { if acceptingSpeech { tail = text } }
     public func boundary(_ reason: String) {
-        if reason == "finalize" || reason == "finished" { onCut?() }
+        if reason == "finalize" || reason == "finished" { onCut?(true) }
     }
     /// A send, its acknowledgement and its timeout can finish in any order, even during a subsequent cut.
     func finalizeForMagic(request: @escaping @MainActor () async -> Bool) async -> Bool {
@@ -52,7 +59,7 @@ import LegatoKeyboardCore
                 onCut = nil
                 continuation.resume(returning: success)
             }
-            onCut = { finish(true) }
+            onCut = finish
             Task { if !(await request()) { finish(false) } }
             Task {
                 try? await Task.sleep(for: DictationPipeline.sendCutWait)
@@ -69,7 +76,7 @@ import LegatoKeyboardCore
         tail = ""
     }
     func correct(using pipeline: DictationPipeline, instructions: String?) {
-        guard !isCorrecting, !isInserting, !needsCopy else { return }
+        guard !isCorrecting, dismissal == nil else { return }
         guard pipeline.keepsTakes() else { message = "Magic is unavailable in a password field."; return }
         let source = LiveSegment.joined([base, additions])
         guard !source.isEmpty else { return }
@@ -87,6 +94,11 @@ import LegatoKeyboardCore
                     preview = visible
                 }
                 guard revision == generation else { return }
+                let originalText = LiveSegment.joined([source, additions, tail])
+                let rewrittenText = LiveSegment.joined([result, additions, tail])
+                if originalText != rewrittenText {
+                    visualRevision = .init(id: generation, source: originalText, result: rewrittenText)
+                }
                 base = result
             } catch {
                 guard revision == generation else { return }
@@ -103,27 +115,31 @@ import LegatoKeyboardCore
         documentID = UUID()
         original = ""
         message = nil
-        needsCopy = false
+        dismissal = nil
+        visualRevision = nil
     }
     private func expireUndo() {
         expiry?.cancel()
         expiry = nil
         discarded = nil
         discardedOriginal = ""
-        discardedNeedsCopy = false
     }
     func settleCorrection() async { await correction?.value }
-    private var discardedNeedsCopy = false
     private var discardedOriginal = ""
     func discard() {
         let saved = LiveSegment.joined([base, additions, tail])
-        guard !saved.isEmpty else { return }
-        let raw = original
-        let retained = needsCopy
+        let raw = LiveSegment.joined([original, tail])
+        dismissal = .discard
+        acceptingSpeech = false
         clear()
-        discardedNeedsCopy = retained
+        guard !saved.isEmpty else { return }
         discarded = saved
         discardedOriginal = raw
+    }
+
+    /// The menu gets its whole undo window after capture has been released.
+    func startUndoWindow() {
+        guard canUndoDiscard else { return }
         expiry = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(DictationPipeline.discardUndoSeconds)) } catch { return }
             self?.expireUndo()
@@ -133,17 +149,18 @@ import LegatoKeyboardCore
         guard let discarded, isEmpty, !isInserting else { return }
         base = discarded
         original = discardedOriginal
-        needsCopy = discardedNeedsCopy
-        if needsCopy { message = "Insertion couldn't be confirmed. Check the field before pasting a copy." }
+        dismissal = nil
         expireUndo()
     }
     func clear() {
         expireUndo()
+        onCut?(false)
         revision += 1
         correction?.cancel()
         correction = nil
         preview = nil
+        visualRevision = nil
         base = ""; additions = ""; tail = ""; original = ""; discardedOriginal = ""
-        isCorrecting = false; needsCopy = false; message = nil
+        isCorrecting = false; message = nil
     }
 }

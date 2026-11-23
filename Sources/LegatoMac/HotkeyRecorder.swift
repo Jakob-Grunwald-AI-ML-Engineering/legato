@@ -15,15 +15,17 @@ public struct HotkeyRecorderLogic: Sendable {
     }
 
     private static let counted: ModifierFlags = [.shift, .control, .option, .command, .function]
-    /// F1...F12 may be used bare.
-    private static let functionKeys: Set<UInt16> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111]
 
     /// Physical modifier keys currently down, from their own flagsChanged events.
     private var down: Set<ModifierKey> = []
     private var candidate: ModifierKey?
     private var spoiled = false
 
-    public init() {}
+    private let allowsBareArrows: Bool
+
+    public init(allowsBareArrows: Bool = false) {
+        self.allowsBareArrows = allowsBareArrows
+    }
 
     public mutating func feed(_ event: KeyEvent) -> Outcome {
         var held = event.flags.intersection(Self.counted)
@@ -36,7 +38,8 @@ public struct HotkeyRecorderLogic: Sendable {
                 held.remove(.function)
             }
             if event.keyCode == 53, held.isEmpty { return .cancelled }
-            guard !held.isEmpty || Self.functionKeys.contains(event.keyCode) else { return .none }
+            guard !held.isEmpty || ModifierFlags.functionKeys.contains(event.keyCode)
+                    || (allowsBareArrows && ModifierFlags.arrowKeys.contains(event.keyCode)) else { return .none }
             return .captured(.combo(keyCode: event.keyCode, modifiers: held))
         case .flagsChanged:
             guard let key = ModifierKey(keyCode: event.keyCode) else { return .none }

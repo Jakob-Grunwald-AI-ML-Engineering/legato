@@ -135,9 +135,11 @@ import ApplicationServices
         harness.start()
     }
     private static func composerState() -> [String: Any] {
-        guard let composer = MacAppController.shared.dictation.composer else { return [:] }
+        let session = MacAppController.shared.dictation
+        guard let composer = session.composer else { return [:] }
         return ["text": composer.text, "correcting": composer.isCorrecting, "inserting": composer.isInserting,
-                "needsCopy": composer.needsCopy, "canUndoDiscard": composer.canUndoDiscard, "message": composer.message ?? ""]
+                "interactive": session.isActivityInteractive, "dismissal": composer.dismissal.map { String(describing: $0) } ?? "",
+                "canUndoDiscard": composer.canUndoDiscard, "message": composer.message ?? ""]
     }
     static func emit(id: String, event: String, _ fields: [String: Any] = [:]) { harness.emit(id: id, event: event, fields) }
     enum Usage: Error { case invalid }
