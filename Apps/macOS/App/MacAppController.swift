@@ -162,8 +162,8 @@ import OSLog
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             // The tap counts host clicks synchronously and excludes the activity's buttons.
             Task { @MainActor in
-                guard let self, !tap.isEnabled else { return }
-                destination.invalidate()
+                guard let self, !self.tap.isEnabled else { return }
+                self.destination.invalidate()
             }
         }
         // Capture inside the active Settings window and consume the event before AppKit
