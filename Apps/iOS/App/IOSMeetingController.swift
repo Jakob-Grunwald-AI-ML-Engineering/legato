@@ -101,6 +101,7 @@ final class IOSMeetingController {
     @discardableResult
     func start(fromIntent: Bool = false, handoff: (() -> Activity<DictationAttributes>?)? = nil) async -> AppController.ToggleOutcome {
         let inForeground = UIApplication.shared.applicationState == .active
+        let backgroundShortcut = fromIntent && !inForeground && handoff == nil
         guard ready, !isActive, fromIntent || inForeground else { return .busy }
         guard !VoiceEnrollmentController.shared.isBusy else {
             return refuseStart("Finish or cancel voice profile setup first.")
@@ -134,6 +135,9 @@ final class IOSMeetingController {
                 activity = try Activity.request(attributes: MeetingAttributes(startedAt: Date()), content: content)
             }
         } catch {
+            if backgroundShortcut, (error as? ActivityAuthorizationError) == .visibility {
+                return .needsForeground(.backgroundStartRefused)
+            }
             if fromIntent { return refuseStart(error.localizedDescription) }
         }
 
@@ -151,6 +155,7 @@ final class IOSMeetingController {
             await updateActivity(.starting)
         }
         await keyboard.suspendForMeeting()
+        var activatingAudio = false
         do {
             try Task.checkCancellation()
             guard !stopRequested else { throw CancellationError() }
@@ -164,13 +169,17 @@ final class IOSMeetingController {
                 try Task.checkCancellation()
                 guard !stopRequested else { throw CancellationError() }
                 let audio = AVAudioSession.sharedInstance()
+                activatingAudio = true
                 // A handed-off session already has a recording category. Reconfiguring an
                 // active AVAudioSession from the background can be refused by iOS.
                 if handedOffActivity == nil {
-                    try audio.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
+                    var options: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .allowBluetoothHFP]
+                    if backgroundShortcut { options.insert(.mixWithOthers) }
+                    try audio.setCategory(.playAndRecord, mode: .default, options: options)
                 }
                 try audio.setActive(true)
                 audioWasActivated = true
+                activatingAudio = false
             }
             guard !stopRequested else { throw CancellationError() }
             input = mic as? AutomaticInputSource
@@ -203,6 +212,12 @@ final class IOSMeetingController {
         } catch {
             await finishCapture(interrupted: interruptedStart)
             if error is CancellationError { return .stopped(nil) }
+            if backgroundShortcut, activatingAudio || (error as? MicSourceError) == .invalidInputFormat {
+                #if LEGATO_INTERNAL
+                AudioDiagnostics.log("meeting.shortcut.background-refused", ["error": AudioDiagnostics.describe(error)])
+                #endif
+                return .needsForeground(.backgroundStartRefused)
+            }
             return refuseStart((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
         }
     }

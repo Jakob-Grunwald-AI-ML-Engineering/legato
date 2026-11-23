@@ -140,9 +140,25 @@ final class AppController {
             catch { return .failed(error.localizedDescription) }
         }
         if ShortcutActionSetting.action(in: AppGroup.defaults) == .meeting {
-            if meetings.isActive { await meetings.stop(); return .stopped(nil) }
+            if meetings.isActive {
+                guard afterForegroundHop == nil else { return .busy }
+                await meetings.stop()
+                return .stopped(nil)
+            }
+            #if LEGATO_INTERNAL
+            AudioDiagnostics.log("meeting.shortcut.begin", ["applicationState": UIApplication.shared.applicationState.rawValue])
+            #endif
             await meetings.prepare()
-            return await meetings.start(fromIntent: true)
+            let outcome: ToggleOutcome
+            if let holdID = holdActivity.meetingHandoffID {
+                outcome = await meetings.start(fromIntent: true, handoff: { self.holdActivity.transferToMeeting(holdID: holdID) })
+            } else {
+                outcome = await meetings.start(fromIntent: true)
+            }
+            #if LEGATO_INTERNAL
+            AudioDiagnostics.log("meeting.shortcut.end", ["outcome": String(describing: outcome)])
+            #endif
+            return outcome
         }
         guard !meetings.isActive else { return .failed("Stop the meeting before dictating.") }
         if keyboardSession.route != .idle { await keyboardSession.closeGate(); return .stopped(nil) }
@@ -158,8 +174,7 @@ final class AppController {
     }
     func startMeetingFromActivity(holdID: String?) async throws {
         await meetings.prepare()
-        guard holdActivity.ownsHold(holdID), microphone.isArmed, !microphone.microphoneRecovering,
-              keyboardSession.route == .idle, !meetings.isActive else { return }
+        guard let holdID, holdActivity.meetingHandoffID == holdID, !meetings.isActive else { return }
         switch await meetings.start(fromIntent: true, handoff: { self.holdActivity.transferToMeeting(holdID: holdID) }) {
         case .failed(let message):
             throw NSError(domain: "Meeting", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
