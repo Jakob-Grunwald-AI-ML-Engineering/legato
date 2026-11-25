@@ -71,21 +71,29 @@ public enum MagicPreviewEffects {
     public static let poofSeconds = 0.22
     public static let entranceSeconds = 0.15
     public static let shimmerPeriod = 3.2
+    private static let poofBlurRadius: CGFloat = 4
+    public static var verticalEffectReach: CGFloat { lift + poofBlurRadius }
 
     public static func marked<Attribute: TextAttribute & Equatable>(_ text: String, role: (Int) -> Attribute?) -> Text {
         let body = Array(text)
         let roles = body.indices.map(role)
-        var result = Text("")
+        var pieces: [Text] = []
         var start = 0
         while start < body.count {
             var end = start + 1
             while end < body.count, roles[end] == roles[start] { end += 1 }
             var piece = Text(String(body[start..<end]))
             if let role = roles[start] { piece = piece.customAttribute(role) }
-            result = Text("\(result)\(piece)")
+            pieces.append(piece)
             start = end
         }
-        return result
+        // A balanced tree keeps SwiftUI's layout and traversal shallow even if roles alternate across a long draft.
+        func join(_ runs: ArraySlice<Text>) -> Text {
+            if runs.count < 2 { return runs.first ?? Text("") }
+            let middle = runs.index(runs.startIndex, offsetBy: runs.count / 2)
+            return Text("\(join(runs[..<middle]))\(join(runs[middle...]))")
+        }
+        return join(pieces[...])
     }
 
     public static func drawPoof(_ run: Text.Layout.Run, progress: Double, in context: GraphicsContext) {
@@ -93,7 +101,7 @@ public enum MagicPreviewEffects {
         var copy = context
         copy.translateBy(x: 0, y: -lift * CGFloat(progress))
         copy.opacity = 1 - progress
-        copy.addFilter(.blur(radius: 4 * progress))
+        copy.addFilter(.blur(radius: poofBlurRadius * progress))
         copy.draw(run)
     }
 
@@ -115,15 +123,19 @@ public enum MagicPreviewEffects {
         copy.draw(glyph)
     }
 
-    public static func drawShimmer(_ glyphs: [Text.Layout.RunSlice], in layout: Text.Layout, now: Date, context: GraphicsContext) {
+    public static func drawShimmer(_ glyphs: [Text.Layout.RunSlice], in layout: Text.Layout, now: Date, context: GraphicsContext,
+                                   viewport: CGRect? = nil) {
         guard !glyphs.isEmpty else { return }
         let bounds = layout.reduce(CGRect.null) { $0.union($1.typographicBounds.rect) }
+        let fillBounds = viewport.map { bounds.intersection($0) } ?? bounds
+        guard !fillBounds.isEmpty else { return }
         let phase = now.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: shimmerPeriod) / shimmerPeriod
         var overlay = context
         overlay.opacity = 0.6
+        if let viewport { overlay.clip(to: Path(viewport)) }
         overlay.clipToLayer { mask in for glyph in glyphs { mask.draw(glyph) } }
         let width = max(bounds.width, 1)
-        overlay.fill(Path(bounds), with: .linearGradient(Gradient(colors: MagicGradient.colors),
+        overlay.fill(Path(fillBounds), with: .linearGradient(Gradient(colors: MagicGradient.colors),
                                                          startPoint: CGPoint(x: bounds.minX - width + 2 * width * phase, y: bounds.midY),
                                                          endPoint: CGPoint(x: bounds.minX + 2 * width * phase, y: bounds.midY)))
     }

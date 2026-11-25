@@ -95,6 +95,7 @@ final class AppController {
         keyboardHost?.attach(microphone, keyboardSession: keyboardSession, dictation: dictation)
         keyboardHost?.link.onRequest = { [weak self] request in
             guard let self else { return false }
+            self.keyboardHost?.recordPreviewRequest(request, run: self.dictation.liveRun)
             guard !self.meetings.isActive, !self.meetings.fixtureMode else { return false }
             switch request.command {
             // With the keyboard on screen a tap only opens the pre-warmed gate on its surface's route.
@@ -103,7 +104,8 @@ final class AppController {
             case .start: await self.readyMicrophone()
             case .stop: await self.keyboardSession.closeGate()
             case .send: await self.keyboardSession.sendNow()
-            case .editPreview: await self.keyboardSession.sendNow(editPreview: true, preview: request.preview)
+            case .editPreview:
+                await self.keyboardSession.sendNow(editPreview: true, preview: request.preview, operationID: UUID(uuidString: request.id))
             case .beginPreviewHold, .releasePreviewHold, .cancelPreviewHold:
                 self.keyboardSession.handlePreviewHold(request)
             // The preview's swipe right: the same, with the words as spoken (no cleanup).

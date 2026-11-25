@@ -79,21 +79,28 @@ private actor LiveHistory: HistoryStore {
         let cleaner = FnCleaner { $0.sequence == 0 ? firstDraft : revisedDraft }
         let pipeline = DictationPipeline(history: LiveHistory(), cleaner: cleaner, sendMode: { .live },
                                         supportsLive: true, liveSend: { .manual }, stagedLive: true)
+        let firstOperation = UUID(), secondOperation = UUID()
         pipeline.beginTake()
         await pipeline.receive(routeLine(0, "um let's meet Tuesday at ten"))
-        await pipeline.sendNow(editPreview: true)
+        await pipeline.sendNow(editPreview: true, operationID: firstOperation)
         try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
+        #expect(pipeline.liveRun?.snapshot.previewDiagnosticRevision()?.operationID == firstOperation)
 
         let runID = try #require(pipeline.liveRun?.runID)
         let anchor = KeyboardRequest.PreviewAnchor(runID: runID, unitID: 0)
         await pipeline.receive(routeLine(1, "Actually make that Wednesday."))
-        await pipeline.sendNow(editPreview: true, preview: anchor)
+        await pipeline.sendNow(editPreview: true, preview: anchor, operationID: secondOperation)
         try await until { pipeline.liveRun?.snapshot.segments.first?.text == revisedDraft }
 
         let input = try #require(cleaner.inputs.withLock { $0.last })
         #expect(input.text == firstDraft + " Actually make that Wednesday.")
         #expect(input.dictation?.previousLines == [])
         #expect(pipeline.liveRun?.snapshot.segments.map(\.text) == [revisedDraft])
+        let revision = try #require(pipeline.liveRun?.snapshot.previewDiagnosticRevision())
+        #expect(revision.operationID == secondOperation)
+        #expect(revision.phase == .ready)
+        #expect(revision.inputCharacters == input.text.count)
+        #expect(revision.resultCharacters == revisedDraft.count)
     }
 
     @Test func heldInstructionsCanReviseAnExistingPreviewWithoutMoreDraftSpeech() async throws {

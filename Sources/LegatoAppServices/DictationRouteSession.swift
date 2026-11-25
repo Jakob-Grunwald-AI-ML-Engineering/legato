@@ -87,9 +87,9 @@ import LegatoSoniox
     var isPaused: Bool { pipeline?.isPaused ?? false }
 
     /// The user's send of a staged take: the words so far go to the field now (`DictationPipeline.sendNow`). Dictation only.
-    func sendNow(editPreview: Bool = false, preview: KeyboardRequest.PreviewAnchor? = nil) async {
+    func sendNow(editPreview: Bool = false, preview: KeyboardRequest.PreviewAnchor? = nil, operationID: UUID? = nil) async {
         guard modeSink.target == .dictation, previewCapture == nil else { return }
-        await pipeline?.sendNow(editPreview: editPreview, preview: preview)
+        await pipeline?.sendNow(editPreview: editPreview, preview: preview, operationID: operationID)
     }
 
     /// The user's raw send (`DictationPipeline.sendRawNow`): the same, with no cleanup. Dictation only.

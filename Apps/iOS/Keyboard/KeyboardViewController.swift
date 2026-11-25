@@ -105,6 +105,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     override func viewWillDisappear(_ animated: Bool) {
+        controller?.recordPreviewLifecycle(.willDisappear)
         handoffVisible = false
         super.viewWillDisappear(animated)
     }
@@ -124,6 +125,7 @@ final class KeyboardViewController: UIInputViewController {
                   AutoFillContentType.semanticName(for: controller.document.textContentType) ?? "none",
                   controller.document.keyboardType.rawValue, controller.document.isSecureTextEntry ? 1 : 0)
             #endif
+            controller.recordPreviewLifecycle(.autoFillSwitch)
             advanceToNextInputMode()
         }
     }
@@ -137,6 +139,11 @@ final class KeyboardViewController: UIInputViewController {
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         controller?.disappeared()
+    }
+
+    override func didReceiveMemoryWarning() {
+        controller?.recordPreviewLifecycle(.memoryWarning)
+        super.didReceiveMemoryWarning()
     }
 
     override func viewWillLayoutSubviews() {

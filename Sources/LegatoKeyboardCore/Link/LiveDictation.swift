@@ -28,15 +28,19 @@ public struct LiveSegment: Codable, Equatable, Sendable {
     public var editPreview: Bool?
     /// What the person saw before a rolling draft was composed again.
     public var previewSource: String?
+    /// The tap request or spoken-instruction hold that composed this unit, for matching preview diagnostics.
+    public var previewOperationID: UUID?
     /// A swipe explicitly released this composed unit for insertion.
     public var previewReleased: Bool?
     public init(id: Int, text: String, cleaned: Bool = false, final: Bool, unit: Int? = nil, raw: String? = nil, ready: Bool? = nil,
                 closed: Bool? = nil, discarded: Bool? = nil, editPreview: Bool? = nil,
-                previewSource: String? = nil, previewReleased: Bool? = nil) {
+                previewSource: String? = nil, previewReleased: Bool? = nil, previewOperationID: UUID? = nil) {
         self.id = id; self.text = text; self.cleaned = cleaned; self.final = final; self.unit = unit; self.raw = raw; self.ready = ready
         self.closed = closed; self.discarded = discarded; self.editPreview = editPreview
-        self.previewSource = previewSource; self.previewReleased = previewReleased
+        self.previewSource = previewSource; self.previewReleased = previewReleased; self.previewOperationID = previewOperationID
     }
+
+    var previewOriginal: String { previewSource ?? raw ?? text }
 
     /// Pieces of a take's text joined as a reader expects: trimmed, a space between them, none before closing
     /// punctuation or a line break and none after an opening mark ("from" and ", like" join as "from, like").
@@ -283,8 +287,11 @@ public struct LiveDictationRun: Sendable, Equatable {
     /// Closed units (by index) the person discarded and whose undo window is open: kept as raw text, never cleaned or ready.
     private var discarded: Set<Int> = []
     /// First segment ids, which stay stable if a unit elsewhere in the run splits.
-    private var previewStarts: Set<Int> = []
-    private var previewSources: [Int: String] = [:]
+    private struct PreviewComposition: Sendable, Equatable {
+        let source: String?
+        let operationID: UUID?
+    }
+    private var previewCompositions: [Int: PreviewComposition] = [:]
     private var releasedPreviews: Set<Int> = []
     public var hasDiscarded: Bool { !discarded.isEmpty }
 
@@ -337,12 +344,13 @@ public struct LiveDictationRun: Sendable, Equatable {
     private var stagedSnapshot: LiveDictationSnapshot {
         var segments = units.indices.map { index in
             let id = units[index].lowerBound
-            let editing = previewStarts.contains(id)
+            let preview = previewCompositions[id]
+            let editing = preview != nil
             return LiveSegment(id: id, text: discarded.contains(index) ? rawText(index) : shownText(index), cleaned: cleaned[index] != nil,
                                final: true, raw: editing ? rawText(index) : nil, ready: ready.contains(index),
                                closed: !(openUnit && index == units.count - 1), discarded: discarded.contains(index) ? true : nil,
-                               editPreview: editing ? true : nil, previewSource: previewSources[id],
-                               previewReleased: releasedPreviews.contains(id) ? true : nil)
+                               editPreview: editing ? true : nil, previewSource: preview?.source,
+                               previewReleased: releasedPreviews.contains(id) ? true : nil, previewOperationID: preview?.operationID)
         }
         let speaking = LiveSegment.joined(open + [head])
         if !speaking.isEmpty { segments.append(.init(id: finals.count, text: speaking, final: false)) }
@@ -392,26 +400,29 @@ public struct LiveDictationRun: Sendable, Equatable {
     }
 
     @discardableResult
-    public mutating func markForPreview(key: Int) -> Bool {
-        guard staged, let unit = unitIndex(ofKey: key), previewStarts.insert(units[unit].lowerBound).inserted else { return false }
+    public mutating func markForPreview(key: Int, operationID: UUID? = nil) -> Bool {
+        guard staged, let unit = unitIndex(ofKey: key) else { return false }
+        let id = units[unit].lowerBound
+        guard previewCompositions[id] == nil else { return false }
+        previewCompositions[id] = PreviewComposition(source: nil, operationID: operationID)
         version += 1
         return true
     }
 
     public func isMarkedForPreview(key: Int) -> Bool {
-        unitIndex(ofKey: key).map { previewStarts.contains(units[$0].lowerBound) } ?? false
+        unitIndex(ofKey: key).map { previewCompositions[units[$0].lowerBound] != nil } ?? false
     }
 
     public func hasPendingPreview(after handledThrough: Int?) -> Bool {
-        previewStarts.contains { $0 > (handledThrough ?? -1) && !releasedPreviews.contains($0) }
+        previewCompositions.keys.contains { $0 > (handledThrough ?? -1) && !releasedPreviews.contains($0) }
     }
 
     /// Replaces the draft and the finalized speech after it with one unit. The original ASR segments
     /// remain intact for History, and speech arriving after this cut starts a new unit.
     public mutating func extendPreview(_ anchor: KeyboardRequest.PreviewAnchor, release: Bool,
-                                       allowsUnchangedSource: Bool = false) -> (key: Int, text: String)? {
+                                       allowsUnchangedSource: Bool = false, operationID: UUID? = nil) -> (key: Int, text: String)? {
         let id = anchor.unitID
-        guard staged, anchor.runID == runID, previewStarts.contains(id), !releasedPreviews.contains(id),
+        guard staged, anchor.runID == runID, let previous = previewCompositions[id], !releasedPreviews.contains(id),
               let first = units.firstIndex(where: { $0.lowerBound == id }), ready.contains(first),
               let last = units.indices.last, release || allowsUnchangedSource || first < last,
               let key = closingKey(last) else { return nil }
@@ -423,9 +434,8 @@ public struct LiveDictationRun: Sendable, Equatable {
         cleaned[first] = source
         ready = ready.filter { $0 < first }
         discarded = discarded.filter { $0 < first }
-        previewStarts = previewStarts.filter { $0 <= id }
-        previewSources = previewSources.filter { $0.key < id }
-        previewSources[id] = source
+        previewCompositions = previewCompositions.filter { $0.key < id }
+        previewCompositions[id] = PreviewComposition(source: source, operationID: release ? previous.operationID : operationID)
         if release {
             ready.insert(first)
             releasedPreviews.insert(id)

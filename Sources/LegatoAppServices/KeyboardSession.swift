@@ -300,9 +300,9 @@ import LegatoVocabulary
 
     /// The keyboard's send (a tap on the preview): a staged take sends the words so far to the field now and keeps listening.
     /// Ignored without a take running; it needs no gate change, so it works from the background like Stop.
-    public func sendNow(editPreview: Bool = false, preview: KeyboardRequest.PreviewAnchor? = nil) async {
+    public func sendNow(editPreview: Bool = false, preview: KeyboardRequest.PreviewAnchor? = nil, operationID: UUID? = nil) async {
         guard isOpen, canSend else { return }
-        await speechRoute.sendNow(editPreview: editPreview, preview: preview)
+        await speechRoute.sendNow(editPreview: editPreview, preview: preview, operationID: operationID)
     }
 
     public func handlePreviewHold(_ request: KeyboardRequest) {
