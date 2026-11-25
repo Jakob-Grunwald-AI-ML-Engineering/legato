@@ -1,4 +1,5 @@
 import AppKit
+import LegatoComposerUI
 import SwiftUI
 
 @main

@@ -35,7 +35,6 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
     private let languages: @Sendable () -> [String]
     private let spellChecker: any SpellChecking
     private let tagger: any EntityTagging
-    private let halfLife: TimeInterval
     private let now: @Sendable () -> Date
     private let queue = Mutex(Queue())
 
@@ -58,12 +57,12 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
         now: @escaping @Sendable () -> Date = { Date() }, pairsFileURL: URL? = nil
     ) {
         store = VocabularyStore(fileURL: fileURL)
+        requestVocabulary = RequestVocabulary(fileURL: fileURL, languages: languages, spellChecker: spellChecker, halfLife: halfLife)
         self.pairsFileURL = pairsFileURL
         pairs = pairsFileURL.map { WordPairStore(fileURL: $0, languages: languages()) }
         self.languages = languages
         self.spellChecker = spellChecker
         self.tagger = tagger
-        self.halfLife = halfLife
         self.now = now
     }
 
@@ -83,13 +82,12 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
         VocabularyLearner(store: store, spellChecker: spellChecker, tagger: tagger, languages: languages(), now: now)
     }
 
-    private var selector: HintSelector { HintSelector(languages: languages(), halfLife: halfLife) }
+    private let requestVocabulary: RequestVocabulary
 
     // MARK: hints
 
     public func hints(for sink: HintSink, limit: Int) async -> [VocabularyHint] {
-        guard let snapshot = try? await store.snapshot() else { return [] }
-        return selector.hints(from: snapshot, for: Self.sink(sink), limit: limit)
+        await requestVocabulary.hints(for: Self.sink(sink), limit: limit)
             .map { VocabularyHint(text: $0.text, spellings: $0.spellings) }
     }
 
@@ -97,8 +95,7 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
     /// ones this text seems to mention. A fuzzy hit on an ordinary word is left out (see
     /// ``HintSelector/cleanupTerms(for:from:spellChecker:limit:now:)``). Empty when the vocabulary can't be read.
     public func cleanupTerms(for text: String) async -> [String] {
-        guard let snapshot = try? await store.snapshot() else { return [] }
-        return await selector.cleanupTerms(for: text, from: snapshot, spellChecker: spellChecker)
+        await requestVocabulary.cleanup(for: text).vocabulary
     }
 
     private static func sink(_ sink: HintSink) -> VocabularyHintSink {
@@ -111,7 +108,7 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
     }
 
     public func sonioxTerms() async -> [String] {
-        await hints(for: .soniox, limit: 100).map(\.text)
+        await requestVocabulary.sonioxTerms()
     }
 
     // MARK: learning

@@ -61,7 +61,7 @@ public final class MeetingServices {
     @ObservationIgnored private let sonioxKey: @Sendable () -> String
     @ObservationIgnored private let makeClaude: @Sendable () -> any LLMBackend
     @ObservationIgnored private let makeSocket: @Sendable () -> any SonioxSocket
-    @ObservationIgnored private let vocabularyURL: URL?
+    @ObservationIgnored private let requestVocabulary: RequestVocabulary?
     @ObservationIgnored private let personalPrompt: @Sendable () -> String
     @ObservationIgnored private let timing: SonioxMeetingEngine.Timing
     @ObservationIgnored private var starting = false
@@ -83,7 +83,7 @@ public final class MeetingServices {
         self.settings = settings
         self.sonioxKey = sonioxKey
         self.makeClaude = { claudeBackend ?? ClaudeBackend(keyStore: claudeKeys) }
-        self.vocabularyURL = vocabularyURL
+        self.requestVocabulary = vocabularyURL.map { RequestVocabulary(fileURL: $0) }
         self.personalPrompt = personalPrompt
         self.makeSocket = makeSocket
         self.timing = timing
@@ -395,7 +395,6 @@ public final class MeetingServices {
     }
 
     private func vocabularyTerms() async -> [String] {
-        guard let vocabularyURL else { return [] }
-        return (try? await VocabularyStore(fileURL: vocabularyURL).snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? []
+        await requestVocabulary?.sonioxTerms() ?? []
     }
 }
