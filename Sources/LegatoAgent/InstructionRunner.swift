@@ -334,7 +334,7 @@ public struct InstructionRunner: Sendable {
     public func run(instruction: String, context: InstructionContext, read: Reader) async throws -> InstructionOutcome {
         guard !context.isEmpty else { throw InstructionFailure.noText }
         let model = model()
-        let system = Self.system(personal: personalPrompt(), vocabulary: await vocabulary()) + "\n" + CleanupPersonalization.guidance
+        let baseSystem = Self.system(personal: personalPrompt(), vocabulary: await vocabulary())
         var context = context
         var reads = 0
         var reasked = false
@@ -344,10 +344,16 @@ public struct InstructionRunner: Sendable {
             for _ in 0...Self.maxReads {
                 try Task.checkCancellation()
                 let offersRead = context.canReadAbove && reads < Self.maxReads
+                var system = baseSystem
                 if let personalization {
                     let hints = await personalization(instruction + " " + (context.selection ?? context.above + context.below))
-                    let data = try JSONEncoder().encode(JSONValue.object(hints.fields))
-                    messages[0] = .object(["role": .string("user"), "content": .string(fieldPrompt + "\nReference data (JSON)\n" + String(decoding: data, as: UTF8.self))])
+                    system = hints.systemPrompt(baseSystem)
+                    if hints.vocabulary.isEmpty && hints.examples.isEmpty {
+                        messages[0] = .object(["role": .string("user"), "content": .string(fieldPrompt)])
+                    } else {
+                        let data = try JSONEncoder().encode(JSONValue.object(hints.fields))
+                        messages[0] = .object(["role": .string("user"), "content": .string(fieldPrompt + "\nReference data (JSON)\n" + String(decoding: data, as: UTF8.self))])
+                    }
                 }
                 let request = try Self.request(model: model, system: system, messages: messages, tools: offersRead)
                 var text = ""
