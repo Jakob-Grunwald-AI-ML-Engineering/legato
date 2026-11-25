@@ -29,7 +29,7 @@ struct DictationPreviewView: View {
         let draft = controller.composedPreview
         let instruction = controller.previewInstructionText
         ZStack(alignment: keySide == .right ? .bottomTrailing : .bottomLeading) {
-            PreviewRow(text: text, instruction: instruction, layout: controller.dictationPreviewLayout, draft: draft,
+            PreviewRow(controller: controller, text: text, instruction: instruction, layout: controller.dictationPreviewLayout, draft: draft,
                        canSend: controller.canSendPreview,
                        canDiscard: controller.canDiscardPreview, insets: Self.textInsets(keySide: keySide), bandHeight: bandHeight, reservesChip: showsUndo,
                        hold: PreviewHoldGesture(controller: controller, onBloom: showBloom),
@@ -178,7 +178,11 @@ private enum PreviewRole: TextAttribute, Equatable { case leaving, waiting, ente
 private final class ExitProbe {
     /// The line's top and bottom in the text's own coordinates; nil while nothing leaves.
     var line: (minY: CGFloat, maxY: CGFloat)?
-    var glyphs: [CGRect] = []
+}
+
+private final class RewriteReference {
+    var glyphs: [Int: CGRect] = [:]
+    var bottom: CGFloat?
 }
 
 /// A single cleanup result and the shared grapheme diff that drives its transition.
@@ -256,8 +260,9 @@ private struct PreviewRenderer: TextRenderer {
     var lifts: Bool
     var probe: ExitProbe
     var rewrite: PreviewRewrite? = nil
-    var reference: ExitProbe? = nil
+    var reference: RewriteReference? = nil
     var capturesReference = false
+    var viewport: CGRect? = nil
     /// Trailing glyphs not typed in yet (`PreviewReveal`): laid out, not drawn.
     var hidden = 0
     /// Room above the text for the leaving letters' lift (the scroll view clips the rest).
@@ -267,56 +272,59 @@ private struct PreviewRenderer: TextRenderer {
     static let fadeSeconds = MagicPreviewEffects.poofSeconds
 
     func draw(layout: Text.Layout, in context: inout GraphicsContext) {
-        // The exit line: the line of the next letter to leave (the last one that left, when all have), reported to the scroll view.
-        var exitLine: Int?
-        var count = 0
-        for (index, line) in layout.enumerated() {
-            for run in line where run[PreviewRole.self] == .leaving {
-                for _ in run {
-                    if count <= exits.count { exitLine = index }
-                    count += 1
-                }
-            }
-        }
-        let lines = Array(layout)
-        probe.line = exitLine.map { (lines[$0].typographicBounds.rect.minY, lines[$0].typographicBounds.rect.maxY) }
+        if !capturesReference { probe.line = nil }
         var glyph = 0
         var entrance = 0
-        var glyphRects: [CGRect] = []
+        var glyphRects: [Int: CGRect] = [:]
         var waiting: [Text.Layout.RunSlice] = []
-        let total = layout.reduce(0) { $0 + $1.reduce(0) { $0 + $1.count } }
-        let visible = total - hidden
+        let visible = hidden == 0 ? Int.max : layout.reduce(0) { $0 + $1.reduce(0) { $0 + $1.count } } - hidden
         var position = 0
         let elapsed = rewrite.map { now.timeIntervalSince($0.start) } ?? 0
         let poof = min(1, max(0, elapsed / Self.fadeSeconds))
         let entranceGap = rewrite?.delayPerPiece ?? 0
         let glyphsPerPiece = rewrite?.glyphsPerPiece ?? 1
-        func drawPlain(_ run: Text.Layout.Run, in context: inout GraphicsContext) -> [Text.Layout.RunSlice] {
-            guard hidden > 0 || reference != nil else { position += run.count; context.draw(run); return Array(run) }
-            var shown: [Text.Layout.RunSlice] = []
+        let effectBounds = viewport?.insetBy(dx: -MagicPreviewEffects.verticalEffectReach, dy: -MagicPreviewEffects.verticalEffectReach)
+        let bottom = layout.last?.typographicBounds.rect.maxY
+        var poofContext = context
+        if capturesReference, let viewport { poofContext.clip(to: Path(viewport)) }
+        func drawPlain(_ run: Text.Layout.Run, trackSurvivors: Bool, shimmer: Bool, in context: inout GraphicsContext) {
+            if visible == Int.max && !trackSurvivors {
+                position += run.count
+                context.draw(run)
+                if shimmer { waiting.append(contentsOf: run) }
+                return
+            }
             for slice in run {
                 if position < visible {
-                    if let reference, let oldIndex = rewrite?.survivors[position], reference.glyphs.indices.contains(oldIndex) {
-                        let old = reference.glyphs[oldIndex], current = slice.typographicBounds.rect
-                        let oldBottom = reference.glyphs.last?.maxY ?? old.maxY
-                        let newBottom = lines.last?.typographicBounds.rect.maxY ?? current.maxY
-                        MagicPreviewEffects.drawSurvivor(slice, from: old, verticalAdjustment: newBottom - oldBottom,
+                    if trackSurvivors, let reference, let oldIndex = rewrite?.survivors[position],
+                       let old = reference.glyphs[oldIndex], let oldBottom = reference.bottom, let bottom {
+                        MagicPreviewEffects.drawSurvivor(slice, from: old, verticalAdjustment: bottom - oldBottom,
                                                          progress: poof, in: context)
                     } else {
                         context.draw(slice)
                     }
-                    shown.append(slice)
+                    if shimmer { waiting.append(slice) }
                 }
                 position += 1
             }
-            return shown
         }
         for line in layout {
+            let bounds = line.typographicBounds.rect
+            let animateLine = effectBounds?.intersects(bounds) == true
             for run in line {
-                if capturesReference { glyphRects.append(contentsOf: run.map { $0.typographicBounds.rect }) }
-                switch run[PreviewRole.self] {
+                let role = run[PreviewRole.self]
+                if capturesReference, animateLine, poof < 1 {
+                    for (offset, slice) in run.enumerated() { glyphRects[position + offset] = slice.typographicBounds.rect }
+                }
+                switch role {
                 case .leaving?:
+                    if glyph <= exits.count { probe.line = (bounds.minY, bounds.maxY) }
                     position += run.count
+                    guard animateLine else {
+                        if glyph >= exits.count { context.draw(run) }
+                        glyph += run.count
+                        continue
+                    }
                     for slice in run {
                         let progress = glyph < exits.count ? min(1, max(0, now.timeIntervalSince(exits[glyph]) / Self.fadeSeconds)) : 0
                         glyph += 1
@@ -327,12 +335,17 @@ private struct PreviewRenderer: TextRenderer {
                         copy.draw(slice)
                     }
                 case .waiting?:
-                    let shown = drawPlain(run, in: &context)
-                    if shimmers { waiting.append(contentsOf: shown) }
+                    drawPlain(run, trackSurvivors: false, shimmer: shimmers && animateLine, in: &context)
                 case .poof?:
                     position += run.count
-                    MagicPreviewEffects.drawPoof(run, progress: poof, in: context)
+                    if animateLine { MagicPreviewEffects.drawPoof(run, progress: poof, in: poofContext) }
                 case .entering?:
+                    guard animateLine else {
+                        position += run.count
+                        entrance += run.count
+                        context.draw(run)
+                        continue
+                    }
                     for slice in run {
                         position += 1
                         let delay = Double(entrance / glyphsPerPiece) * entranceGap
@@ -343,12 +356,16 @@ private struct PreviewRenderer: TextRenderer {
                 case .hidden?:
                     position += run.count
                 case nil:
-                    _ = drawPlain(run, in: &context)
+                    drawPlain(run, trackSurvivors: animateLine && poof < 1 && reference?.bottom != nil,
+                              shimmer: false, in: &context)
                 }
             }
         }
-        if capturesReference { probe.glyphs = glyphRects }
-        MagicPreviewEffects.drawShimmer(waiting, in: layout, now: now, context: context)
+        if capturesReference {
+            reference?.glyphs = glyphRects
+            reference?.bottom = bottom
+        }
+        MagicPreviewEffects.drawShimmer(waiting, in: layout, now: now, context: context, viewport: viewport)
     }
 }
 
@@ -359,6 +376,7 @@ private struct PreviewRenderer: TextRenderer {
 /// for cleanup shimmer. Holding captures Magic instructions. A swipe right sends the draft with a swoosh; a swipe left
 /// clears the preview. Reduce Motion skips the motion effects.
 private struct PreviewRow: View {
+    let controller: KeyboardController
     let text: String
     let instruction: String
     let layout: StagedDictation.PreviewLayout?
@@ -383,8 +401,11 @@ private struct PreviewRow: View {
     @State private var swoosh = false
     @State private var reveal = PreviewReveal()
     @State private var probe = ExitProbe()
-    @State private var rewriteReference = ExitProbe()
+    @State private var rewriteReference = RewriteReference()
     @State private var rewrite: PreviewRewrite?
+    @State private var rewriteDiagnostic: PreviewTransitionDiagnostic?
+    @State private var originalViewport: CGRect?
+    @State private var textViewport: CGRect?
     /// Flips when a reveal finishes, so the timeline pauses again.
     @State private var revealSettled = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -420,28 +441,46 @@ private struct PreviewRow: View {
             let animating = transition != nil || exits.contains { Date().timeIntervalSince($0) < PreviewRenderer.fadeSeconds + 0.1 } || reveal.hidden > 0
             let shimmers = !reduceMotion && !(layout?.waiting.isEmpty ?? true)
             let bottomPadding = reservesChip ? PreviewScroll.undoChipHeight + 4 : 2
+            let original = transition.flatMap { change -> Text? in
+                guard !change.removed.isEmpty || !change.survivors.isEmpty else { return nil }
+                let originalDisplay = change.original + text.dropFirst(change.target.count)
+                return styled(MagicPreviewEffects.marked(originalDisplay) { change.removed.contains($0) ? PreviewRole.poof : .hidden }, size: size)
+            }
+            let body = styled(transition.map { change in
+                MagicPreviewEffects.marked(text) { change.inserted.contains($0) ? PreviewRole.entering : nil }
+            } ?? composed, size: size)
+            let directions = Text(verbatim: instructionSuffix)
+                .font(.system(size: CGFloat(size)))
+                .foregroundStyle(Color(uiColor: .systemPurple))
             ScrollView(.vertical) {
                 TimelineView(.animation(minimumInterval: 1.0 / 60, paused: !animating && !shimmers)) { timeline in
                     let hadHidden = reveal.hidden > 0
                     let settled = reveal.advance(now: timeline.date, total: visibleText.count)
                     let _ = { if hadHidden && settled { Task { @MainActor in revealSettled.toggle() } } }()
                     ZStack(alignment: .bottomLeading) {
-                        if let transition, !transition.removed.isEmpty || !transition.survivors.isEmpty {
-                            let originalDisplay = transition.original + text.dropFirst(transition.target.count)
-                            styled(MagicPreviewEffects.marked(originalDisplay) { transition.removed.contains($0) ? PreviewRole.poof : .hidden }, size: size)
-                                .textRenderer(PreviewRenderer(now: timeline.date, exits: [], shimmers: false, lifts: true,
-                                                              probe: rewriteReference, rewrite: transition, capturesReference: true))
+                        if let original, let transition {
+                            original
+                                .textRenderer(PreviewRenderer(now: timeline.date, exits: [], shimmers: false, lifts: true, probe: probe,
+                                                              rewrite: transition, reference: rewriteReference, capturesReference: true,
+                                                              viewport: originalViewport))
+                                .onGeometryChange(for: CGRect?.self) { $0.bounds(of: .scrollView(axis: .vertical)) } action: {
+                                    originalViewport = $0
+                                }
                                 .accessibilityHidden(true)
                                 .allowsHitTesting(false)
                         }
-                        let body = styled(transition.map { change in MagicPreviewEffects.marked(text) { change.inserted.contains($0) ? PreviewRole.entering : nil } } ?? composed, size: size)
-                        let directions = Text(verbatim: instructionSuffix)
-                            .font(.system(size: CGFloat(size)))
-                            .foregroundStyle(Color(uiColor: .systemPurple))
                         Text("\(body)\(directions)")
                             .textRenderer(PreviewRenderer(now: timeline.date, exits: exits, shimmers: shimmers, lifts: !reduceMotion,
                                                           probe: probe, rewrite: transition,
-                                                          reference: transition == nil ? nil : rewriteReference, hidden: reveal.hidden))
+                                                          reference: transition == nil ? nil : rewriteReference,
+                                                          viewport: textViewport, hidden: reveal.hidden))
+                            .onGeometryChange(for: CGRect?.self) { $0.bounds(of: .scrollView(axis: .vertical)) } action: {
+                                textViewport = $0
+                            }
+                            .task(id: transition?.start) {
+                                guard transition != nil, let rewriteDiagnostic else { return }
+                                controller.previewTransitionMounted(rewriteDiagnostic)
+                            }
                     }
                     .lineSpacing(CGFloat(WordRowHeight.previewLineSpacing(size: size)))
                     .multilineTextAlignment(.leading)
@@ -504,15 +543,25 @@ private struct PreviewRow: View {
                 keepExitInView()
             }
             .onChange(of: draft) { _, draft in
-                guard let draft, draft.original != draft.text, !reduceMotion else { rewrite = nil; return }
-                rewriteReference.glyphs = []
-                let transition = PreviewRewrite(original: draft.original, target: draft.text, start: Date())
-                rewrite = transition
-                Task { @MainActor in
-                    try? await Task.sleep(for: .seconds(transition.duration))
-                    if rewrite?.start == transition.start { rewrite = nil }
-                }
+                finishRewrite(.cancelled)
+                guard let draft else { return }
+                rewriteDiagnostic = controller.beginPreviewTransition(draft)
+                guard draft.original != draft.text else { finishRewrite(.unchanged); return }
+                guard !reduceMotion else { finishRewrite(.reduceMotion); return }
+                rewriteReference.glyphs = [:]
+                rewriteReference.bottom = nil
+                originalViewport = nil
+                rewrite = PreviewRewrite(original: draft.original, target: draft.text, start: Date())
             }
+            .task(id: rewrite?.start) {
+                guard let transition = rewrite else { return }
+                do { try await Task.sleep(for: .seconds(transition.duration)) }
+                catch { return }
+                if rewrite?.start == transition.start { finishRewrite(.completed) }
+            }
+            .onChange(of: reduceMotion) { _, reduced in if reduced { finishRewrite(.reduceMotion) } }
+            .onChange(of: instruction.isEmpty) { _, empty in if !empty { finishRewrite(.cancelled) } }
+            .onDisappear { finishRewrite(.cancelled) }
             .onChange(of: leavingText) { old, new in
                 if new.isEmpty {
                     exits = []
@@ -524,6 +573,12 @@ private struct PreviewRow: View {
                 }
             }
         }
+    }
+
+    private func finishRewrite(_ outcome: PreviewTransitionOutcome) {
+        if let rewriteDiagnostic { controller.endPreviewTransition(rewriteDiagnostic, outcome: outcome) }
+        rewriteDiagnostic = nil
+        rewrite = nil
     }
 
     // MARK: Scrolling

@@ -34,6 +34,7 @@ public struct StagedDictation: Sendable, Equatable {
 
     public struct PreviewDraft: Sendable, Equatable {
         public let unitID: Int
+        public let operationID: UUID?
         public let original: String
         public let text: String
         public let sentByHost: Bool
@@ -41,7 +42,8 @@ public struct StagedDictation: Sendable, Equatable {
 
         fileprivate init(unit: LiveSegment) {
             unitID = unit.id
-            original = unit.previewSource ?? unit.raw ?? unit.text
+            operationID = unit.previewOperationID
+            original = unit.previewOriginal
             text = unit.text
             sentByHost = unit.previewReleased == true
             released = sentByHost
@@ -203,7 +205,7 @@ public struct StagedDictation: Sendable, Equatable {
             return
         }
         let next = PreviewDraft(unit: first)
-        if let current = previewDraft, current.unitID == next.unitID, current.original == next.original,
+        if let current = previewDraft, current.unitID == next.unitID, current.operationID == next.operationID, current.original == next.original,
            current.text == next.text, current.sentByHost == next.sentByHost { return }
         previewDraft = next
     }

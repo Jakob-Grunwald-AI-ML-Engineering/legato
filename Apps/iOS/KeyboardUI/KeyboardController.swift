@@ -146,6 +146,7 @@ final class KeyboardController {
         }
         typing = TypingModel(controller: self)
         wordRow = SuggestionController(controller: self)
+        recordPreviewLifecycle(.controllerCreated)
     }
 
     var fullAccess: Bool { hasFullAccess() }
@@ -336,6 +337,7 @@ final class KeyboardController {
         guard composedPreview == nil || anchor != nil else { return false }
         let hold = KeyboardRequest.PreviewHold(id: UUID().uuidString, runID: runID)
         previewHold = (hold, document.documentID)
+        recordPreviewRequest(.beginPreviewHold, id: hold.id, runID: runID, unitID: anchor?.unitID)
         link.send(.beginPreviewHold, id: hold.id, preview: anchor, previewHold: hold)
         return true
     }
@@ -344,7 +346,9 @@ final class KeyboardController {
         guard let hold = previewHold else { return }
         previewHold = nil
         let valid = apply && document.documentID == hold.documentID && stagedTake.runID == hold.request.runID
-        link.send(valid ? .releasePreviewHold : .cancelPreviewHold, id: UUID().uuidString, previewHold: hold.request)
+        let command: RequestCommand = valid ? .releasePreviewHold : .cancelPreviewHold
+        recordPreviewRequest(command, id: hold.request.id, runID: hold.request.runID, unitID: previewAnchor?.unitID)
+        link.send(command, id: UUID().uuidString, previewHold: hold.request)
     }
 
     /// A quick tap or an accessibility action composes the current draft without separate instructions.
@@ -352,7 +356,9 @@ final class KeyboardController {
         guard canComposePreview else { return }
         let anchor = previewAnchor
         guard composedPreview == nil || anchor != nil else { return }
-        link.send(.editPreview, id: UUID().uuidString, preview: anchor)
+        let id = UUID().uuidString
+        recordPreviewRequest(.editPreview, id: id, runID: stagedTake.runID, unitID: anchor?.unitID)
+        link.send(.editPreview, id: id, preview: anchor)
     }
 
     /// A swipe left on the preview clears what is still in it and not yet sent for cleanup: the open unit and the speaking head
@@ -544,8 +550,15 @@ final class KeyboardController {
         // UIKit can call `viewWillAppear` again with no disappearance between (an interrupted dismissal, a slow first launch):
         // that is the same appearance, and a take begun meanwhile is this keyboard's.
         let wasVisible = isVisible
-        if !wasVisible { liveAppearance += 1 }
+        if !wasVisible {
+            liveAppearance += 1
+            #if DEBUG || LEGATO_INTERNAL
+            // A Darwin note can reach a hidden controller before the first visible poll sees the same revision.
+            previewDiagnosticCursor = PreviewDiagnosticCursor()
+            #endif
+        }
         isVisible = true
+        recordPreviewLifecycle(.willAppear)
         statusPoll?.cancel()
         statusPoll = Task { [weak self] in
             while !Task.isCancelled {
@@ -595,6 +608,7 @@ final class KeyboardController {
         #endif
         correctionPoll?.cancel(); correctionPoll = nil
         isVisible = false
+        recordPreviewLifecycle(.didDisappear)
         if let snapshot = liveSnapshot, !snapshot.complete || snapshot.version != liveAckedVersion || !queue.isIdle {
             // Safari's Next/Previous accessory can cycle keyboard visibility before the new field reports its ID.
             // Remember only this controller's known interrupted take; an arbitrary old publication is still ignored.
@@ -625,6 +639,7 @@ final class KeyboardController {
         guard !isTornDown else { return }
         if isVisible { disappeared() }
         isTornDown = true
+        recordPreviewLifecycle(.controllerTornDown)
         stopTicker()
         link.stopObserving()
         heartbeat?.cancel()
@@ -1299,6 +1314,12 @@ final class KeyboardController {
             if liveSeen != nil { liveSeen = nil; liveSnapshot = nil; setLiveRunning(false) }
             return
         }
+        #if DEBUG || LEGATO_INTERNAL
+        if let preview = previewDiagnosticCursor.changed(in: snapshot) {
+            PreviewDiagnostics.keyboard.record(.snapshotReceived, context: .init(preview), keyboard: previewDiagnosticKeyboard,
+                                               sampleMemory: true)
+        }
+        #endif
         // UIKit can retain hidden controllers that still receive Darwin notes. They must not adopt a
         // take or later write its shared receipt from a stale field callback.
         guard isVisible else { return noteLive(snapshot, "hidden-skipped") }
@@ -1596,9 +1617,62 @@ final class KeyboardController {
 
     /// Keyboard-side diagnostics (`LiveDictationNote`, the app logs `live2.kbd`): why a run is not shown or followed, and when the
     /// preview first shows its words. Once per run, event and detail (`once`), never per snapshot.
-    private let liveControllerID = String(UUID().uuidString.prefix(8))
+    private let liveControllerID = UUID()
     @ObservationIgnored private var liveAppearance = 0
     @ObservationIgnored private var notedLive: Set<String> = []
+    #if DEBUG || LEGATO_INTERNAL
+    @ObservationIgnored private var previewDiagnosticCursor = PreviewDiagnosticCursor()
+    #endif
+
+    private var previewDiagnosticKeyboard: PreviewDiagnostics.Keyboard {
+        .init(controller: liveControllerID, appearance: liveAppearance, visible: isVisible)
+    }
+
+    func recordPreviewLifecycle(_ event: PreviewDiagnostics.Event) {
+        #if DEBUG || LEGATO_INTERNAL
+        let context = liveSnapshot?.previewDiagnosticRevision().map(PreviewDiagnostics.Context.init)
+            ?? .init(runID: liveSnapshot?.runID, revision: liveSnapshot?.version)
+        PreviewDiagnostics.keyboard.record(event, context: context, keyboard: previewDiagnosticKeyboard, sampleMemory: true)
+        #endif
+    }
+
+    private func recordPreviewRequest(_ command: RequestCommand, id: String, runID: String?, unitID: Int?) {
+        #if DEBUG || LEGATO_INTERNAL
+        let revision = liveSnapshot?.runID == runID ? liveSnapshot?.version : nil
+        let context = PreviewDiagnostics.Context(runID: runID, revision: revision, unitID: unitID,
+                                                 operationID: UUID(uuidString: id), inputCharacters: stagedTake.preview.count)
+        PreviewDiagnostics.keyboard.record(.requestIssued, context: context, keyboard: previewDiagnosticKeyboard, command: command,
+                                           sampleMemory: true)
+        #endif
+    }
+
+    func beginPreviewTransition(_ draft: StagedDictation.PreviewDraft) -> PreviewTransitionDiagnostic {
+        #if DEBUG || LEGATO_INTERNAL
+        let preview = liveSnapshot?.previewDiagnosticRevision(unitID: draft.unitID)
+        let context = preview.map(PreviewDiagnostics.Context.init) ?? .init(runID: liveSnapshot?.runID, revision: liveSnapshot?.version,
+            unitID: draft.unitID, inputCharacters: draft.original.count, resultCharacters: draft.text.count)
+        let transition = PreviewTransitionDiagnostic(id: UUID(), context: context)
+        PreviewDiagnostics.keyboard.record(.transitionStarted, context: context, keyboard: previewDiagnosticKeyboard,
+                                           transitionID: transition.id, sampleMemory: true)
+        return transition
+        #else
+        return PreviewTransitionDiagnostic(id: UUID(), context: .init())
+        #endif
+    }
+
+    func endPreviewTransition(_ transition: PreviewTransitionDiagnostic, outcome: PreviewTransitionOutcome) {
+        #if DEBUG || LEGATO_INTERNAL
+        PreviewDiagnostics.keyboard.record(.transitionEnded, context: transition.context, keyboard: previewDiagnosticKeyboard,
+                                           transitionID: transition.id, outcome: outcome, sampleMemory: true)
+        #endif
+    }
+
+    func previewTransitionMounted(_ transition: PreviewTransitionDiagnostic) {
+        #if DEBUG || LEGATO_INTERNAL
+        PreviewDiagnostics.keyboard.record(.transitionMounted, context: transition.context, keyboard: previewDiagnosticKeyboard,
+                                           transitionID: transition.id, sampleMemory: true)
+        #endif
+    }
 
     func notePreviewPresentation(_ mounted: Bool) {
         #if DEBUG || LEGATO_INTERNAL
@@ -1623,7 +1697,7 @@ final class KeyboardController {
             notedLive.insert(key)
         }
         trace?("live note \(event) \(detail ?? "") run=\(snapshot.runID.prefix(8)) v=\(snapshot.version)")
-        let identity = "controller=\(liveControllerID) appearance=\(liveAppearance) visible=\(isVisible)"
+        let identity = "controller=\(liveControllerID.uuidString.prefix(8)) appearance=\(liveAppearance) visible=\(isVisible)"
         link.writeLiveDictationNote(.init(runID: snapshot.runID, event: event, detail: "\(identity) \(detail ?? "")", version: snapshot.version))
         #endif
     }

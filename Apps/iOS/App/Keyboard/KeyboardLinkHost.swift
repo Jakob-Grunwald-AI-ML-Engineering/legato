@@ -33,6 +33,10 @@ final class KeyboardLinkHost {
     private var liveWriteTask: Task<Void, Never>?
     private var liveVersionTimes: [Int: ContinuousClock.Instant] = [:]
     private var liveAckSeen: LiveDictationAck?
+    #if DEBUG || LEGATO_INTERNAL
+    private var previewDiagnosticCursor = PreviewDiagnosticCursor()
+    private var lastPreviewHistory: (operationID: UUID, saved: Bool)?
+    #endif
     /// Instruction mode's end of the link (reads, scoped edits, the strip); the session holds it weakly.
     private var instructionChannel: InstructionFieldChannel?
     func attach(_ microphone: MicrophoneHost, keyboardSession: KeyboardSession, dictation: DictationPipeline) {
@@ -54,6 +58,14 @@ final class KeyboardLinkHost {
         dictation.onLiveChange = { [weak self, weak dictation] snapshot in
             self?.publishLive(snapshot, through: liveChannel, diagnostics: dictation?.diagnostics)
         }
+        #if DEBUG || LEGATO_INTERNAL
+        dictation.onPreviewHistoryCheckpoint = { [weak self] preview, saved in
+            guard let self, preview.phase == .ready,
+                  lastPreviewHistory?.operationID != preview.operationID || lastPreviewHistory?.saved != saved else { return }
+            lastPreviewHistory = (preview.operationID, saved)
+            PreviewDiagnostics.app.record(saved ? .historySaved : .historyWriteFailed, context: .init(preview))
+        }
+        #endif
         statusTask = Task { [weak self, weak microphone] in
             while !Task.isCancelled {
                 guard let self, let microphone else { return }
@@ -136,9 +148,31 @@ final class KeyboardLinkHost {
         liveVersionTimes[snapshot.version] = .now
         if liveVersionTimes.count > 64 { liveVersionTimes = liveVersionTimes.filter { $0.key > snapshot.version - 32 } }
         channel.publish(snapshot)
+        #if DEBUG || LEGATO_INTERNAL
+        if let preview = previewDiagnosticCursor.changed(in: snapshot) {
+            PreviewDiagnostics.app.record(.snapshotPublished, context: .init(preview))
+        }
+        #endif
         DarwinObserver.post(LinkChannel.Note.dictationLive)
         diagnostics?("live2.publish", ["run": String(snapshot.runID.prefix(8)), "v": snapshot.version, "segments": snapshot.segments.count,
                                        "chars": snapshot.segments.reduce(0) { $0 + $1.text.count }, "complete": snapshot.complete])
+    }
+
+    func recordPreviewRequest(_ request: KeyboardRequest, run: LiveDictationRun?) {
+        #if DEBUG || LEGATO_INTERNAL
+        let id: String
+        switch request.command {
+        case .editPreview: id = request.id
+        case .beginPreviewHold, .releasePreviewHold, .cancelPreviewHold:
+            guard let hold = request.previewHold else { return }
+            id = hold.id
+        default: return
+        }
+        let runID = request.previewHold?.runID ?? request.preview?.runID ?? run?.runID
+        let context = PreviewDiagnostics.Context(runID: runID, revision: run?.runID == runID ? run?.version : nil,
+                                                 unitID: request.preview?.unitID, operationID: UUID(uuidString: id))
+        PreviewDiagnostics.app.record(.requestReceived, context: context, command: request.command)
+        #endif
     }
 
     /// The keyboard's counters (what it applied, flipped, froze), logged when they change; no text.
