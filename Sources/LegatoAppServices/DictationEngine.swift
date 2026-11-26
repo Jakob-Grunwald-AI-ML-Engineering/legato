@@ -108,7 +108,7 @@ import LegatoVocabulary
             let terms = await requestVocabulary.sonioxTerms()
             guard self.stream === stream else { await held.close(); return }
             let config = SonioxConfig(mode: "Dictation", personalPrompt: personalPrompt(), terms: terms)
-            try await held.begin(backgroundText: sink.backgroundText, config: config)
+            try await held.begin(backgroundText: sink.backgroundText, config: config, trackLearningCues: true)
             guard self.stream === stream else { await held.close(); return }
             active = held
             activity = DictationActivity()
@@ -228,7 +228,8 @@ import LegatoVocabulary
             guard let words = try? event.payload["words"]?.decode([Word].self), !words.isEmpty else { return }
             let reason = (try? event.payload["metadata"]?["reason"]?.decode(String.self)) ?? ""
             let remainingTail = try? event.payload["remainingTail"]?.decode(String.self)
-            await deliver(words: words, reason: reason, remainingTail: remainingTail)
+            let hints = (try? event.payload["metadata"]?["recognitionCues"]?.decode([String].self)) ?? []
+            await deliver(words: words, reason: reason, remainingTail: remainingTail, hints: hints)
         case .asrBoundary:
             if case .string(let reason) = event.payload["reason"],
                reason == "finalize" || reason == "finished" || admitsPause(reason) { sink.boundary(reason) }
@@ -241,8 +242,10 @@ import LegatoVocabulary
         default: break
         }
     }
-    private func deliver(words: [Word], reason: String, remainingTail: String? = nil) async {
-        let line = DictationRouteLine(sequence: lineSequence, text: words.map(\.text).joined(separator: " "), words: words, reason: reason, remainingTail: remainingTail)
+    private func deliver(words: [Word], reason: String, remainingTail: String? = nil, hints: [String] = []) async {
+        let text = words.map(\.text).joined(separator: " ")
+        let line = DictationRouteLine(sequence: lineSequence, text: text, words: words, reason: reason,
+                                      remainingTail: remainingTail, recognitionHints: hints)
         lineSequence += 1
         await sink.receive(line)
     }

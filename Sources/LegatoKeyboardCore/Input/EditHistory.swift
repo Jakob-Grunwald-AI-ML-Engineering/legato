@@ -1,4 +1,5 @@
 import Foundation
+import LegatoCore
 
 /// The keyboard's own edits, for undo and redo. Pure: it never touches the field. `undo` and `redo` return
 /// what to apply; the caller applies it through the same path as any keyboard edit.
@@ -30,6 +31,7 @@ public struct EditHistory: Sendable, Equatable {
     public struct Entry: Sendable, Equatable {
         public var removed: String
         public var inserted: String
+        public var evidence: [TermEvidence] = []
         public var kind: Kind
         /// The text before the cursor right after the edit, when it was known.
         public var anchor: String?
@@ -59,6 +61,16 @@ public struct EditHistory: Sendable, Equatable {
     private var lastTypedAt: Date?
 
     public init() {}
+
+    /// Evidence travels with its guarded history entry; callers retract it only after the inverse edit lands.
+    public var undoEvidence: [TermEvidence] { entries.last?.evidence ?? [] }
+    public var redoEvidence: [TermEvidence] { redoEntries.last?.evidence ?? [] }
+
+    public mutating func attachEvidence(_ evidence: TermEvidence) {
+        guard let last = entries.indices.last else { return }
+        guard !entries[last].evidence.contains(where: { $0.id == evidence.id }) else { return }
+        entries[last].evidence.append(evidence)
+    }
 
     public var canUndo: Bool { !entries.isEmpty }
     public var canRedo: Bool { !redoEntries.isEmpty }

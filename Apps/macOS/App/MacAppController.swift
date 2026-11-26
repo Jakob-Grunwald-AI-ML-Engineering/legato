@@ -90,7 +90,8 @@ import OSLog
         vocabulary = VocabularyService(fileURL: root.appending(path: "vocabulary.json"),
             languages: { VocabularyService.configuredLanguages(engine) })
         corrections = CorrectionStore(root: root)
-        history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary)
+        let recentTakes = RecentTakesStore(fileURL: root.appending(path: "recent-takes.json"))
+        history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary, recentTakes: recentTakes)
         let vocabularyURL = root.appending(path: "vocabulary.json")
         meetings = MeetingController(root: Self.meetingsRoot(in: root), vocabularyURL: vocabularyURL)
         let pipeline: DictationPipeline
@@ -98,16 +99,16 @@ import OSLog
         #if LEGATO_INTERNAL
         let offlineFixture = UserDefaults.standard.bool(forKey: "LegatoOfflineFixture")
         if offlineFixture {
-            pipeline = DictationPipeline(recentTakes: RecentTakesStore(fileURL: root.appending(path: "recent-takes.json")),
+            pipeline = DictationPipeline(recentTakes: recentTakes,
                 history: history, cleaner: DebugStreamingCleaner(chunkMilliseconds: 0),
                 sendMode: { DictationSendSetting.mode() }, supportsLive: true, groupsLiveHistory: true)
             instruction = InstructionSession(runner: MacOfflineInstructionRunner(), history: history)
         } else {
-            pipeline = DictationPipeline(vocabularyURL: vocabularyURL, recentTakesURL: root.appending(path: "recent-takes.json"), history: history, supportsLive: true, groupsLiveHistory: true)
+            pipeline = DictationPipeline(vocabularyURL: vocabularyURL, recentTakes: recentTakes, history: history, supportsLive: true, groupsLiveHistory: true)
             instruction = InstructionSession(vocabularyURL: vocabularyURL, history: history)
         }
         #else
-        pipeline = DictationPipeline(vocabularyURL: vocabularyURL, recentTakesURL: root.appending(path: "recent-takes.json"), history: history, supportsLive: true, groupsLiveHistory: true)
+        pipeline = DictationPipeline(vocabularyURL: vocabularyURL, recentTakes: recentTakes, history: history, supportsLive: true, groupsLiveHistory: true)
         instruction = InstructionSession(vocabularyURL: vocabularyURL, history: history)
         #endif
         dictation = MacDictationSession(pipeline: pipeline, instruction: instruction,
@@ -136,7 +137,10 @@ import OSLog
         }
         dictation.prepareDraftInsertion = { [weak self] in
             guard let self else { return .init { _ in false } }
-            return destination.captureInsertion(secureOrigin: secureDraftOrigin, using: paster, settings: settings)
+            return destination.captureInsertion(secureOrigin: secureDraftOrigin, using: paster, settings: settings, store: corrections) { [weak self] in
+                guard let draft = self?.dictation.composer else { return nil }
+                return (draft.documentID, draft.original)
+            }
         }
         pipeline.keepsTakes = { [weak self] in self?.secureDraftOrigin == nil }
     }
@@ -514,10 +518,16 @@ import OSLog
     private(set) var pid: pid_t?
     private var generation = 0
 
-    func invalidate() { generation &+= 1 }
+    private var correctionPoll: Task<Void, Never>?
+    func invalidate() {
+        generation &+= 1
+        correctionPoll?.cancel()
+        correctionPoll = nil
+    }
 
     func captureInsertion(secureOrigin: AXTextTarget.PasteWitness?, using paster: PasteService,
-                          settings: MacSettings) -> MacDictationSession.DraftInsertion {
+                          settings: MacSettings, store: CorrectionStore,
+                          source: @escaping @MainActor () -> (UUID, String)?) -> MacDictationSession.DraftInsertion {
         invalidate()
         let generation = self.generation
         let input = RealInput.shared.count
@@ -551,9 +561,23 @@ import OSLog
                 canBegin: { ownsInput() && start.matchesInitialPosition() && ownsInput() }, stillOwned: owned)
             Self.log.debug("Draft events posted: \(posted), elapsed: \(String(describing: started.duration(to: .now)), privacy: .public)")
             if posted, let confirmation {
+                let take = isPrivate ? nil : source()
                 Task { @MainActor in
                     let verified = await confirmation.verify(whileOwned: owned)
                     Self.log.debug("Draft readback verified: \(verified)")
+                    if verified, generation == self.generation, let take, case .element(let target) = witness,
+                       let snapshot = target.correctionSnapshot() {
+                        let capture = CorrectionCapture(store: store)
+                        guard capture.arm(dictationID: take.0.uuidString, raw: take.1, inserted: text,
+                                          snapshot: snapshot, platform: "macOS", locale: Locale.current.identifier, isIdle: true) else { return }
+                        self.correctionPoll = Task { @MainActor in
+                            while !Task.isCancelled && capture.isObserving {
+                                try? await Task.sleep(for: .milliseconds(200))
+                                guard !Task.isCancelled, let current = target.correctionSnapshot() else { return }
+                                capture.observeSettled(current)
+                            }
+                        }
+                    }
                 }
             }
             return posted

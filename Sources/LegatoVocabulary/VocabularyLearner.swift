@@ -49,14 +49,64 @@ public struct VocabularyLearner: Sendable {
     /// The words of the text are checked against the dictionaries in one batch. A word that occurs inside a
     /// multi-word alias of a term ("kuber netties") is a mishearing of that term, not a candidate.
     public func observe(text: String, locale: Locale, dictationID: UUID) async {
+        let items = await Self.candidateTerms(in: text, locale: locale, languages: languages, spellChecker: spellChecker,
+                                              tagger: tagger, snapshot: try? await store.snapshot())
+        guard !items.isEmpty else { return }
+        let moment = now()
+        _ = try? await store.update(now: moment) { snap in
+            let aliasKeys = Set(snap.entries.flatMap(\.aliases).map(VocabularyEntry.foldedKey(for:)))
+            for c in items {
+                let key = VocabularyEntry.key(for: c.text)
+                if aliasKeys.contains(VocabularyEntry.foldedKey(for: c.text)) || snap.isBlocked(c.text) { continue }
+                if let i = snap.entries.firstIndex(where: { VocabularyEntry.key(for: $0.text) == key }) {
+                    if snap.entries[i].remember(dictationID) {
+                        snap.entries[i].score += 1
+                        snap.entries[i].lastSeen = moment
+                    }
+                    continue
+                }
+                var pending: PendingTerm
+                if let p = snap.pendingTerms.firstIndex(where: { VocabularyEntry.key(for: $0.text) == key }) {
+                    pending = snap.pendingTerms[p]
+                    guard !pending.ids.contains(dictationID) else { continue }
+                    pending.ids.append(dictationID)
+                    pending.score += 1
+                    pending.lastSeen = moment
+                    if pending.kind == .term { pending.kind = c.kind }
+                    snap.pendingTerms[p] = pending
+                } else {
+                    pending = PendingTerm(text: c.text, kind: c.kind, ids: [dictationID], score: 1, lastSeen: moment)
+                    snap.pendingTerms.append(pending)
+                }
+                if pending.ids.count >= c.threshold {
+                    snap.pendingTerms.removeAll { VocabularyEntry.key(for: $0.text) == key }
+                    snap.entries.append(
+                        VocabularyEntry(
+                            text: pending.text, kind: pending.kind, source: .history, score: pending.score, lastSeen: moment,
+                            recentIDs: Array(pending.ids.suffix(VocabularyEntry.recentIDsCapacity)), knownIn: c.knownIn))
+                }
+            }
+        }
+    }
+
+    /// The same token identity records a word shown to the recognizer and excludes it from learning.
+    public static func cueWords(in text: String) -> Set<String> {
+        Set(TermMatcher.words(in: Self.fold(text)))
+    }
+
+    /// A recognition or typing observation uses the same multilingual rarity rules as the vocabulary learner.
+    public static func candidateTerms(
+        in text: String, locale: Locale, languages: [String], spellChecker: any SpellChecking, tagger: any EntityTagging,
+        snapshot: VocabularySnapshot? = nil, suggested: [String] = []
+    ) async -> [TermCandidate] {
         let chunks = Self.chunks(of: text)
-        guard !chunks.isEmpty else { return }
-        let language = language(of: locale)
+        guard !chunks.isEmpty else { return [] }
+        let language = locale.language.languageCode?.identifier ?? languages.first ?? "en"
         let spans = tagger.entities(in: text, language: language)
-        let aliasPhrases = await aliasPhrases()
+        let aliasPhrases = aliasPhrases(in: snapshot)
         let covered = chunks.map { Self.covered(by: aliasPhrases, in: $0) }
         let anyCovered = covered.contains { $0.contains(true) }
-        let known = await lookup(chunks.flatMap { $0 } + spans.flatMap { Self.words(of: $0.text) })
+        let known = await lookup(chunks.flatMap { $0 } + spans.flatMap { Self.words(of: $0.text) }, languages: languages, spellChecker: spellChecker)
         var candidates = Candidates()
 
         for span in spans {
@@ -92,43 +142,11 @@ public struct VocabularyLearner: Sendable {
                 }
             }
         }
-        guard !candidates.items.isEmpty else { return }
-
-        let items = candidates.items
-        let moment = now()
-        _ = try? await store.update(now: moment) { snap in
-            let aliasKeys = Set(snap.entries.flatMap(\.aliases).map(VocabularyEntry.foldedKey(for:)))
-            for c in items {
-                let key = VocabularyEntry.key(for: c.text)
-                if aliasKeys.contains(VocabularyEntry.foldedKey(for: c.text)) || snap.isBlocked(c.text) { continue }
-                if let i = snap.entries.firstIndex(where: { VocabularyEntry.key(for: $0.text) == key }) {
-                    if snap.entries[i].remember(dictationID) {
-                        snap.entries[i].score += 1
-                        snap.entries[i].lastSeen = moment
-                    }
-                    continue
-                }
-                var pending: PendingTerm
-                if let p = snap.pendingTerms.firstIndex(where: { VocabularyEntry.key(for: $0.text) == key }) {
-                    pending = snap.pendingTerms[p]
-                    guard !pending.ids.contains(dictationID) else { continue }
-                    pending.ids.append(dictationID)
-                    pending.score += 1
-                    pending.lastSeen = moment
-                    if pending.kind == .term { pending.kind = c.kind }
-                    snap.pendingTerms[p] = pending
-                } else {
-                    pending = PendingTerm(text: c.text, kind: c.kind, ids: [dictationID], score: 1, lastSeen: moment)
-                    snap.pendingTerms.append(pending)
-                }
-                if pending.ids.count >= c.threshold {
-                    snap.pendingTerms.removeAll { VocabularyEntry.key(for: $0.text) == key }
-                    snap.entries.append(
-                        VocabularyEntry(
-                            text: pending.text, kind: pending.kind, source: .history, score: pending.score, lastSeen: moment,
-                            recentIDs: Array(pending.ids.suffix(VocabularyEntry.recentIDsCapacity)), knownIn: c.knownIn))
-                }
-            }
+        let cues = Self.cueWords(in: suggested.joined(separator: " "))
+        return candidates.items.filter { candidate in
+            guard snapshot?.isBlocked(candidate.text) != true else { return false }
+            guard !cues.isEmpty else { return true }
+            return cues.isDisjoint(with: Self.cueWords(in: candidate.text))
         }
     }
 
@@ -275,6 +293,10 @@ public struct VocabularyLearner: Sendable {
 
     /// One batch lookup of `words`, plus the lowercase form of every acronym ("OK" → "ok").
     private func lookup(_ words: [String]) async -> Known {
+        await Self.lookup(words, languages: languages, spellChecker: spellChecker)
+    }
+
+    private static func lookup(_ words: [String], languages: [String], spellChecker: any SpellChecking) async -> Known {
         let lowercase = words.filter(Self.isAcronym).map { $0.lowercased() }
         let table = await spellChecker.knownLanguagesFolding(words + lowercase, languages: languages)
         return Known(table: table, configured: languages)
@@ -312,8 +334,8 @@ public struct VocabularyLearner: Sendable {
     }
 
     /// The multi-word aliases of the vocabulary, as comparison keys of space-joined words.
-    private func aliasPhrases() async -> [String] {
-        guard let snapshot = try? await store.snapshot() else { return [] }
+    private static func aliasPhrases(in snapshot: VocabularySnapshot?) -> [String] {
+        guard let snapshot else { return [] }
         return snapshot.entries.flatMap(\.aliases).compactMap { alias in
             let words = Self.words(of: alias)
             return words.count > 1 ? VocabularyEntry.key(for: words.joined(separator: " ")) : nil
@@ -345,17 +367,17 @@ public struct VocabularyLearner: Sendable {
 
     // MARK: candidates
 
-    private struct Candidate {
-        var text: String
+    public struct TermCandidate: Sendable {
+        public let text: String
         var kind: VocabularyEntry.Kind
-        var threshold: Int
+        public fileprivate(set) var threshold: Int
         var knownIn: [String]
     }
 
     /// The candidates of one text, merged by comparison key: a name that is also an unknown word keeps its kind
     /// and the lower threshold.
     private struct Candidates {
-        private(set) var items: [Candidate] = []
+        private(set) var items: [TermCandidate] = []
 
         mutating func add(text: String, kind: VocabularyEntry.Kind, threshold: Int, knownIn: [String]) {
             let key = VocabularyEntry.key(for: text)
@@ -364,7 +386,7 @@ public struct VocabularyLearner: Sendable {
                 items[i].threshold = min(items[i].threshold, threshold)
                 return
             }
-            items.append(Candidate(text: text, kind: kind, threshold: threshold, knownIn: knownIn))
+            items.append(TermCandidate(text: text, kind: kind, threshold: threshold, knownIn: knownIn))
         }
     }
 

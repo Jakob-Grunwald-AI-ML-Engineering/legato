@@ -1,4 +1,5 @@
 import Foundation
+import LegatoVocabulary
 import LegatoRoom
 import LegatoVoiceIdentity
 
@@ -83,6 +84,8 @@ public actor SonioxClient {
     private let keepaliveInterval: Duration
     private let finishTimeout: Duration
     private var segmenter = Segmenter()
+    /// Actual request vocabulary belongs to this connection, including while a later take starts on another socket.
+    private var recognitionCues: Set<String> = []
     private var receiver: Task<Void, Never>?
     private var heartbeat: Task<Void, Never>?
     private var timeoutTask: Task<Void, Never>?
@@ -152,7 +155,7 @@ public actor SonioxClient {
     }
     /// The start request. No acknowledgement exists: audio may follow at once on the same socket.
     /// `backgroundText` is read by the caller when the take starts (not when the connection was warmed).
-    public func begin(backgroundText: String = "", config startConfig: SonioxConfig? = nil) async throws {
+    public func begin(backgroundText: String = "", config startConfig: SonioxConfig? = nil, trackLearningCues: Bool = false) async throws {
         let config = startConfig ?? self.config
         if state == .streaming { return }
         guard state == .held else { throw failure ?? .notConnected }
@@ -170,6 +173,9 @@ public actor SonioxClient {
                     voiceFilter = nil
                     try await voiceStatus("unavailable")
                 }
+            }
+            if trackLearningCues {
+                recognitionCues = VocabularyLearner.cueWords(in: (config.terms + [config.general, config.fittedBackground(backgroundText)]).joined(separator: " "))
             }
             try await socket.send(.text(String(decoding: config.message(backgroundText: backgroundText), as: UTF8.self)))
             // The stream may have failed or closed while the request was in flight; that outcome stands.
@@ -354,6 +360,11 @@ public actor SonioxClient {
                 let t0 = segment.words.first?.t0
                 let t1 = segment.words.last?.t1
                 var fields: [String: JSONValue] = ["t0": t0.map(JSONValue.number) ?? .null, "t1": t1.map(JSONValue.number) ?? .null, "timings": try .encoding(segment.words.map { ["t0": $0.t0, "t1": $0.t1] }), "reason": .string(segment.reason), "thresholds": thresholds]
+                if !recognitionCues.isEmpty {
+                    let heard = VocabularyLearner.cueWords(in: segment.words.map(\.word.text).joined(separator: " "))
+                    let matches = heard.intersection(recognitionCues)
+                    if !matches.isEmpty { fields["recognitionCues"] = .array(matches.sorted().map(JSONValue.string)) }
+                }
                 if let speaker = segment.speaker { fields["speaker"] = .string(speakerPrefix + speaker) }
                 let metadata: JSONValue = .object(fields)
                 // A final can consume only a prefix of the previous partial. Carry the rest of this update so

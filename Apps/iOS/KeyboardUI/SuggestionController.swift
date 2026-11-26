@@ -1,4 +1,5 @@
 import Foundation
+import LegatoCore
 import LegatoKeyboardCore
 import LegatoVocabulary
 import UIKit
@@ -14,18 +15,18 @@ import os
 /// - alternatives for a tapped word (`WordAlternatives.rank` over the last dictation's other versions, the
 ///   vocabulary and the spell checker). Local only, no model.
 ///
-/// It reads `vocabulary.json` and the two word-pair files from the App Group container, off the main thread,
+/// It reads the vocabulary, active spelling preferences and the two word-pair files from the shared container,
 /// and again whenever one of them changes. Without Full Access there is no container: only the spell
-/// checker is used. It also learns from what the user types (`wordpairs-typed.json`, the keyboard is that
+/// checker is used. Explicit taps are recorded after the edit lands. Typing also teaches word pairs (the keyboard is that
 /// file's only writer), never in secure fields or fields that are not prose, and only with Full Access.
 @MainActor
 final class SuggestionController {
     /// What tapping a slot does, parallel to `KeyboardController.suggestions`.
     enum Action: Equatable {
         /// Finish the word being typed (or, with an empty prefix, add a predicted word).
-        case complete(prefix: String)
+        case complete(prefix: String, correction: Bool = false)
         /// Replace the words `original` (the span) with the slot's text.
-        case replace(original: String, span: WordSpan, fromVocabulary: Bool)
+        case replace(original: String, span: WordSpan)
     }
 
     /// What was read from the container.
@@ -34,6 +35,7 @@ final class SuggestionController {
         var vocabulary: VocabularySource?
         var matcher: TermMatcher?
         var termTexts: [UUID: String] = [:]
+        var choices: [String: [String]] = [:]
         var pairs: WordPairModel?
     }
 
@@ -42,6 +44,7 @@ final class SuggestionController {
         var vocabulary: Date?
         var dictated: Date?
         var typed: Date?
+        var corrections: String?
     }
 
     private unowned let controller: KeyboardController
@@ -73,6 +76,9 @@ final class SuggestionController {
     private var takeoverStatus: String?
     private var takeoverRunning = false
 
+    private var authoredWord = ""
+    private var includesWordStart = false
+    private var typingSession = UUID().uuidString
     private var typedBuffer = TypedSentenceBuffer()
     private var typedStore: WordPairStore?
     private var typedWrittenStamp: Date?
@@ -95,7 +101,7 @@ final class SuggestionController {
     /// The App Group container; nil without Full Access (or misconfigured signing).
     private var container: URL? {
         guard controller.fullAccess else { return nil }
-        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: LinkChannel.appGroupID)
+        return controller.evidenceStore?.directory.deletingLastPathComponent()
     }
 
     private nonisolated static func modified(_ url: URL) -> Date? {
@@ -120,30 +126,47 @@ final class SuggestionController {
             loadedStamps = nil
             return
         }
-        let current = stamps(in: directory)
-        guard !loading, force || current != loadedStamps else { return }
-        loadedStamps = current
+        guard !loading else { return }
         loading = true
+        let store = controller.evidenceStore
         Task { [weak self] in
-            let loaded = await Task.detached(priority: .utility) { Self.load(from: directory) }.value
             guard let self else { return }
+            defer { self.loading = false }
+            var current = self.stamps(in: directory)
+            current.corrections = try? await store?.revisionToken()
+            guard force || current != self.loadedStamps else { return }
+            let loaded = await Task.detached(priority: .utility) { await Self.load(from: directory, store: store) }.value
+            guard self.container == directory else { return }
+            self.loadedStamps = current
             self.resources = loaded
-            self.loading = false
+            self.refreshRow(force: true)
             #if DEBUG
             Self.logger.notice("e2e kbd.memory availableMB=\(Int(os_proc_available_memory() / 1_048_576)) vocabulary=\(loaded.snapshot?.entries.count ?? -1) pairs=\(loaded.pairs?.previousWordCount ?? -1)")
             #endif
         }
     }
 
-    private nonisolated static func load(from directory: URL) -> Resources {
+    private nonisolated static func load(from directory: URL, store: CorrectionStore?) async -> Resources {
         var out = Resources()
-        if let snapshot = try? VocabularySnapshot.read(from: directory.appending(path: vocabularyFile)) {
-            let live = snapshot.entries.filter { !$0.blocked }
-            out.snapshot = snapshot
-            out.vocabulary = VocabularySource(snapshot: snapshot)
-            out.matcher = TermMatcher(terms: live.map(TermMatcher.Term.init))
-            out.termTexts = Dictionary(live.map { ($0.id, $0.text) }, uniquingKeysWith: { first, _ in first })
+        var snapshot = (try? VocabularySnapshot.read(from: directory.appending(path: vocabularyFile))) ?? VocabularySnapshot()
+        snapshot.suppressLearnedSpellings((try? await store?.suppressedSpellings()) ?? [])
+        var choices = WordPairModel()
+        for preference in (try? await store?.keyboardCandidates()) ?? [] where preference.kind == .vocabulary {
+            guard snapshot.overlayTerm(text: preference.after, score: Double(preference.supportCount), lastSeen: preference.lastSeen,
+                                       correctionTarget: !preference.sources.isEmpty, source: preference.state == .approved ? .manual : .choice) != nil else { continue }
+            for source in preference.sources {
+                out.choices[VocabularyEntry.key(for: source), default: []].append(preference.after)
+            }
+            for evidence in preference.keyboardEvidence where evidence.origin == .selection {
+                guard let previous = evidence.previousWord else { continue }
+                choices.observe(text: previous + " " + preference.after, at: evidence.date)
+            }
         }
+        let live = snapshot.entries.filter { !$0.blocked }
+        out.snapshot = snapshot
+        out.vocabulary = VocabularySource(snapshot: snapshot)
+        out.matcher = TermMatcher(terms: live.map(TermMatcher.Term.init))
+        out.termTexts = Dictionary(live.map { ($0.id, $0.text) }, uniquingKeysWith: { first, _ in first })
         let dictated = WordPairModel.read(from: directory.appending(path: dictatedFile))
         let typed = WordPairModel.read(from: directory.appending(path: typedFile))
         out.pairs = switch (dictated, typed) {
@@ -152,6 +175,7 @@ final class SuggestionController {
         case let (nil, b?): b
         case (nil, nil): nil
         }
+        if choices.previousWordCount > 0 { out.pairs = out.pairs?.merged(with: choices) ?? choices }
         return out
     }
 
@@ -198,6 +222,7 @@ final class SuggestionController {
     /// A new field: nothing of the old one carries over.
     func fieldChanged() {
         interruptTyping()
+        typingSession = UUID().uuidString
         state = SuggestionState()
         _ = state.runActive(takeoverRunning)
         _ = state.status(takeoverStatus)
@@ -330,9 +355,10 @@ final class SuggestionController {
         let previous = WordContext.previousWord(beforePrefixIn: before).map { [$0] } ?? []
         let candidates = await WordSuggester.candidates(
             prefix: prefix, previous: previous, snapshot: resources.snapshot, pairs: resources.pairs,
-            completer: PlatformSpellChecker(), checker: PlatformSpellChecker(), languages: languages)
+            completer: PlatformSpellChecker(), checker: PlatformSpellChecker(), languages: languages,
+            preferredCorrections: resources.choices[VocabularyEntry.key(for: prefix)] ?? [])
         guard !Task.isCancelled, id == generation else { return }
-        publish(candidates.map(\.text), candidates.map { _ in .complete(prefix: prefix) },
+        publish(candidates.map(\.text), candidates.map { .complete(prefix: prefix, correction: $0.kind == .correction) },
                 correctionRank: candidates.firstIndex { $0.kind == .correction })
     }
 
@@ -353,6 +379,9 @@ final class SuggestionController {
         if let location, let index = Self.tokenIndex(of: location, in: texts) {
             sources.append(VersionWordsSource(texts: texts, shown: location.version, wordIndex: index))
         }
+        if let choices = resources.choices[VocabularyEntry.key(for: tapped.word)] {
+            sources.append(SelectedAlternativeSource(terms: choices))
+        }
         if let vocabulary = resources.vocabulary { sources.append(vocabulary) }
 
         let sentence = before + after
@@ -361,12 +390,12 @@ final class SuggestionController {
         let context = AlternativeContext(sentence: sentence, wordRange: range, languages: languages)
 
         if !sources.isEmpty {
-            let quick = await WordAlternatives.rank(word: tapped.word, context: context, sources: sources)
+            let quick = await WordAlternatives.rank(word: tapped.word, context: context, sources: sources, wordPairs: resources.pairs)
             guard !Task.isCancelled, id == generation else { return }
             if !quick.isEmpty { publish(alternatives: quick, tapped: tapped, before: before, after: after, location: location, texts: texts) }
         }
         sources.append(SpellCheckerSource(checker: PlatformSpellChecker()))
-        let ranked = await WordAlternatives.rank(word: tapped.word, context: context, sources: sources)
+        let ranked = await WordAlternatives.rank(word: tapped.word, context: context, sources: sources, wordPairs: resources.pairs)
         guard !Task.isCancelled, id == generation else { return }
         publish(alternatives: ranked, tapped: tapped, before: before, after: after, location: location, texts: texts)
     }
@@ -385,8 +414,7 @@ final class SuggestionController {
         let replacements = ranked.map { alt -> Action in
             let span = replacementSpan(for: alt, tapped: tapped, before: before, after: after, location: location, texts: texts)
             return .replace(
-                original: String(before.suffix(span.before)) + String(after.prefix(span.after)), span: span,
-                fromVocabulary: alt.source == .vocabulary)
+                original: String(before.suffix(span.before)) + String(after.prefix(span.after)), span: span)
         }
         publish(ranked.map(\.text), replacements)
     }
@@ -471,43 +499,101 @@ final class SuggestionController {
         // describe a word that is no longer there.
         guard actionsGeneration == generation, actions.count == words.count else { return }
         switch actions[rank] {
-        case .complete(let prefix):
+        case .complete(let prefix, let correction):
             guard let edit = WordEdit.complete(prefix: prefix, with: word, contextBefore: controller.typing.contextBefore) else { return }
-            controller.applyEdit(edit, removed: prefix, asTyping: true)
-        case .replace(let original, let span, let fromVocabulary):
+            let choice = evidence(term: word, original: correction ? prefix : nil, previous: WordContext.previousWord(beforePrefixIn: before))
+            controller.applyEdit(edit, removed: prefix, asTyping: true, evidence: choice.map { [$0] } ?? [])
+        case .replace(let original, let span):
+            let preceding = String(before.dropLast(span.before))
+            let choice = evidence(term: word, original: original, previous: WordContext.previousWord(beforePrefixIn: preceding))
             controller.applyEdit(
-                WordEdit.replace(span: span, with: word, matchingCaseOf: original), removed: original, asTyping: false)
-            controller.recordChoice(ChoiceRecord(original: original, chosen: word, fromVocabulary: fromVocabulary, at: Date()))
+                WordEdit.replace(span: span, with: word, matchingCaseOf: original), removed: original, asTyping: false, evidence: choice.map { [$0] } ?? [])
             clear() // until the next intent
         }
     }
 
     // MARK: Learning from typing
 
-    func typed(_ text: String) {
+    func typed(_ text: String, before: String) {
         guard learnsHere else { return }
+        if text.count == 1, let c = text.first, c.isLetter || c.isNumber || c == "'" || c == "’" {
+            if authoredWord.isEmpty {
+                includesWordStart = TextContext(documentContextBeforeInput: before).wordPrefix.isEmpty
+            }
+            if authoredWord.utf8.count <= 256 { authoredWord.append(c) }
+        } else {
+            finishAuthoredWord()
+            if text.contains("\n") { typingSession = UUID().uuidString }
+        }
         if let sentence = typedBuffer.typed(text) { learn(sentence) }
     }
 
     func deletedTyped() {
         guard learnsHere else { return }
+        if !authoredWord.isEmpty { authoredWord.removeLast() }
         typedBuffer.deleted()
     }
 
     /// A completion or prediction replaced the last `count` typed characters with `text`: it counts as typed.
     func completed(deleting count: Int, with text: String) {
         guard learnsHere else { return }
-        if let sentence = typedBuffer.completed(deleting: count, with: text) { learn(sentence) }
+        authoredWord = ""
+        // The choice itself supplies the preceding pair, including its reversible source ID.
+        // Start the next typed pair with the selected word, preserving only earlier authored pairs.
+        for _ in 0..<count { typedBuffer.deleted() }
+        if let sentence = typedBuffer.interrupted() { learn(sentence) }
+        if let sentence = typedBuffer.typed(text) { learn(sentence) }
     }
 
     /// The typing is being undone: what was typed so far is dropped, not learned.
     func discardTyping() {
+        authoredWord = ""
         typedBuffer.discard()
     }
 
     /// The cursor moved, the field changed or the host edited the text: what was typed so far is learned.
     func interruptTyping() {
+        finishAuthoredWord()
         if let sentence = typedBuffer.interrupted(), learnsHere { learn(sentence) }
+    }
+
+    private func finishAuthoredWord() {
+        defer { authoredWord = "" }
+        guard includesWordStart, authoredWord.count >= 2, let term = evidence(term: authoredWord, origin: .typed) else { return }
+        controller.attachTypedEvidence(term)
+        updateEvidence(term)
+    }
+
+    private func evidence(term: String, original: String? = nil, previous: String? = nil,
+                          origin: TermEvidence.Origin = .selection) -> TermEvidence? {
+        guard learnsHere, term.utf8.count <= 256 else { return nil }
+        return TermEvidence(term: term, original: original.flatMap { $0.utf8.count <= 256 ? $0 : nil },
+                            takeID: controller.evidenceTakeID(before: document.contextBefore, after: document.contextAfter) ?? typingSession,
+                            date: Date(), localeIdentifier: Locale.current.identifier, origin: origin,
+                            previousWord: previous.flatMap { $0.utf8.count <= 256 ? $0 : nil })
+    }
+
+    func updateEvidence(_ action: TermEvidence, retract: Bool = false) {
+        guard let store = controller.evidenceStore else { return }
+        let previous = writeChain
+        let languages = self.languages
+        let snapshot = resources.snapshot
+        writeChain = Task { [weak self] in
+            await previous?.value
+            if retract {
+                try? await store.deleteTermEvidence(id: action.id)
+            } else if (try? await store.personalizationEnabled()) == true {
+                let classified = await VocabularyLearner.candidateTerms(in: action.term, locale: Locale(identifier: action.localeIdentifier),
+                    languages: languages, spellChecker: PlatformSpellChecker(), tagger: NLEntityTagger(), snapshot: snapshot ?? VocabularySnapshot())
+                let candidate = classified.first { VocabularyEntry.key(for: $0.text) == VocabularyEntry.key(for: action.term) }
+                guard action.origin == .selection || candidate != nil else { return }
+                var observation = action
+                observation.promotionCount = candidate?.threshold
+                try? await store.recordTermEvidence(observation)
+            } else { return }
+            self?.lastCheck = .distantPast
+            self?.reloadIfChanged(force: true)
+        }
     }
 
     /// Writes are chained, so the one writer never works on two sentences at once.

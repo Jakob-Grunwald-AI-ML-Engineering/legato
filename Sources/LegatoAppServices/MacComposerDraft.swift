@@ -27,8 +27,9 @@ import LegatoKeyboardCore
     @ObservationIgnored private var expiry: Task<Void, Never>?
     @ObservationIgnored private var correction: Task<Void, Never>?
     @ObservationIgnored private var revision = 0
-    @ObservationIgnored var documentID = UUID()
-    @ObservationIgnored var original = ""
+    @ObservationIgnored public private(set) var documentID = UUID()
+    @ObservationIgnored var recognitionHints: Set<String> = []
+    @ObservationIgnored public private(set) var original = ""
     @ObservationIgnored var acceptingSpeech = false
     @ObservationIgnored var needsFreshBoundary = false
     @ObservationIgnored var recentContext: () -> String = { "" }
@@ -39,6 +40,7 @@ import LegatoKeyboardCore
 
     public func receive(_ line: DictationRouteLine) async {
         guard acceptingSpeech else { return }
+        recognitionHints.formUnion(line.recognitionHints)
         additions = LiveSegment.joined([additions, line.text])
         original = LiveSegment.joined([original, line.text])
         tail = line.remainingTail ?? ""
@@ -109,6 +111,7 @@ import LegatoKeyboardCore
         expireUndo()
         documentID = UUID()
         original = ""
+        recognitionHints.removeAll()
         message = nil
         dismissal = nil
         visualRevision = nil

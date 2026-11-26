@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import LegatoVocabulary
 import os
 
 public enum CorrectionKind: String, Codable, Sendable { case vocabulary, style }
@@ -16,8 +17,21 @@ public struct CorrectionCandidate: Sendable, Identifiable, Equatable {
     /// The newest supporting edit from each independent take, newest first.
     public let records: [CorrectionRecord]
     public let state: CorrectionReviewState
+    public let keyboardEvidence: [TermEvidence]
+    public let sources: [String]
+    public let supportCount: Int
+    public let lastSeen: Date
+    public let isAutomatic: Bool
+    public let approvedSource: String?
+    fileprivate let originalTarget: String
+    fileprivate var visibleInReview: Bool { supportCount >= 2 || !keyboardEvidence.allSatisfy(\.isRecognition) }
+    public var isKeyboardOnly: Bool { !isAutomatic && state == .pending && keyboardEvidence.contains { !$0.isRecognition } }
 
     /// Match whole words. Punctuation-only edits retain their neighbouring word in the captured example.
+    public func matchesTargetPhrase(in text: String) -> Bool {
+        CapturedChange.contains(CapturedChange.words(after), in: CapturedChange.words(text))
+    }
+
     public func matchesSourcePhrase(in text: String) -> Bool {
         CapturedChange.contains(CapturedChange.words(before), in: CapturedChange.words(text))
     }
@@ -28,9 +42,12 @@ public struct CorrectionReviewSnapshot: Sendable {
     public let candidates: [CorrectionCandidate]
 }
 
-private struct ReviewDecision: Codable {
+private struct ReviewDecision: Codable, Sendable {
     let state: CorrectionReviewState
     let evidence: Set<UUID>
+    var originalTarget: String?
+    var spelling: String?
+    var approvedSource: String?
 }
 
 private struct CapturedChange {
@@ -42,14 +59,22 @@ private struct CapturedChange {
     let record: CorrectionRecord
 
     var id: String {
-        // Length prefixes keep distinct phrase pairs distinct even when text contains delimiters.
-        let parts = [kind.rawValue, locale, before, after].map { "\($0.utf8.count):\($0)" }
-        return SHA256.hash(data: Data(parts.joined().utf8)).map { String(format: "%02x", $0) }.joined()
+        decisionID([kind.rawValue, locale, before, after])
     }
 
-    init?(_ record: CorrectionRecord) {
-        var before = record.removed.trimmingCharacters(in: .whitespacesAndNewlines)
-        var after = record.replacement.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Work only on captured changed spans. Reject long rewrites before the quadratic word alignment.
+    static func extract(_ record: CorrectionRecord) -> [Self] {
+        let old = record.removed, new = record.replacement
+        guard old.utf8.count <= 2048, new.utf8.count <= 2048 else { return [] }
+        let blocks = WordAlignment.substitutions(from: old, to: new)
+        let substitutions = blocks.compactMap { Self(record, from: $0.rawText, to: $0.targetText) }
+        if !substitutions.isEmpty { return substitutions }
+        return Self(record, from: old, to: new).map { [$0] } ?? []
+    }
+
+    init?(_ record: CorrectionRecord, from source: String, to target: String) {
+        var before = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        var after = target.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !before.isEmpty, !after.isEmpty, before != after, before.count <= 120, after.count <= 120 else { return nil }
         let originalWords = Self.words(before), correctedWords = Self.words(after)
         guard !originalWords.isEmpty, !correctedWords.isEmpty,
@@ -69,7 +94,7 @@ private struct CapturedChange {
                 let originalLetters = originalWords.joined(), correctedLetters = correctedWords.joined()
                 let common = originalLetters.difference(from: correctedLetters)
                 let retained = (originalLetters.count + correctedLetters.count - common.count) / 2
-                guard retained >= 2, retained * 2 >= max(originalLetters.count, correctedLetters.count) else { return nil }
+                guard after.first?.isUppercase == true || (retained >= 2 && retained * 2 >= max(originalLetters.count, correctedLetters.count)) else { return nil }
                 kind = .vocabulary
                 while let first = before.first, first == after.first, first.isPunctuation {
                     before.removeFirst(); after.removeFirst()
@@ -108,39 +133,110 @@ private struct CapturedChange {
     }
 }
 
-/// Atomic file creation, replacement and removal change the parent directory's modification time.
-/// Keep one device-local result per process; creating another CorrectionStore for a request reuses it.
-private struct DirectoryRevision: Equatable, Sendable {
+private func decisionID(_ parts: [String]) -> String {
+    let key = parts.map { "\($0.utf8.count):\($0)" }.joined()
+    return SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
+}
+
+private struct EvidenceGroup {
+    var changes: [CapturedChange] = []
+    var terms: [TermEvidence] = []
+
+    static func key(target: String, locale: String) -> String {
+        decisionID(["term", Locale(identifier: locale).identifier, VocabularyEntry.key(for: target)])
+    }
+
+    func candidate(id: String, decisions: [String: ReviewDecision]) -> CorrectionCandidate? {
+        let edits = changes.sorted { $0.record.date > $1.record.date }
+        let events = terms.sorted { $0.date > $1.date }
+        guard let target = edits.first?.after ?? events.first?.term,
+              let locale = edits.first?.locale ?? events.first?.localeIdentifier else { return nil }
+        let kind = edits.first?.kind ?? .vocabulary
+        var seen = Set<String>()
+        let records = edits.compactMap { seen.insert($0.record.dictationID.lowercased()).inserted ? $0.record : nil }
+        let independentEvents = events.filter { seen.insert(($0.takeID ?? $0.id.uuidString).lowercased()).inserted }
+        let supportCount = records.count + independentEvents.count
+        let legacySources = Dictionary(grouping: edits, by: \.id)
+        let sourceIDs = Set(edits.map(\.record.id) + events.map(\.id))
+        // A legacy approval applied only to its spelling pair, with surviving supporting records.
+        let legacy = edits.compactMap { change -> (ReviewDecision, String)? in
+            guard let decision = decisions[change.id],
+                  decision.state == .dismissed || decision.evidence.contains(change.record.id) else { return nil }
+            return (decision, change.before)
+        }
+        let legacyDecision = legacy.first { $0.0.state == .dismissed } ?? legacy.first
+        let decision = decisions[id] ?? legacyDecision?.0
+        let state: CorrectionReviewState
+        if let decision, decision.state == .dismissed || !decision.evidence.isDisjoint(with: sourceIDs) && (supportCount >= 2 || decision.evidence.count == 1) {
+            state = decision.state
+        } else {
+            state = .pending
+        }
+        let targetSpelling = state == .pending && decision?.state != .pending ? target : decision?.spelling ?? target
+        let approvedSource: String?
+        if decisions[id] != nil {
+            approvedSource = state == .approved ? decision?.approvedSource : nil
+        } else if let legacySource = legacyDecision?.1, state == .approved, legacySources.values.contains(where: {
+            $0.first?.before == legacySource && Set($0.map(\.record.dictationID)).count >= 2
+        }) {
+            approvedSource = legacySource
+        } else {
+            approvedSource = nil
+        }
+        let before = approvedSource ?? edits.first?.before ?? events.first?.original ?? target
+        let hasEdit = edits.contains { $0.basis != .uncertain } || events.contains { !$0.isTyped && !$0.isRecognition && $0.promotionCount != nil }
+        let threshold = hasEdit ? 2 : events.compactMap(\.promotionCount).min()
+        let qualified = kind == .vocabulary && threshold.map { supportCount >= $0 } == true
+        let sources = Set(edits.map(\.before) + events.compactMap(\.original))
+        let basis = edits.first?.basis ?? .uncertain
+        return CorrectionCandidate(id: id, kind: kind, before: before, after: targetSpelling,
+            localeIdentifier: locale, basis: edits.allSatisfy { $0.basis == basis } ? basis : .uncertain,
+            records: records, state: state, keyboardEvidence: events, sources: sources.sorted(),
+            supportCount: supportCount, lastSeen: max(records.first?.date ?? .distantPast, events.first?.date ?? .distantPast),
+            isAutomatic: state == .pending && qualified, approvedSource: approvedSource, originalTarget: target)
+    }
+}
+
+private struct FileRevision: Equatable, Sendable {
     let inode: ino_t
     let seconds: Int
     let nanoseconds: Int
 
-    init(_ directory: URL) throws {
+    init?(_ url: URL) throws {
         var metadata = stat()
-        guard stat(directory.path, &metadata) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        guard stat(url.path, &metadata) == 0 else {
+            if errno == ENOENT { return nil }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
         inode = metadata.st_ino
         seconds = metadata.st_mtimespec.tv_sec
         nanoseconds = metadata.st_mtimespec.tv_nsec
     }
 }
 
-private struct ApprovedRevision: Equatable, Sendable {
+private struct EvidenceRevision: Equatable, Sendable {
     let directory: URL
-    let records: DirectoryRevision
-    let decisions: DirectoryRevision
+    let files: [FileRevision?]
 }
 
-private struct ApprovedResult: Sendable {
-    let revision: ApprovedRevision
+private struct CachedEvidence: Sendable {
+    let revision: EvidenceRevision
     let candidates: [CorrectionCandidate]
 }
 
+private struct CachedDecisions: Sendable {
+    let directory: URL
+    let revision: FileRevision
+    let decisions: [String: ReviewDecision]
+}
+
 extension CorrectionStore {
-    private static let lastApproved = OSAllocatedUnfairLock(initialState: Optional<ApprovedResult>.none)
-    private var reviewDirectory: URL { directory.appendingPathComponent("Review", isDirectory: true) }
+    private static let decisionCache = OSAllocatedUnfairLock(initialState: Optional<CachedDecisions>.none)
+    private static let cache = OSAllocatedUnfairLock(initialState: Optional<CachedEvidence>.none)
+    private nonisolated var reviewDirectory: URL { directory.appendingPathComponent("Review", isDirectory: true) }
     private var enabledURL: URL { reviewDirectory.appendingPathComponent("enabled") }
 
-    private func personalizationEnabled() throws -> Bool {
+    public func personalizationEnabled() throws -> Bool {
         guard FileManager.default.fileExists(atPath: enabledURL.path) else { return true }
         return try JSONDecoder().decode(Bool.self, from: Data(contentsOf: enabledURL))
     }
@@ -150,97 +246,134 @@ extension CorrectionStore {
         try PrivateFiles.write(JSONEncoder().encode(enabled), to: enabledURL)
     }
 
-    /// One atomically replaced file per decision lets app/extension readers see complete writes and
-    /// prevents concurrent changes to different candidates or to the switch from overwriting each other.
     public func setReview(_ state: CorrectionReviewState, for candidate: CorrectionCandidate) throws {
+        try writeDecision(state, for: candidate, spelling: candidate.after,
+                          approvedSource: state == .approved && candidate.sources.count == 1 ? candidate.sources.first : nil)
+    }
+
+    public func editSpelling(_ spelling: String, for candidate: CorrectionCandidate) throws {
+        let text = spelling.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard candidate.kind == .vocabulary, !text.isEmpty, text.utf8.count <= 256,
+              !text.contains(where: \.isNewline) else { throw CocoaError(.fileWriteInvalidFileName) }
+        try writeDecision(.approved, for: candidate, spelling: text, approvedSource: nil)
+    }
+
+    private func writeDecision(_ state: CorrectionReviewState, for candidate: CorrectionCandidate, spelling: String, approvedSource: String?) throws {
         try PrivateFiles.createDirectory(reviewDirectory)
-        let decision = ReviewDecision(state: state, evidence: Set(candidate.records.map(\.id)))
+        let decision = ReviewDecision(state: state, evidence: Set(candidate.records.map(\.id) + candidate.keyboardEvidence.map(\.id)),
+                                      originalTarget: candidate.kind == .vocabulary ? candidate.originalTarget : nil, spelling: candidate.kind == .vocabulary ? spelling : nil,
+                                      approvedSource: approvedSource)
         try PrivateFiles.write(JSONEncoder().encode(decision), to: reviewDirectory.appendingPathComponent(candidate.id + ".decision"))
     }
 
-    public func approvedCandidates() throws -> [CorrectionCandidate] {
-        guard try personalizationEnabled(), FileManager.default.fileExists(atPath: reviewDirectory.path) else { return [] }
-        let revision = try approvedRevision()
-        if let cached = Self.lastApproved.withLock({ $0?.revision == revision ? $0?.candidates : nil }) { return cached }
-        let decisions = try loadDecisions().filter { $0.value.state == .approved }
-        let result = decisions.isEmpty ? [] : try candidates(decisions: decisions).filter { $0.state == .approved }
-        // A concurrent writer invalidates this read. Fail closed for this request and retry on the next one.
-        guard try revision == approvedRevision(), try personalizationEnabled() else { return [] }
-        Self.lastApproved.withLock { $0 = ApprovedResult(revision: revision, candidates: result) }
-        return result
+    /// Suppression also applies to previously learned (non-manual) entries already on this device.
+    public func suppressedSpellings() throws -> Set<String> {
+        var spellings = Set<String>()
+        for decision in try loadDecisions().values where decision.state == .dismissed {
+            if let target = decision.originalTarget { spellings.insert(VocabularyEntry.key(for: target)) }
+            if let spelling = decision.spelling { spellings.insert(VocabularyEntry.key(for: spelling)) }
+        }
+        return spellings
     }
 
-    private func approvedRevision() throws -> ApprovedRevision {
-        try ApprovedRevision(directory: directory, records: DirectoryRevision(directory), decisions: DirectoryRevision(reviewDirectory))
+    public func invalidateVocabularyEvidence(takeID: String) throws {
+        try PrivateFiles.createDirectory(reviewDirectory)
+        let key = decisionID([takeID.lowercased()])
+        try PrivateFiles.write(Data(), to: reviewDirectory.appendingPathComponent(key + ".deleted"))
+    }
+
+    private func deletedTakeKeys() throws -> Set<String> {
+        guard FileManager.default.fileExists(atPath: reviewDirectory.path) else { return [] }
+        let files = try FileManager.default.contentsOfDirectory(at: reviewDirectory, includingPropertiesForKeys: nil)
+        return Set(files.filter { $0.pathExtension == "deleted" }.map { $0.deletingPathExtension().lastPathComponent })
+    }
+
+    public func revisionToken() throws -> String {
+        try revision().files.map { file in
+            file.map { "\($0.inode)-\($0.seconds)-\($0.nanoseconds)" } ?? "-"
+        }.joined(separator: "/")
+    }
+
+    public func activeCandidates() throws -> [CorrectionCandidate] {
+        guard try personalizationEnabled() else { return [] }
+        return try allCandidates().filter { $0.state == .approved || $0.isAutomatic }
+    }
+
+    public func approvedCandidates() throws -> [CorrectionCandidate] {
+        try activeCandidates().filter { $0.state == .approved }
+    }
+
+    public func keyboardCandidates() throws -> [CorrectionCandidate] {
+        guard try personalizationEnabled() else { return [] }
+        return try allCandidates().filter {
+            $0.kind == .vocabulary && $0.state != .dismissed && ($0.state == .approved || $0.isAutomatic || $0.isKeyboardOnly)
+        }
     }
 
     public func reviewSnapshot() throws -> CorrectionReviewSnapshot {
-        try CorrectionReviewSnapshot(enabled: personalizationEnabled(), candidates: candidates(decisions: loadDecisions()))
+        try CorrectionReviewSnapshot(enabled: personalizationEnabled(), candidates: allCandidates().filter(\.visibleInReview))
+    }
+
+    private func revision() throws -> EvidenceRevision {
+        try EvidenceRevision(directory: directory, files: [directory, reviewDirectory, termEvidenceDirectory].map { try FileRevision($0) })
+    }
+
+    private func allCandidates() throws -> [CorrectionCandidate] {
+        let initial = try revision()
+        if let hit = Self.cache.withLock({ $0?.revision == initial ? $0?.candidates : nil }) { return hit }
+        var groups = [String: EvidenceGroup]()
+        var correctedSources = [String: Set<String>]()
+        let deleted = try deletedTakeKeys()
+        func eligible(_ take: String) -> Bool { deleted.isEmpty || !deleted.contains(decisionID([take.lowercased()])) }
+        let byTake = Dictionary(grouping: try recent(limit: .max), by: \.dictationID)
+        for (take, observations) in byTake where eligible(take) {
+            // Older recorders could save a newline-only host clear as an edit. Retain the preceding spelling.
+            let ordinary = observations.filter { !$0.afterText.allSatisfy(\.isWhitespace) }
+            let ordered = ordinary.sorted { $0.date == $1.date ? $0.id.uuidString < $1.id.uuidString : $0.date < $1.date }
+            guard let latest = ordered.last, latest.afterText != latest.insertedText else { continue }
+            let finalWords = CapturedChange.words(latest.afterText)
+            for record in ordered where record.eligibleForLearning != false {
+                for change in CapturedChange.extract(record) {
+                    guard change.kind == .style ? latest.afterText.contains(change.after) :
+                            CapturedChange.contains(CapturedChange.words(change.after), in: finalWords) else { continue }
+                    // An undone replacement restoring a word originally inserted by Legato is not new user evidence.
+                    if change.kind == .vocabulary && change.basis == .uncertain { continue }
+                    if change.basis == .recognition && !CapturedChange.contains(CapturedChange.words(change.before), in: finalWords) {
+                        correctedSources[take.lowercased(), default: []].insert(VocabularyEntry.key(for: change.before))
+                    }
+                    let id = change.kind == .style ? change.id : EvidenceGroup.key(target: change.after, locale: change.locale)
+                    groups[id, default: EvidenceGroup()].changes.append(change)
+                }
+            }
+        }
+        for event in try termEvidence() where event.takeID.map(eligible) ?? true {
+            if event.isRecognition, let take = event.takeID,
+               correctedSources[take.lowercased()]?.contains(VocabularyEntry.key(for: event.term)) == true { continue }
+            let id = EvidenceGroup.key(target: event.term, locale: event.localeIdentifier)
+            groups[id, default: EvidenceGroup()].terms.append(event)
+        }
+        let decisions = try loadDecisions()
+        let result = groups.compactMap { $0.value.candidate(id: $0.key, decisions: decisions) }
+            .sorted { $0.lastSeen == $1.lastSeen ? $0.id < $1.id : $0.lastSeen > $1.lastSeen }
+        guard try revision() == initial else { return [] }
+        Self.cache.withLock { $0 = CachedEvidence(revision: initial, candidates: result) }
+        return result
     }
 
     private func loadDecisions() throws -> [String: ReviewDecision] {
-        guard FileManager.default.fileExists(atPath: reviewDirectory.path) else { return [:] }
-        let urls = try FileManager.default.contentsOfDirectory(at: reviewDirectory, includingPropertiesForKeys: nil)
-        var decisions: [String: ReviewDecision] = [:]
-        for url in urls where url.pathExtension == "decision" {
-            decisions[url.deletingPathExtension().lastPathComponent] = try JSONDecoder().decode(ReviewDecision.self, from: Data(contentsOf: url))
+        guard let revision = try FileRevision(reviewDirectory) else { return [:] }
+        if let hit = Self.decisionCache.withLock({ state in
+            state?.directory == reviewDirectory && state?.revision == revision ? state?.decisions : nil
+        }) { return hit }
+        var result = [String: ReviewDecision]()
+        for url in try FileManager.default.contentsOfDirectory(at: reviewDirectory, includingPropertiesForKeys: nil)
+            where url.pathExtension == "decision" {
+            result[url.deletingPathExtension().lastPathComponent] = try JSONDecoder().decode(ReviewDecision.self, from: Data(contentsOf: url))
         }
-        return decisions
-    }
-
-    private func candidates(decisions: [String: ReviewDecision]) throws -> [CorrectionCandidate] {
-        // The review list is independent of the raw observation screen's 200-record display window.
-        let groups = Dictionary(grouping: try recent(limit: .max), by: \.dictationID)
-        var evidence: [String: [CapturedChange]] = [:]
-        for observations in groups.values {
-            var seen = Set<String>()
-            for record in Self.survivingEdits(observations).reversed() {
-                guard let change = CapturedChange(record) else { continue }
-                let id = change.id
-                if seen.insert(id).inserted { evidence[id, default: []].append(change) }
-            }
+        if try FileRevision(reviewDirectory) == revision {
+            let entry = CachedDecisions(directory: reviewDirectory, revision: revision, decisions: result)
+            Self.decisionCache.withLock { $0 = entry }
         }
-        return evidence.compactMap { id, changes in
-            guard changes.count >= 2 else { return nil }
-            let ordered = changes.sorted { $0.record.date > $1.record.date }
-            let first = ordered[0]
-            let records = ordered.map(\.record)
-            var state: CorrectionReviewState = .pending
-            if let decision = decisions[id],
-               decision.state == .dismissed || !decision.evidence.isDisjoint(with: records.map(\.id)) {
-                state = decision.state
-            }
-            return CorrectionCandidate(id: id, kind: first.kind, before: first.before, after: first.after,
-                                       localeIdentifier: first.locale, basis: changes.allSatisfy { $0.basis == first.basis } ? first.basis : .uncertain,
-                                       records: records, state: state)
-        }.sorted { lhs, rhs in
-            let l = lhs.records[0].date, r = rhs.records[0].date
-            return l == r ? lhs.id < rhs.id : l > r
-        }
-    }
-
-    /// Collapse settled undo/redo loops within each take, including an undo of several changes at once.
-    private static func survivingEdits(_ observations: [CorrectionRecord]) -> [CorrectionRecord] {
-        let chronological = observations.sorted {
-            $0.date == $1.date ? $0.id.uuidString < $1.id.uuidString : $0.date < $1.date
-        }
-        var edits: [CorrectionRecord] = []
-        for record in chronological {
-            if record.afterText == record.insertedText {
-                edits.removeAll()
-            } else if let index = edits.lastIndex(where: { $0.beforeText == record.afterText }) {
-                edits.removeSubrange(index...)
-            } else if let reversed = edits.lastIndex(where: {
-                $0.removed == record.replacement && $0.replacement == record.removed
-                    && !record.afterText.contains($0.replacement)
-            }) {
-                // Undoing one word while keeping later changes elsewhere does not restore a previous field snapshot.
-                edits.remove(at: reversed)
-            } else {
-                edits.append(record)
-            }
-        }
-        guard let final = chronological.last?.afterText else { return [] }
-        return edits.filter { final.contains($0.replacement) }
+        return result
     }
 }

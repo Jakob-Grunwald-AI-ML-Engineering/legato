@@ -4,7 +4,7 @@ import LegatoKeyboardCore
 import LegatoCore
 import LegatoVocabulary
 
-/// Read-only request view. Approved spellings overlay the vocabulary in memory so revocation
+/// Read-only request view. Qualified and explicitly approved spellings overlay the vocabulary so revocation
 /// never needs to undo a write to the user's manual or history-learned vocabulary.
 struct RequestVocabulary: Sendable {
     private let fileURL: URL
@@ -34,28 +34,26 @@ struct RequestVocabulary: Sendable {
 
     private var selector: HintSelector { HintSelector(languages: languages(), halfLife: halfLife) }
 
-    private func evidence() async -> (VocabularySnapshot, [CorrectionCandidate]) {
+    private func evidence(matching draft: String? = nil) async -> (VocabularySnapshot, [CorrectionCandidate]) {
         var snapshot = (try? VocabularySnapshot.read(from: fileURL)) ?? VocabularySnapshot()
-        let approved = (try? await corrections.approvedCandidates()) ?? []
-        for preference in approved where preference.kind == .vocabulary && !snapshot.isBlocked(preference.after) {
-            guard !preference.after.isEmpty, preference.after.utf8.count <= 256 else { continue }
-            let key = VocabularyEntry.key(for: preference.after)
-            let prior = snapshot.entry(forText: preference.before)
-            let alias = prior?.source == .manual || prior?.pinned == true ? [] : [preference.before]
-            if let index = snapshot.entries.firstIndex(where: { VocabularyEntry.key(for: $0.text) == key }) {
-                snapshot.entries[index].source = .manual
-                snapshot.entries[index].correctionTarget = true
-                if !alias.isEmpty, !snapshot.entries[index].aliases.contains(preference.before) {
-                    snapshot.entries[index].aliases.append(preference.before)
+        let suppressed = (try? await corrections.suppressedSpellings()) ?? []
+        snapshot.suppressLearnedSpellings(suppressed)
+        let active = (try? await corrections.activeCandidates()) ?? []
+        for preference in active where preference.kind == .vocabulary {
+            // Learned substitutions provide independent evidence for a target, not universal aliases.
+            // An automatic term can reach a cleanup/Magic request only if its exact spelling occurs there.
+            if preference.approvedSource == nil, let draft, !preference.matchesTargetPhrase(in: draft) { continue }
+            guard let index = snapshot.overlayTerm(text: preference.after, score: Double(preference.supportCount),
+                lastSeen: preference.lastSeen, correctionTarget: !preference.sources.isEmpty,
+                source: preference.state == .approved ? .manual : .history) else { continue }
+            if let alias = preference.approvedSource, alias != preference.after {
+                let existing = snapshot.entry(forText: alias)
+                if existing?.source != .manual && existing?.pinned != true && !snapshot.entries[index].aliases.contains(alias) {
+                    snapshot.entries[index].aliases.append(alias)
                 }
-            } else {
-                let term = VocabularyEntry(text: preference.after, source: .manual,
-                    score: Double(preference.records.count), lastSeen: preference.records.map(\.date).max() ?? .distantPast,
-                    correctionTarget: true, aliases: alias)
-                snapshot.entries.append(term)
             }
         }
-        return (snapshot, approved)
+        return (snapshot, active.filter { $0.state == .approved })
     }
 
     func hints(for sink: VocabularyHintSink, limit: Int) async -> [SelectedHint] {
@@ -68,7 +66,7 @@ struct RequestVocabulary: Sendable {
     }
 
     func cleanup(for text: String) async -> CleanupPersonalization {
-        let (snapshot, approved) = await evidence()
+        let (snapshot, approved) = await evidence(matching: text)
         let selected = await selector.cleanupTerms(for: text, from: snapshot, spellChecker: spellChecker)
         var budget = 16_384
         let terms = selected.filter { term in
@@ -81,7 +79,7 @@ struct RequestVocabulary: Sendable {
             guard examples.count < 6 else { break }
             guard candidate.before.utf8.count <= 256, candidate.after.utf8.count <= 256 else { continue }
             if candidate.kind == .vocabulary {
-                guard terms.contains(where: { VocabularyEntry.key(for: $0) == VocabularyEntry.key(for: candidate.after) }) else { continue }
+                guard candidate.approvedSource != nil, terms.contains(where: { VocabularyEntry.key(for: $0) == VocabularyEntry.key(for: candidate.after) }) else { continue }
             } else if !candidate.matchesSourcePhrase(in: text) {
                 continue
             }

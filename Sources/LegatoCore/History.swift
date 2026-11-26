@@ -51,6 +51,16 @@ public struct DictationEntry: Sendable, Equatable, Codable, Identifiable {
     public var text: String
     /// The engine's text when post-processing changed it (`text` is then the processed text), else nil.
     public var rawText: String?
+    /// Request cue words that also occurred in recognition. Present only on a finalized take with known request provenance.
+    public var recognitionHints: [String]?
+    /// A newly recorded draft that may still be discarded. Nil on legacy entries.
+    public var provisional: Bool?
+    /// When part of the raw take was discarded, only the retained speech may teach.
+    public var retainedRecognition: String?
+    public var spokenEvidence: String? {
+        guard instructionStatus == nil, engineID != "instruction", provisional != true else { return nil }
+        return retainedRecognition ?? rawText ?? text
+    }
     public var localeIdentifier: String
     public var engineID: String
     public var duration: TimeInterval

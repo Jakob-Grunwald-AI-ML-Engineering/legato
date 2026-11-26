@@ -360,7 +360,7 @@ import LegatoKeyboardCore
             guard !text.isEmpty else { return }
             if !insertion.isPrivate {
                 do {
-                    try await pipeline.recordDraft(id: composer.documentID, raw: composer.original, text: text)
+                    try await pipeline.recordDraft(id: composer.documentID, raw: composer.original, text: text, recognitionHints: composer.recognitionHints.sorted())
                 } catch {
                     Self.log.error("mac.dictation.history.failed")
                     composer.message = "Couldn’t save to History. Try Insert again or discard the draft."

@@ -148,6 +148,12 @@ public extension String {
 
 public enum TextTargetReadError: Error { case unsupported }
 public extension TextTarget {
+    /// Only the currently focused readable target can supply a bounded host snapshot for correction capture.
+    func correctionSnapshot() -> String? {
+        guard isFocused(), let length = try? textLength(), length <= 60_000 else { return nil }
+        return try? text(in: .init(location: 0, length: length))
+    }
+
     var editsInPlace: Bool { true }
     func recoverWriteFailure() -> Bool { false }
     var typesKeys: Bool { false }
