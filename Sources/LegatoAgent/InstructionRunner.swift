@@ -309,12 +309,15 @@ public struct InstructionRunner: Sendable {
     private let model: @Sendable () -> ModelChoice
     private let personalPrompt: @Sendable () -> String
     private let vocabulary: @Sendable () async -> [String]
+    private let personalization: (@Sendable (String) async -> CleanupPersonalization)?
     /// `read_more` calls allowed per instruction (each costs a second or two of visible cursor movement).
     public static let maxReads = 2
 
     public init(client: any MessagesStreaming, model: @escaping @Sendable () -> ModelChoice,
-                personalPrompt: @escaping @Sendable () -> String = { "" }, vocabulary: @escaping @Sendable () async -> [String] = { [] }) {
+                personalPrompt: @escaping @Sendable () -> String = { "" }, vocabulary: @escaping @Sendable () async -> [String] = { [] },
+                personalization: (@Sendable (String) async -> CleanupPersonalization)? = nil) {
         self.client = client; self.model = model; self.personalPrompt = personalPrompt; self.vocabulary = vocabulary
+        self.personalization = personalization
     }
 
     /// The instruction's words, with `DocPresenter`'s confidence marks on the words the recognizer was unsure of.
@@ -331,15 +334,27 @@ public struct InstructionRunner: Sendable {
     public func run(instruction: String, context: InstructionContext, read: Reader) async throws -> InstructionOutcome {
         guard !context.isEmpty else { throw InstructionFailure.noText }
         let model = model()
-        let system = Self.system(personal: personalPrompt(), vocabulary: await vocabulary())
+        let baseSystem = Self.system(personal: personalPrompt(), vocabulary: await vocabulary())
         var context = context
         var reads = 0
         var reasked = false
         ask: while true {
-            var messages: [JSONValue] = [.object(["role": .string("user"), "content": .string(Self.prompt(instruction: instruction, context: context))])]
+            let fieldPrompt = Self.prompt(instruction: instruction, context: context)
+            var messages: [JSONValue] = [.object(["role": .string("user"), "content": .string(fieldPrompt)])]
             for _ in 0...Self.maxReads {
                 try Task.checkCancellation()
                 let offersRead = context.canReadAbove && reads < Self.maxReads
+                var system = baseSystem
+                if let personalization {
+                    let hints = await personalization(instruction + " " + (context.selection ?? context.above + context.below))
+                    system = hints.systemPrompt(baseSystem)
+                    if hints.vocabulary.isEmpty && hints.examples.isEmpty {
+                        messages[0] = .object(["role": .string("user"), "content": .string(fieldPrompt)])
+                    } else {
+                        let data = try JSONEncoder().encode(JSONValue.object(hints.fields))
+                        messages[0] = .object(["role": .string("user"), "content": .string(fieldPrompt + "\nReference data (JSON)\n" + String(decoding: data, as: UTF8.self))])
+                    }
+                }
                 let request = try Self.request(model: model, system: system, messages: messages, tools: offersRead)
                 var text = ""
                 var blocks: [Int: JSONValue] = [:]

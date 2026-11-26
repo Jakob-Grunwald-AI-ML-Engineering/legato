@@ -152,7 +152,8 @@ public actor SonioxClient {
     }
     /// The start request. No acknowledgement exists: audio may follow at once on the same socket.
     /// `backgroundText` is read by the caller when the take starts (not when the connection was warmed).
-    public func begin(backgroundText: String = "") async throws {
+    public func begin(backgroundText: String = "", config startConfig: SonioxConfig? = nil) async throws {
+        let config = startConfig ?? self.config
         if state == .streaming { return }
         guard state == .held else { throw failure ?? .notConnected }
         do {

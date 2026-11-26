@@ -672,9 +672,10 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
                             supportsLive: Bool = false, groupsLiveHistory: Bool = false, stagedLive: Bool = false) {
         // `UserDefaults` is thread-safe by contract; the model is read on the cleanup call's thread.
         nonisolated(unsafe) let store = defaults
+        let preferences = RequestVocabulary(fileURL: vocabularyURL, settings: EngineSettings(defaults: defaults))
         self.init(recentTakes: RecentTakesStore(fileURL: recentTakesURL), history: history,
-                  cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore()), model: { DictationSendSetting.cleanupModel(in: store) }),
-                  vocabulary: { (try? await VocabularyStore(fileURL: vocabularyURL).snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? [] },
+                  cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore()), model: { DictationSendSetting.cleanupModel(in: store) },
+                                                 personalization: { await preferences.cleanup(for: $0) }),
                   sendMode: { DictationSendSetting.mode(in: defaults) }, pauseSeconds: { DictationSendSetting.pause(in: defaults) },
                   supportsLive: supportsLive, liveSend: { DictationSendSetting.liveSend(in: defaults) },
                   groupsLiveHistory: groupsLiveHistory, stagedLive: stagedLive)

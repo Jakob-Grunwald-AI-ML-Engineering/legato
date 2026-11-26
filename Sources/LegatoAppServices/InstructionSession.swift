@@ -62,11 +62,12 @@ extension InstructionRunner: InstructionRunning {}
     /// composer's writer uses them.
     public convenience init(vocabularyURL: URL, history: (any HistoryStore)? = nil, defaults: UserDefaults = .standard) {
         nonisolated(unsafe) let store = defaults
+        let preferences = RequestVocabulary(fileURL: vocabularyURL, settings: EngineSettings(defaults: defaults))
         self.init(runner: InstructionRunner(
             client: MessagesStream(keyStore: KeychainKeyStore()),
             model: { ComposerWritingSettings(in: store).model },
             personalPrompt: { ComposerWritingSettings(in: store).personalPrompt },
-            vocabulary: { (try? await VocabularyStoreAccess.terms(vocabularyURL)) ?? [] }), history: history)
+            personalization: { await preferences.cleanup(for: $0) }), history: history)
     }
 
     /// The instruction's words so far (final words, then the live tail), as the strip shows them.
@@ -383,11 +384,4 @@ extension InstructionRunner: InstructionRunning {}
          "canUndo": strip.canUndo, "running": isRunning, "listening": listening]
     }
     #endif
-}
-
-/// Vocabulary terms for the instruction's system prompt (as the composer's writer gets them).
-enum VocabularyStoreAccess {
-    static func terms(_ url: URL) async throws -> [String] {
-        try await VocabularyStore(fileURL: url).snapshot().entries.filter { !$0.blocked }.map(\.text)
-    }
 }

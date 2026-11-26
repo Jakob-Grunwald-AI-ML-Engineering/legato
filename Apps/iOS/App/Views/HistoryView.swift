@@ -1,3 +1,4 @@
+import LegatoComposerUI
 import LegatoCore
 import SwiftUI
 

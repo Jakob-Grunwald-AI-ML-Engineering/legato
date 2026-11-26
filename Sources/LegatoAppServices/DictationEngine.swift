@@ -19,7 +19,7 @@ import LegatoVocabulary
     @ObservationIgnored private let sink: any DictationRouteSink
     @ObservationIgnored private let sonioxKey: @MainActor () -> String
     @ObservationIgnored private let makeSocket: @Sendable () -> any SonioxSocket
-    @ObservationIgnored private let vocabularyURL: URL
+    @ObservationIgnored private let requestVocabulary: RequestVocabulary
     @ObservationIgnored private let personalPrompt: @MainActor () -> String
     @ObservationIgnored private let now: @MainActor () -> Double
     @ObservationIgnored private var room: Room?
@@ -57,7 +57,7 @@ import LegatoVocabulary
                 personalPrompt: @escaping @MainActor () -> String = { ComposerWritingSettings().personalPrompt },
                 now: @escaping @MainActor () -> Double = { ProcessInfo.processInfo.systemUptime }) {
         self.sink = sink; self.sonioxKey = sonioxKey; self.makeSocket = makeSocket
-        self.vocabularyURL = vocabularyURL; self.personalPrompt = personalPrompt; self.now = now
+        self.requestVocabulary = RequestVocabulary(fileURL: vocabularyURL); self.personalPrompt = personalPrompt; self.now = now
     }
 
     public var isOpen: Bool { stream != nil }
@@ -87,12 +87,9 @@ import LegatoVocabulary
                 await self.receive(event, room: room)
             }
         }
-        let socket = makeSocket, key = sonioxKey, vocabulary = vocabularyURL
-        let prompt = personalPrompt()
+        let socket = makeSocket, key = sonioxKey
         let stream = WarmStream(connect: { onDrop in
-            let terms = (try? await VocabularyStore(fileURL: vocabulary).snapshot().entries.filter { !$0.blocked }.map(\.text)) ?? []
-            let config = SonioxConfig(mode: "Dictation", personalPrompt: prompt, terms: terms)
-            let client = SonioxClient(room: room, config: config, socket: socket(), quietFailure: .always, onDrop: onDrop)
+            let client = SonioxClient(room: room, socket: socket(), quietFailure: .always, onDrop: onDrop)
             try await client.open(apiKey: key()); try await client.hold()
             return client
         }, now: now)
@@ -107,7 +104,15 @@ import LegatoVocabulary
         guard active == nil, let stream else { return }
         guard let held = await stream.take() else { stream.warm(); return }
         stream.warm()
-        do { try await held.begin(backgroundText: sink.backgroundText); active = held; activity = DictationActivity() } catch { await held.close() }
+        do {
+            let terms = await requestVocabulary.sonioxTerms()
+            guard self.stream === stream else { await held.close(); return }
+            let config = SonioxConfig(mode: "Dictation", personalPrompt: personalPrompt(), terms: terms)
+            try await held.begin(backgroundText: sink.backgroundText, config: config)
+            guard self.stream === stream else { await held.close(); return }
+            active = held
+            activity = DictationActivity()
+        } catch { await held.close() }
     }
 
     /// Audio goes out in order; a take whose stream dropped continues on the next held connection.
