@@ -25,4 +25,4 @@ The iPhone app now records and manages meetings alongside Compose and History. O
 
 ## Landing
 
-After implementation, run fresh agent UAT, fix findings, recheck affected behavior, open one PR to main and wait for the protected merge queue to report MERGED. Keep #119 open for acceptance outside the completed scope. Update the issue and current-focus record with the actual outcome, then run meta:wrap-up. Promotion to live is separate.
+After implementation, run fresh agent UAT, fix findings, recheck affected behavior, open one PR to main and wait for the protected merge queue to report MERGED. Keep #119 open for acceptance outside the completed scope. Update the issue and its board status with the actual outcome, then run meta:wrap-up. Promotion to live is separate.
