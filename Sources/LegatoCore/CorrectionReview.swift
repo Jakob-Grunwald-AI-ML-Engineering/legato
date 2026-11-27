@@ -62,9 +62,35 @@ private struct CapturedChange {
         decisionID([kind.rawValue, locale, before, after])
     }
 
+    /// A pause can settle an unfinished spelling. Join consecutive edits only while the complete
+    /// intervening snapshot and the boundaries of the changed span agree. Keep the final real record
+    /// as evidence, so removing either link breaks the inferred correction.
+    static func extract(from records: [CorrectionRecord]) -> [Self] {
+        var changes = [Self]()
+        var start = records.startIndex
+        while start < records.endIndex {
+            let first = records[start]
+            var end = start
+            while end + 1 < records.endIndex && continues(records[end], with: records[end + 1]) { end += 1 }
+            let last = records[end]
+            if first.eligibleForLearning != false {
+                changes += extract(last, from: first.removed, to: last.replacement)
+            }
+            start = end + 1
+        }
+        return changes
+    }
+
+    private static func continues(_ earlier: CorrectionRecord, with later: CorrectionRecord) -> Bool {
+        earlier.eligibleForLearning != false && later.eligibleForLearning != false
+            && earlier.endedAtBoundary != true && earlier.insertedText == later.insertedText
+            && earlier.rawText == later.rawText && earlier.afterText == later.beforeText
+            && earlier.replacement == later.removed && earlier.contextBefore == later.contextBefore
+            && earlier.contextAfter == later.contextAfter
+    }
+
     /// Work only on captured changed spans. Reject long rewrites before the quadratic word alignment.
-    static func extract(_ record: CorrectionRecord) -> [Self] {
-        let old = record.removed, new = record.replacement
+    private static func extract(_ record: CorrectionRecord, from old: String, to new: String) -> [Self] {
         guard old.utf8.count <= 2048, new.utf8.count <= 2048 else { return [] }
         let blocks = WordAlignment.substitutions(from: old, to: new)
         let substitutions = blocks.compactMap { Self(record, from: $0.rawText, to: $0.targetText) }
@@ -332,18 +358,16 @@ extension CorrectionStore {
             let ordered = ordinary.sorted { $0.date == $1.date ? $0.id.uuidString < $1.id.uuidString : $0.date < $1.date }
             guard let latest = ordered.last, latest.afterText != latest.insertedText else { continue }
             let finalWords = CapturedChange.words(latest.afterText)
-            for record in ordered where record.eligibleForLearning != false {
-                for change in CapturedChange.extract(record) {
-                    guard change.kind == .style ? latest.afterText.contains(change.after) :
-                            CapturedChange.contains(CapturedChange.words(change.after), in: finalWords) else { continue }
-                    // An undone replacement restoring a word originally inserted by Legato is not new user evidence.
-                    if change.kind == .vocabulary && change.basis == .uncertain { continue }
-                    if change.basis == .recognition && !CapturedChange.contains(CapturedChange.words(change.before), in: finalWords) {
-                        correctedSources[take.lowercased(), default: []].insert(VocabularyEntry.key(for: change.before))
-                    }
-                    let id = change.kind == .style ? change.id : EvidenceGroup.key(target: change.after, locale: change.locale)
-                    groups[id, default: EvidenceGroup()].changes.append(change)
+            for change in CapturedChange.extract(from: ordered) {
+                guard change.kind == .style ? latest.afterText.contains(change.after) :
+                        CapturedChange.contains(CapturedChange.words(change.after), in: finalWords) else { continue }
+                // An undone replacement restoring a word originally inserted by Legato is not new user evidence.
+                if change.kind == .vocabulary && change.basis == .uncertain { continue }
+                if change.basis == .recognition && !CapturedChange.contains(CapturedChange.words(change.before), in: finalWords) {
+                    correctedSources[take.lowercased(), default: []].insert(VocabularyEntry.key(for: change.before))
                 }
+                let id = change.kind == .style ? change.id : EvidenceGroup.key(target: change.after, locale: change.locale)
+                groups[id, default: EvidenceGroup()].changes.append(change)
             }
         }
         for event in try termEvidence() where event.takeID.map(eligible) ?? true {

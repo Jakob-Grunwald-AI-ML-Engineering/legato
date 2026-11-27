@@ -100,4 +100,37 @@ struct CorrectionReviewTests {
         #expect(try await store.activeCandidates().isEmpty)
         #expect(try await store.recent().count == 3)
     }
+
+    @Test func unfinishedNameSettledBeforeItsLastLettersStillCountsAsOneCorrection() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = CorrectionStore(root: root)
+        let start = Date()
+        var first = try #require(CorrectionTracker(dictationID: "first", rawText: "I Am Meeting Patrice",
+            insertedText: "I Am Meeting Patrice", snapshot: "I Am Meeting Patrice", platform: "iOS",
+            localeIdentifier: "en_GB", now: start))
+        first.observe("I Am Meeting Patri", origin: .keyboard, now: start)
+        let intermediateEdit = first.settle(now: start.addingTimeInterval(2))
+        let intermediate = try #require(intermediateEdit)
+        try await store.append(intermediate)
+        first.observe("I Am Meeting Patrika", origin: .keyboard, now: start.addingTimeInterval(3))
+        let finishedEdit = first.settle(now: start.addingTimeInterval(5))
+        let finished = try #require(finishedEdit)
+        try await store.append(finished)
+        #expect(try await store.activeCandidates().isEmpty)
+        try await store.append(edit("second", from: "Patrico", to: "Patrika", locale: "en_GB"))
+        let name = try #require(try await store.activeCandidates().first)
+        #expect(name.after == "Patrika" && name.supportCount == 2 && name.isAutomatic)
+        #expect(name.sources == ["Patrice", "Patrico"])
+        #expect(name.records.contains(finished))
+        first.observe("I Am Meeting Patrice", origin: .keyboard, now: start.addingTimeInterval(6))
+        let reversalEdit = first.settle(now: start.addingTimeInterval(8))
+        let reversal = try #require(reversalEdit)
+        try await store.append(reversal)
+        #expect(try await store.activeCandidates().isEmpty)
+        try await store.delete(id: reversal.id)
+        #expect(try await store.activeCandidates().map(\.after) == ["Patrika"])
+        try await store.delete(id: intermediate.id)
+        #expect(try await store.activeCandidates().isEmpty)
+    }
 }
