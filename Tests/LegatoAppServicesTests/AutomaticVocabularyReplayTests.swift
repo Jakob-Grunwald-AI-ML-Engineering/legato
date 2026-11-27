@@ -51,12 +51,14 @@ private final class VocabularyReplayTransport: MessagesStreaming {
         let context = try #require(object["context"] as? [String: Any])
         let wire = try #require(context["terms"] as? [String])
         let transport = VocabularyReplayTransport()
-        let clean = SentenceCleanupClient(client: transport, personalization: { await request.cleanup(for: $0) })
+        // Even a relevant name in the current field must not turn a different ordinary word into a draft match.
+        let business = VocabularyTopicContext(textBeforeCursor: "Spoke to Kemas")
+        let clean = SentenceCleanupClient(client: transport, personalization: { await request.cleanup(for: $0, context: business) })
         let ordinary = "Review the database schemas."
         _ = try? await clean.cleanTake(.init(takeID: "technical-held-out", text: ordinary))
         let payload = try #require(JSONSerialization.jsonObject(with: Data(try transport.userMessage().utf8)) as? [String: Any])
         let cleanupTerms = try #require(payload["vocabulary"] as? [String])
-        let magic = InstructionRunner(client: transport, model: { .haiku }, personalization: { await request.cleanup(for: $0) })
+        let magic = InstructionRunner(client: transport, model: { .haiku }, personalization: { await request.cleanup(for: $0, context: business) })
         let field = InstructionContext(selection: ordinary)
         _ = try? await magic.run(instruction: "Make this shorter", context: field) { _ in field }
         let magicMentionsName = try transport.userMessage().contains("Kemas")
@@ -69,6 +71,32 @@ private final class VocabularyReplayTransport: MessagesStreaming {
         #expect(wire == ["Kemas"])
         #expect(!cleanupTerms.contains("Kemas"))
         #expect(!magicMentionsName)
+    }
+
+    @Test func recentSpeechOrdersExactMatchesInSerializedCleanup() async throws {
+        let rig = VocabularyRig()
+        defer { rig.cleanUp() }
+        let historyURL = rig.url.deletingLastPathComponent().appending(path: "history.jsonl")
+        let history = LearningHistoryStore(JSONLHistoryStore(fileURL: historyURL), vocabulary: rig.service)
+        await history.warmTopicContext()
+        for name in ["Kemas", "Badhri"] { try await rig.service.store.add(text: name) }
+        var previous = DictationEntry(date: Date(), text: "I just spoke with Badhri.", localeIdentifier: "en",
+                                      engineID: "soniox", duration: 2)
+        previous.recognitionHints = []
+        try await history.upsert(previous)
+        await rig.service.waitForLearning()
+        let draft = "Kemas and Badhri are attending."
+        for contextual in [false, true] {
+            let request = RequestVocabulary(fileURL: rig.url, history: contextual ? history : nil)
+            let transport = VocabularyReplayTransport()
+            let client = SentenceCleanupClient(client: transport, personalization: { await request.cleanup(for: $0) })
+            _ = try? await client.cleanTake(.init(takeID: "cleanup-order", text: draft))
+            let message = try transport.userMessage()
+            let payload = try #require(JSONSerialization.jsonObject(with: Data(message.utf8)) as? [String: Any])
+            let terms = try #require(payload["vocabulary"] as? [String])
+            #expect(terms == (contextual ? ["Badhri", "Kemas"] : ["Kemas", "Badhri"]))
+            print("Topic cleanup contextual=\(contextual) vocabulary=\(terms)")
+        }
     }
 
     @Test func quickSendThenIndependentTyping() async throws {

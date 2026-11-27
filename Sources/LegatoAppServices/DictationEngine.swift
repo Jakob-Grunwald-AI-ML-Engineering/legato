@@ -96,6 +96,11 @@ import LegatoVocabulary
         self.stream = stream; stream.warm()
     }
 
+    func recognitionConfig() async -> SonioxConfig {
+        let terms = await requestVocabulary.sonioxTerms(contextFor: sink.vocabularyTopicContext(since:))
+        return SonioxConfig(mode: "Dictation", personalPrompt: personalPrompt(), terms: terms)
+    }
+
     /// Starts the take on the held connection (or a fresh one) and holds the next connection right away.
     public func activate() async {
         voiceIsolationStatus = nil
@@ -105,9 +110,8 @@ import LegatoVocabulary
         guard let held = await stream.take() else { stream.warm(); return }
         stream.warm()
         do {
-            let terms = await requestVocabulary.sonioxTerms()
+            let config = await recognitionConfig()
             guard self.stream === stream else { await held.close(); return }
-            let config = SonioxConfig(mode: "Dictation", personalPrompt: personalPrompt(), terms: terms)
             try await held.begin(backgroundText: sink.backgroundText, config: config, trackLearningCues: true)
             guard self.stream === stream else { await held.close(); return }
             active = held

@@ -55,6 +55,9 @@ import ApplicationServices
             return MacAppController.shared.dictation.debugState
         }
         harness.register("dictation-state") { _ in MacAppController.shared.dictation.debugState }
+        harness.register("dictation-vocabulary") { _ in
+            ["terms": await MacAppController.shared.dictation.debugRecognitionTerms()]
+        }
         // The next N take cleanups (default 1) fail twice, so the failed state is reachable without network faults.
         harness.register("dictation-debug-fail-take") { command in
             guard command.args.count <= 1, let count = command.args.first.map({ Int($0) }) ?? 1, count >= 0 else { throw Usage.invalid }

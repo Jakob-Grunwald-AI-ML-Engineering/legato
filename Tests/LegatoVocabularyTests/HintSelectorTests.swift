@@ -154,6 +154,40 @@ import Testing
         #expect(hints == ["Claude"])
     }
 
+    @Test func busyContextSharesSlotsWithDurableAndExplicitTerms() {
+        let entries = [
+            term("Pinned", pinned: true), term("Manual", source: .manual, score: 20),
+            term("Durable", score: 10), term("Frequent", score: 8),
+            term("Rare Phrase", score: 2), term("Field", score: 1),
+        ]
+        let context = VocabularyTopicContext(
+            recentTakes: [.init(raw: "Frequent and Rare Phrase", recognitionHints: [])],
+            textBeforeCursor: "Field")
+        let hints = selector.hints(from: VocabularySnapshot(entries: entries), for: .soniox, limit: 5,
+                                  now: Self.now, context: context)
+        #expect(hints.map(\.text) == ["Pinned", "Manual", "Field", "Durable", "Rare Phrase"])
+    }
+
+    @Test func aliasesPartialPhrasesAndModelCuesCannotChangeTheBaseline() {
+        let entries = [
+            term("Durable", score: 20), term("Kemas", aliases: ["schemas"]), term("Müller"), term("Rare Phrase"),
+        ]
+        let context = VocabularyTopicContext(
+            recentTakes: [.init(raw: "Müller and Rare separated from Phrase", recognitionHints: ["muller"])],
+            textBeforeCursor: "schemas everywhere, including Kemas", excludedFieldWords: ["kemas"])
+        let hints = selector.hints(from: VocabularySnapshot(entries: entries), for: .soniox, limit: 1,
+                                  now: Self.now, context: context)
+        #expect(hints.map(\.text) == ["Durable"])
+    }
+
+    @Test func contextBreaksTiesAmongDraftMatchesAndCannotAdmitAnAbsentTerm() async {
+        let entries = [term("Kemas"), term("Badhri"), term("Zorbax")]
+        let context = VocabularyTopicContext(textBeforeCursor: "Badhri and Zorbax")
+        let list = await selector.cleanupTerms(for: "Kemas meets Badhri", from: VocabularySnapshot(entries: entries),
+                                               spellChecker: Self.dictionary, limit: 1, now: Self.now, context: context)
+        #expect(list == ["Badhri"])
+    }
+
     // MARK: cleanup terms
 
     /// A dictionary in which "cloud", "clause" and the German "Mauer" are ordinary words.

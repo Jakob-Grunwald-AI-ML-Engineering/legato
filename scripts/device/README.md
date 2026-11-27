@@ -98,6 +98,8 @@ Ordinary iOS and Mac Release builds passed the internal endpoint/overlay/probe-a
 
 ### Dictation and Magic offline controls
 
+On a Debug internal Mac or iOS build, `dictation-vocabulary` previews the ordered terms the dictation engine would put in its next recognition request using the context currently available. It runs request preparation locally. Use it with synthetic fields and the offline fixture to inspect topic changes without starting a microphone or provider session.
+
 For interactive simulator input, `harness-text <text>` seeds the field, `harness-key <character>|space|delete|return` presses a keyboard key, and `harness-cursor <UTF-16 offset>` moves the caret. `harness-type` ignores arguments and runs its fixed typing fixture; it does not type supplied text. On Mac, `dictation-debug-pause` supplies a synthetic eligible pause for offline delivery checks, not microphone-detector validation.
 
 Use a Debug internal build with `-LegatoOfflineFixture YES` for provider-free dictation cleanup and Magic. Open the in-app keyboard harness with `-LegatoKeyboardHarness YES`. Synthetic speech uses `dictation-debug-line`, `dictation-debug-tail`, `dictation-debug-stop`, or `dictation-debug-replay`; these do not prove microphone or physical background capture behavior. A line is a final segment with no endpoint after it: a line without a sentence end gets no sentence pass, no pause pass and no long-pause whole pass, and is cleaned at `dictation-debug-stop`. The mic key or a replay ends a line's take still open first, as its stop would. `microphone-arm`, `microphone-release` and `microphone-interrupt` address the microphone host directly.

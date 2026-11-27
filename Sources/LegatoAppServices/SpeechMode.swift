@@ -1,5 +1,6 @@
 import Foundation
 import LegatoKeyboardCore
+import LegatoVocabulary
 
 /// What speech on the dictation route is: words for the field, or an instruction about the field's text.
 public enum SpeechMode: String, Sendable, Equatable { case dictation, instruction, previewInstruction }
@@ -107,4 +108,5 @@ public struct SpeechModeRouter: Sendable, Equatable {
     func finishTake() async { await dictation.finishTake() }
     func pauseTake() async { await dictation.pauseTake() }
     var backgroundText: String { dictation.backgroundText }
+    func vocabularyTopicContext(since: Date) -> VocabularyTopicContext { dictation.vocabularyTopicContext(since: since) }
 }

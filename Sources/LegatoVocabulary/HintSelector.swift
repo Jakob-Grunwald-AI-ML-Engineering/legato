@@ -14,6 +14,7 @@ import Foundation
 ///
 /// Every sink then applies its length floor **before** the cap (see ``VocabularyHintSink``), and the list is
 /// ordered pinned first, then correction targets, then by effective score (`score × 0.5^(age / halfLife)`).
+/// Available topic context can share those slots with recently relevant terms.
 /// Aliases (known mishearings) never appear in any output; spellings do.
 public struct HintSelector: Sendable {
     private let languages: [String]
@@ -29,11 +30,12 @@ public struct HintSelector: Sendable {
 
     /// The best `limit` hints for `sink`: eligible, past the sink's floor, in rank order.
     public func hints(
-        from snapshot: VocabularySnapshot, for sink: VocabularyHintSink, limit: Int = 50, now: Date = Date()
+        from snapshot: VocabularySnapshot, for sink: VocabularyHintSink, limit: Int = 50, now: Date = Date(),
+        context: VocabularyTopicContext = .init()
     ) -> [SelectedHint] {
         guard limit > 0 else { return [] }
-        return ranked(eligibleEntries(in: snapshot, sink: sink), now: now)
-            .prefix(sink == .soniox ? min(limit, 100) : limit)
+        let baseline = ranked(eligibleEntries(in: snapshot, sink: sink), now: now)
+        return contextualHints(baseline, limit: sink == .soniox ? min(limit, 100) : limit, context: context)
             .map { SelectedHint(text: $0.text, spellings: $0.spellings) }
     }
 
@@ -47,7 +49,7 @@ public struct HintSelector: Sendable {
     /// `spellChecker` in every configured language: a real mishearing is usually not a word.
     public func cleanupTerms(
         for text: String, from snapshot: VocabularySnapshot, spellChecker: any SpellChecking, limit: Int = 20,
-        now: Date = Date()
+        now: Date = Date(), context: VocabularyTopicContext = .init()
     ) async -> [String] {
         guard limit > 0 else { return [] }
         let eligible = eligibleEntries(in: snapshot, sink: .cleanup)
@@ -57,7 +59,15 @@ public struct HintSelector: Sendable {
         if out.count < limit, !others.isEmpty {
             let byID = Dictionary(others.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             let matcher = TermMatcher(terms: others.map(TermMatcher.Term.init))
-            let hits = matcher.hits(in: text)
+            var hits = matcher.hits(in: text)
+            // The draft decides which terms can enter cleanup. Context only resolves ties in match quality.
+            let priority = context.priorities(for: hits.compactMap { byID[$0.termID] })
+            if !priority.isEmpty {
+                hits.sort { a, b in
+                    if a.score != b.score { return a.score > b.score }
+                    return priority[a.termID, default: .absent] > priority[b.termID, default: .absent]
+                }
+            }
             let words = TermMatcher.words(in: text)
             let inexact = Array(Set(hits.filter { $0.score < 1 }.flatMap { words[$0.range] }))
             let known = inexact.isEmpty ? [:] : await spellChecker.knownLanguagesFolding(inexact, languages: languages)
@@ -111,6 +121,37 @@ public struct HintSelector: Sendable {
                 return a.entry.text < b.entry.text
             }
             .map(\.entry)
+    }
+
+    /// Share unprotected slots between the topic list and the durable ranking. Keeping their baseline
+    /// positions also preserves explicit pins and admitted manual choices when the request is full.
+    private func contextualHints(
+        _ baseline: [VocabularyEntry], limit: Int, context: VocabularyTopicContext
+    ) -> [VocabularyEntry] {
+        let admitted = baseline.prefix(limit)
+        let priority = context.priorities(for: baseline)
+        guard !priority.isEmpty else { return Array(admitted) }
+
+        let topic = baseline.filter { priority[$0.id] != nil }.sorted { lhs, rhs in
+            priority[lhs.id, default: .absent] > priority[rhs.id, default: .absent]
+        }
+        let protected = Set(admitted.filter { $0.pinned || $0.source == .manual }.map(\.id))
+        var used = protected
+        var contextual = topic.makeIterator()
+        var durable = baseline.makeIterator()
+        var topicSlot = true
+        func nextUnused(_ entries: inout IndexingIterator<[VocabularyEntry]>) -> VocabularyEntry? {
+            while let entry = entries.next() {
+                if used.insert(entry.id).inserted { return entry }
+            }
+            return nil
+        }
+        return admitted.compactMap { entry in
+            if protected.contains(entry.id) { return entry }
+            let next = topicSlot ? nextUnused(&contextual) : nil
+            topicSlot.toggle()
+            return next ?? nextUnused(&durable)
+        }
     }
 
     private static func wordCount(_ text: String) -> Int { text.split(whereSeparator: \.isWhitespace).count }

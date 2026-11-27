@@ -12,8 +12,9 @@ struct RequestVocabulary: Sendable {
     private let languages: @Sendable () -> [String]
     private let spellChecker: any SpellChecking
     private let halfLife: TimeInterval
+    private let history: LearningHistoryStore?
 
-    init(fileURL: URL, settings: EngineSettings? = nil) {
+    init(fileURL: URL, settings: EngineSettings? = nil, history: (any HistoryStore)? = nil) {
         let effectiveSettings: EngineSettings
         #if os(iOS)
         effectiveSettings = settings ?? EngineSettings(defaults: UserDefaults(suiteName: LinkChannel.appGroupID) ?? .standard)
@@ -21,11 +22,12 @@ struct RequestVocabulary: Sendable {
         effectiveSettings = settings ?? EngineSettings()
         #endif
         self.init(fileURL: fileURL, languages: { VocabularyService.configuredLanguages(effectiveSettings) },
-                  spellChecker: PlatformSpellChecker(), halfLife: Decay.defaultHalfLife)
+                  spellChecker: PlatformSpellChecker(), halfLife: Decay.defaultHalfLife, history: history as? LearningHistoryStore)
     }
 
-    init(fileURL: URL, languages: @escaping @Sendable () -> [String], spellChecker: any SpellChecking, halfLife: TimeInterval) {
+    init(fileURL: URL, languages: @escaping @Sendable () -> [String], spellChecker: any SpellChecking, halfLife: TimeInterval, history: LearningHistoryStore? = nil) {
         self.fileURL = fileURL
+        self.history = history
         self.corrections = CorrectionStore(root: fileURL.deletingLastPathComponent())
         self.languages = languages
         self.spellChecker = spellChecker
@@ -56,18 +58,27 @@ struct RequestVocabulary: Sendable {
         return (snapshot, active.filter { $0.state == .approved })
     }
 
-    func hints(for sink: VocabularyHintSink, limit: Int) async -> [SelectedHint] {
+    func hints(for sink: VocabularyHintSink, limit: Int, context: VocabularyTopicContext = .init()) async -> [SelectedHint] {
         let (snapshot, _) = await evidence()
-        return selector.hints(from: snapshot, for: sink, limit: limit)
+        return selector.hints(from: snapshot, for: sink, limit: limit, context: context)
     }
 
     func sonioxTerms() async -> [String] {
         await hints(for: .soniox, limit: VocabularyService.engineHintLimit).map(\.text)
     }
 
-    func cleanup(for text: String) async -> CleanupPersonalization {
+    @MainActor func sonioxTerms(contextFor: (Date) -> VocabularyTopicContext) async -> [String] {
+        let since = try? await corrections.personalizationEnabledSince()
+        let context = since.map(contextFor) ?? .init()
+        return await hints(for: .soniox, limit: VocabularyService.engineHintLimit, context: context).map(\.text)
+    }
+
+    func cleanup(for text: String, context: VocabularyTopicContext? = nil) async -> CleanupPersonalization {
         let (snapshot, approved) = await evidence(matching: text)
-        let selected = await selector.cleanupTerms(for: text, from: snapshot, spellChecker: spellChecker)
+        let since = try? await corrections.personalizationEnabledSince()
+        let topic = since.map { context ?? history?.topicContext(since: $0) ?? .init() } ?? .init()
+        let selected = await selector.cleanupTerms(for: text, from: snapshot, spellChecker: spellChecker,
+                                                   context: topic)
         var budget = 16_384
         let terms = selected.filter { term in
             guard term.utf8.count <= budget else { return false }

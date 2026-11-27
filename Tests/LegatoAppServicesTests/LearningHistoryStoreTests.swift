@@ -160,3 +160,27 @@ private let grunwald = [EntitySpan(text: "Grunwald", kind: .person)]
         #expect(try await rig.service.store.snapshot().pendingTerms.map(\.text) == ["Grunwald"])
     }
 }
+
+extension LearningHistoryStoreTests {
+    @Test func reEnablingTopicRankingDoesNotReuseDisabledTakesFromHistoryOrTheField() async throws {
+        let rig = VocabularyRig(); defer { rig.cleanUp() }
+        let base = MemoryHistory()
+        let settings = CorrectionStore(root: rig.url.deletingLastPathComponent())
+        let request = RequestVocabulary(fileURL: rig.url)
+        let now = Date()
+        try await rig.service.store.update {
+            $0.entries = [VocabularyEntry(text: "Varento", source: .history, score: 10, lastSeen: now),
+                          VocabularyEntry(text: "Lysimeter", source: .history, score: 1, lastSeen: now)]
+        }
+        try await settings.setPersonalizationEnabled(false)
+        var duringPause = entry("Lysimeter")
+        duringPause.date = now.addingTimeInterval(-1)
+        duringPause.recognitionHints = []
+        try await base.append(duringPause)
+        try await settings.setPersonalizationEnabled(true)
+        let history = LearningHistoryStore(base, vocabulary: rig.service)
+        await history.warmTopicContext()
+        let terms = await request.sonioxTerms { since in history.topicContext(textBeforeCursor: "Lysimeter", since: since) }
+        #expect(terms == ["Varento", "Lysimeter"])
+    }
+}

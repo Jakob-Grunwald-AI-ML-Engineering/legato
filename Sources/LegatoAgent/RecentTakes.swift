@@ -26,7 +26,7 @@ public final class RecentTakesStore: @unchecked Sendable {
     /// Characters of cleaned text sent to Soniox as background text (newest kept).
     public static let backgroundBudget = 1500
     /// Longest raw or cleaned text kept per entry.
-    static let entryLimit = 2000
+    public static let entryLimit = 2000
 
     private let fileURL: URL?
     private let now: @Sendable () -> Date

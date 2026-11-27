@@ -30,6 +30,9 @@ import UIKit
             #endif
         }
         #if DEBUG
+        harness.register("dictation-vocabulary") { _ in
+            ["terms": await AppController.shared.keyboardSession.debugRecognitionTerms()]
+        }
         harness.register("microphone-interrupt") { _ in
             await AppController.shared.microphone.interruptMicrophoneForDiagnostics()
             return AppController.shared.microphone.debugState

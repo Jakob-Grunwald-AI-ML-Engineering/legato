@@ -267,7 +267,16 @@ extension CorrectionStore {
         return try JSONDecoder().decode(Bool.self, from: Data(contentsOf: enabledURL))
     }
 
+    /// The current uninterrupted personalization window. The existing toggle file is written
+    /// atomically on transitions and survives restart. Before the first toggle learning is on.
+    public func personalizationEnabledSince() throws -> Date? {
+        guard FileManager.default.fileExists(atPath: enabledURL.path) else { return .distantPast }
+        guard try personalizationEnabled() else { return nil }
+        return try enabledURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+    }
+
     public func setPersonalizationEnabled(_ enabled: Bool) throws {
+        guard (try? personalizationEnabled()) != enabled else { return }
         try PrivateFiles.createDirectory(reviewDirectory)
         try PrivateFiles.write(JSONEncoder().encode(enabled), to: enabledURL)
     }

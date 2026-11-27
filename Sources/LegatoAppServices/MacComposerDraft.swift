@@ -1,4 +1,5 @@
 import Foundation
+import LegatoVocabulary
 import Observation
 import LegatoAgent
 import LegatoKeyboardCore
@@ -34,6 +35,8 @@ import LegatoKeyboardCore
     @ObservationIgnored var needsFreshBoundary = false
     @ObservationIgnored var recentContext: () -> String = { "" }
     public var backgroundText: String { recentContext() }
+    @ObservationIgnored var topicContext: (Date) -> VocabularyTopicContext = { _ in .init() }
+    public func vocabularyTopicContext(since: Date) -> VocabularyTopicContext { topicContext(since) }
     @ObservationIgnored var onCut: ((Bool) -> Void)?
     @ObservationIgnored private let defaults: UserDefaults
     public init(defaults: UserDefaults = .standard) { self.defaults = defaults }

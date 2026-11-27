@@ -105,6 +105,11 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     public var takeLength: Int { takeDisplay.count }
     /// Background text for Soniox at take start: the recent written takes.
     public var backgroundText: String { recentTakes.backgroundText() }
+    public func vocabularyTopicContext(since: Date) -> VocabularyTopicContext {
+        guard keepsTakes() else { return .init() }
+        guard let history = history as? LearningHistoryStore else { return .init() }
+        return history.topicContext(textBeforeCursor: contextBefore(), since: since)
+    }
     /// The field's text before the cursor now (the keyboard reports it with its presence).
     @ObservationIgnored public var contextBefore: @MainActor () -> String = { "" }
     /// Called when the outbox changed.
@@ -681,7 +686,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
                             supportsLive: Bool = false, groupsLiveHistory: Bool = false, stagedLive: Bool = false) {
         // `UserDefaults` is thread-safe by contract; the model is read on the cleanup call's thread.
         nonisolated(unsafe) let store = defaults
-        let preferences = RequestVocabulary(fileURL: vocabularyURL, settings: EngineSettings(defaults: defaults))
+        let preferences = RequestVocabulary(fileURL: vocabularyURL, settings: EngineSettings(defaults: defaults), history: history)
         self.init(recentTakes: recentTakes ?? RecentTakesStore(fileURL: recentTakesURL), history: history,
                   cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore()), model: { DictationSendSetting.cleanupModel(in: store) },
                                                  personalization: { await preferences.cleanup(for: $0) }),
