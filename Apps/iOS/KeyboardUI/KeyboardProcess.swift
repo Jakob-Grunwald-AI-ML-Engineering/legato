@@ -33,7 +33,6 @@ enum KeyboardProcess {
     private static var lastPreviewBlankRecord: TimeInterval?
     /// Touched by the first registration, which comes with the extension's first view.
     private static let startedAt = ProcessInfo.processInfo.systemUptime
-    private static var lastLifecycleAt = ProcessInfo.processInfo.systemUptime
 
     static var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime - startedAt }
 
@@ -46,12 +45,7 @@ enum KeyboardProcess {
         _ = startedAt
         hosts.removeAll { $0.value == nil }
         hosts.append(.init(value: host))
-        noteLifecycle()
     }
-
-    /// A keyboard loaded, appeared or disappeared: the recycle policy waits for things to settle after it.
-    static func noteLifecycle() { lastLifecycleAt = ProcessInfo.processInfo.systemUptime }
-    static var quietSeconds: TimeInterval { ProcessInfo.processInfo.systemUptime - lastLifecycleAt }
 
     static func noteMemoryWarning() { memoryWarnings += 1 }
 
@@ -82,17 +76,17 @@ enum KeyboardProcess {
     }
 
     /// The facts the recycle policy decides on. `takeOpen`: the app's published take is still open.
-    static func recycleFacts(takeOpen: Bool) -> KeyboardRecyclePolicy.Facts {
+    static func recycleFacts(sessionEnded: Bool, takeOpen: Bool, forced: Bool) -> KeyboardRecyclePolicy.Facts {
         let census = census
         let owesWork = takeOpen || liveControllers.contains { !$0.isTornDown && $0.holdsWork }
-        return .init(visible: max(census.visible, census.hostsInWindow), hiddenControllers: census.hidden, owesWork: owesWork,
-                     quietSeconds: quietSeconds, uptimeSeconds: uptime, footprintBytes: footprint(),
-                     availableBytes: UInt64(availableMemory), previewBlanks: previewBlanks, memoryWarnings: memoryWarnings)
+        return .init(sessionEnded: sessionEnded, visible: max(census.visible, census.hostsInWindow),
+                     hiddenControllers: census.hidden, owesWork: owesWork, uptimeSeconds: uptime, previewBlanks: previewBlanks,
+                     memoryWarnings: memoryWarnings, forced: forced)
     }
 
     // MARK: Memory
 
-    /// What this process may still allocate before iOS ends it.
+    /// What this process may still allocate before iOS ends it; the simulator reports 0. Diagnostics only.
     nonisolated static var availableMemory: Int { os_proc_available_memory() }
 
     /// The process's physical footprint, the figure iOS holds against its limit; nil when the kernel does not report it.

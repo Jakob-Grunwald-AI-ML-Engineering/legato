@@ -12,6 +12,7 @@ final class KeyboardViewController: UIInputViewController {
     private static var autoFillHandoff = AutoFillHandoff()
     private var handoffVisible = false
     private var controller: KeyboardController?
+    private var hosting: UIHostingController<KeyboardRootView>?
     private var heightConstraint: NSLayoutConstraint?
 
     /// A height change animates over this.
@@ -22,6 +23,7 @@ final class KeyboardViewController: UIInputViewController {
         input.allowsSelfSizing = true
         inputView = input
         KeyboardProcess.registerHost(self)
+        KeyboardRecycler.start()
     }
 
     override func viewDidLoad() {
@@ -56,6 +58,7 @@ final class KeyboardViewController: UIInputViewController {
         self.controller = controller
 
         let host = UIHostingController(rootView: KeyboardRootView(controller: controller))
+        hosting = host
         host.view.backgroundColor = .clear
         host.view.translatesAutoresizingMaskIntoConstraints = false
         addChild(host)
@@ -102,8 +105,6 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        KeyboardRecycler.cancel()
-        KeyboardProcess.noteLifecycle()
         buildKeyboard()
         controller?.showsGlobe = needsInputModeSwitchKey
         controller?.appeared()
@@ -112,6 +113,7 @@ final class KeyboardViewController: UIInputViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         handoffVisible = true
+        KeyboardRecycler.keyboardAppeared(in: view.window?.windowScene)
         controller?.refreshTraits()
         switchForAutoFillIfNeeded()
     }
@@ -144,15 +146,23 @@ final class KeyboardViewController: UIInputViewController {
 
     /// The controller observes the app's Darwin notes and runs tasks of its own; a hosting view can keep it
     /// alive a moment past this view controller, so it is shut down here, not left to its own release.
+    ///
+    /// The hosting view is taken out too. A keyboard's window goes away with its host's session without the view ever
+    /// leaving it, and SwiftUI then keeps the hosting view (its focus state captures it), and with it the controller: one
+    /// more per show, never released (#342). Removing it lets both go.
     isolated deinit {
         controller?.tearDown()
+        if let hosting {
+            hosting.willMove(toParent: nil)
+            hosting.view.removeFromSuperview()
+            hosting.removeFromParent()
+        }
     }
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         controller?.disappeared()
-        KeyboardProcess.noteLifecycle()
-        KeyboardRecycler.schedule()
+        KeyboardRecycler.keyboardChanged()
     }
 
     /// Every loaded view controller hears the warning; the process counts it once.
@@ -160,7 +170,7 @@ final class KeyboardViewController: UIInputViewController {
         if Self.lastMemoryWarning.map({ ContinuousClock.now - $0 > .seconds(1) }) ?? true { KeyboardProcess.noteMemoryWarning() }
         Self.lastMemoryWarning = ContinuousClock.now
         controller?.recordPreviewLifecycle(.memoryWarning)
-        KeyboardRecycler.schedule()
+        KeyboardRecycler.keyboardChanged()
         super.didReceiveMemoryWarning()
     }
     private static var lastMemoryWarning: ContinuousClock.Instant?

@@ -1,18 +1,24 @@
 import Foundation
 
 /// Whether the keyboard extension ends its own process so iOS starts a fresh one on the next show (#342). A long-lived process
-/// can keep keyboard controllers UIKit never released, grow towards its memory limit, or stop drawing the dictation preview,
-/// and only a new process recovers. The extension feeds the facts and acts; the policy never exits while the keyboard is
-/// visible, owes work, or is still settling after a hide.
+/// can keep keyboard controllers UIKit never released or stop drawing the dictation preview, and only a new process recovers.
+/// The extension feeds the facts and acts only once the host's session with the keyboard has ended (the host left the
+/// foreground): a process ended under a host still holding it makes iOS show Apple's keyboard on the next show instead. The
+/// policy never exits while a keyboard is visible or owes work.
 public struct KeyboardRecyclePolicy: Sendable {
-    /// What makes the process unhealthy, in the order checked.
+    /// What makes the process unhealthy, in the order checked. Memory use alone is not one: the simulator reports no available
+    /// memory at all, and the phone's limit is not known well enough to set a share of it; iOS's own warning stands for it.
     public enum Reason: String, Codable, Sendable {
-        case previewBlank, leakedControllers, memoryWarning, memoryFootprint
+        case previewBlank, leakedControllers, memoryWarning
+        /// A debug build was told to (`KeyboardRecycler`), to test the recycle itself.
+        case forced
     }
 
     /// Why an unhealthy process is kept for now.
     public enum Blocker: String, Codable, Sendable {
-        case visible, owesWork, settling, young
+        /// The host's session with the keyboard is still open: the host is in front.
+        case sessionOpen
+        case visible, owesWork, young
     }
 
     public enum Decision: Equatable, Sendable {
@@ -22,68 +28,56 @@ public struct KeyboardRecyclePolicy: Sendable {
     }
 
     public struct Facts: Equatable, Sendable {
+        /// The host's session with the keyboard ended (the host left the foreground) and no new one began.
+        public var sessionEnded: Bool
         /// Keyboards on screen: controllers marked visible, or view controllers whose view is in a window.
         public var visible: Int
-        /// Controllers alive and not torn down while hidden (the one just hidden is released about a second later).
+        /// Controllers alive and not torn down while hidden: the one just hidden, or ones UIKit never released.
         public var hiddenControllers: Int
         /// A take, field edit, instruction or write is still in flight, or the app's published take is still open.
         public var owesWork: Bool
-        /// Seconds since the last keyboard lifecycle event (load, appear, disappear).
-        public var quietSeconds: Double
         public var uptimeSeconds: Double
-        public var footprintBytes: UInt64?
-        public var availableBytes: UInt64
         public var previewBlanks: Int
         public var memoryWarnings: Int
+        public var forced: Bool
 
-        public init(visible: Int, hiddenControllers: Int, owesWork: Bool, quietSeconds: Double, uptimeSeconds: Double,
-                    footprintBytes: UInt64?, availableBytes: UInt64, previewBlanks: Int, memoryWarnings: Int) {
+        public init(sessionEnded: Bool, visible: Int, hiddenControllers: Int, owesWork: Bool, uptimeSeconds: Double,
+                    previewBlanks: Int, memoryWarnings: Int, forced: Bool = false) {
+            self.sessionEnded = sessionEnded
             self.visible = visible
             self.hiddenControllers = hiddenControllers
             self.owesWork = owesWork
-            self.quietSeconds = quietSeconds
             self.uptimeSeconds = uptimeSeconds
-            self.footprintBytes = footprintBytes
-            self.availableBytes = availableBytes
             self.previewBlanks = previewBlanks
             self.memoryWarnings = memoryWarnings
-        }
-
-        /// The footprint's share of the process limit (footprint plus what is still available); nil when unknown.
-        public var footprintFraction: Double? {
-            guard let footprintBytes else { return nil }
-            let limit = Double(footprintBytes) + Double(availableBytes)
-            return limit > 0 ? Double(footprintBytes) / limit : nil
+            self.forced = forced
         }
     }
 
-    // Thresholds are estimates, to measure on the phone (#342). The bad process held 6–7 leaked controllers at 117–130 MB of
-    // about 185 MB (0.63–0.70); a healthy one releases each hidden controller within about a second.
-    /// More hidden controllers than this, after the settle time, count as leaked.
-    public var maxHiddenControllers = 2
-    /// The footprint share of the limit at which the process counts as unhealthy.
-    public var maxFootprintFraction = 0.75
-    /// A hide must have settled this long: the hidden controller's release, Safari's Next/Previous re-show.
-    public var settleSeconds = 3.0
-    /// A younger process is kept, so a process that starts unhealthy cannot recycle on every hide.
-    public var minimumUptimeSeconds = 120.0
+    // Thresholds are estimates, to measure on the phone (#342). The bad process held 6–7 leaked controllers. A healthy one still
+    // holds the keyboards it hid during the session as its host leaves (UIKit releases them when the next session begins): 1–3
+    // over 16 shows in the simulator.
+    /// More hidden controllers than this count as leaked.
+    public var maxHiddenControllers = 4
+    /// A younger process is kept, so a process that starts unhealthy does not cold-start the keyboard after every app switch.
+    public var minimumUptimeSeconds = 60.0
 
     public init() {}
 
     public func reason(_ facts: Facts) -> Reason? {
+        if facts.forced { return .forced }
         if facts.previewBlanks > 0 { return .previewBlank }
         if facts.hiddenControllers > maxHiddenControllers { return .leakedControllers }
         if facts.memoryWarnings > 0 { return .memoryWarning }
-        if let fraction = facts.footprintFraction, fraction >= maxFootprintFraction { return .memoryFootprint }
         return nil
     }
 
     public func decide(_ facts: Facts) -> Decision {
         guard let reason = reason(facts) else { return .healthy }
+        if !facts.sessionEnded { return .wait(reason, .sessionOpen) }
         if facts.visible > 0 { return .wait(reason, .visible) }
         if facts.owesWork { return .wait(reason, .owesWork) }
-        if facts.quietSeconds < settleSeconds { return .wait(reason, .settling) }
-        if facts.uptimeSeconds < minimumUptimeSeconds { return .wait(reason, .young) }
+        if !facts.forced, facts.uptimeSeconds < minimumUptimeSeconds { return .wait(reason, .young) }
         return .recycle(reason)
     }
 }

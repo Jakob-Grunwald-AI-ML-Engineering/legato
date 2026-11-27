@@ -20,8 +20,9 @@ final class PreviewDiagnostics {
         case controllerCreated, willAppear, willDisappear, didDisappear, controllerTornDown, memoryWarning, autoFillSwitch
         case requestIssued, requestReceived, snapshotPublished, snapshotReceived, transitionStarted, transitionMounted, transitionEnded
         case historySaved, historyWriteFailed
-        /// The preview should show text but evidently does not (`PreviewBlank`); the process recycle checks (#342).
-        case previewBlank, recycleWait, processRecycled
+        /// The preview should show text but evidently does not (`PreviewBlank`); the host's session with the keyboard ended
+        /// or a new one began; the process recycle checks (#342).
+        case previewBlank, sessionEnded, sessionStarted, recycleWait, processRecycled
     }
 
     struct Context: Codable {
@@ -96,7 +97,6 @@ final class PreviewDiagnostics {
         var reason: KeyboardRecyclePolicy.Reason
         var blocker: KeyboardRecyclePolicy.Blocker?
         var owesWork: Bool
-        var quietSeconds: Double
     }
 
     static let app = PreviewDiagnostics(.app)

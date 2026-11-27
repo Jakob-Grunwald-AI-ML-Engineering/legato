@@ -4,10 +4,10 @@ import Testing
 @Suite struct KeyboardRecyclePolicyTests {
     private let policy = KeyboardRecyclePolicy()
 
-    /// A hidden, idle, settled, old process using a modest share of its limit.
+    /// A healthy, hidden, idle, old process whose host session has ended.
     private func facts(_ change: (inout KeyboardRecyclePolicy.Facts) -> Void = { _ in }) -> KeyboardRecyclePolicy.Facts {
-        var facts = KeyboardRecyclePolicy.Facts(visible: 0, hiddenControllers: 0, owesWork: false, quietSeconds: 10, uptimeSeconds: 600,
-                                                footprintBytes: 80_000_000, availableBytes: 100_000_000, previewBlanks: 0, memoryWarnings: 0)
+        var facts = KeyboardRecyclePolicy.Facts(sessionEnded: true, visible: 0, hiddenControllers: 1, owesWork: false,
+                                                uptimeSeconds: 600, previewBlanks: 0, memoryWarnings: 0)
         change(&facts)
         return facts
     }
@@ -15,13 +15,20 @@ import Testing
     @Test func healthyProcessStays() {
         #expect(policy.decide(facts()) == .healthy)
         #expect(policy.decide(facts { $0.hiddenControllers = policy.maxHiddenControllers }) == .healthy)
+        // Keyboards hidden during the session are still alive as the host leaves: 3 was measured in ordinary use.
+        #expect(policy.decide(facts { $0.hiddenControllers = 3 }) == .healthy)
     }
 
-    @Test func eachSignalRecyclesAnIdleHiddenProcess() {
+    @Test func eachSignalRecyclesOnceTheSessionHasEnded() {
         #expect(policy.decide(facts { $0.previewBlanks = 1 }) == .recycle(.previewBlank))
         #expect(policy.decide(facts { $0.hiddenControllers = policy.maxHiddenControllers + 1 }) == .recycle(.leakedControllers))
         #expect(policy.decide(facts { $0.memoryWarnings = 1 }) == .recycle(.memoryWarning))
-        #expect(policy.decide(facts { $0.footprintBytes = 150_000_000; $0.availableBytes = 40_000_000 }) == .recycle(.memoryFootprint))
+    }
+
+    /// Ending the process under a host still holding it makes iOS fall back to Apple's keyboard on the next show.
+    @Test func neverExitsWhileTheSessionIsOpen() {
+        #expect(policy.decide(facts { $0.previewBlanks = 1; $0.sessionEnded = false }) == .wait(.previewBlank, .sessionOpen))
+        #expect(policy.decide(facts { $0.forced = true; $0.sessionEnded = false }) == .wait(.forced, .sessionOpen))
     }
 
     @Test func neverExitsWhileVisibleOrOwingWork() {
@@ -31,13 +38,9 @@ import Testing
         #expect(policy.decide(facts { $0 = unhealthy; $0.owesWork = true }) == .wait(.leakedControllers, .owesWork))
     }
 
-    @Test func waitsForTheHideToSettleAndForAMinimumUptime() {
-        let unhealthy = facts { $0.memoryWarnings = 1 }
-        #expect(policy.decide(facts { $0 = unhealthy; $0.quietSeconds = policy.settleSeconds - 0.1 }) == .wait(.memoryWarning, .settling))
-        #expect(policy.decide(facts { $0 = unhealthy; $0.uptimeSeconds = policy.minimumUptimeSeconds - 1 }) == .wait(.memoryWarning, .young))
-    }
-
-    @Test func unknownFootprintIsNotASignal() {
-        #expect(policy.decide(facts { $0.footprintBytes = nil; $0.availableBytes = 0 }) == .healthy)
+    @Test func aYoungProcessIsKeptUnlessForced() {
+        #expect(policy.decide(facts { $0.memoryWarnings = 1; $0.uptimeSeconds = policy.minimumUptimeSeconds - 1 })
+                == .wait(.memoryWarning, .young))
+        #expect(policy.decide(facts { $0.forced = true; $0.uptimeSeconds = 1 }) == .recycle(.forced))
     }
 }
