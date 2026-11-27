@@ -38,10 +38,11 @@ private final class OfflineRequest: MessagesStreaming {
 
     func body(for probe: Probe, suggest: Bool) async throws -> JSONValue? {
         guard let mode = probe.mode else { return nil }
-        let defaults = try #require(UserDefaults(suiteName: UUID().uuidString))
-        // Override both settings in an isolated, volatile domain, including for the baseline.
-        defaults.setVolatileDomain([ComposerWritingSettings.promptKey: suggest ? styleCue : "",
-                                    ComposerWritingSettings.modelKey: ModelChoice.haiku.rawValue], forName: UserDefaults.argumentDomain)
+        let suite = UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(suggest ? styleCue : "", forKey: ComposerWritingSettings.promptKey)
+        defaults.set(ModelChoice.haiku.rawValue, forKey: ComposerWritingSettings.modelKey)
         let input = SentenceCleanupInput(sentenceID: "fixture", sequence: 0, text: probe.draft, vocabulary: [],
                                          dictation: .init(style: mode, instructions: probe.instruction),
                                          writingSettings: .init(in: defaults))
