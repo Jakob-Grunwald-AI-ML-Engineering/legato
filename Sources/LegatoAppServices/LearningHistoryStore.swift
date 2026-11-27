@@ -13,6 +13,8 @@ public struct LearningHistoryStore: HistoryStore {
     private let base: any HistoryStore
     private let vocabulary: VocabularyService
     private let recentTakes: RecentTakesStore?
+    private let styleDiagnostics: StyleDiagnosticLog?
+    private let styleFinalizations: Bool
     private let topicHistory: VocabularyTopicHistory
 
     func topicContext(textBeforeCursor: String = "", since: Date = .distantPast) -> VocabularyTopicContext {
@@ -21,7 +23,10 @@ public struct LearningHistoryStore: HistoryStore {
 
     func warmTopicContext() async { await topicHistory.warm() }
 
-    public init(_ base: any HistoryStore, vocabulary: VocabularyService, recentTakes: RecentTakesStore? = nil) {
+    public init(_ base: any HistoryStore, vocabulary: VocabularyService, recentTakes: RecentTakesStore? = nil,
+                styleDiagnostics: StyleDiagnosticLog? = nil, styleFinalizations: Bool = true) {
+        self.styleDiagnostics = styleDiagnostics
+        self.styleFinalizations = styleFinalizations
         self.recentTakes = recentTakes
         self.base = base
         self.topicHistory = VocabularyTopicHistory(history: base)
@@ -32,7 +37,7 @@ public struct LearningHistoryStore: HistoryStore {
         try await base.append(entry)
         topicHistory.observe(entry)
         if entry.recognitionHints != nil {
-            vocabulary.learnFromFinalizedTake(entry, history: base)
+            didFinalize(entry)
         } else if let raw = entry.spokenEvidence {
             vocabulary.learnFromDictation(text: raw, locale: Locale(identifier: entry.localeIdentifier), id: entry.id)
         }
@@ -42,13 +47,22 @@ public struct LearningHistoryStore: HistoryStore {
     public func upsert(_ entry: DictationEntry) async throws {
         try await base.upsert(entry)
         topicHistory.observe(entry)
-        if entry.recognitionHints != nil { vocabulary.learnFromFinalizedTake(entry, history: base) }
+        if entry.recognitionHints != nil { didFinalize(entry) }
+    }
+
+    private func didFinalize(_ entry: DictationEntry) {
+        if styleFinalizations, entry.spokenEvidence != nil, let styleDiagnostics {
+            styleDiagnostics.record(.init(takeID: entry.id, platform: styleDiagnostics.platform, action: .finalized,
+                                          eventID: entry.id, at: entry.date))
+        }
+        vocabulary.learnFromFinalizedTake(entry, history: base)
     }
 
     public func recent(limit: Int) async throws -> [DictationEntry] { try await base.recent(limit: limit) }
 
     public func delete(id: UUID) async throws {
         try await base.delete(id: id)
+        styleDiagnostics?.record(takeID: id, action: .deleted)
         topicHistory.forget(id)
         recentTakes?.forget(id: id)
         // After the base delete, so the pair rebuild reads history without the dictation.

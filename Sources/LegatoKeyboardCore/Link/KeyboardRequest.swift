@@ -1,4 +1,5 @@
 import Foundation
+import LegatoCore
 
 public enum RequestCommand: String, Codable, Sendable, Equatable {
     case start, stop, endKeepAlive
@@ -90,6 +91,17 @@ public struct KeyboardPresence: Codable, Sendable, Equatable {
     /// dictated lines. nil for a secure field and before this was reported.
     public var contextBefore: String?
     public static let contextLimit = 400
+    /// Offered by internal keyboards only for a visible, learnable field. The nonce changes when the draft ends.
+    public struct StyleField: Codable, Sendable, Equatable {
+        public let draftID: UUID
+        public let context: StyleDiagnosticEvent.Context
+
+        public init(draftID: UUID, context: StyleDiagnosticEvent.Context) {
+            self.draftID = draftID
+            self.context = context
+        }
+    }
+    public var styleField: StyleField?
     /// The magic key (instruction mode); nil decodes presences written before it existed (off).
     public var magic: MagicToggle?
     /// When `magic` last changed (the keyboard's clock).

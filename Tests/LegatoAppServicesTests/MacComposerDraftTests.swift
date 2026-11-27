@@ -178,10 +178,12 @@ private actor DraftHistory: HistoryStore {
     }
 
     @Test func magicAndSpokenInstructionsReadTheCurrentMacWritingPreferences() async throws {
-        let defaults = try #require(UserDefaults(suiteName: UUID().uuidString))
+        let suite = UUID().uuidString
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
         func set(_ model: ModelChoice, _ preference: String) {
-            defaults.setVolatileDomain(["composer.liveModel": model.rawValue, "composer.personalPrompt": preference],
-                                       forName: UserDefaults.argumentDomain)
+            defaults.set(model.rawValue, forKey: ComposerWritingSettings.modelKey)
+            defaults.set(preference, forKey: ComposerWritingSettings.promptKey)
         }
         let recorder = WritingRequestRecorder()
         let (session, draft) = session(SentenceCleanupClient(client: recorder, model: { .haiku }), defaults: defaults)

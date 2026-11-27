@@ -37,6 +37,8 @@ Bundle/group overrides route the CLI; they do not rewrite signing, entitlements,
 
 ## Keyboard edit journal
 
+For the offline contextual-style study, use the narrower **style evidence** export below.
+
 Internal and debug keyboards write every field-queue event with full text to the App Group (`Library/Caches/edit-journal.jsonl`, rotated at about 2 MB into `edit-journal.1.jsonl`). Pull it with `xcrun devicectl device copy from --device "$LEGATO_DEVICE" --domain-type appGroupDataContainer --domain-identifier group.de.gruenwald.legato --source Library/Caches/edit-journal.jsonl --destination /tmp/edit-journal.jsonl` (or `bash scripts/device/ctl.sh pull --group Library/Caches/edit-journal.jsonl`), then replay it in a test with `JournalReplay` (`Tests/LegatoKeyboardCoreTests/EditJournalTests.swift`). It holds what was typed: share it only with Jakob's consent.
 
 
@@ -49,6 +51,19 @@ For iOS dictation regressions, replay the reported takes and several nearby comp
 These commands wrap Apple’s `devicectl device capture` service, verified with Xcode 27.2 and a wireless physical iPhone (1206 × 2622 PNG). The project toolchain pin stays unchanged; an older selected Xcode without this command produces a clear capability error. Use the selected Xcode’s `xcrun devicectl device capture screenshot --help` for its native options. Native touch controls use a separate signed `LegatoNativeControl` XCTest runner: `tree`, `tap X Y`, `hold X Y SECONDS`, `swipe X1 Y1 X2 Y2` and `label "Accessibility label"`. Coordinates are screen points, not screenshot pixels (the current iPhone is 402 × 874 points, screenshot scale 3). `keyboard` long-presses the globe at (42, 820) and chooses the native “Legato” menu item on that iPhone. Every invocation activates the already running `LEGATO_BUNDLE` (default `de.gruenwald.legato`), performs one action and exports the real accessibility tree plus an `XCUIScreen` screenshot beneath `.claude/tmp/native-control` (override `LEGATO_NATIVE_OUTPUT`).
 
 The runner has no target-app dependency, never reinstalls or launches Legato, and refuses a stopped target app. Xcode may briefly foreground its runner; coordinate exclusive phone ownership for touch commands and restore the desired field/keyboard before visual acceptance. `LEGATO_NATIVE_BUILD` selects its incremental build directory. Only the standalone test runner is provisioned/installed. These are manual UAT controls, outside the CI suite.
+
+## Offline style evidence
+
+In an internal build containing the style diagnostics, normal use produces a bounded, local record of observable actions. To replay a collection, run these commands from the repository root. Select `mac` for the local Mac, `device` for a paired iPhone or `sim` for an installed simulator build. The standard bundle and target overrides above apply.
+
+```bash
+snapshot="$(bash scripts/device/ctl.sh --target mac style-evidence)" &&
+  LEGATO_STYLE_DIAGNOSTICS="$snapshot" swift test --filter StyleEvidenceReplayTests/collectedDiagnostics
+```
+
+The collector prints the path to a new private snapshot. On iPhone and simulator it reads `Library/Caches` in the App Group. On Mac it reads `~/Library/Caches/<bundle ID>`. It combines `style-diag.previous.jsonl` and `style-diag.jsonl` when available. An empty collection reports an error; an older build cannot reconstruct these observations after the fact. Cache rotation and OS eviction limit the time window. Keep device exports local.
+
+For the labelled synthetic comparison, run `swift test --filter StyleEvidenceReplayTests/heldOutSessions`. A device export can measure observed actions, missing context and when a candidate rule would have influenced a request. Judging whether a suggestion matched someone's preference requires a separate expectation for that take. [Offline study and interpretation](../../docs/research/automatic-vocabulary/contextual-style.md)
 
 ## Commands and lifecycle
 

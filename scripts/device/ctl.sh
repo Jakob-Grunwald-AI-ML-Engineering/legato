@@ -25,6 +25,7 @@
 #   pull [--group] <path>    copy a file from the data container (Library/, Documents/, tmp/) or, with
 #                            --group, the App Group container, and print it (e.g. pull Library/Caches/audio-diag.jsonl)
 #   pull-sessions [--group] <path>  alias of pull for session directories/files
+#   style-evidence           collect the two bounded style diagnostics files and print the local snapshot path
 #   device-logs [--since <dur>]  collect the iPhone's unified log (default --since 10m; <num>m|h|d), keep the
 #                            subsystem de.gruenwald.legato lines (app, keyboard, widget) in $STATE/pulled/device-logs.txt (prompts for sudo)
 #                            and print its path with the composer-view/keyboard-composer findings (#225)
@@ -205,7 +206,12 @@ local_path() {
   printf '%s/%s\n' "$root" "$path"
 }
 copy_from() {
-  if [ "$TARGET" != device ]; then cp -R "$(local_path "$1" "${3:-}")" "$2"; return; fi
+  if [ "$TARGET" != device ]; then
+    local source_path
+    source_path="$(local_path "$1" "${3:-}")" || return 1
+    cp -R "$source_path" "$2"
+    return
+  fi
   local domain=(--domain-type appDataContainer --domain-identifier "$BID")
   [ "${3:-}" = group ] && domain=(--domain-type appGroupDataContainer --domain-identifier "$GROUP")
   dc device copy from --device "$DEVICE" "${domain[@]}" --source "$1" --destination "$2" > /dev/null
@@ -568,6 +574,42 @@ cmd_pull() {
   if [ -d "$dest" ]; then ls -l "$dest"; else cat "$dest"; fi
 }
 
+# Keep each successful collection independent. Copy current first so a concurrent rotation can
+# duplicate an event in the snapshot, but cannot drop the tail that just moved to previous.
+cmd_style_evidence() (
+  [ $# -eq 0 ] || die "usage: style-evidence"
+  directory="Library/Caches" domain="group"
+  if [ "$TARGET" = mac ]; then
+    directory="$directory/$BID"
+    domain=""
+  else
+    require_device
+  fi
+  umask 077
+  mkdir -p "$STATE/pulled"
+  staging="$(mktemp -d "$STATE/pulled/.style.XXXXXX")"
+  trap 'rm -rf "$staging"' EXIT
+  for name in style-diag.jsonl style-diag.previous.jsonl; do
+    if ! copy_from "$directory/$name" "$staging/$name" "$domain" 2> "$staging/error"; then
+      # Before the first rotation, or between rotation and the next event, one file is absent.
+      if LC_ALL=C grep -Eiq 'no such file or directory|NSPOSIXErrorDomain[^[:cntrl:]]*Code=2([^0-9]|$)|NSCocoaErrorDomain[^[:cntrl:]]*Code=260([^0-9]|$)' "$staging/error"; then
+        rm -f "$staging/$name"
+        continue
+      fi
+      cat "$staging/error" >&2
+      die "could not collect $name from $TARGET"
+    fi
+  done
+  [ -s "$staging/style-diag.previous.jsonl" ] || [ -s "$staging/style-diag.jsonl" ] ||
+    die "no style evidence available for $TARGET ($BID); check the internal build and completed activity"
+  for name in style-diag.previous.jsonl style-diag.jsonl; do
+    if [ -f "$staging/$name" ]; then cat "$staging/$name" >> "$staging/combined"; fi
+  done
+  snapshot="$(mktemp "$STATE/pulled/style-evidence.XXXXXX")"
+  mv "$staging/combined" "$snapshot"
+  printf '%s\n' "$snapshot"
+)
+
 # Unified log of the physical iPhone: `log collect --device-udid` writes a .logarchive (needs the phone
 # unlocked and paired), `log show --archive` filters it. Debug-level lines are included; our messages mark
 # draft content private, so the file holds counts and flags only.
@@ -610,6 +652,7 @@ sub="${1:-}"
 case "$sub" in
   import-keys) cmd_import_keys "$@" ;;
   pull-sessions) cmd_pull "$@" ;;
+  style-evidence) cmd_style_evidence "$@" ;;
   device-logs) cmd_device_logs "$@" ;;
   devices | build | install | launch | send | put | say | ask | status | clear | block | wait | log | background | foreground | terminate | pull) "cmd_$sub" "$@" ;;
   *) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; [ -z "$sub" ] || exit 1 ;;

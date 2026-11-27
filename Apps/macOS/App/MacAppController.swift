@@ -86,12 +86,17 @@ import OSLog
             root = URL(fileURLWithPath: path, isDirectory: true)
         }
         #endif
+        #if DEBUG || LEGATO_INTERNAL
+        let styleLog: StyleDiagnosticLog? = StyleDiagnosticLog(directory: EditJournalFile.directory, platform: .macOS, settingsRoot: root)
+        #else
+        let styleLog: StyleDiagnosticLog? = nil
+        #endif
         let engine = EngineSettings()
         vocabulary = VocabularyService(fileURL: root.appending(path: "vocabulary.json"),
             languages: { VocabularyService.configuredLanguages(engine) })
         corrections = CorrectionStore(root: root)
         let recentTakes = RecentTakesStore(fileURL: root.appending(path: "recent-takes.json"))
-        history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary, recentTakes: recentTakes)
+        history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary, recentTakes: recentTakes, styleDiagnostics: styleLog)
         let vocabularyURL = root.appending(path: "vocabulary.json")
         meetings = MeetingController(root: Self.meetingsRoot(in: root), vocabularyURL: vocabularyURL)
         let pipeline: DictationPipeline
@@ -113,7 +118,7 @@ import OSLog
         #endif
         dictation = MacDictationSession(pipeline: pipeline, instruction: instruction,
             microphone: AutomaticInputSource(preference: { MicrophonePreference.dictation() }),
-            vocabularyURL: vocabularyURL, composer: MacComposerDraft())
+            vocabularyURL: vocabularyURL, composer: MacComposerDraft(styleDiagnostics: styleLog))
         dictation.onPrepare = { [weak self] in
             guard let self else { return }
             let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
@@ -137,7 +142,7 @@ import OSLog
         }
         dictation.prepareDraftInsertion = { [weak self] in
             guard let self else { return .init { _ in false } }
-            return destination.captureInsertion(secureOrigin: secureDraftOrigin, using: paster, settings: settings, store: corrections) { [weak self] in
+            return destination.captureInsertion(secureOrigin: secureDraftOrigin, using: paster, settings: settings, store: corrections, styleDiagnostics: styleLog) { [weak self] in
                 guard let draft = self?.dictation.composer else { return nil }
                 return (draft.documentID, draft.original)
             }
@@ -526,7 +531,7 @@ import OSLog
     }
 
     func captureInsertion(secureOrigin: AXTextTarget.PasteWitness?, using paster: PasteService,
-                          settings: MacSettings, store: CorrectionStore,
+                          settings: MacSettings, store: CorrectionStore, styleDiagnostics: StyleDiagnosticLog?,
                           source: @escaping @MainActor () -> (UUID, String)?) -> MacDictationSession.DraftInsertion {
         invalidate()
         let generation = self.generation
@@ -565,9 +570,18 @@ import OSLog
                 Task { @MainActor in
                     let verified = await confirmation.verify(whileOwned: owned)
                     Self.log.debug("Draft readback verified: \(verified)")
-                    if verified, generation == self.generation, let take, case .element(let target) = witness,
-                       let snapshot = target.correctionSnapshot() {
+                    guard verified, generation == self.generation, let take else { return }
+                    styleDiagnostics?.record(takeID: take.0, action: .inserted)
+                    if case .element(let target) = witness, let snapshot = target.correctionSnapshot() {
                         let capture = CorrectionCapture(store: store)
+                        if let styleDiagnostics {
+                            capture.onSettled = { record in
+                                // AX readback cannot distinguish a person typing from another editor or host autocorrect.
+                                styleDiagnostics.record(takeID: take.0, action: .hostEdit, before: record.removed,
+                                                        after: record.replacement, eventID: record.id)
+                            }
+                            capture.onBoundary = { id in styleDiagnostics.record(takeID: id, action: .boundary) }
+                        }
                         guard capture.arm(dictationID: take.0.uuidString, raw: take.1, inserted: text,
                                           snapshot: snapshot, platform: "macOS", locale: Locale.current.identifier, isIdle: true) else { return }
                         self.correctionPoll = Task { @MainActor in
