@@ -1,5 +1,6 @@
 import Foundation
 import LegatoComposerDoc
+import LegatoVocabulary
 
 /// One finalized Soniox segment heard on the dictation route, in the order it was spoken.
 public struct DictationRouteLine: Sendable, Equatable {
@@ -41,11 +42,14 @@ public struct DictationRouteLine: Sendable, Equatable {
     func boundary(_ reason: String)
     /// Recent written takes, newest last, sent to Soniox as background text when a take starts.
     var backgroundText: String { get }
+    /// Context available before any recognition from the new take.
+    func vocabularyTopicContext(since: Date) -> VocabularyTopicContext
 }
 public extension DictationRouteSink {
     func warm() async {}
     func beginTake() {}
     var backgroundText: String { "" }
+    func vocabularyTopicContext(since: Date) -> VocabularyTopicContext { .init() }
     func speechActivity() {}
     func tailChanged(_ text: String) {}
     func finishTake() async {}

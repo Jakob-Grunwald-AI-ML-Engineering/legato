@@ -2,6 +2,8 @@
 
 Two independent corrections can qualify a spelling for a future recognition request. An explicit keyboard selection can influence a relevant suggestion on its first use. The raw word that someone corrected can still be useful in a different context.
 
+The topic-switch replay compares recognition requests before and after business and science topic changes. [Topic-ranking results](topic-ranking.md)
+
 ## Choosing the first rules
 
 The November 2026 baseline used main revision `812df729`, Swift 6.4.2 and synthetic data. The chronological replay recorded “Email schemas today” → “Email Kemas today” and, in a separate take, “Canvas bitte anrufen” → “Kemas bitte anrufen.” Both records used the same device locale, as the existing capture adapters do when someone switches spoken languages. The original Soniox start message contained no vocabulary terms. Cleanup and Magic received no Kemas suggestion for the later technical passage “Review the database schemas.”

@@ -62,7 +62,7 @@ extension InstructionRunner: InstructionRunning {}
     /// composer's writer uses them.
     public convenience init(vocabularyURL: URL, history: (any HistoryStore)? = nil, defaults: UserDefaults = .standard) {
         nonisolated(unsafe) let store = defaults
-        let preferences = RequestVocabulary(fileURL: vocabularyURL, settings: EngineSettings(defaults: defaults))
+        let preferences = RequestVocabulary(fileURL: vocabularyURL, settings: EngineSettings(defaults: defaults), history: history)
         self.init(runner: InstructionRunner(
             client: MessagesStream(keyStore: KeychainKeyStore()),
             model: { ComposerWritingSettings(in: store).model },

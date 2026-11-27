@@ -3,6 +3,7 @@ import LegatoAgent
 import LegatoClaude
 import LegatoCore
 import LegatoRoom
+import LegatoVocabulary
 import Synchronization
 import Testing
 @testable import LegatoAppServices
@@ -92,5 +93,51 @@ private final class RequestCapture: MessagesStreaming {
         let revoked = try await payload(heldOut)
         #expect((revoked["vocabulary"] as? [String]) == [])
         #expect(revoked["reviewedExamples"] == nil)
+    }
+}
+
+extension ReviewedPersonalizationTests {
+    @Test func editedRecognitionSpellingReplacesItsLearnedEntryInACappedRequest() async throws {
+        let rig = VocabularyRig()
+        defer { rig.cleanUp() }
+        let now = Date()
+        try await rig.service.store.update { snapshot in
+            snapshot.entries = (0..<67).map { VocabularyEntry(text: "OtherTerm\($0)", source: .history, score: 10, lastSeen: now) }
+            snapshot.entries.append(VocabularyEntry(text: "Kemas", source: .history, score: 20, lastSeen: now))
+        }
+        let store = CorrectionStore(root: rig.url.deletingLastPathComponent())
+        let takes = [UUID(), UUID()]
+        for id in takes {
+            try await store.replaceRecognizedEvidence(takeID: id.uuidString, with: [
+                .recognized(takeID: id, term: "Kemas", date: now, localeIdentifier: "en", promotionCount: 2)
+            ])
+        }
+        let request = RequestVocabulary(fileURL: rig.url)
+        #expect(await request.sonioxTerms().first == "Kemas")
+        let candidate = try #require(try await store.activeCandidates().first)
+        try await store.editSpelling("Kemaris", for: candidate)
+        let revised = await request.sonioxTerms { _ in .init(textBeforeCursor: "Kemas") }
+        #expect(revised.count == VocabularyService.engineHintLimit)
+        #expect(revised.contains("Kemaris"))
+        #expect(!revised.contains("Kemas"))
+
+        var keyboard = try await rig.service.store.snapshot()
+        let original = try #require(keyboard.entry(forText: "Kemas"))
+        let choices = try await store.keyboardCandidates()
+        keyboard.applySpellingEdits(from: choices)
+        for choice in choices { keyboard.overlay(choice, automaticSource: .choice) }
+        var pairs = WordPairModel()
+        pairs.observe(text: "call Kemas", at: now)
+        #expect(await WordSuggester.completions(prefix: "Kem", previous: ["call"], snapshot: keyboard,
+                                                pairs: pairs, completer: nil, languages: ["en"]) == ["Kemaris"])
+
+        try await rig.service.store.pin(id: original.id)
+        let pinned = await request.sonioxTerms()
+        #expect(pinned.contains("Kemaris") && pinned.contains("Kemas"))
+        try await rig.service.store.unpin(id: original.id)
+        try await store.replaceRecognizedEvidence(takeID: takes[0].uuidString, with: [])
+        let withdrawn = await request.sonioxTerms()
+        #expect(withdrawn.contains("Kemas"))
+        #expect(!withdrawn.contains("Kemaris"))
     }
 }

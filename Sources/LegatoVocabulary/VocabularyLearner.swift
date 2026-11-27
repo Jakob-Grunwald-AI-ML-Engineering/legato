@@ -91,7 +91,11 @@ public struct VocabularyLearner: Sendable {
 
     /// The same token identity records a word shown to the recognizer and excludes it from learning.
     public static func cueWords(in text: String) -> Set<String> {
-        Set(TermMatcher.words(in: Self.fold(text)))
+        Set(orderedCueWords(in: text))
+    }
+
+    static func orderedCueWords(in text: String) -> [String] {
+        TermMatcher.words(in: fold(text))
     }
 
     /// A recognition or typing observation uses the same multilingual rarity rules as the vocabulary learner.

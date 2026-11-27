@@ -59,6 +59,9 @@ import LegatoVocabulary
     /// The magic toggle as the keyboard last reported it: only a change acts (a debug override then stays).
     @ObservationIgnored private var reportedMagic = MagicToggle.off
     public var speechMode: SpeechMode { speechRoute.speechMode }
+    #if DEBUG || LEGATO_INTERNAL
+    public func debugRecognitionTerms() async -> [String] { await dictation.recognitionConfig().terms }
+    #endif
     @ObservationIgnored private let sonioxKey: @MainActor () -> String
     @ObservationIgnored private let makeSocket: @Sendable () -> any SonioxSocket
     @ObservationIgnored private let warmConnection: @Sendable () async -> Void

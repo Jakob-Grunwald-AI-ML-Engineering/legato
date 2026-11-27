@@ -128,7 +128,7 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
     func learnFromFinalizedTake(_ entry: DictationEntry, history: any HistoryStore) {
         guard let raw = entry.spokenEvidence, let hints = entry.recognitionHints else { return }
         spawn { [self] in
-            if (try? await corrections.personalizationEnabled()) == true {
+            if let since = try? await corrections.personalizationEnabledSince(), entry.date >= since {
                 let candidates = await VocabularyLearner.candidateTerms(in: raw, locale: Locale(identifier: entry.localeIdentifier),
                     languages: languages(), spellChecker: spellChecker, tagger: tagger,
                     snapshot: try? await store.snapshot(), suggested: hints)

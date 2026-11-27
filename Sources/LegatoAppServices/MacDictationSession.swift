@@ -61,6 +61,9 @@ import LegatoKeyboardCore
     }
     var engine: DictationEngine { speechRoute.engine }
     @ObservationIgnored private let mic: any AudioSource
+    #if DEBUG || LEGATO_INTERNAL
+    public func debugRecognitionTerms() async -> [String] { await engine.recognitionConfig().terms }
+    #endif
     @ObservationIgnored private let sonioxKey: @MainActor () -> String
     @ObservationIgnored private let claudeKey: @MainActor () -> Bool
     @ObservationIgnored private let warmConnection: @Sendable () async -> Void
@@ -109,6 +112,7 @@ import LegatoKeyboardCore
         speechRoute = DictationRouteSession(sink: sink, instruction: self.instruction, sonioxKey: sonioxKey,
                                            makeSocket: makeSocket, vocabularyURL: vocabularyURL)
         if let composer {
+            composer.topicContext = { [weak pipeline] since in pipeline?.vocabularyTopicContext(since: since) ?? .init() }
             composer.recentContext = { [weak pipeline] in pipeline?.backgroundText ?? "" }
             self.instruction.onDraftInstruction = { [weak composer, weak pipeline] instruction in
                 guard let pipeline else { return }
