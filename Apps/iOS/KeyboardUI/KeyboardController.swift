@@ -738,16 +738,7 @@ final class KeyboardController {
     /// A new field starts over (no history, no row); a cursor move or text change the keyboard didn't make
     /// closes the typing group and what was typed so far is learned, and the word row looks at the word there.
     private func trackContext() {
-        let id = document.documentID
-        if id != lastDocumentID {
-            sessionSpan.broken()
-            typing.closeEmojiPanel()
-            lastDocumentID = id
-            queue.history.clear()
-            lastDictationTexts = [] // the dictation belongs to the field it landed in
-            syncHistory()
-            wordRow.fieldChanged()
-        }
+        bindSuggestionField()
         if wordRow.contextChanged() {
             queue.history.cursorMoved()
             wordRow.interruptTyping()
@@ -758,6 +749,20 @@ final class KeyboardController {
            !OwnEditEcho.isSame(expected: sessionSpan.text, reported: document.contextBefore) {
             sessionSpan.broken()
             trace?("session ended by a change outside the keyboard")
+        }
+    }
+
+    /// Bind before writing the first key: its UIKit echo belongs to this field too.
+    private func bindSuggestionField() {
+        let id = document.documentID
+        if id != lastDocumentID {
+            sessionSpan.broken()
+            typing.closeEmojiPanel()
+            lastDocumentID = id
+            queue.history.clear()
+            lastDictationTexts = [] // the dictation belongs to the field it landed in
+            syncHistory()
+            wordRow.fieldChanged()
         }
     }
 
@@ -976,6 +981,7 @@ final class KeyboardController {
     private func syncQueueField() {
         guard !draftEvidence.isPending else { return }
         observeIdentity()
+        bindSuggestionField()
         let id = document.documentID
         if id != queueDocumentID {
             // A take still going that typed nothing yet goes to the field the user is in now, at its caret (as on the Mac).
@@ -2525,7 +2531,8 @@ final class KeyboardController {
         guard old.count == edit.deleteCount, oldAfter.count <= old.count else {
             show("The word changed, so nothing was edited."); return
         }
-        if !asTyping { wordRow.interruptTyping() }
+        if asTyping { wordRow.beginCompletion(deleting: edit.deleteCount) }
+        else { wordRow.interruptTyping() }
         let queued = FieldQueue.Edit(kind: record ? .word : .undo, before: shown(String(old.dropLast(oldAfter.count))),
                                      after: shown(oldAfter), target: shown(edit.insert))
         enqueue(queued, user: true) { [weak self] outcome in
@@ -2535,7 +2542,7 @@ final class KeyboardController {
                 self.show("The text changed, so nothing was edited.")
                 return
             }
-            if asTyping { self.wordRow.completed(deleting: edit.deleteCount, with: edit.insert) }
+            if asTyping { self.wordRow.completed(with: edit.insert) }
             self.wordRow.willApplyOwnEdit(expectedContextBefore: expected)
             if record { self.queue.history.record(removed: removed, inserted: edit.insert, at: Date(), contextBefore: expected) }
             for action in evidence {

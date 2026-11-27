@@ -8,6 +8,19 @@ import Testing
         return out
     }
 
+    @Test func choosingDuringTypingKeepsAnUnfinishedPrefixOutOfLearnedPairs() {
+        var buffer = TypedSentenceBuffer()
+        _ = type(&buffer, "meet Vellunor vel")
+        #expect(buffer.takeBeforeCompletion(deleting: 3) == "meet Vellunor")
+        #expect(buffer.interrupted() == nil) // the host reports the intermediate text while the edit lands
+        buffer.seedIfEmpty(with: "velvet ")
+        _ = type(&buffer, "jacket")
+        #expect(buffer.interrupted() == "velvet jacket")
+        _ = type(&buffer, "new words")
+        buffer.seedIfEmpty(with: "older ")
+        #expect(buffer.interrupted() == "new words")
+    }
+
     @Test func aSentenceEndingInAPeriodIsHandedOverOnceFinished() {
         var b = TypedSentenceBuffer()
         #expect(type(&b, "Hello big world") == nil)

@@ -111,6 +111,8 @@ struct WordRowView: View {
                         if position < ranks.count - 1 {
                             Rectangle().fill(Color(uiColor: KeyColors.divider))
                                 .frame(width: 0.67, height: 24)
+                                .accessibilityHidden(true)
+                                .allowsHitTesting(false)
                                 .opacity(words.isEmpty || pressed == position || pressed == position + 1
                                          || highlighted == position || highlighted == position + 1 ? 0 : 1)
                                 .transaction { $0.animation = nil }
@@ -145,6 +147,7 @@ private struct SuggestionSlot: View {
             if isPressed { press.began(controller.suggestionTap(rank: rank)) }
             onPressChange(isPressed)
         }))
+        .contentShape(.accessibility, Rectangle())
         .disabled(word == nil)
         .accessibilityHidden(word == nil)
         .accessibilityLabel(word ?? "")
@@ -235,8 +238,8 @@ private struct MorphingWord: View {
                 if !next.glyphs.isEmpty { anchorWidth = Self.naturalWidth(of: next, fontSize: fontSize) }
             }
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(text)
+        // The slot owns the accessible label and hit area for its changing glyphs.
+        .accessibilityHidden(true)
     }
 
     /// Scale new glyphs around the font baseline so their feet stay level with retained letters.

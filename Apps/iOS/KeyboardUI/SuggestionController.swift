@@ -534,15 +534,19 @@ final class SuggestionController {
         typedBuffer.deleted()
     }
 
-    /// A completion or prediction replaced the last `count` typed characters with `text`: it counts as typed.
-    func completed(deleting count: Int, with text: String) {
+    /// Stop observing the prefix before the first incremental host callback can settle it as a typed word.
+    func beginCompletion(deleting count: Int) {
         guard learnsHere else { return }
         authoredWord = ""
         // The choice itself supplies the preceding pair, including its reversible source ID.
         // Start the next typed pair with the selected word, preserving only earlier authored pairs.
-        for _ in 0..<count { typedBuffer.deleted() }
-        if let sentence = typedBuffer.interrupted() { learn(sentence) }
-        if let sentence = typedBuffer.typed(text) { learn(sentence) }
+        if let sentence = typedBuffer.takeBeforeCompletion(deleting: count) { learn(sentence) }
+    }
+
+    /// A confirmed selection can anchor the following typed pair. New keys entered while it was landing keep their order.
+    func completed(with text: String) {
+        guard learnsHere else { return }
+        typedBuffer.seedIfEmpty(with: text)
     }
 
     /// The typing is being undone: what was typed so far is dropped, not learned.
