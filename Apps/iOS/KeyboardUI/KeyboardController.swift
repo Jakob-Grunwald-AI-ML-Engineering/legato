@@ -17,6 +17,9 @@ import os
 final class KeyboardController {
     @ObservationIgnored private var correctionCapture: CorrectionCapture?
     @ObservationIgnored private var correctionPoll: Task<Void, Never>?
+    @ObservationIgnored private var styleLog: StyleDiagnosticLog?
+    @ObservationIgnored private var styleKey: StyleKeyConfirmation?
+    @ObservationIgnored private var lastStyleFinalization: UUID?
 
     @ObservationIgnored let document: any TextDocument
     @ObservationIgnored private let link: LinkClient
@@ -146,6 +149,21 @@ final class KeyboardController {
         }
         typing = TypingModel(controller: self)
         wordRow = SuggestionController(controller: self)
+        if let root = evidenceStore?.directory.deletingLastPathComponent() {
+            styleLog = KeyboardStyleDiagnostics.makeLog(root: root)
+        }
+        if styleLog != nil {
+            correctionCapture?.onSettled = { [weak self] record in
+                guard let self, let field = self.styleField, let id = UUID(uuidString: record.dictationID) else { return }
+                // A polled change can also be host autocorrect or another keyboard.
+                self.styleLog?.record(takeID: id, action: .hostEdit, context: field.context,
+                                      before: record.beforeText, after: record.afterText, eventID: record.id)
+            }
+            correctionCapture?.onBoundary = { [weak self] id in
+                guard let self, let field = self.styleField else { return }
+                self.styleLog?.record(takeID: id, action: .boundary, context: field.context)
+            }
+        }
         recordPreviewLifecycle(.controllerCreated)
     }
 
@@ -153,6 +171,21 @@ final class KeyboardController {
 
     func evidenceTakeID(before: String, after: String) -> String? {
         correctionCapture?.anchoredTakeID(in: before + after, at: before.count)
+    }
+
+    private var styleField: KeyboardPresence.StyleField? {
+        guard styleLog != nil, isVisible, !isTornDown, wordRow.learnsHere,
+              let id = document.documentID, id == queueDocumentID, let draft = UUID(uuidString: draftID) else { return nil }
+        return .init(draftID: draft, context: document.returnKeyType == .send ? .sendField : .unknown)
+    }
+
+    /// Both ends must belong to the same delivered dictation. Adjacent host text can have its own style.
+    private func styleTake(report: FieldQueue.Report, start: Int, end: Int) -> UUID? {
+        guard start >= 0, start <= end, let capture = correctionCapture else { return nil }
+        let text = report.before + (report.selected ?? "") + report.after
+        guard end <= text.count, let id = capture.anchoredTakeID(in: text, at: start),
+              start == end || id == capture.anchoredTakeID(in: text, at: end) else { return nil }
+        return UUID(uuidString: id)
     }
 
     func attachTypedEvidence(_ evidence: TermEvidence) { queue.history.attachEvidence(evidence) }
@@ -511,7 +544,8 @@ final class KeyboardController {
     /// cleaned against (never from a secure field).
     private func writePresence(notify: Bool) {
         let context = fullAccess && !document.isSecureTextEntry ? typing.contextBefore : nil
-        link.writePresence(visible: true, notify: notify, documentID: document.documentID, surface: .typing, contextBefore: context)
+        link.writePresence(visible: true, notify: notify, documentID: document.documentID, surface: .typing, contextBefore: context,
+                           styleField: draftEvidence.isPending ? nil : styleField)
     }
     /// The host is sending audio somewhere (`dictation` or `agent`): the mic key stops it.
     var routeOpen: Bool { dictationPresentation.audioRoute != .idle }
@@ -867,6 +901,10 @@ final class KeyboardController {
         case .cleared:
             draftRecheck?.cancel(); draftRecheck = nil
             if unverifiedBlankProbeOrigin != nil, let snapshot = liveSnapshot { blockLiveRun(snapshot, reason: .draftCleared) }
+            // The reset releases every tracker. Settle the last observed edit and its blank boundary first.
+            if styleField != nil, !hasText, report.before.isEmpty, report.after.isEmpty, report.selected == nil {
+                correctionCapture?.recordDiagnosticBoundary()
+            }
             finishDraft(reason: .draftCleared)
         }
     }
@@ -1021,6 +1059,7 @@ final class KeyboardController {
         verifiedBlankProbeReturn = nil
         recoveryTask?.cancel(); recoveryTask = nil; recoveryTaskID = nil
         cursorReadID = nil
+        styleKey = nil
         correctionCapture?.reset()
         // The field changed or the keyboard went away: nothing more of a take's cleanup lands here.
         updateCleanup { $0.clear() }
@@ -1111,6 +1150,10 @@ final class KeyboardController {
         for iteration in 0..<16 {
             observeDraftBoundary()
             let report = currentReport
+            if let key = styleKey, key.sent, key.expected == report {
+                styleKey = nil
+                if key.field == styleField { styleLog?.record(key.event) }
+            }
             let hostCallback = callback && iteration == 0
             let action = queue.step(report: report, elapsedMs: elapsed, callback: hostCallback,
                                     awaitingDraftEvidence: draftEvidence.isPending)
@@ -1171,6 +1214,7 @@ final class KeyboardController {
         for event in events {
             switch event {
             case .sent(let op, let lane):
+                if styleKey?.dispatched(op, lane: lane) == false { styleKey = nil }
                 if lane != .user, case .insert(let piece) = op, stagedTake.inFlight != nil {
                     // A piece of the staged unit typed into the field: the preview's letters leave in step with it.
                     stagedTake.sent(piece, revealProgress: stagedBegan?.insertsWhole != true)
@@ -1222,6 +1266,10 @@ final class KeyboardController {
             case .liveApplied(let runID, let version, let complete):
                 if complete, let snapshot = liveSnapshot, snapshot.runID == runID {
                     correctionCapture?.watch(dictationID: snapshot.evidenceID ?? runID, raw: snapshot.rawText ?? snapshot.text, inserted: snapshot.text)
+                    if version != liveAckedVersion, !snapshot.text.isEmpty,
+                       let field = styleField, let id = UUID(uuidString: snapshot.evidenceID ?? runID) {
+                        styleLog?.record(takeID: id, action: .inserted, context: field.context, after: snapshot.text)
+                    }
                 }
                 updateCleanup { $0.applied(runID: runID, version: version, complete: complete) }
                 guard runID == liveSnapshot?.runID, version != liveAckedVersion else { break }
@@ -1429,6 +1477,16 @@ final class KeyboardController {
             }
             liveDocumentID = document.documentID
         }
+        if snapshot.complete, let id = UUID(uuidString: snapshot.evidenceID ?? snapshot.runID),
+           id != lastStyleFinalization, let field = styleField, !draftEvidence.isPending,
+           !snapshot.text.isEmpty, liveDocumentID == document.documentID {
+            lastStyleFinalization = id
+            // Complete snapshots may be revised. The take ID is stable across retries and appearances.
+            styleLog?.record(takeID: id, action: .finalized, eventID: id)
+            if snapshot.staged != true, snapshot.segments.contains(where: \.cleaned), let raw = snapshot.rawText {
+                styleLog?.record(takeID: id, action: .cleanup, context: field.context, before: raw, after: snapshot.text)
+            }
+        }
         if snapshot.staged == true { return driveStaged() }
         guard isVisible, !document.isSecureTextEntry else { return }
         updateCleanup { $0.received(snapshot, at: Date()) }
@@ -1518,6 +1576,9 @@ final class KeyboardController {
         if insertsWhole, origin == draftID { showPreviewExit(unit.text, direction: .right) }
         stagedTake.delivered(unit.id, typed: typed)
         let sourceID = liveSnapshot.flatMap { $0.runID == runID ? $0.evidenceID : nil } ?? runID
+        if let field = styleField, origin == draftID, let id = UUID(uuidString: sourceID) {
+            styleLog?.record(takeID: id, action: .inserted, context: field.context, after: typed)
+        }
         correctionCapture?.watch(dictationID: sourceID, raw: unit.raw ?? unit.previewSource ?? unit.text,
                                  inserted: typed.trimmingCharacters(in: .whitespacesAndNewlines))
         liveStats.applies += 1
@@ -2481,6 +2542,7 @@ final class KeyboardController {
         beforeUserEdit()
         let before = contextBefore ?? typing.contextBefore
         let selected = document.selectedText
+        prepareStyleKey(.insert(text), replacing: selected ?? "", with: text, before: before)
         enqueue(.insert(text))
         if let selected, !selected.isEmpty {
             queue.history.record(removed: selected, inserted: text, at: Date(), contextBefore: before + text) // the key replaced the selection
@@ -2502,6 +2564,7 @@ final class KeyboardController {
         let selected = document.selectedText
         let deletesSelection = selected?.isEmpty == false
         let remaining = deletesSelection ? before : String(before.dropLast())
+        prepareStyleKey(.deleteBackward(1), replacing: selected ?? before.last.map(String.init) ?? "", with: "", before: before)
         enqueue(.deleteBackward)
         if let selected, deletesSelection {
             queue.history.record(removed: selected, inserted: "", at: Date(), contextBefore: before)
@@ -2513,6 +2576,20 @@ final class KeyboardController {
         syncHistory()
         wordRow.keystroke(contextBefore: remaining)
         pump()
+    }
+
+    private func prepareStyleKey(_ op: ShadowOp, replacing old: String, with new: String, before: String) {
+        styleKey = nil
+        guard styleLog != nil, StyleDiagnosticEvent.containsEmoji(old) || StyleDiagnosticEvent.containsEmoji(new),
+              let field = styleField, queue.isIdle, !draftEvidence.isPending else { return }
+        armCorrections()
+        let report = currentReport
+        guard report.before == before else { return }
+        let start = report.before.count - (report.selected == nil ? old.count : 0)
+        guard let takeID = styleTake(report: report, start: start, end: start + old.count) else { return }
+        let expected = FieldQueue.Report(before: String(report.before.prefix(start)) + new, after: report.after)
+        styleKey = .init(field: field, operation: op, expected: expected,
+                         event: .init(takeID: takeID, platform: .iOS, action: .typed, context: field.context, before: old, after: new))
     }
 
     /// One edit of the word row (a completion or a swap), or of undo and redo: the span around the cursor becomes
@@ -2535,12 +2612,23 @@ final class KeyboardController {
         else { wordRow.interruptTyping() }
         let queued = FieldQueue.Edit(kind: record ? .word : .undo, before: shown(String(old.dropLast(oldAfter.count))),
                                      after: shown(oldAfter), target: shown(edit.insert))
+        let field = styleField
+        var styleID: UUID?
+        if field != nil, (record || retract), document.selectedText == nil, before == document.contextBefore {
+            armCorrections()
+            let end = before.count + oldAfter.count
+            styleID = styleTake(report: currentReport, start: end - old.count, end: end)
+        }
         enqueue(queued, user: true) { [weak self] outcome in
             guard let self else { return }
             guard case .applied? = outcome else {
                 if !record { self.queue.history.clear(); self.syncHistory() }
                 self.show("The text changed, so nothing was edited.")
                 return
+            }
+            if let styleID, let field, field == self.styleField, case .applied(_, _, let confirmed)? = outcome {
+                self.styleLog?.record(takeID: styleID, action: record ? .suggestion : .undo, context: field.context,
+                                      before: confirmed.original, after: confirmed.result)
             }
             if asTyping { self.wordRow.completed(with: edit.insert) }
             self.wordRow.willApplyOwnEdit(expectedContextBefore: expected)

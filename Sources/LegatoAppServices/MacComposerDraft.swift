@@ -1,4 +1,5 @@
 import Foundation
+import LegatoCore
 import LegatoVocabulary
 import Observation
 import LegatoAgent
@@ -39,7 +40,11 @@ import LegatoKeyboardCore
     public func vocabularyTopicContext(since: Date) -> VocabularyTopicContext { topicContext(since) }
     @ObservationIgnored var onCut: ((Bool) -> Void)?
     @ObservationIgnored private let defaults: UserDefaults
-    public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
+    @ObservationIgnored private let styleDiagnostics: StyleDiagnosticLog?
+    public init(defaults: UserDefaults = .standard, styleDiagnostics: StyleDiagnosticLog? = nil) {
+        self.defaults = defaults
+        self.styleDiagnostics = styleDiagnostics
+    }
 
     public func receive(_ line: DictationRouteLine) async {
         guard acceptingSpeech else { return }
@@ -93,12 +98,18 @@ import LegatoKeyboardCore
         let settings = ComposerWritingSettings(in: defaults)
         correction = Task {
             do {
-                let result = try await pipeline.cleanDraft(source, instructions: instructions, writingSettings: settings)
+                let requestID = UUID()
+                let result = try await pipeline.cleanDraft(source, instructions: instructions, writingSettings: settings,
+                                                           takeID: documentID, requestID: requestID, styleDiagnostics: styleDiagnostics)
                 guard revision == generation else { return }
                 let originalText = LiveSegment.joined([source, additions, tail])
                 let rewrittenText = LiveSegment.joined([result, additions, tail])
                 if originalText != rewrittenText {
                     visualRevision = .init(id: generation, source: originalText, result: rewrittenText)
+                }
+                if pipeline.keepsTakes() {
+                    styleDiagnostics?.record(takeID: documentID, action: .magic, before: source, after: result,
+                                             instruction: instructions, requestID: requestID)
                 }
                 base = result
             } catch {

@@ -61,7 +61,7 @@ public struct CorrectionTracker: Sendable {
     private let suffix: String
     private var settled: String
     private var candidate: String
-    private var endedAtBoundary = false
+    fileprivate private(set) var endedAtBoundary = false
     private var changedAt: Date?
     private var origin = CorrectionRecord.Origin.observedHost
     private let expires: Date
@@ -130,6 +130,8 @@ public struct CorrectionTracker: Sendable {
 /// Platform adapters feed only settled, readable snapshots and discard observations around Legato writes.
 @MainActor public final class CorrectionCapture {
     public let store: CorrectionStore
+    public var onSettled: ((CorrectionRecord) -> Void)?
+    public var onBoundary: ((UUID) -> Void)?
     private var trackers: [CorrectionTracker] = []
     public var isObserving: Bool { !trackers.isEmpty }
     private var pending: [String: (raw: String, text: String)] = [:]
@@ -179,13 +181,28 @@ public struct CorrectionTracker: Sendable {
         return false
     }
     public func observe(_ snapshot: String, origin: CorrectionRecord.Origin, now: Date = Date()) {
+        observe(snapshot, origin: origin, now: now, persist: true)
+    }
+
+    /// Immediately before a confirmed field reset, notify diagnostics of the last edit and its boundary.
+    /// Running an internal build must not change which corrections the vocabulary store receives.
+    public func recordDiagnosticBoundary(now: Date = Date()) {
+        guard canObserve(now: now) else { return }
+        observe("", origin: .observedHost, now: now, persist: false)
+    }
+
+    private func observe(_ snapshot: String, origin: CorrectionRecord.Origin, now: Date, persist: Bool) {
         var records: [CorrectionRecord] = []
         for i in trackers.indices {
             trackers[i].observe(snapshot, origin: origin, now: now)
-            if let record = trackers[i].settle(now: now) { records.append(record) }
+            if let record = trackers[i].settle(now: now) {
+                records.append(record)
+                onSettled?(record)
+            }
+            if trackers[i].endedAtBoundary, let id = UUID(uuidString: trackers[i].dictationID) { onBoundary?(id) }
         }
         trackers.removeAll { !$0.active }
-        guard !records.isEmpty else { return }
+        guard persist, !records.isEmpty else { return }
         Task {
             do { for record in records { try await store.append(record) }; lastError = nil }
             catch { lastError = "Could not save corrections: \(error.localizedDescription)" }

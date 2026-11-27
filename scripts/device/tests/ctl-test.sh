@@ -320,6 +320,22 @@ sim_sessions() {
   [ "$(cat "${pulled[0]}")" = '{"seq":1}' ]
 }
 check sim_sessions
+setup style-evidence
+style_evidence() {
+  local directory="$FIXTURE/Library/Caches/example.style" snapshot
+  mkdir -p "$directory"
+  echo '{"eventID":"older"}' > "$directory/style-diag.previous.jsonl"
+  LEGATO_MAC_DATA_ROOT="$FIXTURE" LEGATO_BUNDLE=example.style run_ctl --target mac style-evidence || return 1
+  snapshot="$(cat "$FIXTURE/out")"
+  cmp "$snapshot" "$directory/style-diag.previous.jsonl" || return 1
+  echo '{"eventID":"newer"}' > "$directory/style-diag.jsonl"
+  LEGATO_MAC_DATA_ROOT="$FIXTURE" LEGATO_BUNDLE=example.style run_ctl --target mac style-evidence || return 1
+  cat "$directory/style-diag.previous.jsonl" "$directory/style-diag.jsonl" | cmp - "$(cat "$FIXTURE/out")" || return 1
+  cmp "$snapshot" "$directory/style-diag.previous.jsonl" || return 1
+  ! LEGATO_MAC_DATA_ROOT="$FIXTURE" LEGATO_BUNDLE=example.empty run_ctl --target mac style-evidence &&
+    grep -q 'no style evidence' "$FIXTURE/err"
+}
+check style_evidence
 setup sim-alias
 mkdir -p "$FIXTURE/container/Library/Caches/debug-bridge/inbox"
 sim_alias() {

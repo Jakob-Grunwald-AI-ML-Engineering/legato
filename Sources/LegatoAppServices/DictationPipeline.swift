@@ -1017,6 +1017,17 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// Per cleanup sequence: whether a speculative request existed for the unit when it was sent (`match`: same text, `grew`:
     /// words were added since, `none`), for the diagnostic; the pipeline says whether the result was actually used.
     @ObservationIgnored private var liveSpecState: [Int: String] = [:]
+    /// Installed by the internal iPhone app. A result can describe a field only while the original draft remains visible.
+    @ObservationIgnored public var styleField: (@MainActor () -> KeyboardPresence.StyleField?)?
+    @ObservationIgnored public var styleDiagnostics: StyleDiagnosticLog?
+    private struct StyleRequest {
+        let id = UUID()
+        let field: KeyboardPresence.StyleField
+        let takeID: UUID
+        let action: StyleDiagnosticEvent.Action
+        let instruction: StyleDiagnosticEvent.Instruction
+    }
+    @ObservationIgnored private var styleRequests: [Int: StyleRequest] = [:]
 
     /// Sends a closed unit (`key`: its last segment) to cleanup, against the text before the run and the units so far.
     private func submitLive(_ unit: String, key sequence: Int, run: LiveDictationRun,
@@ -1024,6 +1035,13 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         let id = liveCleanupSequence
         liveCleanupSequence += 1
         liveKeys[id] = (sequence, run.unitRange(key: sequence))
+        if run.staged, let styleDiagnostics, let field = styleField?(), let takeID = UUID(uuidString: run.runID) {
+            let request = StyleRequest(field: field, takeID: takeID, action: run.isMarkedForPreview(key: sequence) ? .magic : .cleanup,
+                                       instruction: .init(instructions))
+            styleRequests[id] = request
+            styleDiagnostics.record(takeID: takeID, action: .request, context: field.context, instructionKind: request.instruction,
+                                    eventID: request.id, mode: .send)
+        }
         pending += 1
         liveSubmitted[id] = .now
         let before = textBeforeUnit(key: sequence, run: run)
@@ -1176,6 +1194,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             let parts = start.duration(to: .now).components
             return Int(parts.seconds * 1000 + parts.attoseconds / 1_000_000_000_000_000)
         }
+        let styleRequest = styleRequests.removeValue(forKey: line.sequence)
         let specState = liveSpecState.removeValue(forKey: line.sequence)
         guard var run = liveRun, let (key, range) = liveKeys.removeValue(forKey: line.sequence) else { return }
         // The user swiped: this unit already stands as its raw words.
@@ -1198,6 +1217,10 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             let text = SentenceStart.capitalized(line.text, after: before)
             let segments = run.unitSegments(key: key)
             let shown = run.setCleaned(key: key, text: text)
+            if shown, let request = styleRequest, request.field == styleField?(), request.takeID.uuidString == run.runID {
+                styleDiagnostics?.record(takeID: request.takeID, action: request.action, context: request.field.context,
+                                         before: line.raw, after: text, instructionKind: request.instruction, mode: .send, requestID: request.id)
+            }
             // `changed`: the cleaned unit differs from its raw words (held or not); `shown`: the target changed now.
             diagnostics?("live2.cleanup", ["landed": true, "changed": text != line.raw, "dropped": text.isEmpty, "shown": shown, "held": !run.complete,
                                            "segments": segments, "rawChars": line.raw.count, "chars": text.count, "ms": ms as Any]
@@ -1298,6 +1321,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         discardTimer?.cancel(); discardTimer = nil
         previewHoldRunID = nil
         liveSubmitted = [:]; liveKeys = [:]; rawSent = []; liveFinishedAt = nil
+        styleRequests.removeAll()
         held = nil; heldAwaitsStop = false; liveTakeOpen = false; pausedRunID = nil
         let waiting = stopWaiters; stopWaiters = []
         for waiter in waiting { waiter.resume() }
@@ -1512,15 +1536,20 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     }
 
     /// An explicit Magic action uses the same staged-send prompt and validation as the keyboard.
-    func cleanDraft(_ text: String, instructions: String?, writingSettings: ComposerWritingSettings) async throws -> String {
+    func cleanDraft(_ text: String, instructions: String?, writingSettings: ComposerWritingSettings,
+                    takeID: UUID, requestID: UUID, styleDiagnostics: StyleDiagnosticLog?) async throws -> String {
         var client = cleaner
         #if DEBUG || LEGATO_INTERNAL
         if debugFailTakes > 0 { debugFailTakes -= 1; throw SentenceCleanupError.providerError }
         if let debugStreamCleaner { client = debugStreamCleaner }
         #endif
         let terms = Array(await loadTerms().prefix(200))
-        let input = SentenceCleanupInput(sentenceID: UUID().uuidString, sequence: 0, text: text, vocabulary: terms,
+        let input = SentenceCleanupInput(sentenceID: requestID.uuidString, sequence: 0, text: text, vocabulary: terms,
                                          dictation: .init(style: .send, instructions: instructions), writingSettings: writingSettings)
+        if keepsTakes() {
+            styleDiagnostics?.record(takeID: takeID, action: .request, instruction: instructions, eventID: requestID,
+                                     mode: input.dictation.flatMap { .init(rawValue: $0.style.rawValue) })
+        }
         let timeout = takeTimeout?(text.count) ?? DictationTakeLimits.timeout(characters: text.count)
         let service = client
         let result = try await withThrowingTaskGroup(of: String.self) { group in

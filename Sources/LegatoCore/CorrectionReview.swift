@@ -294,16 +294,16 @@ extension CorrectionStore {
     private static let decisionCache = OSAllocatedUnfairLock(initialState: Optional<CachedDecisions>.none)
     private static let cache = OSAllocatedUnfairLock(initialState: Optional<CachedEvidence>.none)
     private nonisolated var reviewDirectory: URL { directory.appendingPathComponent("Review", isDirectory: true) }
-    private var enabledURL: URL { reviewDirectory.appendingPathComponent("enabled") }
+    private nonisolated var enabledURL: URL { reviewDirectory.appendingPathComponent("enabled") }
 
-    public func personalizationEnabled() throws -> Bool {
+    public nonisolated func personalizationEnabled() throws -> Bool {
         guard FileManager.default.fileExists(atPath: enabledURL.path) else { return true }
         return try JSONDecoder().decode(Bool.self, from: Data(contentsOf: enabledURL))
     }
 
     /// The current uninterrupted personalization window. The existing toggle file is written
     /// atomically on transitions and survives restart. Before the first toggle learning is on.
-    public func personalizationEnabledSince() throws -> Date? {
+    public nonisolated func personalizationEnabledSince() throws -> Date? {
         guard FileManager.default.fileExists(atPath: enabledURL.path) else { return .distantPast }
         guard try personalizationEnabled() else { return nil }
         return try enabledURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate

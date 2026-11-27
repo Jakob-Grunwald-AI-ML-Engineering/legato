@@ -62,9 +62,11 @@ final class LinkClient {
     }
     func readAck() -> KeyboardAck? { store?.read(KeyboardAck.self, forKey: LinkChannel.Key.ack) }
     /// `notify`: also post the note (on a change of visibility; the 1 s refreshes stay quiet).
-    func writePresence(visible: Bool, notify: Bool, documentID: String? = nil, surface: KeyboardSurface? = nil, contextBefore: String? = nil) {
-        store?.write(KeyboardPresence(visible: visible, at: Date(), documentID: documentID, surface: surface, contextBefore: contextBefore),
-                     forKey: LinkChannel.Key.presence)
+    func writePresence(visible: Bool, notify: Bool, documentID: String? = nil, surface: KeyboardSurface? = nil, contextBefore: String? = nil,
+                       styleField: KeyboardPresence.StyleField? = nil) {
+        var presence = KeyboardPresence(visible: visible, at: Date(), documentID: documentID, surface: surface, contextBefore: contextBefore)
+        presence.styleField = styleField
+        store?.write(presence, forKey: LinkChannel.Key.presence)
         if notify { DarwinObserver.post(LinkChannel.Note.presence) }
     }
 

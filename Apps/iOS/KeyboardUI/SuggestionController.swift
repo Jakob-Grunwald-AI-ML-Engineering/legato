@@ -206,7 +206,7 @@ final class SuggestionController {
     }
 
     /// Whether what is typed here may be learned (`SuggestionField.learns`).
-    private var learnsHere: Bool {
+    var learnsHere: Bool {
         SuggestionField.learns(
             fullAccess: controller.fullAccess, secure: document.isSecureTextEntry, keyboard: fieldKeyboard,
             contentType: document.textContentType?.rawValue)

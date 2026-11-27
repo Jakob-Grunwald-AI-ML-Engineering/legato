@@ -44,7 +44,10 @@ final class AppController {
             pairsFileURL: root.appending(path: "wordpairs-dictated.json"))
         corrections = CorrectionStore(root: root)
         let recentTakes = RecentTakesStore(fileURL: root.appending(path: "recent-takes.json"))
-        history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary, recentTakes: recentTakes)
+        let styleLog = AppGroup.containerURL.flatMap { KeyboardStyleDiagnostics.makeLog(root: $0) }
+        // The keyboard can identify a nonsecure, eligible field when a take ends. History still reports explicit deletions.
+        history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary,
+                                       recentTakes: recentTakes, styleDiagnostics: styleLog, styleFinalizations: false)
         microphone = MicrophoneHost(vocabularyURL: root.appending(path: "vocabulary.json"),
             keepMicrophoneActive: ComposerMicrophonePreference.keepActive())
         #if LEGATO_INTERNAL
@@ -93,6 +96,10 @@ final class AppController {
             }
         }
         microphone.inputRoute = Self.inputRoutePolicy()
+        #if DEBUG || LEGATO_INTERNAL
+        dictation.styleDiagnostics = styleLog
+        dictation.styleField = { [weak host] in host?.link.keyboardPresence()?.styleField }
+        #endif
         keyboardHost?.attach(microphone, keyboardSession: keyboardSession, dictation: dictation)
         keyboardHost?.link.onRequest = { [weak self] request in
             guard let self else { return false }
