@@ -175,13 +175,18 @@ final class KeyboardController {
     }
 
     /// Work the process must not be ended under (`KeyboardRecyclePolicy`): a take this keyboard is following, a field edit,
-    /// read or instruction in flight, a mic-key start, cleanup still landing, or a word-row write. A take blocked on hide is not
-    /// owed: it is in History, as when the controller is released.
+    /// read or instruction in flight, a mic-key start, cleanup still landing, or a word-row write. A typed run blocked on hide is
+    /// not owed: it is in History, as when the controller is released. Nor is a staged take kept across a hide (#343) that was
+    /// neither stopped nor complete, with no unit on its way to the field: the app pauses it on the hide, and its words are that
+    /// run, which any keyboard shows again when it appears, one in a fresh process included
+    /// (`LiveDictationSnapshot.isHeldForKeyboard`). A stopped take's preview is shown again only by this controller: owed.
     var holdsWork: Bool {
         if !queue.isIdle || !editCompletions.isEmpty || activeInstructionID != nil || isFieldBusy || pendingRemoteStartID != nil
             || cleanup.isActive || wordRow.isWriting { return true }
         guard let snapshot = liveSnapshot else { return false }
-        return !snapshot.complete || (stagedTake.runID == snapshot.runID && !stagedTake.isFinished)
+        let ownStaged = snapshot.staged == true && stagedTake.runID == snapshot.runID
+        if !isVisible, ownStaged, !snapshot.complete, snapshot.stopped != true, stagedTake.inFlight == nil { return false }
+        return !snapshot.complete || (ownStaged && !stagedTake.isFinished)
     }
 
     var evidenceStore: CorrectionStore? { correctionCapture?.store }
@@ -669,7 +674,11 @@ final class KeyboardController {
         correctionPoll?.cancel(); correctionPoll = nil
         isVisible = false
         recordPreviewLifecycle(.didDisappear)
-        if let snapshot = liveSnapshot, !snapshot.complete || snapshot.version != liveAckedVersion || !queue.isIdle {
+        if let snapshot = liveSnapshot, snapshot.staged == true, stagedTake.runID == snapshot.runID {
+            // A staged take survives a hide (#343): its units, the run and following it are kept, and the preview shows them
+            // again when the keyboard comes back. Only work in flight to the field stops (`stopStagedDelivery`).
+            stopStagedDelivery()
+        } else if let snapshot = liveSnapshot, !snapshot.complete || snapshot.version != liveAckedVersion || !queue.isIdle {
             // Safari's Next/Previous accessory can cycle keyboard visibility before the new field reports its ID.
             // Remember only this controller's known interrupted take; an arbitrary old publication is still ignored.
             blockLiveRun(snapshot, reason: .hidden)
@@ -1620,6 +1629,21 @@ final class KeyboardController {
         syncRowTakeover()
     }
 
+    /// The keyboard hid during a staged take: only work in flight to the field stops (#343). A unit mid-burst (typewriter
+    /// entrance) cannot finish, since the queue is reset next: it and the rest are held, pending in the preview for the person's
+    /// tap or swipe. Nothing else of the take changes.
+    private func stopStagedDelivery() {
+        guard stagedTake.inFlight != nil else { return }
+        noteStagedInterruption()
+        holdStaged()
+    }
+
+    /// A unit mid-burst when delivery stops: the burst's first pieces, if typed, stay in the field as a short fragment. Noted here,
+    /// since nothing else sees it.
+    private func noteStagedInterruption() {
+        if let unit = stagedTake.inFlight { trace?("staged unit interrupted unit=\(unit): typed fragment may remain") }
+    }
+
     /// What the field shows of the take, for the app: the last unit typed, and the end once nothing is left.
     /// `ended`: the keyboard stops following the run, so a paused manual take is not resumed under it (`LiveDictationAck.ended`).
     private enum LiveEndReason: String {
@@ -1649,9 +1673,7 @@ final class KeyboardController {
             blockedLiveRunID = snapshot.runID
             blockedLiveCompleted = snapshot.complete
             if stagedTake.runID == snapshot.runID {
-                // A unit mid-burst (typewriter entrance) when the keyboard hid: the queue is reset next and cannot finish it. The burst's
-                // first pieces, if typed, stay in the field as a short fragment; the take is in History. Noted here, since nothing else sees it.
-                if let unit = stagedTake.inFlight { trace?("staged unit interrupted by hide unit=\(unit): typed fragment may remain") }
+                noteStagedInterruption()
                 holdStaged()
                 acknowledgeStaged(ending: reason)
             }
@@ -1699,15 +1721,24 @@ final class KeyboardController {
     }
 
     /// An older publication belongs to its previous appearance. If the app kept capturing, a later version
-    /// can establish that the take is still active (`LiveDictationSnapshot.continues`).
+    /// can establish that the take is still active (`LiveDictationSnapshot.continues`). This controller's own staged take, kept
+    /// across its hide (#343), is followed on, ended or not, until every unit is in the field. So is a run the app holds for the
+    /// keyboard (`LiveDictationSnapshot.isHeldForKeyboard`): a controller that never saw it (a recreated view, a new process after
+    /// a recycle) shows it at once. Only this appearing, visible controller decides; a hidden one never adopts a run.
     private func ignorePublishedRun() {
         guard let published = link.readLiveDictation() else { ignoredLiveRunID = nil; ignoredAtAppearance = nil; return }
-        let following = published.runID == liveSnapshot?.runID && !published.complete
+        let ownStaged = stagedTake.runID == published.runID && !stagedTake.isFinished
+        let held = published.isHeldForKeyboard
+        let following = held || (published.runID == liveSnapshot?.runID && (!published.complete || ownStaged))
         if !published.complete {
-            noteLive(published, "appear", detail: "\(following ? "following" : "ignored") \(published.isCapturing ? "capturing" : published.paused == true ? "paused" : "stopped")",
+            let decision = held ? "held" : following ? "following" : "ignored"
+            noteLive(published, "appear", detail: "\(decision) \(published.isCapturing ? "capturing" : published.paused == true ? "paused" : "stopped")",
                      once: false)
         }
-        guard !following else { return }
+        guard !following else {
+            if ignoredLiveRunID == published.runID { ignoredLiveRunID = nil; ignoredAtAppearance = nil }
+            return
+        }
         ignoredLiveRunID = published.runID
         ignoredAtAppearance = published
     }

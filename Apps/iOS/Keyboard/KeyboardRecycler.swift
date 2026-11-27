@@ -84,8 +84,7 @@ enum KeyboardRecycler {
     }
 
     private static func check() {
-        let takeOpen = LinkClient().readLiveDictation().map { !$0.complete } ?? false
-        let facts = KeyboardProcess.recycleFacts(sessionEnded: sessionEnded, takeOpen: takeOpen, forced: isForced)
+        let facts = KeyboardProcess.recycleFacts(sessionEnded: sessionEnded, forced: isForced, published: LinkClient().readLiveDictation())
         switch policy.decide(facts) {
         case .healthy:
             return

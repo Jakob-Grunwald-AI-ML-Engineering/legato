@@ -147,8 +147,9 @@ import LegatoSoniox
         #expect(sink.begins == 2)
     }
 
-    /// Manual send (#313): the mic key's Stop is a pause for the sink, and only the keyboard going away ends the take.
-    @Test func stopPausesTheTakeAndOnlyHidingTheKeyboardEndsIt() async throws {
+    /// Manual send (#313): the mic key's Stop is a pause for the sink. Contract change (#343): the keyboard going away no longer
+    /// ends the take either; the sink is asked to keep it for the keyboard's return (`suspendTake`, a pause by default).
+    @Test func stopPausesTheTakeAndHidingTheKeyboardKeepsItForTheReturn() async throws {
         sink.keepsPausedTake = true
         let (_, keyboard) = try await openOnTyping()
         let socket = try #require(sockets.last)
@@ -162,7 +163,8 @@ import LegatoSoniox
         #expect(sink.finishes == 0, "A paused take stays open")
         keyboard.update(visible: false, surface: .dictation)
         await keyboard.settle()
-        try await until { sink.finishes == 1 }
+        try await until { sink.suspends == 1 }
+        #expect(sink.pauses == 2 && sink.finishes == 0, "Hiding keeps the paused take open")
     }
 
     @Test func aTapWithoutSonioxKeyStaysClosedAndSaysWhy() async throws {
@@ -334,6 +336,8 @@ import LegatoSoniox
     func beginTake() { begins += 1 }
     func finishTake() async { finishes += 1 }
     func pauseTake() async { pauses += 1; if !keepsPausedTake { await finishTake() } }
+    var suspends = 0
+    func suspendTake() async { suspends += 1; await pauseTake() }
 }
 
 actor GateMicrophone: AudioSource {
@@ -428,14 +432,17 @@ private final class HeldCleaner: SentenceCleaning {
     }
 }
 
-/// Hiding the keyboard with a take open ends it like Stop: the open unit is cleaned and the take goes to History cleaned.
-@MainActor @Suite(.timeLimit(.minutes(1))) struct KeyboardHideFinishesTakeTests {
+/// Contract change (#343): hiding the keyboard with a staged take open no longer ends it like Stop. The take survives the hide:
+/// its run is paused for the keyboard's return, and the next start continues it. A Stop before the hide still decides the take.
+@MainActor @Suite(.timeLimit(.minutes(1))) struct KeyboardHideKeepsTakeTests {
     let mic = GateMicrophone()
     let sockets = SocketBox()
     fileprivate let history = CloseHistory()
     fileprivate let logged = LogBox()
 
-    private func session(_ cleaner: any SentenceCleaning, manual: Bool) async throws -> (DictationPipeline, KeyboardSession) {
+    private func session(_ cleaner: any SentenceCleaning, manual: Bool,
+                         clock: VirtualSleep? = nil) async throws -> (DictationPipeline, KeyboardSession) {
+        // Without a virtual clock the hold bound waits in real time, past any test.
         let pipeline = DictationPipeline(history: history, cleaner: cleaner, sendMode: { .live }, supportsLive: true,
                                          liveSend: { manual ? .manual : .sentence }, liveTimeout: .seconds(30),
                                          groupsLiveHistory: true, stagedLive: true)
@@ -444,8 +451,10 @@ private final class HeldCleaner: SentenceCleaning {
         let composer = MicrophoneHost(microphone: mic, activateAudioSession: {})
         await composer.arm()
         let sockets = self.sockets
-        let keyboard = KeyboardSession(microphone: composer, sink: pipeline, sonioxKey: { "test" },
-                                       makeSocket: { sockets.make() }, warmConnection: {})
+        let keyboard = clock.map { clock in
+            KeyboardSession(microphone: composer, sink: pipeline, sonioxKey: { "test" }, makeSocket: { sockets.make() }, warmConnection: {},
+                            holdSleep: { try await clock.sleep($0) })
+        } ?? KeyboardSession(microphone: composer, sink: pipeline, sonioxKey: { "test" }, makeSocket: { sockets.make() }, warmConnection: {})
         keyboard.update(visible: true, surface: .dictation)
         await keyboard.settle()
         try await until { keyboard.diagnostics["dictationStreamLive"] as? Bool == true }
@@ -499,39 +508,118 @@ private final class HeldCleaner: SentenceCleaning {
         #expect(pipeline.liveRun?.runID == runID && !pipeline.isPaused)
     }
 
-    @Test(arguments: [true, false]) func hidingMidTakeCleansTheOpenUnitIntoHistory(manual: Bool) async throws {
-        let (_, keyboard) = try await session(HeldCleaner(), manual: manual)
+    @Test(arguments: [true, false]) func hidingMidTakeKeepsTheRunOpenForTheKeyboardsReturn(manual: Bool) async throws {
+        let (pipeline, keyboard) = try await session(HeldCleaner(), manual: manual)
         try await keyboard.debugDictationLine("we should ship it on friday")
+        let runID = try #require(pipeline.liveRun?.runID)
         keyboard.update(visible: false, surface: .dictation); await keyboard.settle()
-        try await cleanedHistory("We should ship it on friday")
-        try await until { self.logged.has("live2.run.end") }
+        try await until { pipeline.isPaused }
+        #expect(pipeline.liveRun?.runID == runID && pipeline.liveRun?.snapshot.text == "we should ship it on friday")
+        #expect(!logged.has("live2.run.end") && !logged.has("live2.run.drop"), "The take is neither ended nor dropped")
+    }
+
+    @Test(arguments: [true, false]) func aStopBeforeTheHideStillDecidesTheTake(manual: Bool) async throws {
+        let (pipeline, keyboard) = try await session(HeldCleaner(), manual: manual)
+        try await keyboard.debugDictationLine("bring the laptop")
+        let runID = try #require(pipeline.liveRun?.runID)
+        await pipeline.pauseTake()
+        keyboard.update(visible: false, surface: .dictation); await keyboard.settle()
+        if manual {
+            // Manual send: Stop paused it, and the hide keeps it paused.
+            try await until { self.logged.has("live2.run.pause") }
+            #expect(pipeline.isPaused && pipeline.liveRun?.runID == runID)
+            #expect(!logged.has("live2.run.end"))
+        } else {
+            // Sentence-end mode: Stop ended it; its units stay published for the keyboard to type when it comes back.
+            try await cleanedHistory("Bring the laptop")
+            try await until { self.logged.has("live2.run.end") }
+            #expect(pipeline.liveRun?.runID == runID && pipeline.liveRun?.complete == true)
+        }
+    }
+
+    /// #343: a line spoken after the keyboard came back joins the take it hid in, so the first line is not replaced by the next.
+    @Test(arguments: [true, false]) func aLineAfterTheKeyboardReturnsContinuesTheTakeItHidIn(manual: Bool) async throws {
+        let (pipeline, keyboard) = try await session(HeldCleaner(), manual: manual)
+        try await keyboard.debugDictationLine("alpha bravo charlie")
+        let runID = try #require(pipeline.liveRun?.runID)
+        keyboard.update(visible: false, surface: .dictation); await keyboard.settle()
+        try await until { pipeline.isPaused }
+        keyboard.update(visible: true, surface: .dictation); await keyboard.settle()
+        #expect(keyboard.isOpen)
+        try await keyboard.debugDictationLine("delta echo foxtrot")
+        #expect(pipeline.liveRun?.runID == runID && !pipeline.isPaused)
+        #expect(pipeline.liveRun?.snapshot.text == "alpha bravo charlie delta echo foxtrot")
+        try keyboard.debugDictationStop()
+        try await cleanedHistory("Alpha bravo charlie delta echo foxtrot")
         #expect(!logged.has("live2.run.drop"))
     }
 
-    @Test(arguments: [true, false]) func hidingAPausedOrListeningTakeCleansItToo(manual: Bool) async throws {
-        let (pipeline, keyboard) = try await session(HeldCleaner(), manual: manual)
-        try await keyboard.debugDictationLine("bring the laptop")
-        try keyboard.debugDictationStop()
-        await pipeline.pauseTake()
+    /// #343's bound: a kept take whose keyboard never comes back ends as the old hide did once the hold limit passed.
+    @Test(arguments: [true, false]) func aKeptTakeEndsIntoHistoryWhenNoKeyboardReturnsInTime(manual: Bool) async throws {
+        let clock = VirtualSleep()
+        let (pipeline, keyboard) = try await session(HeldCleaner(), manual: manual, clock: clock)
+        try await keyboard.debugDictationLine("we should ship it on friday")
         keyboard.update(visible: false, surface: .dictation); await keyboard.settle()
-        try await cleanedHistory("Bring the laptop")
-        try await until { self.logged.has("live2.run.end") }
+        try await until { pipeline.isPaused && clock.sleepers == 1 }
+        clock.advance(by: KeyboardSession.keyboardHoldLimit - .seconds(1))
+        await Task.yield()
+        #expect(pipeline.isPaused && !logged.has("live2.run.end"), "Held until the limit")
+        clock.advance(by: .seconds(1))
+        try await cleanedHistory("We should ship it on friday")
+        try await until { self.logged.has("live2.run.end") && pipeline.liveRun == nil }
+        #expect(!logged.has("live2.run.drop"), "Ended and cleaned, not dropped")
     }
 
-    @Test(arguments: [true, false]) func reopeningAtOnceKeepsTheNewTakeApartAndTheOldOneLandsInHistory(manual: Bool) async throws {
-        let held = ConnectGate()
-        let (pipeline, keyboard) = try await session(HeldCleaner(holdFirst: held), manual: manual)
-        try await keyboard.debugDictationLine("the old take")
+    @Test func aKeyboardBackBeforeTheLimitKeepsTheTake() async throws {
+        let clock = VirtualSleep()
+        let (pipeline, keyboard) = try await session(HeldCleaner(), manual: true, clock: clock)
+        try await keyboard.debugDictationLine("alpha bravo charlie")
+        let runID = try #require(pipeline.liveRun?.runID)
         keyboard.update(visible: false, surface: .dictation); await keyboard.settle()
-        // The old take's cleanup is still running while the keyboard comes back.
+        try await until { pipeline.isPaused && clock.sleepers == 1 }
         keyboard.update(visible: true, surface: .dictation); await keyboard.settle()
-        #expect(keyboard.isOpen)
-        try await keyboard.debugDictationLine("the new take and more")
-        held.open()
-        try await cleanedHistory("The old take")
-        keyboard.update(visible: false, surface: .dictation); await keyboard.settle()
-        try await cleanedHistory("The new take and more")
-        let texts = await history.recent(limit: 10).map(\.text)
-        #expect(texts.contains("The old take"))
+        try await until { clock.sleepers == 0 }
+        clock.advance(by: KeyboardSession.keyboardHoldLimit * 2)
+        await Task.yield()
+        #expect(pipeline.isPaused && pipeline.liveRun?.runID == runID, "The bound was cancelled")
+        #expect(!logged.has("live2.run.end"))
+    }
+}
+
+/// A virtual clock for one-shot waits: a sleep returns only once `advance` moves the clock past its end, and a cancelled one
+/// throws. Nothing returns at once, so a waiting task never spins.
+@MainActor final class VirtualSleep {
+    private(set) var now = Duration.zero
+    private var waiting: [(id: Int, until: Duration, continuation: CheckedContinuation<Void, any Error>)] = []
+    private var nextID = 0
+    var sleepers: Int { waiting.count }
+
+    func sleep(_ duration: Duration) async throws {
+        let id = nextID; nextID += 1
+        let until = now + duration
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                self.register(id: id, until: until, continuation)
+            }
+        } onCancel: {
+            Task { @MainActor in self.cancel(id) }
+        }
+    }
+
+    private func register(id: Int, until: Duration, _ continuation: CheckedContinuation<Void, any Error>) {
+        if Task.isCancelled { return continuation.resume(throwing: CancellationError()) }
+        waiting.append((id: id, until: until, continuation: continuation))
+    }
+
+    func advance(by duration: Duration) {
+        now += duration
+        let due = waiting.filter { $0.until <= now }
+        waiting.removeAll { $0.until <= now }
+        for sleeper in due { sleeper.continuation.resume() }
+    }
+
+    private func cancel(_ id: Int) {
+        guard let index = waiting.firstIndex(where: { $0.id == id }) else { return }
+        waiting.remove(at: index).continuation.resume(throwing: CancellationError())
     }
 }

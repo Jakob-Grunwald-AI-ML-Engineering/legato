@@ -381,6 +381,20 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         #expect(paused.isCapturing == false && snapshot(1, []).isCapturing)
     }
 
+    /// #343: a paused staged run is the app's, held for whichever keyboard appears next (a fresh controller or process too), and a
+    /// hidden keyboard owes nothing for it. Nothing else the app publishes is held.
+    @Test func onlyAPausedStagedRunIsHeldForTheKeyboard() {
+        var paused = snapshot(5, [unit(0, "Hello.", ready: false)], head: "and"); paused.paused = true
+        #expect(paused.isHeldForKeyboard)
+        var ended = paused; ended.complete = true
+        #expect(!ended.isHeldForKeyboard, "a run the app ended (the hold limit, a send) is in History")
+        var typed = paused; typed.staged = nil
+        #expect(!typed.isHeldForKeyboard, "a typed run is never held")
+        #expect(!snapshot(5, [unit(0, "Hello.")], head: "and").isHeldForKeyboard, "a run still spoken belongs to its appearance")
+        var stopped = snapshot(5, [unit(0, "Hello.")]); stopped.stopped = true
+        #expect(!stopped.isHeldForKeyboard, "a stopped run is ending")
+    }
+
     @Test func adoptingARunSkipsTheUnitsAnEarlierAppearanceTypedAndKeepsAHeldRunHeld() {
         var take = StagedDictation()
         take.receive(snapshot(7, [unit(0, "One."), unit(1, "Two."), unit(2, "Three.", ready: false)], head: "four"))

@@ -79,6 +79,10 @@ import LegatoVocabulary
     @ObservationIgnored private var takeFinish: Task<Void, Never>?
     /// The last close's take end and pipeline reset, running in the background.
     @ObservationIgnored private var pipelineFinish: Task<Void, Never>?
+    /// Ends a take kept for the keyboard's return once `keyboardHoldLimit` passed with no session open (`boundHeldTake`).
+    @ObservationIgnored private var heldTakeBound: Task<Void, Never>?
+    /// The bound's wait; tests pass a virtual clock.
+    @ObservationIgnored private let holdSleep: @MainActor (Duration) async throws -> Void
     @ObservationIgnored private var sessionNumber = 0
     /// Counts session closes: a take end still on its way from before one does nothing.
     @ObservationIgnored private var takeGeneration = 0
@@ -103,9 +107,10 @@ import LegatoVocabulary
 
     init(microphone: MicrophoneHost, sink: any DictationRouteSink, instruction: InstructionSession? = nil, sonioxKey: @escaping @MainActor () -> String,
          makeSocket: @escaping @Sendable () -> any SonioxSocket, warmConnection: @escaping @Sendable () async -> Void,
-         now: @escaping @MainActor () -> Double = { ProcessInfo.processInfo.systemUptime }) {
+         now: @escaping @MainActor () -> Double = { ProcessInfo.processInfo.systemUptime },
+         holdSleep: @escaping @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
         self.microphone = microphone; self.sink = sink; self.sonioxKey = sonioxKey; self.makeSocket = makeSocket
-        self.warmConnection = warmConnection; self.now = now
+        self.warmConnection = warmConnection; self.now = now; self.holdSleep = holdSleep
         self.instruction = instruction ?? InstructionSession(runner: InstructionRunner(client: MessagesStream(keyStore: KeychainKeyStore()), model: { .haiku }))
         speechRoute = DictationRouteSession(sink: sink, instruction: self.instruction, sonioxKey: sonioxKey,
                                            makeSocket: makeSocket, vocabularyURL: microphone.vocabularyURL, now: now)
@@ -157,6 +162,8 @@ import LegatoVocabulary
 
     private func open(surface: AudioRoute) async {
         isOpen = true; sessionNumber += 1
+        // The keyboard is back in time: the take it hid in stays with it.
+        heldTakeBound?.cancel(); heldTakeBound = nil
         gate = AudioGate(surface: surface); probe.cancel(); routeClosedAt = nil
         microphone.dictationAudio = { [weak self] pcm in await self?.sendDictation(pcm) }
         let warmConnection = self.warmConnection
@@ -169,9 +176,14 @@ import LegatoVocabulary
     /// How long a take end waits for the recognizer's last final words (a stop, and the keyboard hiding mid-take).
     static let takeEndWait = Duration.seconds(3)
 
+    /// How long a take kept for the keyboard's return (#343) waits for a keyboard session to open again before it ends as a hide
+    /// used to end it. An estimate, not measured: long enough to answer a message elsewhere and come back, short enough that a
+    /// take the person walked away from is cleaned into History the same session.
+    static let keyboardHoldLimit = Duration.seconds(10 * 60)
+
     private func close() async {
         cancelPreviewMic()
-        // Hiding ends a take that is speaking like Stop does for the words already spoken: the recognizer finalizes what it
+        // Hiding stops a take that is speaking like Stop does for the words already spoken: the recognizer finalizes what it
         // heard (bounded) before the route closes, so a sentence not yet final when the keyboard hid is not lost. Only audio
         // arriving after the hide is dropped (the route stops first). A debug replay is cut here too; it cannot prove the
         // real mic's tail, which only a spoken take on the phone does.
@@ -184,19 +196,22 @@ import LegatoVocabulary
         }
         if let action = gate.abandon() { await perform(action) }
         isOpen = false; probe.cancel()
-        // The take is the keyboard appearance's: it ends as a stop would, in the
-        // background, so its final words are cleaned and written to History. Closing
-        // used to cancel the end and leave the run open for good, and nothing of it was recorded past its first words.
+        // The take survives the hide (#343): a staged take with words not in the field yet is paused for the keyboard's return,
+        // whose preview holds it again, and the next start continues it (`DictationRouteSink.suspendTake`), for up to
+        // `keyboardHoldLimit`. Any other take ends as a stop would, in the background, so its final words are cleaned and written
+        // to History.
         let earlierFinish = takeFinish; takeFinish = nil; takeGeneration += 1
         let sink = self.sink, closedSession = sessionNumber
         // The pipeline is reset only after this finish completed (bounded by the pipeline's own cleanup timeouts): a reset
         // first dropped the open run uncleaned. A keyboard that opened meanwhile owns the pipeline: it is not reset under
-        // it, and its take waits behind the ending run like any take (`DictationPipeline.beginTake`).
+        // it, and its take waits behind the ending run like any take (`DictationPipeline.beginTake`). A run kept for the
+        // keyboard is not reset either, and its lines keep counting so the continued run's keys stay unique, until its bound.
         pipelineFinish = Task { [weak self] in
             await earlierFinish?.value
-            await sink.finishTake()
+            await sink.suspendTake()
             guard let self, !self.isOpen, self.sessionNumber == closedSession else { return }
-            await self.speechRoute.resetPipeline()
+            if self.speechRoute.holdsTakeForKeyboard { return self.boundHeldTake(closedSession: closedSession) }
+            await self.resetClosedPipeline()
         }
         #if DEBUG || LEGATO_INTERNAL
         debugTakeOpen = false
@@ -204,10 +219,32 @@ import LegatoVocabulary
         reportedMagic = .off
         await closeDictation()
         speechRoute.resetRouting()
-        dictation.resetSequence()
         microphone.dictationAudio = nil
         await microphone.endKeyboardSession()
         Self.log.info("keyboard.session.close")
+    }
+
+    /// No keyboard session holds the pipeline: its run and line count start over for the next one.
+    private func resetClosedPipeline() async {
+        dictation.resetSequence()
+        await speechRoute.resetPipeline()
+    }
+
+    /// A take kept for the keyboard's return (#343) is held for `keyboardHoldLimit`. If no keyboard session opened by then, it ends
+    /// as a hide used to end it: its open unit is cleaned and the take written to History (`finishTake`), and the pipeline is
+    /// reset. A session that opens first cancels this (`open`).
+    private func boundHeldTake(closedSession: Int) {
+        heldTakeBound?.cancel()
+        let sink = self.sink, sleep = holdSleep
+        heldTakeBound = Task { [weak self] in
+            do { try await sleep(Self.keyboardHoldLimit) } catch { return }
+            guard !Task.isCancelled, let self, !self.isOpen, self.sessionNumber == closedSession else { return }
+            Self.log.info("keyboard.session.held-take-expired")
+            self.heldTakeBound = nil
+            await sink.finishTake()
+            guard !self.isOpen, self.sessionNumber == closedSession else { return }
+            await self.resetClosedPipeline()
+        }
     }
 
     private func warm(_ surface: AudioRoute) async {

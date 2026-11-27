@@ -75,9 +75,12 @@ enum KeyboardProcess {
                       memoryWarnings: memoryWarnings, previewBlanks: previewBlanks, uptimeSeconds: Int(uptime))
     }
 
-    /// The facts the recycle policy decides on. `takeOpen`: the app's published take is still open.
-    static func recycleFacts(sessionEnded: Bool, takeOpen: Bool, forced: Bool) -> KeyboardRecyclePolicy.Facts {
+    /// The facts the recycle policy decides on. Work is owed while a controller holds some (`KeyboardController.holdsWork`) or the
+    /// app's published take is still open. A run the app holds for the keyboard's return is not open (#343): the next keyboard, one
+    /// in a fresh process too, shows it again (`LiveDictationSnapshot.isHeldForKeyboard`).
+    static func recycleFacts(sessionEnded: Bool, forced: Bool, published: LiveDictationSnapshot?) -> KeyboardRecyclePolicy.Facts {
         let census = census
+        let takeOpen = published.map { !$0.complete && !$0.isHeldForKeyboard } ?? false
         let owesWork = takeOpen || liveControllers.contains { !$0.isTornDown && $0.holdsWork }
         return .init(sessionEnded: sessionEnded, visible: max(census.visible, census.hostsInWindow),
                      hiddenControllers: census.hidden, owesWork: owesWork, uptimeSeconds: uptime, previewBlanks: previewBlanks,

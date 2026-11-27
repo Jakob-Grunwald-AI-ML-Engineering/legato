@@ -117,7 +117,15 @@ extension LiveDictationSnapshot {
     /// The take is still being spoken into: not stopped, complete or paused.
     public var isCapturing: Bool { !complete && stopped != true && paused != true }
 
-    /// The keyboard leaves the run published when it appears (`seen`) alone: hiding ended that take and it is in History. A later
+    /// A staged run paused with words waiting (a manual Stop, #313, or the keyboard's hide, #343): the app holds it for the keyboard,
+    /// and any keyboard that appears shows it in its preview, a fresh controller or process included. The app ends the run
+    /// (`complete`) once it stops holding it (`KeyboardSession.keyboardHoldLimit`), so while the app runs a paused publication is
+    /// never a stale one. Its words are the app's: a hidden keyboard owes nothing for it (`KeyboardRecyclePolicy`).
+    public var isHeldForKeyboard: Bool { staged == true && paused == true && !complete }
+
+    /// The keyboard leaves the run published when it appears (`seen`) alone unless it is the keyboard's own staged take, kept
+    /// across the hide, or a run the app holds for the keyboard (`isHeldForKeyboard`, #343): any other belongs to an earlier
+    /// appearance. A later
     /// version of the same run that is still being spoken shows the app kept the take going across the appearance (it never saw
     /// the keyboard go, or the keyboard's view was recreated mid-take): the person is speaking into it now, so the keyboard follows it.
     public func continues(_ seen: LiveDictationSnapshot) -> Bool {
