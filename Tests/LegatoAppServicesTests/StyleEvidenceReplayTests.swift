@@ -116,7 +116,7 @@ private struct Score {
         sessionDay = 2
         try observe(.hostEdit, take: 8, before: "Ja", after: "Ja 👍")
         try observe(.typed, take: 9, context: .unknown, after: "🙂")
-        try observe(.finalized, take: 10)  // Ordinary finalized take; cleanup was skipped.
+        try observe(.finalized, take: 10, context: .unknown)  // Ordinary finalized take; cleanup was skipped.
         try observe(.typed, take: 10, after: "🙂")
         try observe(.typed, take: 10, before: "🙂", after: "🙂🎉")      // Same take.
         try observe(.typed, take: 11, after: "🎉")
