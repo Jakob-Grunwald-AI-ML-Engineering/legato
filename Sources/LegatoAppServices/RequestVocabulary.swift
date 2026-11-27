@@ -41,13 +41,12 @@ struct RequestVocabulary: Sendable {
         let suppressed = (try? await corrections.suppressedSpellings()) ?? []
         snapshot.suppressLearnedSpellings(suppressed)
         let active = (try? await corrections.activeCandidates()) ?? []
+        snapshot.applySpellingEdits(from: active)
         for preference in active where preference.kind == .vocabulary {
             // Learned substitutions provide independent evidence for a target, not universal aliases.
             // An automatic term can reach a cleanup/Magic request only if its exact spelling occurs there.
             if preference.approvedSource == nil, let draft, !preference.matchesTargetPhrase(in: draft) { continue }
-            guard let index = snapshot.overlayTerm(text: preference.after, score: Double(preference.supportCount),
-                lastSeen: preference.lastSeen, correctionTarget: !preference.sources.isEmpty,
-                source: preference.state == .approved ? .manual : .history) else { continue }
+            guard let index = snapshot.overlay(preference, automaticSource: .history) else { continue }
             if let alias = preference.approvedSource, alias != preference.after {
                 let existing = snapshot.entry(forText: alias)
                 if existing?.source != .manual && existing?.pinned != true && !snapshot.entries[index].aliases.contains(alias) {

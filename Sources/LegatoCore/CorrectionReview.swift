@@ -37,6 +37,40 @@ public struct CorrectionCandidate: Sendable, Identifiable, Equatable {
     }
 }
 
+public extension VocabularySnapshot {
+    /// Reserve the old spelling of an active, explicitly renamed term in the derived request/keyboard
+    /// snapshot. A blocked row also keeps keyboard word-pair completions from reintroducing it.
+    /// Ordinary mishearings and independently pinned or manually entered words keep their meaning.
+    mutating func applySpellingEdits(from candidates: [CorrectionCandidate]) {
+        let approved = candidates.filter { $0.kind == .vocabulary && $0.state == .approved }
+        let retained = Set(approved.map { VocabularyEntry.key(for: $0.after) })
+        for preference in approved {
+            let key = VocabularyEntry.key(for: preference.originalTarget)
+            guard !retained.contains(key) else { continue }
+            if let i = entries.firstIndex(where: { VocabularyEntry.key(for: $0.text) == key }) {
+                if !entries[i].pinned && entries[i].source != .manual { entries[i].blocked = true }
+            } else {
+                entries.append(VocabularyEntry(text: preference.originalTarget, source: .history,
+                                               lastSeen: preference.lastSeen, blocked: true))
+            }
+        }
+    }
+
+    /// Apply one applicable preference after reserving edited spellings. Carry the old learned
+    /// term's weight across an explicit rename so the chosen spelling can keep its request slot.
+    @discardableResult
+    mutating func overlay(_ preference: CorrectionCandidate, automaticSource: VocabularyEntry.Source) -> Int? {
+        let edited = preference.state == .approved && preference.originalTarget != preference.after
+        let source: VocabularyEntry.Source = preference.state == .approved ? .manual : automaticSource
+        if edited, let old = entry(forText: preference.originalTarget), old.source != .manual, !old.pinned {
+            overlayTerm(text: preference.after, score: old.score, lastSeen: old.lastSeen,
+                        correctionTarget: true, source: source)
+        }
+        return overlayTerm(text: preference.after, score: Double(preference.supportCount), lastSeen: preference.lastSeen,
+                           correctionTarget: edited || !preference.sources.isEmpty, source: source)
+    }
+}
+
 public struct CorrectionReviewSnapshot: Sendable {
     public let enabled: Bool
     public let candidates: [CorrectionCandidate]

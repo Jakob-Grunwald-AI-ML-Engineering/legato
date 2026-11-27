@@ -151,9 +151,10 @@ final class SuggestionController {
         var snapshot = (try? VocabularySnapshot.read(from: directory.appending(path: vocabularyFile))) ?? VocabularySnapshot()
         snapshot.suppressLearnedSpellings((try? await store?.suppressedSpellings()) ?? [])
         var choices = WordPairModel()
-        for preference in (try? await store?.keyboardCandidates()) ?? [] where preference.kind == .vocabulary {
-            guard snapshot.overlayTerm(text: preference.after, score: Double(preference.supportCount), lastSeen: preference.lastSeen,
-                                       correctionTarget: !preference.sources.isEmpty, source: preference.state == .approved ? .manual : .choice) != nil else { continue }
+        let preferences = (try? await store?.keyboardCandidates()) ?? []
+        snapshot.applySpellingEdits(from: preferences)
+        for preference in preferences where preference.kind == .vocabulary {
+            guard snapshot.overlay(preference, automaticSource: .choice) != nil else { continue }
             for source in preference.sources {
                 out.choices[VocabularyEntry.key(for: source), default: []].append(preference.after)
             }
