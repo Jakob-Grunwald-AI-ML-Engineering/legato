@@ -15,7 +15,8 @@ struct StyleReplay {
         var addedByAnyone = 0
         var scopedAdds = 0
         var ambiguousRequest = false
-        var ambiguousHost = false
+        var sawHostEmojiEdit = false
+        var sawDirectEmojiEdit = false
         var undone = false
         var deleted = false
     }
@@ -75,6 +76,7 @@ struct StyleReplay {
             requestInstructions[event.instruction.rawValue, default: 0] += 1
         }
         var observations = takes[key, default: .init()]
+        let emojiChanged = event.emojiAdded > 0 || event.emojiRemoved > 0
         let delta = event.emojiAdded - event.emojiRemoved
         func net(_ prior: Int) throws -> Int {
             let (sum, overflow) = prior.addingReportingOverflow(delta)
@@ -89,12 +91,13 @@ struct StyleReplay {
             // There is no target operation ID. Abstain on this take even if its earlier additions appeared deliberate.
             observations.undone = true
         case .typed, .suggestion:
+            observations.sawDirectEmojiEdit = observations.sawDirectEmojiEdit || emojiChanged
             observations.addedByUser = try net(observations.addedByUser)
             if event.context == .sendField { observations.scopedAdds = try net(observations.scopedAdds) }
         case .hostEdit:
-            observations.ambiguousHost = observations.ambiguousHost || event.emojiAdded != 0 || event.emojiRemoved != 0
+            observations.sawHostEmojiEdit = observations.sawHostEmojiEdit || emojiChanged
         case .magic:
-            if event.instruction == .other && (event.emojiAdded > 0 || event.emojiRemoved > 0) {
+            if event.instruction == .other && emojiChanged {
                 observations.ambiguousRequest = true
             }
         default:
@@ -179,7 +182,9 @@ struct StyleReplay {
         for platform in [StyleEvent.Platform.iOS, .macOS] {
             let active = active(on: platform)
             guard !active.isEmpty || platforms[platform.rawValue] != nil else { continue }
-            lines.append("\(platform.rawValue) activeTakes=\(active.count) directNetAdds=\(active.filter { $0.addedByUser > 0 }.count) sendFieldDirectNetAdds=\(active.filter { $0.scopedAdds > 0 }.count) ambiguousMagicTakes=\(active.filter(\.ambiguousRequest).count) unattributedHostTakes=\(active.filter(\.ambiguousHost).count)")
+            let host = active.filter(\.sawHostEmojiEdit)
+            let mixed = host.filter(\.sawDirectEmojiEdit).count
+            lines.append("\(platform.rawValue) activeTakes=\(active.count) directNetAdds=\(active.filter { $0.addedByUser > 0 }.count) sendFieldDirectNetAdds=\(active.filter { $0.scopedAdds > 0 }.count) ambiguousMagicTakes=\(active.filter(\.ambiguousRequest).count) hostEmojiWithoutDirectTakes=\(host.count - mixed) hostAndDirectEmojiTakes=\(mixed)")
         }
         return lines.joined(separator: "\n")
     }

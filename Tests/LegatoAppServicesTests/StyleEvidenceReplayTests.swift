@@ -180,6 +180,23 @@ private struct Score {
         print("synthetic exportedBytes=\(bytes.count)\n\(imported.describe())")
     }
 
+    @Test func hostSnapshotsAndKeyboardChangesShareTakeCoverage() throws {
+        let mixed = UUID(), hostOnly = UUID()
+        var replay = StyleReplay()
+        let picker = StyleEvent(takeID: mixed, platform: .iOS, action: .typed, context: .sendField, after: "🙂")
+        try replay.observe(picker, line: 1)
+        try replay.observe(.init(takeID: mixed, platform: .iOS, action: .hostEdit, context: .sendField, after: "🙂"), line: 2)
+        try replay.observe(.init(takeID: hostOnly, platform: .iOS, action: .hostEdit, context: .sendField, after: "🙂"), line: 3)
+        let request = StyleEvent(takeID: UUID(), platform: .iOS, action: .request, context: .sendField, mode: .send)
+        #expect(replay.shadowDecision(at: request) == .insufficientTakes)
+        #expect(replay.active(on: .iOS).filter { $0.addedByUser > 0 }.count == 1)
+        #expect(replay.reviewCandidates(on: .iOS).isEmpty)
+        try replay.observe(.init(takeID: mixed, platform: .iOS, action: .typed, context: .sendField, before: "🙂"), line: 4)
+        // Removing the directly entered emoji brings its net support to zero, but the direct edit was still observed.
+        #expect(replay.describe().contains("hostEmojiWithoutDirectTakes=1 hostAndDirectEmojiTakes=1"))
+        #expect(replay.active(on: .iOS).allSatisfy { $0.addedByUser == 0 })
+    }
+
     @Test(.enabled(if: ProcessInfo.processInfo.environment["LEGATO_STYLE_DIAGNOSTICS"] != nil,
                    "Set LEGATO_STYLE_DIAGNOSTICS to a local metadata export to replay collected evidence."))
     func collectedDiagnostics() throws {
