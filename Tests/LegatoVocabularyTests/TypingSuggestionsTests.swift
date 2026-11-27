@@ -16,6 +16,18 @@ private struct TypingCompleter: WordCompleting {
 
 @Suite("Typing suggestions")
 struct TypingSuggestionsTests {
+    @Test func selectedSpellingCompletesAheadOfUnrelatedCorrectionAndKeepsOrdinaryWordsAvailable() async {
+        var snapshot = VocabularySnapshot()
+        snapshot.overlayTerm(text: "Kemas", score: 2, lastSeen: Date(), correctionTarget: true)
+        let checker = TypingSpellChecker(known: ["schemas": ["en"]], guesses: ["en": ["keg"]])
+        let prefix = await WordSuggester.candidates(prefix: "Kem", previous: [], snapshot: snapshot, pairs: nil,
+            completer: nil, checker: checker, languages: ["en"])
+        #expect(prefix.first?.text == "Kemas")
+        let ordinary = await WordSuggester.candidates(prefix: "schemas", previous: ["database"], snapshot: snapshot,
+            pairs: nil, completer: nil, checker: checker, languages: ["en"], preferredCorrections: ["Kemas"])
+        #expect(ordinary.isEmpty)
+    }
+
     @Test func unknownPrefixOffersTappableNonprefixCorrection() async {
         let candidates = await WordSuggester.candidates(
             prefix: "teh", previous: [], snapshot: nil, pairs: nil, completer: nil,

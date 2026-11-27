@@ -23,6 +23,7 @@ public struct DictationDelivery: Sendable, Equatable {
     public var retracted = false
     /// A whole-take delivery (the take modes), as opposed to a line of line-by-line dictation.
     public var isTake = false
+    public var evidenceID: UUID?
 }
 
 /// A whole-text snapshot plus the buffered cleaner's recovery state.
@@ -64,6 +65,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         var snapshot = LiveDictationSnapshot(runID: delivery.lineID, version: version,
             segments: [.init(id: 0, text: delivery.retracted ? "" : delivery.text, cleaned: delivery.cleaned, final: delivery.final)],
             complete: delivery.final, stopped: true, rawText: delivery.raw)
+        snapshot.evidenceID = delivery.evidenceID?.uuidString
         snapshot.text = delivery.retracted ? "" : delivery.text
         deliveryStates[delivery.lineID] = (delivery, snapshot)
         return snapshot
@@ -119,6 +121,9 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     @ObservationIgnored private var lastLiveHistory: DictationEntry?
     @ObservationIgnored private var liveHistoryFallbacks: Set<Int> = []
     /// The history entry of the last take: a retry of the same text updates it instead of adding another.
+    @ObservationIgnored private var liveRecognitionHints: Set<String> = []
+    @ObservationIgnored private var bufferedRecognitionHints: Set<String> = []
+    @ObservationIgnored private var takeRecognitionHints: [String] = []
     @ObservationIgnored private var takeEntry: (raw: String, id: UUID)?
     @ObservationIgnored private let cleaner: any SentenceCleaning
     @ObservationIgnored private let vocabulary: @Sendable () async -> [String]
@@ -264,6 +269,10 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             entry.cleanupResultText = confirmed.isEmpty ? nil : confirmed
             entry.cleanupRecoveryText = cleanup?.recoveryTarget
             entry.cleanupFieldStatus = status
+            if self.fieldEntry?.id == id {
+                entry.recognitionHints = self.takeRecognitionHints
+                entry.provisional = false
+            }
             self.lastLiveHistory = entry
             try? await history.upsert(entry)
             self.historyRevision += 1
@@ -668,12 +677,12 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
 
     /// `defaults` holds the send setting: the Mac app's standard defaults, or the App Group on iOS.
     /// `supportsLive`: the iOS keyboard link is there to carry the live mode.
-    public convenience init(vocabularyURL: URL, recentTakesURL: URL? = nil, history: (any HistoryStore)? = nil, defaults: UserDefaults = .standard,
+    public convenience init(vocabularyURL: URL, recentTakesURL: URL? = nil, recentTakes: RecentTakesStore? = nil, history: (any HistoryStore)? = nil, defaults: UserDefaults = .standard,
                             supportsLive: Bool = false, groupsLiveHistory: Bool = false, stagedLive: Bool = false) {
         // `UserDefaults` is thread-safe by contract; the model is read on the cleanup call's thread.
         nonisolated(unsafe) let store = defaults
         let preferences = RequestVocabulary(fileURL: vocabularyURL, settings: EngineSettings(defaults: defaults))
-        self.init(recentTakes: RecentTakesStore(fileURL: recentTakesURL), history: history,
+        self.init(recentTakes: recentTakes ?? RecentTakesStore(fileURL: recentTakesURL), history: history,
                   cleaner: SentenceCleanupClient(client: MessagesStream(keyStore: KeychainKeyStore()), model: { DictationSendSetting.cleanupModel(in: store) },
                                                  personalization: { await preferences.cleanup(for: $0) }),
                   sendMode: { DictationSendSetting.mode(in: defaults) }, pauseSeconds: { DictationSendSetting.pause(in: defaults) },
@@ -711,9 +720,10 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         guard !raw.isEmpty else { return }
         if mode == .live {
             if held != nil { held?.append(.line(line)); return }
-            await receiveLive(raw, sequence: line.sequence, forced: Self.forcedSplits.contains(line.reason), remainingTail: line.remainingTail)
+            await receiveLive(raw, sequence: line.sequence, forced: Self.forcedSplits.contains(line.reason), remainingTail: line.remainingTail, hints: line.recognitionHints)
             return
         }
+        bufferedRecognitionHints.formUnion(line.recognitionHints)
         bufferLine(raw)
     }
 
@@ -735,7 +745,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         pipeline = nil; terms = nil; lastWarm = nil
         sessionID = UUID().uuidString
         outbox = []; deliveryStates = [:]; fallbacks = []; pending = 0
-        nextTakeSequence = 0; takeLines = []
+        nextTakeSequence = 0; takeLines = []; bufferedRecognitionHints = []
         endLiveRun()
         if let kept { failedText = kept; takePhase = .failed }
         await old?.reset()
@@ -795,6 +805,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         if let failed = failedText {
             // New speech after a failed cleanup: the held text and the new lines go in one take.
             takeLines.insert(failed, at: 0); failedText = nil
+            bufferedRecognitionHints.formUnion(takeRecognitionHints)
             retractPartial()
             if takePhase == .failed { takePhase = cleaningText == nil ? .buffering : .cleaning }
         }
@@ -838,6 +849,9 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         guard takePhase != .failed, !takeLines.isEmpty else { return }
         let raw = takeLines.joined(separator: " ")
         takeLines = []
+        takeEntry = (raw, UUID())
+        takeRecognitionHints = bufferedRecognitionHints.sorted()
+        bufferedRecognitionHints = []
         await runTake(raw)
     }
     public func finishTake() async {
@@ -913,7 +927,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             case .tail(let text): liveTail(text)
             case .line(let line):
                 let raw = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !raw.isEmpty { await receiveLive(raw, sequence: line.sequence, forced: Self.forcedSplits.contains(line.reason), remainingTail: line.remainingTail) }
+                if !raw.isEmpty { await receiveLive(raw, sequence: line.sequence, forced: Self.forcedSplits.contains(line.reason), remainingTail: line.remainingTail, hints: line.recognitionHints) }
             case .begin:
                 // A take that began while this one ran without a stop: its run ends first.
                 if let run = liveRun, !run.complete { held?.insert(.begin, at: 0); return await finishLive() }
@@ -933,9 +947,10 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// Segment reasons that cut a sentence short (`Segmenter.maxWords`, `maxDuration`), not end it.
     private static let forcedSplits: Set<String> = ["words", "duration"]
 
-    private func receiveLive(_ raw: String, sequence: Int, forced: Bool, remainingTail: String? = nil) async {
+    private func receiveLive(_ raw: String, sequence: Int, forced: Bool, remainingTail: String? = nil, hints: [String]) async {
         setVoiceActive(true)
         var run = currentLiveRun()
+        liveRecognitionHints.formUnion(hints)
         let unit = run.addFinal(key: sequence, text: raw, closes: !forced,
                                 holdsForPreview: previewHoldRunID == run.runID || run.hasPendingPreview(after: liveDeliveryAck?.deliveredThrough))
         // Commit the final and the provider update's residual words in one publication. A segment
@@ -1216,6 +1231,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         if let run = liveRun, !run.complete || late { return run }
         fieldCleanup?.reset()
         liveHistoryFallbacks = []
+        liveRecognitionHints = []
         let run = LiveDictationRun(staged: stagedLive, manual: stagedLive && liveSend() == .manual)
         liveDeliveryAck = nil
         liveRun = run
@@ -1239,9 +1255,15 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         let raw = run.wholeRaw.text
         guard !raw.isEmpty else { return }
         let text = LiveSegment.joined(snapshot.segments.filter(\.final).map(\.text))
-        let entry = DictationEntry(id: id, date: lastLiveHistory.flatMap { $0.id == id ? $0.date : nil } ?? Date(),
+        var entry = DictationEntry(id: id, date: lastLiveHistory.flatMap { $0.id == id ? $0.date : nil } ?? Date(),
             text: text, rawText: text == raw ? nil : raw, localeIdentifier: Locale.current.identifier,
             engineID: "dictation", duration: 0, cleanupFallback: liveHistoryFallbacks.isEmpty ? nil : true)
+        entry.provisional = !run.complete
+        if run.complete {
+            entry.recognitionHints = liveRecognitionHints.sorted()
+            let retained = run.retainedSpeech
+            entry.retainedRecognition = retained == raw ? nil : retained
+        }
         guard entry != lastLiveHistory else { return }
         lastLiveHistory = entry
         let preview = onPreviewHistoryCheckpoint == nil ? nil : snapshot.previewDiagnosticRevision()
@@ -1294,12 +1316,14 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         retractPartial()
         takePhase = cleaningText == nil ? .buffering : .cleaning
         deliverTake(raw: raw, text: raw, cleaned: false)
+        if let id = takeEntry?.id { await save(id: id, raw: raw, text: raw, finalized: true) }
         speechActivity()
     }
 
     /// Drops the unsent take and the failed text: nothing is typed.
     public func discardTake() {
         cancelTake()
+        bufferedRecognitionHints = []
         takeLines = []
         onChange?()
     }
@@ -1368,10 +1392,11 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             case .cleaned(let text):
                 self.takePhase = .buffering
                 self.finishStream(raw: raw, text: text, rejected: rejected)
-                await self.save(id: entryID, raw: raw, text: rejected ? raw : text, fallback: rejected)
+                await self.save(id: entryID, raw: raw, text: rejected ? raw : text, fallback: rejected, finalized: true)
             case .unavailable:
                 self.takePhase = .buffering
                 self.deliverTake(raw: raw, text: raw, cleaned: false)
+                await self.save(id: entryID, raw: raw, text: raw, finalized: true)
             case .failed(let reason):
                 // Text already streamed stays in the field until Retry / Insert as-is erases it.
                 if let seq = self.streamSeq, let i = self.outbox.firstIndex(where: { $0.sequence == seq }) {
@@ -1400,7 +1425,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
             let sequence = nextTakeSequence
             nextTakeSequence += 1
             streamSeq = sequence
-            outbox.append(.init(lineID: "\(sessionID)-t\(sequence)", sequence: sequence, raw: raw, text: streamed, cleaned: true, final: false, isTake: true))
+            outbox.append(.init(lineID: "\(sessionID)-t\(sequence)", sequence: sequence, raw: raw, text: streamed, cleaned: true, final: false, isTake: true, evidenceID: takeEntry?.id))
             notifyStream(force: true)
         }
     }
@@ -1421,7 +1446,7 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         streamSeq = nil; streamed = ""
         // The delivery may be gone: the keyboard stopped typing it (the user moved on) and acknowledged.
         if let i = outbox.firstIndex(where: { $0.sequence == seq }) { outbox[i].text = text; outbox[i].final = true }
-        if keepsTakes() { recentTakes.record(raw: raw, cleaned: text, wasCleaned: true) }
+        if keepsTakes() { recentTakes.record(raw: raw, cleaned: text, wasCleaned: true, id: takeEntry?.id) }
         notifyStream(force: true)
     }
 
@@ -1459,22 +1484,25 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     private func deliverTake(raw: String, text: String, cleaned: Bool) {
         let sequence = nextTakeSequence
         nextTakeSequence += 1
-        outbox.append(.init(lineID: "\(sessionID)-t\(sequence)", sequence: sequence, raw: raw, text: text, cleaned: cleaned, isTake: true))
-        if keepsTakes() { recentTakes.record(raw: raw, cleaned: text, wasCleaned: cleaned) }
+        outbox.append(.init(lineID: "\(sessionID)-t\(sequence)", sequence: sequence, raw: raw, text: text, cleaned: cleaned, isTake: true, evidenceID: takeEntry?.id))
+        if keepsTakes() { recentTakes.record(raw: raw, cleaned: text, wasCleaned: cleaned, id: takeEntry?.id) }
         onChange?()
     }
 
     private enum HistoryError: Error { case unavailable }
 
-    private func save(id: UUID, raw: String, text: String, fallback: Bool = false) async {
+    private func save(id: UUID, raw: String, text: String, fallback: Bool = false, finalized: Bool = false) async {
         guard let history, keepsTakes() else { return }
-        try? await writeHistory(id: id, raw: raw, text: text, fallback: fallback, to: history)
+        try? await writeHistory(id: id, raw: raw, text: text, fallback: fallback, recognitionHints: finalized ? takeRecognitionHints : nil, to: history)
     }
 
-    private func writeHistory(id: UUID, raw: String, text: String, fallback: Bool = false, to history: any HistoryStore) async throws {
-        try await history.upsert(DictationEntry(id: id, date: Date(), text: text, rawText: text == raw ? nil : raw,
+    private func writeHistory(id: UUID, raw: String, text: String, fallback: Bool = false, recognitionHints: [String]? = nil, to history: any HistoryStore) async throws {
+        var entry = DictationEntry(id: id, date: Date(), text: text, rawText: text == raw ? nil : raw,
                                                 localeIdentifier: Locale.current.identifier, engineID: "dictation", duration: 0,
-                                                cleanupFallback: fallback ? true : nil))
+                                                cleanupFallback: fallback ? true : nil)
+        entry.provisional = recognitionHints == nil
+        entry.recognitionHints = recognitionHints
+        try await history.upsert(entry)
         historyRevision += 1
     }
 
@@ -1502,11 +1530,11 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         return result
     }
 
-    func recordDraft(id: UUID, raw: String, text: String) async throws {
+    func recordDraft(id: UUID, raw: String, text: String, recognitionHints: [String] = []) async throws {
         guard keepsTakes(), !text.isEmpty else { return }
         guard let history else { throw HistoryError.unavailable }
-        try await writeHistory(id: id, raw: raw, text: text, to: history)
-        recentTakes.record(raw: raw, cleaned: text, wasCleaned: raw != text)
+        try await writeHistory(id: id, raw: raw, text: text, recognitionHints: recognitionHints, to: history)
+        recentTakes.record(raw: raw, cleaned: text, wasCleaned: raw != text, id: id)
     }
 
     var nextOutboxSequenceForTesting: Int { nextTakeSequence }

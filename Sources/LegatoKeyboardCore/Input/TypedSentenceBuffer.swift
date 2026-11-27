@@ -31,6 +31,18 @@ public struct TypedSentenceBuffer: Sendable, Equatable {
         return typed(text)
     }
 
+    /// Close the authored run when a suggestion is chosen. Its unfinished prefix is about to be replaced.
+    public mutating func takeBeforeCompletion(deleting count: Int) -> String? {
+        for _ in 0..<max(0, count) { deleted() }
+        return interrupted()
+    }
+
+    /// Anchor the next pair with a confirmed suggestion, unless the person has already started a new run.
+    public mutating func seedIfEmpty(with selection: String) {
+        guard text.isEmpty, !selection.contains(where: { Self.enders.contains($0) }) else { return }
+        text = selection
+    }
+
     /// The typed text is being undone: it is dropped, not learned.
     public mutating func discard() { text = "" }
 

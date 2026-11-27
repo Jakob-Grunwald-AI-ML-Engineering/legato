@@ -46,6 +46,34 @@ public struct VocabularySnapshot: Sendable, Equatable, Codable {
     /// Whether `text` belongs to a blocked entry. Learning sources must check this before adding or reinforcing.
     public func isBlocked(_ text: String) -> Bool { entry(forText: text)?.blocked == true }
 
+    /// Explicit manual words and pins take precedence over a suppressed spelling learned through ordinary use.
+    public mutating func suppressLearnedSpellings(_ keys: Set<String>) {
+        entries.removeAll { !$0.blocked && !$0.pinned && $0.source != .manual && keys.contains(VocabularyEntry.key(for: $0.text)) }
+    }
+
+    /// Merge a derived spelling into a request or keyboard snapshot without modifying the user's vocabulary file.
+    @discardableResult
+    public mutating func overlayTerm(text: String, score: Double, lastSeen: Date, correctionTarget: Bool,
+                                     source: VocabularyEntry.Source = .choice) -> Int? {
+        guard !text.isEmpty, text.utf8.count <= 256, !isBlocked(text) else { return nil }
+        let key = VocabularyEntry.key(for: text)
+        if let index = entries.firstIndex(where: { VocabularyEntry.key(for: $0.text) == key }) {
+            let latest = max(entries[index].lastSeen, lastSeen)
+            let evidenceScore = Decay.effectiveScore(score, lastSeen: lastSeen, now: latest)
+            entries[index].score = max(entries[index].effectiveScore(now: latest), evidenceScore)
+            entries[index].lastSeen = latest
+            entries[index].correctionTarget = entries[index].correctionTarget || correctionTarget
+            if source == .manual {
+                if !entries[index].pinned && entries[index].source != .manual { entries[index].text = text }
+                entries[index].source = .manual
+            }
+            return index
+        }
+        entries.append(VocabularyEntry(text: text, source: source, score: score, lastSeen: lastSeen,
+                                       correctionTarget: correctionTarget))
+        return entries.count - 1
+    }
+
     /// Drops what an alias makes redundant: the learned entries (neither manual, pinned nor blocked) and the pending
     /// terms whose text equals one of `aliases` ignoring case and diacritics. A mishearing kept as an entry of its
     /// own would be hinted to the engines and the cleanup model as a correct spelling. The entry whose text

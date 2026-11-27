@@ -289,9 +289,8 @@ import LegatoMac
     }
 
     private func correctionSnapshot() -> String? {
-        guard let target, target.isFocused(), !passwordField,
-              let length = try? target.textLength(), length <= 60_000 else { return nil }
-        return try? target.text(in: .init(location: 0, length: length))
+        guard !passwordField else { return nil }
+        return target?.correctionSnapshot()
     }
 
     private func armCorrections() {

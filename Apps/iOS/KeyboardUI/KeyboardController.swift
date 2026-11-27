@@ -149,6 +149,14 @@ final class KeyboardController {
         recordPreviewLifecycle(.controllerCreated)
     }
 
+    var evidenceStore: CorrectionStore? { correctionCapture?.store }
+
+    func evidenceTakeID(before: String, after: String) -> String? {
+        correctionCapture?.anchoredTakeID(in: before + after, at: before.count)
+    }
+
+    func attachTypedEvidence(_ evidence: TermEvidence) { queue.history.attachEvidence(evidence) }
+
     var fullAccess: Bool { hasFullAccess() }
 
     // MARK: Layout
@@ -730,16 +738,7 @@ final class KeyboardController {
     /// A new field starts over (no history, no row); a cursor move or text change the keyboard didn't make
     /// closes the typing group and what was typed so far is learned, and the word row looks at the word there.
     private func trackContext() {
-        let id = document.documentID
-        if id != lastDocumentID {
-            sessionSpan.broken()
-            typing.closeEmojiPanel()
-            lastDocumentID = id
-            queue.history.clear()
-            lastDictationTexts = [] // the dictation belongs to the field it landed in
-            syncHistory()
-            wordRow.fieldChanged()
-        }
+        bindSuggestionField()
         if wordRow.contextChanged() {
             queue.history.cursorMoved()
             wordRow.interruptTyping()
@@ -750,6 +749,20 @@ final class KeyboardController {
            !OwnEditEcho.isSame(expected: sessionSpan.text, reported: document.contextBefore) {
             sessionSpan.broken()
             trace?("session ended by a change outside the keyboard")
+        }
+    }
+
+    /// Bind before writing the first key: its UIKit echo belongs to this field too.
+    private func bindSuggestionField() {
+        let id = document.documentID
+        if id != lastDocumentID {
+            sessionSpan.broken()
+            typing.closeEmojiPanel()
+            lastDocumentID = id
+            queue.history.clear()
+            lastDictationTexts = [] // the dictation belongs to the field it landed in
+            syncHistory()
+            wordRow.fieldChanged()
         }
     }
 
@@ -968,6 +981,7 @@ final class KeyboardController {
     private func syncQueueField() {
         guard !draftEvidence.isPending else { return }
         observeIdentity()
+        bindSuggestionField()
         let id = document.documentID
         if id != queueDocumentID {
             // A take still going that typed nothing yet goes to the field the user is in now, at its caret (as on the Mac).
@@ -1207,7 +1221,7 @@ final class KeyboardController {
                 }
             case .liveApplied(let runID, let version, let complete):
                 if complete, let snapshot = liveSnapshot, snapshot.runID == runID {
-                    correctionCapture?.watch(dictationID: runID, raw: snapshot.rawText ?? snapshot.text, inserted: snapshot.text)
+                    correctionCapture?.watch(dictationID: snapshot.evidenceID ?? runID, raw: snapshot.rawText ?? snapshot.text, inserted: snapshot.text)
                 }
                 updateCleanup { $0.applied(runID: runID, version: version, complete: complete) }
                 guard runID == liveSnapshot?.runID, version != liveAckedVersion else { break }
@@ -1503,6 +1517,9 @@ final class KeyboardController {
         let expected = currentReport.before
         if insertsWhole, origin == draftID { showPreviewExit(unit.text, direction: .right) }
         stagedTake.delivered(unit.id, typed: typed)
+        let sourceID = liveSnapshot.flatMap { $0.runID == runID ? $0.evidenceID : nil } ?? runID
+        correctionCapture?.watch(dictationID: sourceID, raw: unit.raw ?? unit.previewSource ?? unit.text,
+                                 inserted: typed.trimmingCharacters(in: .whitespacesAndNewlines))
         liveStats.applies += 1
         // One undo step per unit; the guard is the context after it when the proxy shows it.
         queue.history.record(removed: "", inserted: typed, at: Date(), contextBefore: expected)
@@ -2470,7 +2487,7 @@ final class KeyboardController {
             wordRow.interruptTyping()
         } else {
             queue.history.typed(text, at: Date(), contextBefore: before + text)
-            wordRow.typed(text)
+            wordRow.typed(text, before: before)
         }
         syncHistory()
         wordRow.keystroke(contextBefore: before + text)
@@ -2502,7 +2519,7 @@ final class KeyboardController {
     /// `edit.insert`, as minimal character edits through the queue, ahead of later keys. `removed` is the text the edit
     /// takes out, for the history; `asTyping` marks a completion, which the row follows up with predictions and which
     /// counts as typed text. `record: false` is for undo and redo, which move the history themselves.
-    func applyEdit(_ edit: WordEdit, removed: String, asTyping: Bool, record: Bool = true) {
+    func applyEdit(_ edit: WordEdit, removed: String, asTyping: Bool, record: Bool = true, evidence: [TermEvidence] = [], retract: Bool = false) {
         userPreemptsFieldRead()
         beforeUserEdit()
         let before = typing.contextBefore
@@ -2514,7 +2531,8 @@ final class KeyboardController {
         guard old.count == edit.deleteCount, oldAfter.count <= old.count else {
             show("The word changed, so nothing was edited."); return
         }
-        wordRow.interruptTyping()
+        if asTyping { wordRow.beginCompletion(deleting: edit.deleteCount) }
+        else { wordRow.interruptTyping() }
         let queued = FieldQueue.Edit(kind: record ? .word : .undo, before: shown(String(old.dropLast(oldAfter.count))),
                                      after: shown(oldAfter), target: shown(edit.insert))
         enqueue(queued, user: true) { [weak self] outcome in
@@ -2524,20 +2542,18 @@ final class KeyboardController {
                 self.show("The text changed, so nothing was edited.")
                 return
             }
-            if asTyping { self.wordRow.completed(deleting: edit.deleteCount, with: edit.insert) }
+            if asTyping { self.wordRow.completed(with: edit.insert) }
             self.wordRow.willApplyOwnEdit(expectedContextBefore: expected)
             if record { self.queue.history.record(removed: removed, inserted: edit.insert, at: Date(), contextBefore: expected) }
+            for action in evidence {
+                if record { self.queue.history.attachEvidence(action) }
+                self.wordRow.updateEvidence(action, retract: retract)
+            }
             self.syncHistory()
             self.typing.ownEdit(contextBefore: expected)
             if asTyping || !record { self.wordRow.keystroke(contextBefore: expected) }
         }
         pump()
-    }
-
-    /// The user's choice from the word row, for the app to learn from (Full Access only).
-    func recordChoice(_ record: ChoiceRecord) {
-        guard hasFullAccess() else { return }
-        link.writeChoice(record)
     }
 
     // MARK: Undo and redo
@@ -2555,18 +2571,20 @@ final class KeyboardController {
         guard canUndo else { return }
         userPreemptsFieldRead()
         prepareHistoryStep(discardingTyped: true)
+        let evidence = queue.history.undoEvidence
         guard let step = queue.history.undo(contextBefore: typing.contextBefore) else { return historyRefused() }
         syncHistory()
-        run(step, undoing: true)
+        run(step, undoing: true, evidence: evidence)
     }
 
     func redo() {
         guard canRedo else { return }
         userPreemptsFieldRead()
         prepareHistoryStep(discardingTyped: false)
+        let evidence = queue.history.redoEvidence
         guard let step = queue.history.redo(contextBefore: typing.contextBefore) else { return historyRefused() }
         syncHistory()
-        run(step, undoing: false)
+        run(step, undoing: false, evidence: evidence)
     }
 
     /// Undoing typing drops the typing buffer (what is taken back is not learned); a redo has nothing typed to lose.
@@ -2580,10 +2598,10 @@ final class KeyboardController {
         show("The text changed, so there is nothing to undo.")
     }
 
-    private func run(_ step: EditHistory.Step, undoing: Bool) {
+    private func run(_ step: EditHistory.Step, undoing: Bool, evidence: [TermEvidence]) {
         switch step {
         case .edit(let edit):
-            applyEdit(edit, removed: "", asTyping: false, record: false)
+            applyEdit(edit, removed: "", asTyping: false, record: false, evidence: evidence, retract: undoing)
         case .scoped(var edit):
             edit.id = UUID().uuidString
             enqueue(edit, completion: { [weak self] event in

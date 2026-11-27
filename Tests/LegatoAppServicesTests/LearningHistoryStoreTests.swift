@@ -67,6 +67,31 @@ private let grunwald = [EntitySpan(text: "Grunwald", kind: .person)]
         #expect(try await rig.entries().map(\.text) == ["Grunwald"])
     }
 
+    @Test func finalizedTakeRevisionsReplaceOnlyTheirUncuedSpeech() async throws {
+        let rig = VocabularyRig(withPairs: true); defer { rig.cleanUp() }
+        let store = LearningHistoryStore(MemoryHistory(), vocabulary: rig.service)
+        let corrections = CorrectionStore(root: rig.url.deletingLastPathComponent())
+        var first = entry("generated Badhri", raw: "we met Kemas")
+        try await store.upsert(first)
+        await rig.service.waitForLearning()
+        #expect(try await corrections.termEvidence().isEmpty)
+        first.recognitionHints = []
+        try await store.upsert(first)
+        await rig.service.waitForLearning()
+        let original = try await corrections.termEvidence()
+        #expect(original.map(\.term) == ["Kemas"])
+        try await store.upsert(first)
+        await rig.service.waitForLearning()
+        #expect(try await corrections.termEvidence() == original)
+        var second = entry("we met Kemas"); second.recognitionHints = ["Kemas"]
+        try await store.upsert(second)
+        await rig.service.waitForLearning()
+        #expect(try await corrections.termEvidence() == original)
+        try await store.delete(id: first.id)
+        await rig.service.waitForLearning()
+        #expect(try await corrections.termEvidence().isEmpty)
+    }
+
     @Test func aFailedAppendObservesNothing() async throws {
         let rig = VocabularyRig(spans: grunwald); defer { rig.cleanUp() }
         let store = LearningHistoryStore(MemoryHistory(failAppends: true), vocabulary: rig.service)

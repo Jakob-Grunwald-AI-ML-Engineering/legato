@@ -6,11 +6,13 @@ public struct DictationRouteLine: Sendable, Equatable {
     public var sequence: Int
     public var text: String
     public var words: [Word]
+    public var recognitionHints: [String]
     /// The segment boundary: `endpoint`, `punctuation`, `gap`, `finalize`, …
     public var reason: String
     /// The same provider update's words after this segment. Finalization and the remaining head must publish together.
     public var remainingTail: String?
-    public init(sequence: Int, text: String, words: [Word], reason: String, remainingTail: String? = nil) {
+    public init(sequence: Int, text: String, words: [Word], reason: String, remainingTail: String? = nil, recognitionHints: [String] = []) {
+        self.recognitionHints = recognitionHints
         self.sequence = sequence; self.text = text; self.words = words; self.reason = reason; self.remainingTail = remainingTail
     }
 }

@@ -13,7 +13,7 @@ public enum WordSuggester {
     public static func candidates(
         prefix: String, previous: [String], snapshot: VocabularySnapshot?, pairs: WordPairModel?,
         completer: (any WordCompleting)?, checker: any SpellChecking, languages: [String],
-        limit: Int = WordSuggester.limit, now: Date = Date()
+        preferredCorrections: [String] = [], limit: Int = WordSuggester.limit, now: Date = Date()
     ) async -> [Candidate] {
         let typed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !typed.isEmpty, limit > 0 else { return [] }
@@ -30,7 +30,7 @@ public enum WordSuggester {
         if !known {
             var lists: [[String]] = []
             for language in languages { lists.append(await checker.guesses(for: typed, language: language)) }
-            corrections = PlatformSpellChecker.interleave(lists)
+            corrections = preferredCorrections + PlatformSpellChecker.interleave(lists)
         }
         var seen = Set<String>()
         var out: [Candidate] = []
@@ -41,6 +41,8 @@ public enum WordSuggester {
             else { return }
             out.append(Candidate(text: text, kind: kind))
         }
+        // A personal spelling that completes this prefix wins over the checker's unrelated guess.
+        if let first = completed.first, snapshot?.entry(forText: first) != nil { add(first, kind: .completion) }
         // Reserve the primary slot for an actual spelling proposal. Remaining slots still offer completions.
         if let first = corrections.first(where: {
             let text = $0.trimmingCharacters(in: .whitespacesAndNewlines)

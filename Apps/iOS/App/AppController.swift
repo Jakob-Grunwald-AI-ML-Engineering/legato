@@ -43,12 +43,13 @@ final class AppController {
             languages: { VocabularyService.configuredLanguages(settings) },
             pairsFileURL: root.appending(path: "wordpairs-dictated.json"))
         corrections = CorrectionStore(root: root)
-        history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary)
+        let recentTakes = RecentTakesStore(fileURL: root.appending(path: "recent-takes.json"))
+        history = LearningHistoryStore(JSONLHistoryStore(fileURL: root.appending(path: "history.jsonl")), vocabulary: vocabulary, recentTakes: recentTakes)
         microphone = MicrophoneHost(vocabularyURL: root.appending(path: "vocabulary.json"),
             keepMicrophoneActive: ComposerMicrophonePreference.keepActive())
         #if LEGATO_INTERNAL
         if UserDefaults.standard.bool(forKey: "LegatoOfflineFixture") {
-            dictation = DictationPipeline(recentTakes: RecentTakesStore(fileURL: root.appending(path: "recent-takes.json")),
+            dictation = DictationPipeline(recentTakes: recentTakes,
                                           history: history, cleaner: DebugStreamingCleaner(chunkMilliseconds: 0),
                                           sendMode: { DictationSendSetting.mode(in: AppGroup.defaults) }, supportsLive: true,
                                           liveSend: { DictationSendSetting.liveSend(in: AppGroup.defaults) }, groupsLiveHistory: true, stagedLive: true)
@@ -56,7 +57,7 @@ final class AppController {
                                                              instruction: InstructionSession(runner: IOSOfflineInstructionRunner(), history: history))
         } else {
             dictation = DictationPipeline(vocabularyURL: root.appending(path: "vocabulary.json"),
-                                          recentTakesURL: root.appending(path: "recent-takes.json"), history: history, defaults: AppGroup.defaults,
+                                          recentTakes: recentTakes, history: history, defaults: AppGroup.defaults,
                                           supportsLive: true, groupsLiveHistory: true, stagedLive: true)
             keyboardSession = KeyboardSession(microphone: microphone, sink: dictation,
                                               instruction: InstructionSession(vocabularyURL: root.appending(path: "vocabulary.json"), history: history))
@@ -64,7 +65,7 @@ final class AppController {
         dictation.diagnostics = { event, fields in AudioDiagnostics.log(event, fields) }
         #else
         dictation = DictationPipeline(vocabularyURL: root.appending(path: "vocabulary.json"),
-                                      recentTakesURL: root.appending(path: "recent-takes.json"), history: history, defaults: AppGroup.defaults,
+                                      recentTakes: recentTakes, history: history, defaults: AppGroup.defaults,
                                       supportsLive: true, groupsLiveHistory: true, stagedLive: true)
         keyboardSession = KeyboardSession(microphone: microphone, sink: dictation,
                                           instruction: InstructionSession(vocabularyURL: root.appending(path: "vocabulary.json"), history: history))

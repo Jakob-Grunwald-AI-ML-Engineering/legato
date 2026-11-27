@@ -102,6 +102,15 @@ public struct VocabularySource: AlternativeSource {
     }
 }
 
+/// Explicit replacements are offered on a tapped word without treating that word as an incorrect spelling.
+public struct SelectedAlternativeSource: AlternativeSource {
+    private let terms: [String]
+    public init(terms: [String]) { self.terms = terms }
+    public func candidates(for word: String, context: AlternativeContext) async -> [ScoredCandidate] {
+        terms.map { ScoredCandidate(text: $0, score: 1, source: .vocabulary) }
+    }
+}
+
 /// The spell checker's guesses for the tapped word, in each configured language.
 ///
 /// A guess scores by its rank (0.8 for the first, 0.1 less for each next, at least 0.3); the guesses of

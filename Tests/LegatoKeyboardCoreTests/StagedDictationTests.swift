@@ -112,6 +112,7 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         // Expiry: the unit is empty and ready, so the keyboard passes it.
         let expired = run.expireDiscarded()
         #expect(expired)
+        #expect(run.retainedSpeech == "Keep this" && undone.retainedSpeech == undone.wholeRaw.text)
         take.receive(run.snapshot)
         #expect(!take.hasDiscarded && take.nextReady?.text == "Keep this" && take.deliveredThrough == 0)
         #expect(take.preview == "Keep this")

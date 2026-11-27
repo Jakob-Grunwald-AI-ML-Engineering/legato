@@ -8,6 +8,9 @@ public struct CorrectionsView: View {
     @State private var review: CorrectionReviewSnapshot?
     @State private var error: String?
     @State private var updating = false
+    @State private var editing: CorrectionCandidate?
+    @State private var spelling = ""
+    @State private var revision: String?
 
     public init(store: CorrectionStore) {
         self.store = store
@@ -17,7 +20,7 @@ public struct CorrectionsView: View {
         List {
             if let review {
                 Section {
-                    Toggle("Use approved preferences", isOn: Binding(
+                    Toggle("Use personal vocabulary and preferences", isOn: Binding(
                         get: { review.enabled },
                         set: { enabled in
                             update { try await store.setPersonalizationEnabled(enabled) }
@@ -25,17 +28,19 @@ public struct CorrectionsView: View {
                     ))
                     .disabled(updating)
                     .accessibilityIdentifier("corrections.enabled")
-                    Text("Your speech provider can receive approved spellings. Cleanup can receive relevant correction and style examples. Turning this off keeps your review decisions on this device.")
+                    Text("Your keyboard uses words you type and choose. Recurring spellings can go to your speech provider. Cleanup uses matching vocabulary and approved examples.")
                         .font(.footnote).foregroundStyle(.secondary)
                     if review.candidates.isEmpty {
-                        Text("Suggestions appear here when similar edits recur across dictations.")
+                        Text("Your vocabulary appears here as you type, choose suggestions and correct dictations.")
                             .foregroundStyle(.secondary)
                     }
                 } header: {
                     Text("Personalization")
                 }
 
-                candidateSection("Suggested preferences", candidates: review.candidates.filter { $0.state == .pending })
+                candidateSection("Automatic vocabulary", candidates: review.candidates.filter(\.isAutomatic))
+                candidateSection("Keyboard vocabulary", candidates: review.candidates.filter(\.isKeyboardOnly))
+                candidateSection("Suggested preferences", candidates: review.candidates.filter { $0.state == .pending && !$0.isAutomatic && !$0.isKeyboardOnly })
                 candidateSection("Approved preferences", candidates: review.candidates.filter { $0.state == .approved })
                 let dismissed = review.candidates.filter { $0.state == .dismissed }
                 if !dismissed.isEmpty {
@@ -64,6 +69,18 @@ public struct CorrectionsView: View {
             Button("Refresh") { Task { await reload(force: true) } }
                 .accessibilityIdentifier("corrections.refresh")
         }
+        .sheet(item: $editing) { candidate in
+            VStack(alignment: .leading) {
+                TextField("Preferred spelling", text: $spelling)
+                    .onSubmit { saveSpelling(candidate) }
+                HStack {
+                    Button("Cancel") { editing = nil }
+                    Button("Save") { saveSpelling(candidate) }
+                        .disabled(spelling.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .padding()
+        }
         .task {
             while !Task.isCancelled {
                 await reload()
@@ -85,12 +102,19 @@ public struct CorrectionsView: View {
     private func candidateRow(_ candidate: CorrectionCandidate) -> some View {
         DisclosureGroup {
             VStack(alignment: .leading) {
-                Text(basisDescription(candidate.basis))
-                    .font(.footnote).foregroundStyle(.secondary)
+                if !candidate.records.isEmpty {
+                    Text(basisDescription(candidate.basis))
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 HStack {
+                    if candidate.kind == .vocabulary && candidate.state != .dismissed {
+                        Button("Edit spelling") { spelling = candidate.after; editing = candidate }
+                    }
                     switch candidate.state {
                     case .pending:
-                        Button("Approve") { decide(.approved, candidate) }
+                        if !candidate.isAutomatic {
+                            Button(candidate.isKeyboardOnly ? "Use in dictation" : "Approve") { decide(.approved, candidate) }
+                        }
                         Button("Dismiss") { decide(.dismissed, candidate) }
                     case .approved:
                         Button("Remove preference", role: .destructive) { decide(.dismissed, candidate) }
@@ -101,16 +125,41 @@ public struct CorrectionsView: View {
                 .buttonStyle(.bordered)
                 .disabled(updating)
                 ForEach(candidate.records) { recordRow($0) }
+                ForEach(candidate.keyboardEvidence) { event in
+                    VStack(alignment: .leading) {
+                        Text(event.term)
+                        Text(eventLabel(event)).font(.caption).foregroundStyle(.secondary)
+                        Text(event.date, format: .dateTime.day().month().year().hour().minute()).font(.caption)
+                    }
+                }
             }
         } label: {
             VStack(alignment: .leading) {
-                replacement(candidate.before, candidate.after)
+                if candidate.kind == .vocabulary {
+                    Text(candidate.after)
+                } else {
+                    replacement(candidate.before, candidate.after)
+                }
                 let kind = candidate.kind == .vocabulary ? "Vocabulary" : "Style"
-                let count = candidate.records.count
-                Text("\(kind) · \(count) \(count == 1 ? "dictation" : "dictations")")
+                let count = candidate.supportCount
+                Text("\(kind) · \(count) \(count == 1 ? "observation" : "observations")")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func eventLabel(_ event: TermEvidence) -> String {
+        switch event.origin {
+        case .selection: "Selected on the keyboard"
+        case .typed: "Typed on the keyboard"
+        case .recognition: "Heard in dictation"
+        }
+    }
+
+    private func saveSpelling(_ candidate: CorrectionCandidate) {
+        let text = spelling
+        editing = nil
+        update { try await store.editSpelling(text, for: candidate) }
     }
 
     private func basisDescription(_ basis: CorrectionBasis) -> String {
@@ -175,10 +224,12 @@ public struct CorrectionsView: View {
 
     private func reload(force: Bool = false) async {
         do {
-            let latest = try await store.recent()
-            if force || review == nil || latest != records {
+            let token = try await store.revisionToken()
+            if force || token != revision {
+                let latest = try await store.recent()
                 review = try await store.reviewSnapshot()
                 records = latest
+                revision = token
                 error = nil
             }
         } catch { self.error = "Could not load captured edits: \(error.localizedDescription)" }

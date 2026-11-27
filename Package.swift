@@ -26,7 +26,7 @@ let package = Package(
     targets: [
         .testTarget(name: "LegatoRoomTests", dependencies: ["LegatoRoom", "LegatoComposerDoc"]),
         .target(name: "LegatoVoiceIdentity", resources: [.copy("ModelAssets.json")]),
-        .target(name: "LegatoSoniox", dependencies: ["LegatoRoom", "LegatoComposerDoc", "LegatoVoiceIdentity"]),
+        .target(name: "LegatoSoniox", dependencies: ["LegatoRoom", "LegatoComposerDoc", "LegatoVoiceIdentity", "LegatoVocabulary"]),
         .testTarget(name: "LegatoSonioxTests", dependencies: ["LegatoSoniox", "LegatoRoom", "LegatoComposerDoc"]),
         .target(name: "LegatoComposerDoc"),
         .target(name: "LegatoAgent", dependencies: ["LegatoClaude", "LegatoRoom", "LegatoComposerDoc"], resources: [.copy("Prompts")]),
@@ -34,7 +34,7 @@ let package = Package(
         .target(name: "LegatoRoom", dependencies: ["LegatoComposerDoc"]),
         .target(name: "LegatoDevHarness"),
         .testTarget(name: "LegatoDevHarnessTests", dependencies: ["LegatoDevHarness"]),
-        .target(name: "LegatoCore"),
+        .target(name: "LegatoCore", dependencies: ["LegatoVocabulary"]),
         .testTarget(name: "LegatoCoreTests", dependencies: ["LegatoCore"]),
         .target(name: "LegatoKeyboardCore", dependencies: ["LegatoComposerDoc", "LegatoCore"]),
         .target(name: "LegatoComposerUI", dependencies: ["LegatoCore"]),

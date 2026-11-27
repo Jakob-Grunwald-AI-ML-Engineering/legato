@@ -57,4 +57,80 @@ struct CorrectionReviewTests {
         try await store.append(undo)
         #expect(try await store.reviewSnapshot().candidates.map(\.kind) == [.vocabulary])
     }
+
+    @Test func separateSourcesInOneTakeCountOnceAndSuppressionSurvivesNewForms() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = CorrectionStore(root: root)
+        let first = edit("one", from: "schemas and Canvas today", to: "Kemas and Kemas today")
+        try await store.append(first)
+        try await store.recordTermEvidence(TermEvidence(term: "Kemas", original: "schemas", takeID: "ONE",
+            date: Date(), localeIdentifier: "en", origin: .selection, promotionCount: 2))
+        #expect(try await store.activeCandidates().isEmpty)
+        try await store.append(edit("two", from: "Call Canvas about layouts", to: "Call Kemas about drafts"))
+        let term = try #require(try await store.activeCandidates().first)
+        #expect(term.sources == ["Canvas", "schemas"])
+        #expect(term.isAutomatic)
+        #expect(term.supportCount == 2)
+        try await store.editSpelling("KEMAS", for: term)
+        let edited = try #require(try await store.activeCandidates().first)
+        #expect(edited.after == "KEMAS")
+        #expect(edited.approvedSource == nil)
+        try await store.setReview(.dismissed, for: edited)
+        try await store.append(edit("three", from: "Chemist", to: "Kemas"))
+        #expect(try await store.activeCandidates().isEmpty)
+        #expect(try await store.keyboardCandidates().isEmpty)
+    }
+
+    @Test func deletingTakeOrDisablingLearningWithdrawsLinkedSupport() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = CorrectionStore(root: root)
+        try await store.append(edit("first"))
+        try await store.setPersonalizationEnabled(false)
+        try await store.append(edit("disabled"))
+        try await store.setPersonalizationEnabled(true)
+        #expect(try await store.activeCandidates().isEmpty)
+        try await store.append(edit("second"))
+        #expect(try await store.activeCandidates().count == 1)
+        try await store.invalidateVocabularyEvidence(takeID: "SECOND")
+        #expect(try await store.activeCandidates().isEmpty)
+        try await store.recordTermEvidence(TermEvidence(term: "Grunwald", takeID: "second",
+            date: Date(), localeIdentifier: "en", origin: .typed, promotionCount: 2))
+        #expect(try await store.activeCandidates().isEmpty)
+        #expect(try await store.recent().count == 3)
+    }
+
+    @Test func unfinishedNameSettledBeforeItsLastLettersStillCountsAsOneCorrection() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = CorrectionStore(root: root)
+        let start = Date()
+        var first = try #require(CorrectionTracker(dictationID: "first", rawText: "I Am Meeting Patrice",
+            insertedText: "I Am Meeting Patrice", snapshot: "I Am Meeting Patrice", platform: "iOS",
+            localeIdentifier: "en_GB", now: start))
+        first.observe("I Am Meeting Patri", origin: .keyboard, now: start)
+        let intermediateEdit = first.settle(now: start.addingTimeInterval(2))
+        let intermediate = try #require(intermediateEdit)
+        try await store.append(intermediate)
+        first.observe("I Am Meeting Patrika", origin: .keyboard, now: start.addingTimeInterval(3))
+        let finishedEdit = first.settle(now: start.addingTimeInterval(5))
+        let finished = try #require(finishedEdit)
+        try await store.append(finished)
+        #expect(try await store.activeCandidates().isEmpty)
+        try await store.append(edit("second", from: "Patrico", to: "Patrika", locale: "en_GB"))
+        let name = try #require(try await store.activeCandidates().first)
+        #expect(name.after == "Patrika" && name.supportCount == 2 && name.isAutomatic)
+        #expect(name.sources == ["Patrice", "Patrico"])
+        #expect(name.records.contains(finished))
+        first.observe("I Am Meeting Patrice", origin: .keyboard, now: start.addingTimeInterval(6))
+        let reversalEdit = first.settle(now: start.addingTimeInterval(8))
+        let reversal = try #require(reversalEdit)
+        try await store.append(reversal)
+        #expect(try await store.activeCandidates().isEmpty)
+        try await store.delete(id: reversal.id)
+        #expect(try await store.activeCandidates().map(\.after) == ["Patrika"])
+        try await store.delete(id: intermediate.id)
+        #expect(try await store.activeCandidates().isEmpty)
+    }
 }

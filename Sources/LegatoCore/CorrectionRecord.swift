@@ -16,15 +16,21 @@ public struct CorrectionRecord: Codable, Sendable, Equatable, Identifiable {
     public var replacement: String
     public var contextBefore: String
     public var contextAfter: String
+    /// A blank composer closed observation immediately after this edit.
+    public var endedAtBoundary: Bool? = nil
+    /// False when the user disabled learning before this observation was saved.
+    public var eligibleForLearning: Bool? = nil
     public var origin: Origin
 }
 
 /// Immutable files avoid a read/delete in the app rewriting an extension's concurrent append.
 public actor CorrectionStore {
     public static let directoryName = "Corrections"
-    public let directory: URL
+    public nonisolated let directory: URL
     public init(root: URL) { directory = root.appendingPathComponent(Self.directoryName, isDirectory: true) }
-    public func append(_ record: CorrectionRecord) throws {
+    public func append(_ observation: CorrectionRecord) throws {
+        var record = observation
+        if try !personalizationEnabled() { record.eligibleForLearning = false }
         try PrivateFiles.createDirectory(directory)
         try PrivateFiles.write(JSONEncoder().encode(record), to: directory.appendingPathComponent(record.id.uuidString + ".json"))
     }
@@ -55,6 +61,7 @@ public struct CorrectionTracker: Sendable {
     private let suffix: String
     private var settled: String
     private var candidate: String
+    private var endedAtBoundary = false
     private var changedAt: Date?
     private var origin = CorrectionRecord.Origin.observedHost
     private let expires: Date
@@ -80,19 +87,28 @@ public struct CorrectionTracker: Sendable {
         prefix = String(snapshot[..<range.lowerBound]); suffix = String(snapshot[range.upperBound...])
         settled = delivered; candidate = delivered; expires = now.addingTimeInterval(600)
     }
+    fileprivate func containsCursor(in snapshot: String, at cursor: Int, now: Date) -> Bool {
+        active && now <= expires && snapshot.hasPrefix(prefix) && snapshot.hasSuffix(suffix)
+            && cursor >= prefix.count && cursor <= snapshot.count - suffix.count
+    }
+
     public mutating func observe(_ snapshot: String, origin: CorrectionRecord.Origin, now: Date = Date()) {
-        guard active, now <= expires, snapshot.count <= 60_000,
-              snapshot.hasPrefix(prefix), snapshot.hasSuffix(suffix), snapshot.count >= prefix.count + suffix.count else {
+        guard active, now <= expires, snapshot.count <= 60_000 else { active = false; return }
+        if snapshot.allSatisfy(\.isWhitespace) {
+            endedAtBoundary = true
+            active = false
+            return
+        }
+        guard snapshot.hasPrefix(prefix), snapshot.hasSuffix(suffix), snapshot.count >= prefix.count + suffix.count else {
             active = false; return
         }
         let value = String(snapshot.dropFirst(prefix.count).dropLast(suffix.count))
-        // Sending/clearing a message is a lifecycle boundary, not a huge deletion to learn from.
-        guard !snapshot.isEmpty else { active = false; return }
         if value != candidate { candidate = value; changedAt = now; self.origin = origin }
     }
     /// A one-second pause groups backspacing and replacement typing into one observation.
     public mutating func settle(now: Date = Date()) -> CorrectionRecord? {
-        guard active, now <= expires, let changedAt, now.timeIntervalSince(changedAt) >= 1, candidate != settled else { return nil }
+        guard active || endedAtBoundary, now <= expires, let changedAt, candidate != settled,
+              endedAtBoundary || now.timeIntervalSince(changedAt) >= 1 else { return nil }
         let old = Array(settled), new = Array(candidate)
         var head = 0, tail = 0
         while head < min(old.count, new.count), old[head] == new[head] { head += 1 }
@@ -105,7 +121,7 @@ public struct CorrectionTracker: Sendable {
             beforeText: settled, afterText: candidate, removed: String(old[head..<(old.count - tail)]),
             replacement: String(new[head..<(new.count - tail)]),
             contextBefore: String((prefix + String(old.prefix(head))).suffix(80)),
-            contextAfter: String((String(old.suffix(tail)) + suffix).prefix(80)), origin: origin)
+            contextAfter: String((String(old.suffix(tail)) + suffix).prefix(80)), endedAtBoundary: endedAtBoundary ? true : nil, origin: origin)
         settled = candidate; self.changedAt = nil
         return record
     }
@@ -115,6 +131,7 @@ public struct CorrectionTracker: Sendable {
 @MainActor public final class CorrectionCapture {
     public let store: CorrectionStore
     private var trackers: [CorrectionTracker] = []
+    public var isObserving: Bool { !trackers.isEmpty }
     private var pending: [String: (raw: String, text: String)] = [:]
     private var ownWriteAt = Date.distantPast
     private var keyAt = Date.distantPast
@@ -123,6 +140,12 @@ public struct CorrectionTracker: Sendable {
         pending[dictationID] = (raw, inserted)
     }
     public func ownWrite(now: Date = Date()) { trackers = []; ownWriteAt = now }
+    public func anchoredTakeID(in snapshot: String, at cursor: Int) -> String? {
+        let now = Date()
+        let matches = trackers.filter { $0.containsCursor(in: snapshot, at: cursor, now: now) }
+        return matches.count == 1 ? matches.first?.dictationID : nil
+    }
+
     public func userWrite(now: Date = Date()) { keyAt = now }
     public func canObserve(now: Date = Date()) -> Bool { now.timeIntervalSince(ownWriteAt) >= 0.15 }
     @discardableResult public func armPending(snapshot: String, platform: String, locale: String, isIdle: Bool,

@@ -223,11 +223,16 @@ private actor TakeHistory: HistoryStore {
         let history = TakeHistory()
         // No short timeout: failures throw at once, and the retry's clean call must not time out on a loaded runner.
         let failing = DictationPipeline(history: history, cleaner: TakeCleaner([.fail, .fail, .ok]), sendMode: { .onStop })
-        await failing.receive(routeLine(0, thirteenWords))
+        var line = routeLine(0, thirteenWords)
+        line.recognitionHints = ["sample"]
+        await failing.receive(line)
         await failing.sendTake()
         #expect(try await history.recent(limit: 1).first?.cleanupFallback == true)
+        #expect(try await history.recent(limit: 1).first?.recognitionHints == nil)
         await failing.retry()
         let entries = try await history.recent(limit: 10)
+        #expect(entries.first?.recognitionHints == ["sample"])
+        #expect(failing.outbox.last?.evidenceID == entries.first?.id)
         #expect(entries.count == 1 && entries.first?.cleanupFallback == nil, "A retry that cleans the take clears the mark")
     }
 

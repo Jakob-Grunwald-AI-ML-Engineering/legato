@@ -66,6 +66,8 @@ public struct LiveSegment: Codable, Equatable, Sendable {
 /// republished on every change (`version` counts up within `runID`); the keyboard diffs it against the field it
 /// typed and owns all edits, so only the words that differ are touched.
 public struct LiveDictationSnapshot: Codable, Equatable, Sendable {
+    /// Buffered transports use a sequence-based run ID. The history UUID identifies their speech across retries.
+    public var evidenceID: String?
     public var runID: String
     public var version: Int
     /// Assembled once by the producer; adapters never reconstruct punctuation or spacing.
@@ -94,10 +96,11 @@ public struct LiveDictationSnapshot: Codable, Equatable, Sendable {
         self.rawText = rawText ?? LiveSegment.joined(segments.map { $0.raw ?? $0.text }); self.text = LiveSegment.joined(segments.map(\.text))
         self.shadowAsk = shadowAsk; self.staged = staged; self.paused = paused
     }
-    private enum CodingKeys: String, CodingKey { case runID, version, text, segments, complete, stopped, rawText, shadowAsk, staged, paused }
+    private enum CodingKeys: String, CodingKey { case runID, evidenceID, version, text, segments, complete, stopped, rawText, shadowAsk, staged, paused }
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         runID = try values.decode(String.self, forKey: .runID)
+        evidenceID = try values.decodeIfPresent(String.self, forKey: .evidenceID)
         version = try values.decode(Int.self, forKey: .version)
         segments = try values.decode([LiveSegment].self, forKey: .segments)
         text = try values.decodeIfPresent(String.self, forKey: .text) ?? LiveSegment.joined(segments.map(\.text))
@@ -286,6 +289,11 @@ public struct LiveDictationRun: Sendable, Equatable {
     private var ready: Set<Int> = []
     /// Closed units (by index) the person discarded and whose undo window is open: kept as raw text, never cleaned or ready.
     private var discarded: Set<Int> = []
+    /// Final segment IDs stay stable when a preview is split or regrouped.
+    private var discardedFinals: Set<Int> = []
+    public var retainedSpeech: String {
+        LiveSegment.joined(finals.filter { !discardedFinals.contains($0.id) }.map(\.text))
+    }
     /// First segment ids, which stay stable if a unit elsewhere in the run splits.
     private struct PreviewComposition: Sendable, Equatable {
         let source: String?
@@ -466,7 +474,10 @@ public struct LiveDictationRun: Sendable, Equatable {
     @discardableResult
     public mutating func expireDiscarded() -> Bool {
         guard !discarded.isEmpty else { return false }
-        for unit in discarded { cleaned[unit] = ""; ready.insert(unit) }
+        for unit in discarded {
+            discardedFinals.formUnion(finals[units[unit]].map(\.id))
+            cleaned[unit] = ""; ready.insert(unit)
+        }
         discarded = []
         version += 1
         return true

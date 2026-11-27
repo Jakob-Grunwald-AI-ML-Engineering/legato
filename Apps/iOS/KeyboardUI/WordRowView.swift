@@ -111,6 +111,8 @@ struct WordRowView: View {
                         if position < ranks.count - 1 {
                             Rectangle().fill(Color(uiColor: KeyColors.divider))
                                 .frame(width: 0.67, height: 24)
+                                .accessibilityHidden(true)
+                                .allowsHitTesting(false)
                                 .opacity(words.isEmpty || pressed == position || pressed == position + 1
                                          || highlighted == position || highlighted == position + 1 ? 0 : 1)
                                 .transaction { $0.animation = nil }
@@ -130,55 +132,75 @@ private struct SuggestionSlot: View {
     let fontSize: CGFloat
     let highlighted: Bool
     let onPressChange: (Bool) -> Void
-    @State private var press = SuggestionPress()
+    @State private var isPressed = false
 
-    var body: some View {
-        Button {
-            if let tap = press.activate(current: nil) { controller.suggestionTapped(tap) }
-        } label: {
-            MorphingWord(text: word ?? "", fontSize: fontSize)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.black.opacity(0.001))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(WordSlotStyle(highlighted: highlighted, onPressChange: { isPressed in
-            if isPressed { press.began(controller.suggestionTap(rank: rank)) }
-            onPressChange(isPressed)
-        }))
-        .disabled(word == nil)
-        .accessibilityHidden(word == nil)
-        .accessibilityLabel(word ?? "")
-        .accessibilityHint(highlighted ? "Spelling correction. Tap to replace the word being typed." : "Tap to insert suggestion.")
-        .accessibilityIdentifier("keyboard.word.\(rank)")
-        .accessibilityAction {
-            // A canceled touch can leave its token behind. VoiceOver activates the announced row,
-            // independently of that touch; ordinary Button actions always keep their frozen token.
-            if let tap = press.activate(current: controller.suggestionTap(rank: rank), accessibility: true) {
-                controller.suggestionTapped(tap)
-            }
-        }
-    }
-}
-
-/// A word slot's press: a capsule across the whole slot (a little shorter than it), white over the bar, which
-/// appears and disappears within one frame, as on the system's bar.
-private struct WordSlotStyle: ButtonStyle {
-    let highlighted: Bool
-    let onPressChange: (Bool) -> Void
-
-    /// The system's pill is white at about 30% over the light bar; in dark mode the same lift needs less.
     private static let pill = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.15) : UIColor(white: 1, alpha: 0.3) })
 
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
+    var body: some View {
+        MorphingWord(text: word ?? "", fontSize: fontSize)
             .background {
                 Capsule(style: .continuous)
                     .fill(Self.pill)
                     .padding(.vertical, 4)
-                    .opacity(configuration.isPressed || highlighted ? 1 : 0)
+                    .opacity(isPressed || highlighted ? 1 : 0)
                     .transaction { $0.animation = nil }
             }
-            .onChange(of: configuration.isPressed) { _, isPressed in onPressChange(isPressed) }
+            .overlay {
+                SuggestionButton(controller: controller, rank: rank, word: word, correction: highlighted) {
+                    isPressed = $0
+                    onPressChange($0)
+                }
+            }
+    }
+}
+
+/// A slot owns one native control. Its visible bounds, touch target and VoiceOver frame move together,
+/// independently of the animated glyphs and dividers around it.
+private struct SuggestionButton: UIViewRepresentable {
+    let controller: KeyboardController
+    let rank: Int
+    let word: String?
+    let correction: Bool
+    let pressed: (Bool) -> Void
+
+    final class Control: UIButton {
+        var current: (() -> SuggestionTap?)?
+        var select: ((SuggestionTap) -> Void)?
+        var pressed: ((Bool) -> Void)?
+        private var press = SuggestionPress()
+
+        override var isHighlighted: Bool {
+            didSet { if oldValue != isHighlighted { pressed?(isHighlighted) } }
+        }
+
+        @objc func down() { press.began(current?()) }
+        @objc func up() {
+            if let tap = press.activate(current: nil) { select?(tap) }
+        }
+
+        override func accessibilityActivate() -> Bool {
+            guard isEnabled, let tap = press.activate(current: current?(), accessibility: true) else { return false }
+            select?(tap)
+            return true
+        }
+    }
+
+    func makeUIView(context: Context) -> Control {
+        let button = Control(type: .custom)
+        button.addTarget(button, action: #selector(Control.down), for: .touchDown)
+        button.addTarget(button, action: #selector(Control.up), for: .touchUpInside)
+        return button
+    }
+
+    func updateUIView(_ button: Control, context: Context) {
+        button.isEnabled = word != nil
+        button.isAccessibilityElement = word != nil
+        button.accessibilityIdentifier = "keyboard.word.\(rank)"
+        button.accessibilityLabel = word
+        button.accessibilityHint = correction ? "Spelling correction. Tap to replace the word being typed." : "Tap to insert suggestion."
+        button.current = { [weak controller] in controller?.suggestionTap(rank: rank) }
+        button.select = { [weak controller] in controller?.suggestionTapped($0) }
+        button.pressed = pressed
     }
 }
 
@@ -235,8 +257,8 @@ private struct MorphingWord: View {
                 if !next.glyphs.isEmpty { anchorWidth = Self.naturalWidth(of: next, fontSize: fontSize) }
             }
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(text)
+        // The slot owns the accessible label and hit area for its changing glyphs.
+        .accessibilityHidden(true)
     }
 
     /// Scale new glyphs around the font baseline so their feet stay level with retained letters.

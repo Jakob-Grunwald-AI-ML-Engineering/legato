@@ -2,13 +2,15 @@ import Foundation
 
 /// One finished dictation take: what was heard, what was written, and when.
 public struct RecentTake: Sendable, Equatable, Codable {
+    public var id: UUID?
     public var raw: String
     public var cleaned: String
     /// True when `cleaned` is the result of a cleanup call (a correction worth showing as raw to cleaned);
     /// false when the raw text was inserted as heard (context only).
     public var wasCleaned: Bool
     public var date: Date
-    public init(raw: String, cleaned: String, wasCleaned: Bool, date: Date) {
+    public init(raw: String, cleaned: String, wasCleaned: Bool, date: Date, id: UUID? = nil) {
+        self.id = id
         self.raw = raw; self.cleaned = cleaned; self.wasCleaned = wasCleaned; self.date = date
     }
 }
@@ -38,14 +40,23 @@ public final class RecentTakesStore: @unchecked Sendable {
     }
 
     /// Appends a finished take (older than-capacity and expired entries drop) and saves.
-    public func record(raw: String, cleaned: String, wasCleaned: Bool) {
+    public func record(raw: String, cleaned: String, wasCleaned: Bool, id: UUID? = nil) {
         let text = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         lock.lock(); defer { lock.unlock() }
         load()
+        if let id { takes.removeAll { $0.id == id } }
         takes.append(RecentTake(raw: String(raw.prefix(Self.entryLimit)), cleaned: String(text.prefix(Self.entryLimit)),
-                                wasCleaned: wasCleaned, date: now()))
+                                wasCleaned: wasCleaned, date: now(), id: id))
         prune()
+        save()
+    }
+
+    public func forget(id: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        load()
+        guard takes.contains(where: { $0.id == id }) else { return }
+        takes.removeAll { $0.id == id }
         save()
     }
 

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import LegatoCore
 @testable import LegatoKeyboardCore
 
 @Suite struct InputEditHistoryTests {
@@ -12,6 +13,34 @@ import Testing
             h.typed(String(ch), at: at(now))
             now += step
         }
+    }
+
+    @Test func onlyTheConfirmedChoiceTravelsWithItsUndoAndRedo() {
+        var history = EditHistory()
+        let evidence = TermEvidence(term: "Badhri", original: "Patrice", date: t, localeIdentifier: "en", origin: .selection)
+        history.record(removed: "Patrice", inserted: "Badhri", at: t, contextBefore: "Hi Badhri")
+        history.attachEvidence(evidence)
+        history.typed("!", at: t, contextBefore: "Hi Badhri!")
+        #expect(history.undoEvidence.isEmpty)
+        _ = history.undo(contextBefore: "Hi Badhri!")
+        #expect(history.undoEvidence == [evidence])
+        _ = history.undo(contextBefore: "Hi Badhri")
+        #expect(history.redoEvidence.map(\.id) == [evidence.id])
+        _ = history.redo(contextBefore: "Hi Patrice")
+        #expect(history.undoEvidence.map(\.id) == [evidence.id])
+    }
+
+    @Test func groupedUndoRetractsEveryWordAndRedoRestoresTheSameActions() {
+        var history = EditHistory()
+        let words = ["Kemas", "Badhri"]
+        let observations = words.map { TermEvidence(term: $0, date: t, localeIdentifier: "en", origin: .typed) }
+        history.typed(words.joined(separator: " "), at: t, contextBefore: "Kemas Badhri")
+        for observation in observations { history.attachEvidence(observation) }
+        #expect(history.undoEvidence == observations)
+        _ = history.undo(contextBefore: "Kemas Badhri")
+        #expect(history.redoEvidence == observations)
+        _ = history.redo(contextBefore: "")
+        #expect(history.undoEvidence == observations)
     }
 
     // MARK: typing groups

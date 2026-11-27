@@ -31,6 +31,7 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
     public let store: VocabularyStore
     /// The dictated word-pair model (`wordpairs-dictated.json`); nil where nothing predicts (the Mac).
     public let pairs: WordPairStore?
+    private let corrections: CorrectionStore
     private let pairsFileURL: URL?
     private let languages: @Sendable () -> [String]
     private let spellChecker: any SpellChecking
@@ -57,6 +58,7 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
         now: @escaping @Sendable () -> Date = { Date() }, pairsFileURL: URL? = nil
     ) {
         store = VocabularyStore(fileURL: fileURL)
+        corrections = CorrectionStore(root: fileURL.deletingLastPathComponent())
         requestVocabulary = RequestVocabulary(fileURL: fileURL, languages: languages, spellChecker: spellChecker, halfLife: halfLife)
         self.pairsFileURL = pairsFileURL
         pairs = pairsFileURL.map { WordPairStore(fileURL: $0, languages: languages()) }
@@ -122,6 +124,25 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
         }
     }
 
+    /// A completed composer take owns its source observations. A late final or retry replaces the same take.
+    func learnFromFinalizedTake(_ entry: DictationEntry, history: any HistoryStore) {
+        guard let raw = entry.spokenEvidence, let hints = entry.recognitionHints else { return }
+        spawn { [self] in
+            if (try? await corrections.personalizationEnabled()) == true {
+                let candidates = await VocabularyLearner.candidateTerms(in: raw, locale: Locale(identifier: entry.localeIdentifier),
+                    languages: languages(), spellChecker: spellChecker, tagger: tagger,
+                    snapshot: try? await store.snapshot(), suggested: hints)
+                let takeID = entry.id.uuidString
+                let observations = candidates.map {
+                    TermEvidence.recognized(takeID: entry.id, term: $0.text, date: entry.date, localeIdentifier: entry.localeIdentifier,
+                                            promotionCount: $0.threshold)
+                }
+                try? await corrections.replaceRecognizedEvidence(takeID: takeID, with: observations)
+            }
+            if let pairs { _ = await rebuildPairs(pairs, from: history) }
+        }
+    }
+
     /// Learns from a tapped alternative in the keyboard (see ``VocabularyLearner/recordChoice(original:chosen:fromVocabulary:)``).
     /// Returns at once.
     public func recordChoice(original: String, chosen: String, fromVocabulary: Bool) {
@@ -158,7 +179,13 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
     /// stay old); false when history can't be read.
     private func rebuildPairs(_ pairs: WordPairStore, from history: any HistoryStore) async -> Bool {
         guard let recent = try? await history.recent(limit: Self.pairHistoryLimit) else { return false }
-        return (try? await pairs.rebuild(entries: recent.reversed().map { ($0.rawText ?? $0.text, $0.date) }, now: now())) != nil
+        var seen = Set<UUID>()
+        let unique = recent.filter { seen.insert($0.id).inserted }
+        let entries = unique.reversed().compactMap { entry -> (String, Date)? in
+            guard entry.engineID != ComposerHistoryBackfill.engineID, let raw = entry.spokenEvidence else { return nil }
+            return (raw, entry.date)
+        }
+        return (try? await pairs.rebuild(entries: entries, now: now())) != nil
     }
 
     /// Learns from what cleanup run `runID` changed. Returns at once. `suggested`: the terms the model was
@@ -184,6 +211,8 @@ public final class VocabularyService: VocabularyHintProvider, Sendable {
     /// entries: it is derived data and can't be taken apart per dictation.
     public func forget(dictationID id: UUID, remainingHistory history: (any HistoryStore)? = nil) {
         spawn { [self] in
+            try? await corrections.invalidateVocabularyEvidence(takeID: id.uuidString)
+            try? await corrections.replaceRecognizedEvidence(takeID: id.uuidString, with: [])
             try? await store.forget(id: id)
             if let history, let pairs { _ = await rebuildPairs(pairs, from: history) }
         }

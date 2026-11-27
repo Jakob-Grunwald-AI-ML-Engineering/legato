@@ -1,5 +1,6 @@
 import Foundation
 import LegatoCore
+import LegatoAgent
 
 /// A ``HistoryStore`` that lets the vocabulary learn from what is appended. Every call goes to the wrapped
 /// store; after an append that succeeded, the entry's raw text (or final text when no raw text exists) is handed to the service, which learns in
@@ -10,25 +11,34 @@ import LegatoCore
 public struct LearningHistoryStore: HistoryStore {
     private let base: any HistoryStore
     private let vocabulary: VocabularyService
+    private let recentTakes: RecentTakesStore?
 
-    public init(_ base: any HistoryStore, vocabulary: VocabularyService) {
+    public init(_ base: any HistoryStore, vocabulary: VocabularyService, recentTakes: RecentTakesStore? = nil) {
+        self.recentTakes = recentTakes
         self.base = base
         self.vocabulary = vocabulary
     }
 
     public func append(_ entry: DictationEntry) async throws {
         try await base.append(entry)
-        vocabulary.learnFromDictation(text: entry.rawText ?? entry.text, locale: Locale(identifier: entry.localeIdentifier), id: entry.id)
+        if entry.recognitionHints != nil {
+            vocabulary.learnFromFinalizedTake(entry, history: base)
+        } else if let raw = entry.spokenEvidence {
+            vocabulary.learnFromDictation(text: raw, locale: Locale(identifier: entry.localeIdentifier), id: entry.id)
+        }
     }
 
-    /// Upserts are provisional checkpoints of a draft, so they teach nothing: repeated edits must not
-    /// re-count pairs, and generated text is not a spoken sighting.
-    public func upsert(_ entry: DictationEntry) async throws { try await base.upsert(entry) }
+    /// Only an explicitly finalized recognition can teach. Checkpoints, old imports and Magic writes have no hints receipt.
+    public func upsert(_ entry: DictationEntry) async throws {
+        try await base.upsert(entry)
+        if entry.recognitionHints != nil { vocabulary.learnFromFinalizedTake(entry, history: base) }
+    }
 
     public func recent(limit: Int) async throws -> [DictationEntry] { try await base.recent(limit: limit) }
 
     public func delete(id: UUID) async throws {
         try await base.delete(id: id)
+        recentTakes?.forget(id: id)
         // After the base delete, so the pair rebuild reads history without the dictation.
         vocabulary.forget(dictationID: id, remainingHistory: base)
     }
