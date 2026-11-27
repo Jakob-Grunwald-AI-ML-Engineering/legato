@@ -51,8 +51,9 @@ final class LinkClient {
         }
     }
 
-    /// Stops the `link.host` observation; the handlers never run again.
+    /// Stops every observation; the handlers never run again until observed anew.
     func stopObserving() { observers.removeAll() }
+    var isObserving: Bool { !observers.isEmpty }
 
     func readHost() -> HostState? {
         #if DEBUG

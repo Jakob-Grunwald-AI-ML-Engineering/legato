@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import LegatoCore
 import LegatoKeyboardCore
@@ -21,6 +20,8 @@ final class PreviewDiagnostics {
         case controllerCreated, willAppear, willDisappear, didDisappear, controllerTornDown, memoryWarning, autoFillSwitch
         case requestIssued, requestReceived, snapshotPublished, snapshotReceived, transitionStarted, transitionMounted, transitionEnded
         case historySaved, historyWriteFailed
+        /// The preview should show text but evidently does not (`PreviewBlank`); the process recycle checks (#342).
+        case previewBlank, recycleWait, processRecycled
     }
 
     struct Context: Codable {
@@ -61,6 +62,43 @@ final class PreviewDiagnostics {
 
     enum Role: String, Codable { case app, keyboard, harness }
 
+    /// Why a shown preview counts as blank, and what would name the cause: the text against the glyphs the renderer drew, whether
+    /// it drew at all since the text changed, where the text sits against the scroll viewport, and whether the view is on screen.
+    /// Lengths and geometry only, never the text.
+    struct PreviewBlank: Codable {
+        enum Reason: String, Codable { case drawStall, noGlyphs, offViewport, detached, noInk }
+        var reasons: [Reason]
+        var textCharacters: Int
+        var revealHidden: Int
+        var draws: Int
+        var drawsSinceChange: Int
+        var msSinceDraw: Int?
+        var laidOutGlyphs: Int
+        var drawnGlyphs: Int
+        var textMinY: Double?
+        var textMaxY: Double?
+        var viewportMinY: Double?
+        var viewportMaxY: Double?
+        var scrollOffset: Double
+        var contentHeight: Double
+        var containerHeight: Double
+        var inWindow: Bool?
+        var viewAlpha: Double?
+        var viewHidden: Bool?
+        var hostAlpha: Double?
+        var hostHidden: Bool?
+        /// The share of the preview's pixels that differ from its background, from a snapshot; nil when not sampled.
+        var ink: Double?
+    }
+
+    /// A recycle check that found the process unhealthy (`KeyboardRecyclePolicy`).
+    struct Recycle: Codable {
+        var reason: KeyboardRecyclePolicy.Reason
+        var blocker: KeyboardRecyclePolicy.Blocker?
+        var owesWork: Bool
+        var quietSeconds: Double
+    }
+
     static let app = PreviewDiagnostics(.app)
     #if APP_TARGET
     static let keyboard = PreviewDiagnostics(.harness)
@@ -86,6 +124,9 @@ final class PreviewDiagnostics {
         let outcome: PreviewTransitionOutcome?
         let footprintBytes: UInt64?
         let availableBytes: Int?
+        let process: KeyboardProcess.Census?
+        let blank: PreviewBlank?
+        let recycle: Recycle?
     }
 
     private static let log = Logger(subsystem: RuntimeIdentity.current.notificationNamespace, category: "magic-preview")
@@ -100,28 +141,17 @@ final class PreviewDiagnostics {
                                 rotateBytes: 64 * 1024)
     }()
 
-    private static func footprint() -> UInt64? {
-        var info = task_vm_info_data_t()
-        let capacity = MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size
-        var count = mach_msg_type_number_t(capacity)
-        let result = withUnsafeMutablePointer(to: &info) { pointer in
-            pointer.withMemoryRebound(to: integer_t.self, capacity: capacity) {
-                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
-            }
-        }
-        guard result == KERN_SUCCESS, let offset = MemoryLayout<task_vm_info_data_t>.offset(of: \.phys_footprint),
-              Int(count) * MemoryLayout<integer_t>.size >= offset + MemoryLayout<UInt64>.size else { return nil }
-        return info.phys_footprint
-    }
     #endif
 
     func record(_ event: Event, context: Context = .init(), keyboard: Keyboard? = nil, command: RequestCommand? = nil,
-                transitionID: UUID? = nil, outcome: PreviewTransitionOutcome? = nil, sampleMemory: Bool = false) {
+                transitionID: UUID? = nil, outcome: PreviewTransitionOutcome? = nil, sampleMemory: Bool = false,
+                census: Bool = false, blank: PreviewBlank? = nil, recycle: Recycle? = nil) {
         #if DEBUG || LEGATO_INTERNAL
         let value = Entry(event: event, role: role, atMs: Int64(Date().timeIntervalSince1970 * 1000), pid: Self.pid,
                           processInstance: Self.processInstance, context: context, keyboard: keyboard, command: command,
-                          transitionID: transitionID, outcome: outcome, footprintBytes: sampleMemory ? Self.footprint() : nil,
-                          availableBytes: sampleMemory ? os_proc_available_memory() : nil)
+                          transitionID: transitionID, outcome: outcome, footprintBytes: sampleMemory ? KeyboardProcess.footprint() : nil,
+                          availableBytes: sampleMemory ? KeyboardProcess.availableMemory : nil,
+                          process: census ? KeyboardProcess.census : nil, blank: blank, recycle: recycle)
         guard var data = try? encoder.encode(value) else { return }
         Self.log.notice("\(String(decoding: data, as: UTF8.self), privacy: .public)")
         data.append(0x0A)

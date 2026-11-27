@@ -111,7 +111,7 @@ final class KeyboardController {
     @ObservationIgnored private var lastJournaledReport: FieldQueue.Report?
     /// Proposes the host's text a few characters at a time; the queue lands it. `ticker` drives both while work is left.
     @ObservationIgnored private var ticker: Task<Void, Never>?
-    @ObservationIgnored private var isTornDown = false
+    @ObservationIgnored private(set) var isTornDown = false
     private var forcedOpenAppUntil: Date?
     private var remoteRequestID: String?
     private var pendingRemoteStartID: String?
@@ -138,10 +138,6 @@ final class KeyboardController {
         self.dictationKeyHints = dictationKeyHints
         emojiSystemSwitcher = current.emojiSystemSwitcher
         host = link.readHost()
-        link.observeHost { [weak self] in self?.hostDidChange() }
-        link.observeDictationStatus { [weak self] in self?.dictationStatusArrived() }
-        link.observeLiveDictation { [weak self] in self?.receiveLiveDictation() }
-        link.observeInstruction { [weak self] in self?.receiveInstruction() }
         if let correctionStore {
             correctionCapture = CorrectionCapture(store: correctionStore)
         } else if let root = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: LinkChannel.appGroupID) {
@@ -164,7 +160,28 @@ final class KeyboardController {
                 self.styleLog?.record(takeID: id, action: .boundary, context: field.context)
             }
         }
+        KeyboardProcess.register(self)
         recordPreviewLifecycle(.controllerCreated)
+    }
+
+    /// The app's Darwin notes reach only a visible keyboard: a hidden controller ignores them anyway, and one UIKit keeps alive
+    /// must cost nothing (#342). Appearing catches up by reading the link (`appeared`).
+    private func observeLink() {
+        guard !link.isObserving else { return }
+        link.observeHost { [weak self] in self?.hostDidChange() }
+        link.observeDictationStatus { [weak self] in self?.dictationStatusArrived() }
+        link.observeLiveDictation { [weak self] in self?.receiveLiveDictation() }
+        link.observeInstruction { [weak self] in self?.receiveInstruction() }
+    }
+
+    /// Work the process must not be ended under (`KeyboardRecyclePolicy`): a take this keyboard is following, a field edit,
+    /// read or instruction in flight, a mic-key start, cleanup still landing, or a word-row write. A take blocked on hide is not
+    /// owed: it is in History, as when the controller is released.
+    var holdsWork: Bool {
+        if !queue.isIdle || !editCompletions.isEmpty || activeInstructionID != nil || isFieldBusy || pendingRemoteStartID != nil
+            || cleanup.isActive || wordRow.isWriting { return true }
+        guard let snapshot = liveSnapshot else { return false }
+        return !snapshot.complete || (stagedTake.runID == snapshot.runID && !stagedTake.isFinished)
     }
 
     var evidenceStore: CorrectionStore? { correctionCapture?.store }
@@ -600,6 +617,7 @@ final class KeyboardController {
             #endif
         }
         isVisible = true
+        observeLink()
         recordPreviewLifecycle(.willAppear)
         statusPoll?.cancel()
         statusPoll = Task { [weak self] in
@@ -670,6 +688,7 @@ final class KeyboardController {
         typing.disappeared()
         heartbeat?.cancel()
         heartbeat = nil
+        link.stopObserving()
         link.writePresence(visible: false, notify: true)
         trace?("visible value=0")
     }
@@ -1710,8 +1729,28 @@ final class KeyboardController {
         #if DEBUG || LEGATO_INTERNAL
         let context = liveSnapshot?.previewDiagnosticRevision().map(PreviewDiagnostics.Context.init)
             ?? .init(runID: liveSnapshot?.runID, revision: liveSnapshot?.version)
-        PreviewDiagnostics.keyboard.record(event, context: context, keyboard: previewDiagnosticKeyboard, sampleMemory: true)
+        PreviewDiagnostics.keyboard.record(event, context: context, keyboard: previewDiagnosticKeyboard, sampleMemory: true, census: true)
         #endif
+    }
+
+    /// The preview should show text but evidently does not (`PreviewRow`'s check). Counted for the recycle policy in every build
+    /// that checks; written to the diagnostics at a bounded rate.
+    func recordPreviewBlank(_ blank: PreviewDiagnostics.PreviewBlank) {
+        guard isVisible, !isTornDown, KeyboardProcess.notePreviewBlank() else { return }
+        #if DEBUG || LEGATO_INTERNAL
+        let context = liveSnapshot?.previewDiagnosticRevision().map(PreviewDiagnostics.Context.init)
+            ?? .init(runID: liveSnapshot?.runID, revision: liveSnapshot?.version)
+        PreviewDiagnostics.keyboard.record(.previewBlank, context: context, keyboard: previewDiagnosticKeyboard, sampleMemory: true,
+                                           census: true, blank: blank)
+        #endif
+    }
+
+    /// Whether the keyboard's views are on screen, for the blank-preview check: the input view controller's view and the hosting
+    /// view inside it. Nil outside the extension (the harness has no input view controller).
+    var hostViewState: (inWindow: Bool, alpha: Double, hidden: Bool, hostAlpha: Double?, hostHidden: Bool?, window: UIWindow?)? {
+        guard let view = inputModeTarget?.viewIfLoaded else { return nil }
+        let host = view.subviews.first
+        return (view.window != nil, Double(view.alpha), view.isHidden, host.map { Double($0.alpha) }, host?.isHidden, view.window)
     }
 
     private func recordPreviewRequest(_ command: RequestCommand, id: String, runID: String?, unitID: Int?) {
