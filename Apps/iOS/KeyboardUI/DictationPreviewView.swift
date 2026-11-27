@@ -180,6 +180,18 @@ private final class ExitProbe {
     var line: (minY: CGFloat, maxY: CGFloat)?
 }
 
+/// What the renderer last drew, for the blank-preview check (`PreviewRow.checkBlank`, internal builds): which text, how many
+/// glyphs it laid out and drew, and where they sit. Drawing writes it, like `ExitProbe`.
+private final class PreviewDrawProbe {
+    var draws = 0
+    var lastDrawAt: Date?
+    /// The `generation` of the text last drawn (`PreviewRenderer.generation`).
+    var generation: Int?
+    var laidOut = 0
+    var drawn = 0
+    var bounds: CGRect?
+}
+
 private final class RewriteReference {
     var glyphs: [Int: CGRect] = [:]
     var bottom: CGFloat?
@@ -267,6 +279,9 @@ private struct PreviewRenderer: TextRenderer {
     var hidden = 0
     /// Room above the text for the leaving letters' lift (the scroll view clips the rest).
     var displayPadding = EdgeInsets(top: 8, leading: 0, bottom: 0, trailing: 0)
+    /// Internal builds: where to note what was drawn, and which text it was.
+    var drawProbe: PreviewDrawProbe? = nil
+    var generation = 0
 
     static let lift = MagicPreviewEffects.lift
     static let fadeSeconds = MagicPreviewEffects.poofSeconds
@@ -287,15 +302,18 @@ private struct PreviewRenderer: TextRenderer {
         let bottom = layout.last?.typographicBounds.rect.maxY
         var poofContext = context
         if capturesReference, let viewport { poofContext.clip(to: Path(viewport)) }
+        var drawn = 0
         func drawPlain(_ run: Text.Layout.Run, trackSurvivors: Bool, shimmer: Bool, in context: inout GraphicsContext) {
             if visible == Int.max && !trackSurvivors {
                 position += run.count
+                drawn += run.count
                 context.draw(run)
                 if shimmer { waiting.append(contentsOf: run) }
                 return
             }
             for slice in run {
                 if position < visible {
+                    drawn += 1
                     if trackSurvivors, let reference, let oldIndex = rewrite?.survivors[position],
                        let old = reference.glyphs[oldIndex], let oldBottom = reference.bottom, let bottom {
                         MagicPreviewEffects.drawSurvivor(slice, from: old, verticalAdjustment: bottom - oldBottom,
@@ -321,7 +339,7 @@ private struct PreviewRenderer: TextRenderer {
                     if glyph <= exits.count { probe.line = (bounds.minY, bounds.maxY) }
                     position += run.count
                     guard animateLine else {
-                        if glyph >= exits.count { context.draw(run) }
+                        if glyph >= exits.count { context.draw(run); drawn += run.count }
                         glyph += run.count
                         continue
                     }
@@ -333,6 +351,7 @@ private struct PreviewRenderer: TextRenderer {
                         copy.opacity = 1 - progress
                         if lifts { copy.translateBy(x: 0, y: -Self.lift * CGFloat(1 - (1 - progress) * (1 - progress))) }
                         copy.draw(slice)
+                        drawn += 1
                     }
                 case .waiting?:
                     drawPlain(run, trackSurvivors: false, shimmer: shimmers && animateLine, in: &context)
@@ -343,11 +362,13 @@ private struct PreviewRenderer: TextRenderer {
                     guard animateLine else {
                         position += run.count
                         entrance += run.count
+                        drawn += run.count
                         context.draw(run)
                         continue
                     }
                     for slice in run {
                         position += 1
+                        drawn += 1
                         let delay = Double(entrance / glyphsPerPiece) * entranceGap
                         entrance += 1
                         let reveal = min(1, max(0, (elapsed - Self.fadeSeconds / 2 - delay) / MagicPreviewEffects.entranceSeconds))
@@ -366,6 +387,16 @@ private struct PreviewRenderer: TextRenderer {
             reference?.bottom = bottom
         }
         MagicPreviewEffects.drawShimmer(waiting, in: layout, now: now, context: context, viewport: viewport)
+        if let drawProbe {
+            drawProbe.draws += 1
+            drawProbe.lastDrawAt = Date()
+            drawProbe.generation = generation
+            drawProbe.laidOut = layout.reduce(0) { $0 + $1.reduce(0) { $0 + $1.count } }
+            drawProbe.drawn = drawn
+            drawProbe.bounds = layout.reduce(nil as CGRect?) { bounds, line in
+                bounds.map { $0.union(line.typographicBounds.rect) } ?? line.typographicBounds.rect
+            }
+        }
     }
 }
 
@@ -417,6 +448,9 @@ private struct PreviewRow: View {
     @State private var metrics = ScrollMetrics()
     @State private var scrollPhase = ScrollPhase.idle
     @State private var resumeTask: Task<Void, Never>?
+    @State private var drawProbe = PreviewDrawProbe()
+    @State private var previewFrame: CGRect?
+    @State private var lastInkSample: Date?
 
     private struct ScrollMetrics: Equatable { var offset = 0.0, content = 0.0, container = 0.0 }
     private var scrollable: Bool { metrics.content > metrics.container + 0.5 }
@@ -473,7 +507,8 @@ private struct PreviewRow: View {
                             .textRenderer(PreviewRenderer(now: timeline.date, exits: exits, shimmers: shimmers, lifts: !reduceMotion,
                                                           probe: probe, rewrite: transition,
                                                           reference: transition == nil ? nil : rewriteReference,
-                                                          viewport: textViewport, hidden: reveal.hidden))
+                                                          viewport: textViewport, hidden: reveal.hidden,
+                                                          drawProbe: Self.checksBlank ? drawProbe : nil, generation: visibleText.hashValue))
                             .onGeometryChange(for: CGRect?.self) { $0.bounds(of: .scrollView(axis: .vertical)) } action: {
                                 textViewport = $0
                             }
@@ -562,6 +597,10 @@ private struct PreviewRow: View {
             .onChange(of: reduceMotion) { _, reduced in if reduced { finishRewrite(.reduceMotion) } }
             .onChange(of: instruction.isEmpty) { _, empty in if !empty { finishRewrite(.cancelled) } }
             .onDisappear { finishRewrite(.cancelled) }
+            #if DEBUG || LEGATO_INTERNAL
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { previewFrame = $0 }
+            .task(id: visibleText) { await checkBlank(visibleText) }
+            #endif
             .onChange(of: leavingText) { old, new in
                 if new.isEmpty {
                     exits = []
@@ -574,6 +613,84 @@ private struct PreviewRow: View {
             }
         }
     }
+
+    // MARK: Blank check (#342)
+
+    #if DEBUG || LEGATO_INTERNAL
+    private static let checksBlank = true
+    #else
+    private static let checksBlank = false
+    #endif
+    /// How long the text holds still before the check: the typewriter reveal and a cleanup transition are over by then. An estimate.
+    private static let blankCheckDelay = Duration.seconds(1)
+    /// The pixel snapshot runs at most this often, and only when nothing cheaper names the cause. An estimate.
+    private static let inkSampleInterval: TimeInterval = 5
+    /// Less ink than this share of the preview's pixels counts as nothing drawn. An estimate: one short word covers about 1%.
+    private static let minimumInk = 0.002
+
+    #if DEBUG || LEGATO_INTERNAL
+    /// Once the text has held still, the preview should show it (the "Listening…" placeholder included). When it evidently does
+    /// not, the controller records `previewBlank` with what would name the cause next time.
+    private func checkBlank(_ visible: String) async {
+        let drawsAtChange = drawProbe.draws
+        try? await Task.sleep(for: Self.blankCheckDelay)
+        guard !Task.isCancelled, !visible.isEmpty, controller.isVisible, metrics.container > 0 else { return }
+        var reasons: [PreviewDiagnostics.PreviewBlank.Reason] = []
+        let drawnNow = drawProbe.generation == visible.hashValue
+        if !drawnNow { reasons.append(.drawStall) }
+        if drawnNow, drawProbe.laidOut > 0, drawProbe.drawn == 0 { reasons.append(.noGlyphs) }
+        if let text = drawProbe.bounds, let viewport = textViewport, !viewport.intersects(text) { reasons.append(.offViewport) }
+        let host = controller.hostViewState
+        if let host, !host.inWindow || host.hidden || host.alpha < 0.01 || host.hostHidden == true || (host.hostAlpha ?? 1) < 0.01 {
+            reasons.append(.detached)
+        }
+        var ink: Double?
+        if reasons.isEmpty, let window = host?.window, let frame = previewFrame,
+           lastInkSample.map({ Date().timeIntervalSince($0) >= Self.inkSampleInterval }) ?? true {
+            lastInkSample = Date()
+            ink = Self.inkShare(of: window, in: frame)
+            if let ink, ink < Self.minimumInk { reasons.append(.noInk) }
+        }
+        guard !reasons.isEmpty else { return }
+        let since = drawProbe.lastDrawAt.map { Int(Date().timeIntervalSince($0) * 1000) }
+        controller.recordPreviewBlank(.init(
+            reasons: reasons, textCharacters: visible.count, revealHidden: reveal.hidden, draws: drawProbe.draws,
+            drawsSinceChange: drawProbe.draws - drawsAtChange, msSinceDraw: since, laidOutGlyphs: drawProbe.laidOut,
+            drawnGlyphs: drawProbe.drawn, textMinY: drawProbe.bounds.map { Double($0.minY) }, textMaxY: drawProbe.bounds.map { Double($0.maxY) },
+            viewportMinY: textViewport.map { Double($0.minY) }, viewportMaxY: textViewport.map { Double($0.maxY) },
+            scrollOffset: metrics.offset, contentHeight: metrics.content, containerHeight: metrics.container,
+            inWindow: host?.inWindow, viewAlpha: host?.alpha, viewHidden: host?.hidden, hostAlpha: host?.hostAlpha,
+            hostHidden: host?.hostHidden, ink: ink))
+    }
+
+    /// The share of pixels in `frame` (window coordinates) that differ from the most common one, from what is on screen. The
+    /// preview's own background is clear or one glow colour, so text is most of what differs. One small snapshot at scale 1.
+    private static func inkShare(of window: UIWindow, in frame: CGRect) -> Double? {
+        let rect = frame.intersection(window.bounds)
+        guard rect.width >= 4, rect.height >= 4 else { return nil }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        let image = UIGraphicsImageRenderer(size: rect.size, format: format).image { context in
+            context.cgContext.translateBy(x: -rect.minX, y: -rect.minY)
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+        }
+        guard let cg = image.cgImage, cg.bitsPerPixel == 32, let data = cg.dataProvider?.data,
+              let bytes = CFDataGetBytePtr(data) else { return nil }
+        let width = cg.width, height = cg.height, stride = cg.bytesPerRow
+        guard width > 0, height > 0 else { return nil }
+        // Four bits a channel: anti-aliasing and the glow's gradient stay near the background's bucket.
+        func bucket(_ p: UnsafePointer<UInt8>) -> Int { Int(p[0] >> 4) << 12 | Int(p[1] >> 4) << 8 | Int(p[2] >> 4) << 4 | Int(p[3] >> 4) }
+        var counts = [Int: Int]()
+        for y in 0..<height { for x in 0..<width { counts[bucket(bytes + y * stride + x * 4), default: 0] += 1 } }
+        guard let background = counts.max(by: { $0.value < $1.value })?.key else { return nil }
+        func far(_ a: Int, _ b: Int) -> Bool {
+            (0..<4).contains { abs(((a >> ($0 * 4)) & 0xF) - ((b >> ($0 * 4)) & 0xF)) > 1 }
+        }
+        let inked = counts.reduce(0) { $0 + (far($1.key, background) ? $1.value : 0) }
+        return Double(inked) / Double(width * height)
+    }
+    #endif
 
     private func finishRewrite(_ outcome: PreviewTransitionOutcome) {
         if let rewriteDiagnostic { controller.endPreviewTransition(rewriteDiagnostic, outcome: outcome) }

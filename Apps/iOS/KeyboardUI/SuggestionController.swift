@@ -83,6 +83,20 @@ final class SuggestionController {
     private var typedStore: WordPairStore?
     private var typedWrittenStamp: Date?
     private var writeChain: Task<Void, Never>?
+    /// Writes chained and not finished: the process is not recycled under them (`KeyboardController.holdsWork`).
+    private var pendingWrites = 0
+    var isWriting: Bool { pendingWrites > 0 }
+
+    /// Chains a write after the ones before, counted until it finishes.
+    private func chainWrite(_ write: @escaping @MainActor () async -> Void) {
+        let previous = writeChain
+        pendingWrites += 1
+        writeChain = Task { [weak self] in
+            await previous?.value
+            await write()
+            self?.pendingWrites -= 1
+        }
+    }
 
     #if DEBUG
     private static let logger = Logger(subsystem: "de.gruenwald.legato", category: "e2e")
@@ -580,11 +594,9 @@ final class SuggestionController {
 
     func updateEvidence(_ action: TermEvidence, retract: Bool = false) {
         guard let store = controller.evidenceStore else { return }
-        let previous = writeChain
         let languages = self.languages
         let snapshot = resources.snapshot
-        writeChain = Task { [weak self] in
-            await previous?.value
+        chainWrite { [weak self] in
             if retract {
                 try? await store.deleteTermEvidence(id: action.id)
             } else if (try? await store.personalizationEnabled()) == true {
@@ -605,9 +617,7 @@ final class SuggestionController {
     private func learn(_ sentence: String) {
         guard let directory = container else { return }
         let url = directory.appending(path: Self.typedFile)
-        let previous = writeChain
-        writeChain = Task { [weak self] in
-            _ = await previous?.value
+        chainWrite { [weak self] in
             guard let self else { return }
             // A file changed behind the store's back (the app wiped it) starts a fresh store, which reads it again.
             let stamp = Self.modified(url)

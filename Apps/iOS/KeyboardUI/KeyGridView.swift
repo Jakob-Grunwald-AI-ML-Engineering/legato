@@ -113,6 +113,8 @@ final class KeyGridView: UIView {
     }
 
     private func cancelTouches() {
+        // Layout calls this: with nothing to cancel it must not read the typing model (see `draw`).
+        guard !touchStates.isEmpty || presentation.cursorPanning else { return }
         for state in touchStates.values {
             state.hold?.cancel()
             typing?.keyCancelled(state.origin)
@@ -317,6 +319,9 @@ final class KeyGridView: UIView {
 
     // MARK: Drawing
 
+    /// Draws only from the values `apply` was handed, never from the `@Observable` typing model: UIKit tracks what `draw`
+    /// and `layoutSubviews` read, and a change after the keyboard left the screen queued a redraw that never ran, which
+    /// kept this view and its keyboard alive (#342).
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
         let trait = traitCollection
@@ -325,7 +330,7 @@ final class KeyGridView: UIView {
             guard !overlayKeys.contains(key.id), let frame = frames[key.id] else { continue }
             drawKey(key, in: frame, pressed: held.contains(key.id), ctx: ctx, trait: trait)
         }
-        guard typing?.isCursorPanning != true else { return }
+        guard !presentation.cursorPanning else { return }
         for state in touchStates.values {
             if state.picking {
                 drawStrip(state, ctx: ctx, trait: trait)
@@ -364,7 +369,7 @@ final class KeyGridView: UIView {
         }
         fill(CGPath(roundedRect: frame, cornerWidth: g.radius, cornerHeight: g.radius, transform: nil), color: color, ctx: ctx, trait: trait)
 
-        guard typing?.isCursorPanning != true else { return }
+        guard !presentation.cursorPanning else { return }
         let inkColor = ink.resolvedColor(with: trait)
         switch key.action {
         case .character(let c):
@@ -464,7 +469,7 @@ final class KeyGridView: UIView {
     }
 
     private func drawPopup(for key: Key, frame: CGRect, ctx: CGContext, trait: UITraitCollection) {
-        guard let text = typing?.output(of: key) else { return }
+        guard let text = key.output(uppercase: presentation.uppercase) else { return }
         let g = geometry
         let path = popupPath(for: frame)
         ctx.saveGState()
