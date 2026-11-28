@@ -30,8 +30,8 @@ struct DictationPreviewView: View {
         let instruction = controller.previewInstructionText
         ZStack(alignment: keySide == .right ? .bottomTrailing : .bottomLeading) {
             PreviewRow(controller: controller, text: text, instruction: instruction, layout: controller.dictationPreviewLayout, draft: draft,
-                       canSend: controller.canSendPreview,
-                       canDiscard: controller.canDiscardPreview, insets: Self.textInsets(keySide: keySide), bandHeight: bandHeight, reservesChip: showsUndo,
+                       canSend: controller.previewOffersSend,
+                       canDiscard: controller.previewOffersDiscard, insets: Self.textInsets(keySide: keySide), bandHeight: bandHeight, reservesChip: showsUndo,
                        hold: PreviewHoldGesture(controller: controller, onBloom: showBloom),
                        onSendRaw: { controller.previewSwiped() },
                        onDiscard: { controller.discardPreview() })
@@ -42,8 +42,8 @@ struct DictationPreviewView: View {
                 .accessibilityHint(controller.canComposePreview ? "Tap to clean up. Press to speak Magic instructions. Swipe right to insert, left to clear." : draft != nil ? "Swipe right to insert, left to clear." : "")
                 .accessibilityAddTraits(controller.canComposePreview ? .isButton : [])
                 .accessibilityAction(named: "Compose draft") { controller.composePreviewWithoutInstructions() }
-                .accessibilityAction(named: draft == nil ? "Insert without cleanup" : "Insert draft") { if controller.canSendPreview { controller.previewSwiped() } }
-                .accessibilityAction(named: "Clear") { if controller.canDiscardPreview { controller.discardPreview() } }
+                .accessibilityAction(named: draft == nil ? "Insert without cleanup" : "Insert draft") { if controller.previewOffersSend { controller.previewSwiped() } }
+                .accessibilityAction(named: "Clear") { if controller.previewOffersDiscard { controller.discardPreview() } }
                 .accessibilityIdentifier("keyboard.hint")
             if showsUndo { undoChip.transition(.opacity) }
         }
@@ -157,8 +157,9 @@ private struct PreviewHoldGesture: UIGestureRecognizerRepresentable {
     func updateUIGestureRecognizer(_ recognizer: Recognizer, context: Context) {
         let coordinates = context.converter
         recognizer.tapped = { [weak controller, onBloom] point in
-            guard let controller, controller.canComposePreview else { return }
-            onBloom(coordinates.convert(globalPoint: point))
+            guard let controller, controller.previewOffersCompose else { return }
+            // Without Full Access the tap only says how to turn it on (`KeyboardController.needsFullAccess`): no bloom.
+            if controller.canComposePreview { onBloom(coordinates.convert(globalPoint: point)) }
             controller.composePreviewWithoutInstructions()
         }
     }
@@ -429,6 +430,8 @@ private struct PreviewRow: View {
     let instruction: String
     let layout: StagedDictation.PreviewLayout?
     let draft: StagedDictation.PreviewDraft?
+    /// The preview takes a swipe right or left (`KeyboardController.previewOffersSend`, `previewOffersDiscard`); without Full Access
+    /// the swipe reaches the controller, which says how to turn it on.
     let canSend: Bool
     let canDiscard: Bool
     /// The text's leading and trailing insets (`WordRowLayout.insets`).
@@ -579,8 +582,10 @@ private struct PreviewRow: View {
                         case .sendRaw? where canSend:
                             fired = true
                             Task { @MainActor in
+                                // Without Full Access the swipe only says how to turn it on: no swoosh.
+                                let sends = controller.canSendPreview
                                 onSendRaw()
-                                playSwoosh()
+                                if sends { playSwoosh() }
                             }
                         case .clear? where canDiscard:
                             fired = true
