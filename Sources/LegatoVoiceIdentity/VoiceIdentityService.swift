@@ -102,6 +102,12 @@ public actor VoiceIdentityService {
         guard let profile else { throw VoiceIdentityError.setupRequired }
         return try similarity(samples: samples, against: profile)
     }
+    /// The normalized CAM++ embedding of 16 kHz mono samples (at least 0.35 s). Needs `prepareModels()` first,
+    /// not a profile. Callers that compare voices keep the vectors in memory only.
+    public func embedding(samples: [Float]) throws -> [Float] {
+        if preprocessor == nil || model == nil { try loadModels() }
+        return try embed(samples)
+    }
     private func similarity(samples: [Float], against profile: [Float]) throws -> Float {
         let vector = try embed(samples)
         guard vector.count == profile.count else { throw VoiceIdentityError.invalidModel }
