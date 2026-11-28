@@ -1421,6 +1421,10 @@ final class KeyboardController {
         // UIKit can retain hidden controllers that still receive Darwin notes. They must not adopt a
         // take or later write its shared receipt from a stale field callback.
         guard isVisible else { return noteLive(snapshot, "hidden-skipped") }
+        // The app can end with the keyboard on screen: a run it published stays as it was, so only its beat tells.
+        let holdsRun = (stagedTake.runID == snapshot.runID && !stagedTake.isFinished) || liveSnapshot?.runID == snapshot.runID
+            || blockedLiveRunID == snapshot.runID
+        if holdsRun, letGoIfAbandoned(snapshot, event: "visible") { return }
         guard snapshot != liveSeen else { return }
         // A new take on the same field can supply pending speech to a blank-line recovery. The draft gate
         // still holds all its automatic writes until the old field is recognized or the take is preserved.
@@ -1756,15 +1760,7 @@ final class KeyboardController {
             return
         }
         reloadHost()
-        if published.isAbandoned(host: host, now: now) {
-            noteLive(published, "appear", detail: "abandoned \(published.paused == true ? "paused" : "open")", once: false)
-            if stagedTake.runID == published.runID { retireStagedTake(reason: "abandoned") }
-            if blockedLiveRunID == published.runID { blockedLiveRunID = nil }
-            if liveSnapshot?.runID == published.runID { liveSnapshot = nil; liveSeen = nil; setLiveRunning(false) }
-            ignoredLiveRunID = published.runID
-            ignoredAtAppearance = published
-            return
-        }
+        if letGoIfAbandoned(published, event: "appear") { return }
         let ownStaged = stagedTake.runID == published.runID && !stagedTake.isFinished
         let held = published.isHeldForKeyboard
         let following = held || (published.runID == liveSnapshot?.runID && (!published.complete || ownStaged))
@@ -1779,6 +1775,24 @@ final class KeyboardController {
         }
         ignoredLiveRunID = published.runID
         ignoredAtAppearance = published
+    }
+
+    /// An open run whose app is gone (`LiveDictationSnapshot.isAbandoned`, the app's beat older than `LinkChannel.beatFreshness`) is
+    /// neither shown nor followed, this controller's own staged take included: nothing would act on its preview, and its words are
+    /// in History. Checked as the keyboard appears (`ignorePublishedRun`) and on every visible poll (`receiveLiveDictation`), so a
+    /// take whose app ends while the keyboard is on screen leaves the preview too. The beat is read again before deciding: a missed
+    /// note must not make a live app look gone. True when the run is let go.
+    private func letGoIfAbandoned(_ published: LiveDictationSnapshot, event: String) -> Bool {
+        guard published.isAbandoned(host: host, now: Date()) else { return false }
+        reloadHost()
+        guard published.isAbandoned(host: host, now: now) else { return false }
+        noteLive(published, event, detail: "abandoned \(published.paused == true ? "paused" : "open")", once: false)
+        if stagedTake.runID == published.runID { retireStagedTake(reason: "abandoned") }
+        if blockedLiveRunID == published.runID { blockedLiveRunID = nil }
+        if liveSnapshot?.runID == published.runID { liveSnapshot = nil; liveSeen = nil; setLiveRunning(false) }
+        ignoredLiveRunID = published.runID
+        ignoredAtAppearance = published
+        return true
     }
 
     /// Keyboard-side diagnostics (`LiveDictationNote`, the app logs `live2.kbd`): why a run is not shown or followed, and when the

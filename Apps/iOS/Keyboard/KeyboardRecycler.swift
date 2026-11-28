@@ -5,7 +5,8 @@ import os
 import UIKit
 
 /// Ends the keyboard's process once it is unhealthy and its host's session with the keyboard has ended (`KeyboardRecyclePolicy`,
-/// #342), so iOS starts a fresh one on the next show: only a new process recovered a preview that stopped drawing.
+/// #342), so iOS starts a fresh one on the next show: only a new process recovered a preview that stopped drawing. The cause
+/// measured since, a background UIKit never ended, is repaired as the keyboard shows (`KeyboardForeground`); this stays for any other.
 ///
 /// When that happens is what matters. Ended while the host still holds the keyboard (hidden, but the host in front), iOS shows
 /// Apple's keyboard on the next show. The host is done with it once it has resigned active and then the keyboard's scene

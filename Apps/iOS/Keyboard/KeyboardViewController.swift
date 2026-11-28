@@ -24,6 +24,7 @@ final class KeyboardViewController: UIInputViewController {
         inputView = input
         KeyboardProcess.registerHost(self)
         KeyboardRecycler.start()
+        KeyboardForeground.start()
     }
 
     override func viewDidLoad() {
@@ -105,6 +106,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        KeyboardForeground.keyboardWillAppear()
         buildKeyboard()
         controller?.showsGlobe = needsInputModeSwitchKey
         controller?.appeared()

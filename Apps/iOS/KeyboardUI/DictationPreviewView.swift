@@ -688,6 +688,8 @@ private struct PreviewRow: View {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         format.opaque = false
+        // 8 bits a channel, as read below: the default range is extended (16 bits a channel) on a wide-colour screen.
+        format.preferredRange = .standard
         let image = UIGraphicsImageRenderer(size: rect.size, format: format).image { context in
             context.cgContext.translateBy(x: -rect.minX, y: -rect.minY)
             window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)

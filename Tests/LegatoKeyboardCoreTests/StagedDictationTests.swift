@@ -427,6 +427,9 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         let beating = HostState(beatAt: now.addingTimeInterval(-1))
         let stale = HostState(beatAt: now.addingTimeInterval(-LinkChannel.beatFreshness))
         #expect(!held.isAbandoned(host: beating, now: now))
+        // A visible keyboard checks this on every poll (#343): a beat late by less than the freshness bound keeps the take.
+        let late = HostState(beatAt: now.addingTimeInterval(-(LinkChannel.beatFreshness - 0.1)))
+        #expect(!held.isAbandoned(host: late, now: now))
         #expect(held.isAbandoned(host: stale, now: now))
         #expect(held.isAbandoned(host: nil, now: now), "no app state at all")
         var capturing = held; capturing.paused = nil

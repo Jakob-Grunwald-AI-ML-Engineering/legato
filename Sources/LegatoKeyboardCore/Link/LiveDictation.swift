@@ -126,7 +126,8 @@ extension LiveDictationSnapshot {
 
     /// An open run whose app is not beating (`HostState.isLive`): its process is gone (iOS ends it when Full Access changes, or under
     /// memory pressure) or cannot act. Nothing will speak into, send or end the run, and its words are in History (checkpointed as
-    /// they came): an appearing keyboard neither shows nor follows it. A complete run needs no app; it is never abandoned.
+    /// they came): a keyboard neither shows nor follows it, one already on screen when the app ended included (it checks on each
+    /// poll). A complete run needs no app; it is never abandoned.
     public func isAbandoned(host: HostState?, now: Date) -> Bool {
         !complete && !(host?.isLive(now: now) ?? false)
     }
