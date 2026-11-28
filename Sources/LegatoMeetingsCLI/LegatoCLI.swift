@@ -49,6 +49,9 @@ public enum LegatoCLI {
             case .show(let id, let json, let root):
                 let detail = try await reader(root).detail(id: id)
                 console.out(json ? Output.detail(detail).text(pretty: true) + "\n" : Output.detailText(detail))
+            case .speakers(let target, let threshold, let voiceRoot, let usesProfile, let root):
+                try await SpeakerReplay.run(
+                    target: target, threshold: threshold, voiceRoot: voiceRoot, usesProfile: usesProfile, root: root, console: console)
             case .mcp(let root):
                 let reader = reader(root)
                 console.err("legato mcp: serving \(reader.root.path)\n")
