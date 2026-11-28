@@ -23,7 +23,7 @@ Research, 2026-11-28. Desk research only: nothing here was run on Legato audio. 
 
 Swapping the embedding model buys little: CAM++ (7.2M params, 0.65–0.73% EER on VoxCeleb1-O) is already near the best accuracy for its size ([3D-Speaker](https://github.com/modelscope/3D-Speaker)).
 
-**Shape for the user:** one voice and one setup flow; the profiles stay behind the scenes. The setup records several prompts. Legato keeps one profile per style (normal, quiet, whisper) and per mic, scores against all of them and takes the best match. The adaptive updates (row 4) refine whichever profile matched. Replacing or deleting the voice removes all of them.
+**Shape for the user (as built, #350):** one voice; the profiles stay behind the scenes. A guided first setup (about a minute of reading in a quiet room), then named settings the user records in their own situations (Office, Train, In bed…), speaking as they naturally do there. Whispering is simply how someone speaks in the "In bed" setting, not a separate style. Legato keeps one profile per setting and mic, scores against all of them and takes the best match. Deleting the voice removes all of them.
 
 ### Later, if the above falls short
 
@@ -105,4 +105,4 @@ The first version split words too eagerly. A tester saw the user's sentences spl
 
 1. **Only the user who records is recognised**, from their own voice profile. No people library and no stored voiceprints of other participants. Users rename other speakers by hand. Embeddings computed temporarily for diarization within one meeting are discarded, never stored. Recognising others from a stored library could count as "remote biometric identification" under the EU AI Act, a high-risk class from 2 Dec 2027 that the open-source exemption does not cover.
 2. **No re-sending meetings to Soniox async.** Speaker cleanup, both splitting and merging, runs locally after the meeting.
-3. **A guided setup of about 60 s:** the user reads sentences in normal, soft, lively and whispered tones. Behind the scenes there is one profile per style and per mic.
+3. **A guided setup of about 60 s, plus named settings:** the user reads sentences aloud. Each setting (suggested or their own) is only a name; they record it in that situation and speak naturally. The app never mentions voice tones. Behind the scenes there is one profile per setting and per mic.
