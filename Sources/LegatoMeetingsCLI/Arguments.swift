@@ -1,4 +1,5 @@
 import Foundation
+import LegatoMeetings
 
 /// What `--client`, `--project` and `--tag` narrow a list or search to. Client and project match on part of the name, ignoring case and accents; every tag must be on the meeting.
 public struct MeetingFilters: Sendable, Equatable {
@@ -21,6 +22,8 @@ public enum Command: Sendable, Equatable {
     case show(id: String, json: Bool, root: String?)
     case search(words: String, filters: MeetingFilters, json: Bool, root: String?)
     case mcp(root: String?)
+    /// Replays the after-meeting speaker check on a saved meeting without saving: `target` is an id (or its start) or a folder.
+    case speakers(target: String, threshold: Float?, voiceRoot: String?, usesProfile: Bool, root: String?)
 }
 
 /// A command line that cannot be run: what is wrong, in words for the person who typed it.
@@ -31,7 +34,7 @@ public struct UsageError: Error, Equatable {
 
 /// Reads `legato`'s arguments (without the program name). Hand-rolled: `--name value` or `--name=value`, `--` ends the options.
 public enum Arguments {
-    private enum Flag: String { case json, client, project, tag, root }
+    private enum Flag: String { case json, client, project, tag, root, replay, threshold, voiceRoot = "voice-root", noProfile = "no-profile" }
 
     private struct Parsed {
         var positionals: [String] = []
@@ -40,6 +43,10 @@ public enum Arguments {
         var project: String?
         var tags: [String] = []
         var root: String?
+        var replay: String?
+        var threshold: String?
+        var voiceRoot: String?
+        var noProfile = false
         var wantsHelp = false
 
         var filters: MeetingFilters { MeetingFilters(client: client, project: project, tags: tags) }
@@ -62,7 +69,7 @@ public enum Arguments {
     }
 
     private static func meetings(_ arguments: [String]) throws -> Command {
-        guard let sub = arguments.first else { throw UsageError("missing meetings command (list, show or search)") }
+        guard let sub = arguments.first else { throw UsageError("missing meetings command (list, show, search or speakers)") }
         let rest = Array(arguments.dropFirst())
         switch sub {
         case "-h", "--help", "help": return .help(Help.meetings)
@@ -84,7 +91,18 @@ public enum Arguments {
             let words = p.positionals.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !words.isEmpty else { throw UsageError("meetings search needs at least one word to look for") }
             return .search(words: words, filters: p.filters, json: p.json, root: p.root)
-        default: throw UsageError("unknown meetings command '\(sub)' (list, show or search)")
+        case "speakers":
+            let p = try scan(rest, allowing: [.replay, .threshold, .voiceRoot, .noProfile, .root])
+            if p.wantsHelp { return .help(Help.speakers) }
+            try noPositionals(p, "meetings speakers")
+            guard let target = p.replay else { throw UsageError("meetings speakers needs --replay <meeting id or folder>") }
+            var threshold: Float?
+            if let text = p.threshold {
+                guard let value = Float(text), value > -1, value < 1 else { throw UsageError("--threshold must be a number between -1 and 1") }
+                threshold = value
+            }
+            return .speakers(target: target, threshold: threshold, voiceRoot: p.voiceRoot, usesProfile: !p.noProfile, root: p.root)
+        default: throw UsageError("unknown meetings command '\(sub)' (list, show, search or speakers)")
         }
     }
 
@@ -109,9 +127,9 @@ public enum Arguments {
             let body = argument.dropFirst(2)
             let name = String(body.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)[0])
             guard let flag = Flag(rawValue: name), allowed.contains(flag) else { throw UsageError("unknown option '--\(name)'") }
-            if flag == .json {
-                guard !body.contains("=") else { throw UsageError("--json takes no value") }
-                p.json = true
+            if flag == .json || flag == .noProfile {
+                guard !body.contains("=") else { throw UsageError("--\(name) takes no value") }
+                if flag == .json { p.json = true } else { p.noProfile = true }
                 continue
             }
             var value: String
@@ -129,7 +147,10 @@ public enum Arguments {
             case .project: p.project = value
             case .tag: p.tags.append(value)
             case .root: p.root = value
-            case .json: break
+            case .replay: p.replay = value
+            case .threshold: p.threshold = value
+            case .voiceRoot: p.voiceRoot = value
+            case .json, .noProfile: break
             }
         }
         return p
@@ -147,18 +168,22 @@ public enum Help {
           legato meetings search <words> [filters] [--json]
                                                        Find meetings whose title, filing, summary, notes or transcript contain every word.
           legato mcp                                   Serve the same as an MCP server on stdin/stdout.
+          legato meetings speakers --replay <id|folder>
+                                                       Replay the after-meeting speaker check without saving.
 
         Everything is read-only; nothing in the meetings folder is ever written.
         Run 'legato meetings --help' or 'legato mcp --help' for details.
         """
 
     public static let meetings = """
-        Usage: legato meetings <list|show|search> [options]
+        Usage: legato meetings <list|show|search|speakers> [options]
 
           list                 List meetings, newest first.
           show <id>            One meeting in full. <id> is the id from 'list', or any unambiguous start of it.
           search <words>       Meetings that contain every word (ignoring case and accents) in the title, client,
                                project, tags, speaker names, summaries, notes or transcript.
+          speakers --replay <id|folder>
+                               Replay the after-meeting speaker check without saving (see 'meetings speakers --help').
 
         Filters (list and search; repeatable --tag; every tag must be on the meeting):
           --client <name>      Only meetings whose client contains this.
@@ -191,6 +216,22 @@ public enum Help {
 
         Lists the meetings that contain every word, with a short excerpt of where it was found.
         With --json: {"meetings": [...as in list, plus "snippets": [{"source", "text", "at_seconds"}]]}.
+        """
+
+    public static let speakers = """
+        Usage: legato meetings speakers --replay <id|folder> [--threshold <0..1>] [--voice-root <dir>] [--no-profile] [--root <dir>]
+
+        Runs the after-meeting speaker check on a saved meeting (diarization of its recording on this Mac, then the
+        reassignment of its words) WITHOUT saving anything, and prints counts only, no transcript text: splits, merges,
+        people before and after, the voice found as you, agreement with which track (microphone or system audio) each word
+        was loud on (Mac meetings), and the run time against the audio length.
+        <id|folder> is a meeting id (or an unambiguous start of one) or the meeting's folder.
+        Meetings saved before word times were kept take them from the meeting's log (log/room.jsonl) when it has them.
+          --threshold <x>      Cosine similarity at which two stretches are one voice (default \(SpeakerClustering.defaultThreshold)).
+          --voice-root <dir>   Where the voice models and your profile are. Default: the Mac app's folder under
+                               ~/Library/Application Support/Legato/VoiceIdentity.
+          --no-profile         Ignore the voice profile, as if there were none (the Mac then needs one microphone voice).
+        Downloads the speaker models (Hugging Face, pinned and verified) when they are not cached yet.
         """
 
     public static let mcp = """

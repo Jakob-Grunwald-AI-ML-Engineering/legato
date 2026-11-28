@@ -1,0 +1,108 @@
+# Speaker recognition: meetings and background voices
+
+Research, 2026-11-28. Desk research only: nothing here was run on Legato audio. Every number is a published or vendor figure unless marked otherwise. Current behaviour: [Background voice filtering](../uat/voice-isolation.md), [spike #242](../../spikes/only-my-voice/README.md).
+
+## Verdict
+
+- **Background voices:** better enrolment, calibration and cues will do more than training a model on the user's voice. On-device fine-tuning with a few enrolment clips tends to make verification *worse* ([Chen 2025](https://www.isca-archive.org/interspeech_2025/chen25_interspeech.pdf)). Collecting more, and more varied, enrolment audio is the "training" that works.
+- **Meetings:** yes, this can be improved. Legato already has the signals to tell "me" from "them" (the separate Mac tracks and the voice profile). A pass over the whole meeting after it ends fixes renumbered and split speakers. Naming *other* people from their voices is the legally risky part.
+
+## Background voices (dictation)
+
+### Recommended first: no new model
+
+| # | Change | Why | Confidence |
+|---|---|---|---|
+| 1 | **Guided enrolment:** several sentences in normal, quiet and fast speech, about 30–60 s in total, ideally on each mic the user has | Enrolment covering several conditions makes short, noisy test windows more robust ([Zhang 2022](https://www.isca-archive.org/interspeech_2022/zhang22j_interspeech.pdf)). The single 10 s quiet take is the likely cause of the "rejects my own voice" failure. | medium |
+| 2 | **Whispering as its own profile**, not averaged into the normal one | Matching a whisper against a profile enrolled with normal speech is the worst case: EER of roughly 5–8% against 0.2–0.5% for matched styles. Enrolling some whispered speech closes most of that gap ([arXiv 2604.20229](https://arxiv.org/abs/2604.20229), [Sarria-Paja 2017](https://espace.inrs.ca/id/eprint/6539/1/Sarria%20Paja%2C%20Milton%20Orlando_2017.pdf)). Score against several profiles and take the best match. | medium |
+| 3 | **Per-mic profiles** (built-in, AirPods, Mac) | The same voice through different mics drifts in embedding space. This is an engineering inference; nothing published either way. | low–medium |
+| 4 | **Adaptive profile:** fold in windows that match strongly (≥0.6) and are close to the mic, capped so the profile cannot drift | Keeps the profile current on real routes and in real rooms. Standard practice, but no dictation-specific numbers. | medium |
+| 5 | **Per-user threshold** (cohort normalisation, AS-norm) instead of the global 0.45 / 0.20 | The EER gain is small on benchmarks (~6–12% relative), but it calibrates the threshold to each voice; the spike's worst speaker kept only 83% of their own windows ([arXiv 2504.04512](https://arxiv.org/html/2504.04512v1)). Needs ~200 stored cohort embeddings, a few hundred KB. | medium |
+| 6 | **Near-field prior:** loudness and spectral tilt relative to the enrolment level make the thresholds stricter or looser | A TV or a voice across the room is much quieter than the user's mouth at the mic. Cheap. Unmeasured: test on the device. | medium |
+| 7 | **iPhone audio front end A/B test:** voice processing off / on / on with Voice Isolation, a TV playing nearby | `setVoiceProcessingEnabled` is Mac-only in `MicSource` today. On iOS it unlocks the user-chosen mic modes; recording apps get Voice Isolation on iOS 26+, and the user turns it on via `showSystemUserInterface(.microphoneModes)`, since there is no API to set it ([WWDC23](https://developer.apple.com/videos/play/wwdc2023/10235), [Apple](https://support.apple.com/en-us/101993)). Apple claims only that it removes ambient noise; whether it removes a competing *speaker* is unverified. It applies in the containing app, which owns the mic. | high (API) / unknown (effect) |
+
+Swapping the embedding model buys little: CAM++ (7.2M params, 0.65–0.73% EER on VoxCeleb1-O) is already near the best accuracy for its size ([3D-Speaker](https://github.com/modelscope/3D-Speaker)).
+
+**Shape for the user (as built, #350):** one voice; the profiles stay behind the scenes. A guided first setup (about a minute of reading in a quiet room), then named settings the user records in their own situations (Office, Train, In bed…), speaking as they naturally do there. Whispering is simply how someone speaks in the "In bed" setting, not a separate style. Legato keeps one profile per setting and mic, scores against all of them and takes the best match. Deleting the voice removes all of them.
+
+### Later, if the above falls short
+
+- **Decide per speaker, not per window:** turn on Soniox speaker separation in dictation and decide "me" from all audio of a label. Soniox allows this together with endpoint detection, but warns that endpointing lowers diarization accuracy, without giving numbers ([Soniox](https://docs.soniox.com/stt/rt/endpoint-detection)). Worth a measured spike only.
+- **Target-speaker extraction on the Mac:** REAL-TSE BSRNN has a Core ML build ([model card](https://huggingface.co/ferdinandl007/REAL-TSE-BSRNN-CoreML)). The separator is ~44 MB, plus a 12 MB embedding model. It is not causal (8 s chunks) and runs on CPU only. The card's one-clip result is 57.8% → 2.0% WER. Its licence is "other". Not suitable for the iPhone keyboard path.
+- **Personal VAD / VoiceFilter-Lite** (130 KB–2.2 MB, built for phones): no public weights, so Legato would have to train its own. A larger project, justified only after the first table.
+
+### Not recommended
+
+On-device fine-tuning (a classifier head, PLDA or LoRA) on enrolment clips: too little data, and it overfits. More varied enrolment is the cheaper and safer form of training.
+
+## Meetings
+
+### Recommended
+
+| # | Change | Notes | Confidence |
+|---|---|---|---|
+| 1 | **Mac "me" vs "them" from the separate tracks** | `mic.caf` and `system.caf` are recorded already; only the mix is transcribed. Granola uses the same approach: mic is Me, system audio is Them ([Granola](https://docs.granola.ai/help-center/taking-notes/speaker-attribution)). Pitfalls: people in the same room are also on the mic, echo leaks in over speakers, and both sides talk at once. So mark a segment "me" only if the mic dominates *and* the voice matches the profile. | high |
+| 2 | **"Me" from the voice profile** (both platforms) | Reuses the dictation enrolment. On iPhone it is the only way to find "me", since there is just one mic. | medium–high |
+| 3 | **Refine after the meeting**, over the whole recording | Sees the whole meeting at once, so reconnect renumbering and split speakers go away. Two routes; benchmark both on real meetings: | medium |
+|   | a. **Soniox async** on the stored mix | Soniox itself recommends async for the best speaker separation. About $0.10/h, against $0.12/h for real-time; diarization costs nothing extra ([Soniox](https://docs.soniox.com/stt/concepts/speaker-diarization), [pricing](https://soniox.com/pricing)). Also re-transcribes the words. | medium |
+|   | b. **Local FluidAudio offline diarizer** (pyannote community-1, Core ML, Apache-2.0 code) | ~300× real time on an M5 Pro. AMI DER 18–20%; it found the right speaker count in 12 of 16 meetings ([Benchmarks](https://github.com/FluidInference/FluidAudio/blob/main/Documentation/Benchmarks.md)). Free, and the audio stays on the device. Check the weight licence before shipping. | medium |
+| 4 | **Link labels by voice** if the live labels are kept: a CAM++ embedding per label, then clustering across streams | Cheaper than item 3 and merges reconnect duplicates. Published within-meeting EER with CAM++ is about 3%. Start at a cosine of 0.5–0.6, calibrated on real meetings. | medium |
+
+Soniox offers no speaker identification, enrolment or stable labels across streams. A stereo stream does not give separate transcripts per channel either; per-channel transcription means one stream per source, about double the cost ([Soniox](https://soniox.com/wiki/diarization-vs-speaker-identification)).
+
+Not realistic: a live on-device diarizer on the phone. FluidAudio's own docs report about 53% DER for streaming on AMI and recommend offline.
+
+### Naming other people: a product and legal decision
+
+A stored voiceprint used to recognise a person in later meetings counts as biometric data under GDPR Art. 9, which requires explicit consent ([EDPB 3/2019 ¶75](https://www.edpb.europa.eu/sites/default/files/files/file1/edpb_guidelines_201903_video_devices_en_0.pdf)). Anonymous "Speaker N" labels within one meeting probably do not. In the US, suits over voiceprints are proceeding against Otter.ai (2025) and Fireflies.AI ([Otter](https://www.sheppard.com/insights/blogs/when-ai-takes-notes-court-allows-privacy-claims-against-otterai-to-proceed), [Fireflies](https://www.sheppard.com/insights/blogs/illinois-bipa-suit-targets-ai-note-takers-practical-lessons-for-meeting-transcription)). Teams requires each person to enrol themselves.
+
+| Option | What it does | Risk |
+|---|---|---|
+| Me only | Only the user's own consented profile | low |
+| Names within one meeting | Names the user types are spread across label duplicates; nothing is kept afterwards | low |
+| Opt-in people library | Saved voiceprints suggest names in later meetings, filtered by calendar attendees; can be deleted | high: needs other people's consent |
+
+### Built (#352): local cleanup after the meeting
+
+The `speakers` step of the after-stop chain (`LegatoMeetingSpeakers`) runs between the m4a conversion and the summary. Live segments now keep Soniox's word times.
+
+- **Segmentation:** pyannote segmentation-3.0 runs on overlapping 10 s windows (5 s hop). Its weights are under the MIT licence, © 2023 CNRS (upstream revision `e66f3d3b`). Legato uses Fluid Inference's Core ML conversion `pyannote_segmentation.mlmodelc` from [FluidInference/speaker-diarization-coreml](https://huggingface.co/FluidInference/speaker-diarization-coreml), pinned at revision `7eab74f3463c736418d0eb10296261ae581146c9`. That repository mixes licences. Its NOTICE.md lists this legacy file under its upstream MIT licence and puts only the Community-1 files (Segmentation, FBank, Embedding, PLDA) under CC-BY-4.0, which Legato does not use. The files are checked against SHA-256 hashes and cached under `Application Support/Legato/Models/pyannote-segmentation-3.0`.
+- **Voices:** the app's CAM++ embeds 3 s of each local speaker's solo speech. Agglomerative clustering joins the embeddings (average linkage, cosine 0.5, an estimate). Small voice fragments are folded into larger voices. Embeddings exist in memory only while the step runs.
+- **Words:** each word goes to the voice that speaks most during it. When the voices are close, Soniox's label decides. Each person keeps the voice that holds most of their words. Duplicates are merged, and two people with different user-given names are never merged. A voice nobody holds becomes a new person, unless its centroid is at least 0.6 similar to a held voice on the same track (an estimate): then it is a fragment of that voice.
+- **Splits:** Soniox heard one speaker in a segment, and its segment edges are more exact than the diarization's. A change of person inside a segment therefore holds only when its part has at least 3 words and lasts at least 1 s, or when the louder track switches for at least 0.3 s (a barge-in from the other side). Without tracks (the iPhone), a clean interjection of 2 or more words also holds, if the neighbouring voices stay silent through it. Shorter parts join their neighbours. The first part keeps the segment's id. All these values are estimates.
+- **Me:** on the Mac, the user is the one voice loud on the microphone (10 dB over the system audio). When the user is alone on the microphone, the tracks decide word by word. A word loud on the microphone is the user's wherever the diarization hears the user's voice at all, and a word loud on the system audio is never the user's. When several voices are loud on the microphone (people in the room), the best profile match at 0.45 or more decides. On the iPhone, the profile alone decides.
+
+Measured on this Mac with `legato meetings speakers --replay` (release build for the run times). The word times came from the meetings' logs. "Me/Them disagreement" counts the words loud on one track whose track differs from the side most of their person's words are on.
+
+| Meeting | Audio | Run time | Per audio hour | People before → after | Merges / new | Me/Them disagreement before → after |
+|---|---|---|---|---|---|---|
+| A | 25 min | 28 s | 68 s | 3 → 3 | 0 / 0 | 0.9% → 0.5% |
+| B | 54 min | 51 s | 57 s | 3 → 4 | 0 / 1 | 8.9% → 1.0% |
+| C | 79 min | 83 s | 63 s | 8 → 4 | 4 / 0 | 15.8% → 1.4% |
+
+The first version split words too eagerly. A tester saw the user's sentences split between Me and a remote speaker, a fifth "speaker" continuing others' sentences, and two people alternating inside one sentence. The quality lines of the replay, before → after the split, track and fragment rules:
+
+| Meeting | Changes inside a live segment (track-confirmed) | Short parts | Me recall | Me precision |
+|---|---|---|---|---|
+| A | 8 (0) → 4 (4) | 12 → 5 | 98.2% → 98.8% | 98.5% → 99.4% |
+| B | 142 (4) → 12 (6) | 165 → 9 | 82.6% → 90.1% | 96.8% → 98.7% |
+| C | 222 (15) → 25 (12) | 268 → 13 | 96.0% → 96.5% | 90.3% → 98.5% |
+
+- Recall and precision are self-labelled by the same tracks the rules use. They show consistency, not independent accuracy.
+- B's remaining recall misses are mostly quiet microphone words (about −50 to −40 dBFS) where the diarization hears no voice of the user's. They are left out on purpose.
+- In B the fifth person was a voice with 0.62 centroid similarity to Speaker 2, on the same track. It is now part of Speaker 2. The closest pair of distinct people in these meetings scored 0.59, so the 0.6 margin is thin.
+
+- About 80% of the run time is CAM++. The other ~20% is segmentation, Core ML on the CPU and Neural Engine.
+- iPhone run time is unmeasured.
+- The only voice profile on this Mac comes from a UAT build, and it scored 0.22–0.29 against the microphone voice. The Mac rule therefore trusts the tracks when exactly one voice is on the microphone. The 0.45 threshold still decides on the iPhone and between people in the room; calibrate it once a real guided-setup profile exists.
+
+## How to measure
+
+- **Meetings:** the separate Mac tracks label each saved meeting for free (system track = them, mic track = me or room). Replay saved meetings through items 1–4 and compare against Soniox's live labels before changing the UI.
+- **Dictation:** real recordings on the device are needed: the user's speech with a TV and another person nearby, in normal, quiet and whispered styles, on the built-in mic and AirPods. Measure at word level through the real insertion path, as the spike asked.
+
+## Decisions (2026-11-28)
+
+1. **Only the user who records is recognised**, from their own voice profile. No people library and no stored voiceprints of other participants. Users rename other speakers by hand. Embeddings computed temporarily for diarization within one meeting are discarded, never stored. Recognising others from a stored library could count as "remote biometric identification" under the EU AI Act, a high-risk class from 2 Dec 2027 that the open-source exemption does not cover.
+2. **No re-sending meetings to Soniox async.** Speaker cleanup, both splitting and merging, runs locally after the meeting.
+3. **A guided setup of about 60 s, plus named settings:** the user reads sentences aloud. Each setting (suggested or their own) is only a name; they record it in that situation and speak naturally. The app never mentions voice tones. Behind the scenes there is one profile per setting and per mic.

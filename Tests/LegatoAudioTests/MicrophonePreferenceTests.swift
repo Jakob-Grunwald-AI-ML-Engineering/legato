@@ -44,6 +44,16 @@ func unknownStoredMicrophoneReadsAsAutomatic(_ value: String?) {
     #expect(AudioInputCandidate.ordered(dead, preference: .device(uid: "usb-uid"), defaultID: nil).map(\.id) == ["50"])
 }
 
+/// A Mac whose only input is virtual (BlackHole in a test VM): Automatic records from the system default rather than
+/// failing with no microphone; with a real microphone present, the virtual default is still skipped.
+@Test func automaticFallsBackToTheSystemDefaultOnlyWhenNothingElseQualifies() {
+    let virtualOnly = [input("80", .virtual, uid: "blackhole-uid")]
+    #expect(AudioInputCandidate.ordered(virtualOnly, preference: .automatic, defaultID: "80").map(\.id) == ["80"])
+    #expect(AudioInputCandidate.ordered(virtualOnly, preference: .automatic, defaultID: nil).isEmpty)
+    #expect(AudioInputCandidate.ordered(virtualOnly, preference: .device(uid: "gone"), defaultID: "80").map(\.id) == ["80"])
+    #expect(AudioInputCandidate.ordered(desk, preference: .automatic, defaultID: "80").map(\.id) == ["50", "60", "55", "70"])
+}
+
 /// A MacBook Pro's built-in microphone is a three-channel array; the plain AVAudioFormat initializer refuses more
 /// than two channels, which made dictation skip the built-in mic for a Continuity iPhone.
 @Test func threeChannelBuiltInMicrophoneConvertsToMonoFromItsFirstChannel() throws {

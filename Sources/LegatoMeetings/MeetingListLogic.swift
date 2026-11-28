@@ -170,6 +170,15 @@ public enum MeetingListLogic {
         return hasLive ? .none : .noMeetings
     }
 
+    /// What a stopped meeting shows while its after-stop chain runs, by the step it is in (nil: between steps).
+    public static func finishingStatus(_ step: Meeting.Step?) -> String {
+        switch step {
+        case .speakers: "Checking speakers…"
+        case .summary: "Writing the summary…"
+        case .audio, nil: "Finishing the recording…"
+        }
+    }
+
     /// "1:05", or "1:02:05" from an hour on.
     public static func clock(_ seconds: TimeInterval) -> String {
         let total = max(0, Int(seconds))

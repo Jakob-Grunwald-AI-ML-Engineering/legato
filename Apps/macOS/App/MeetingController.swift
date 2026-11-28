@@ -13,10 +13,10 @@ import Observation
 ///
 /// - **Recording.** `start` opens the microphone, then the system-audio tap, through `MeetingServices`; the live
 ///   transcript is the session's snapshots. The hotkeys for dictation and the composer ask `refusal` first.
-/// - **After stop.** The services run the chain (m4a, summary); `stop` waits for it and refreshes the list so the
-///   window shows each step.
-/// - **The list** is read from the store and refreshed after every change made here; `shown` is it narrowed by the
-///   sidebar and the search.
+/// - **After stop.** The services run the chain (m4a, speakers, summary), after a stop or at launch; each step they save
+///   refreshes the list (`MeetingServices.onMeetingChanged`) so an open window shows it.
+/// - **The list** is read from the store and refreshed after every change made here or by the chain; refreshes run one
+///   at a time, so an older read never replaces a newer one. `shown` is it narrowed by the sidebar and the search.
 @MainActor @Observable
 final class MeetingController {
     static let windowID = "meetings"
@@ -91,6 +91,7 @@ final class MeetingController {
     @ObservationIgnored private var searchTask: Task<Void, Never>?
     @ObservationIgnored private var noticeTask: Task<Void, Never>?
     @ObservationIgnored private var startTask: Task<Void, Never>?
+    @ObservationIgnored private let reloads = SerialReload()
 
     init(root: URL, vocabularyURL: URL?, defaults: UserDefaults = .standard) {
         var sonioxKey: @Sendable () -> String = { (try? KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey()) ?? "" }
@@ -106,7 +107,9 @@ final class MeetingController {
         #endif
         services = MeetingServices(
             store: MeetingStore(root: root), settings: MeetingSettings(defaults: defaults),
-            sonioxKey: sonioxKey, claudeKeys: claudeKeys, vocabularyURL: vocabularyURL, makeSocket: makeSocket)
+            sonioxKey: sonioxKey, claudeKeys: claudeKeys, vocabularyURL: vocabularyURL, makeSocket: makeSocket,
+            speakerCleanup: MeetingServices.onDeviceSpeakerCleanup)
+        services.onMeetingChanged = { [weak self] _ in Task { await self?.refresh() } }
     }
 
     var isRecording: Bool { phase != .idle || services.isRecording }
@@ -151,19 +154,16 @@ final class MeetingController {
         }
     }
 
-    /// Stops the recording, then follows the after-stop chain until it ends.
+    /// Stops the recording; the after-stop chain reports its steps through `onMeetingChanged`.
     func stop() {
         guard phase == .recording else { return }
         phase = .stopping
         stopObserving()
         Task {
-            let meeting = await services.stopMeeting()
+            await services.stopMeeting()
             phase = .idle
             startedAutomatically = false
             live = nil
-            await refresh()
-            guard let meeting else { return }
-            await services.waitForProcessing(meeting.id)
             await refresh()
         }
     }
@@ -263,12 +263,16 @@ final class MeetingController {
 
     // MARK: Saved meetings
 
-    func refresh() async {
-        meetings = (try? await services.meetings()) ?? meetings
+    /// Reads the list again, one read at a time (`SerialReload`): the last read wins.
+    func refresh() async { await reloads.run { [weak self] in await self?.reload() } }
+
+    private func reload() async {
+        let read = (try? await services.meetings()) ?? meetings
         var empty = Set<UUID>()
-        for meeting in meetings where meeting.state != .recording {
+        for meeting in read where meeting.state != .recording {
             if !(await services.store.hasSegments(for: meeting.id)) { empty.insert(meeting.id) }
         }
+        meetings = read
         emptyTranscripts = empty
         revision += 1
         if let selection, !meetings.contains(where: { $0.id == selection }) { self.selection = nil }

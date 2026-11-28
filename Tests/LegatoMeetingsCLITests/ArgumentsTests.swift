@@ -21,6 +21,16 @@ import Testing
         #expect(try Arguments.parse(["meetings", "search", "--", "--json"]) == .search(words: "--json", filters: MeetingFilters(), json: false, root: nil))
     }
 
+    @Test func speakersReplaysOneMeeting() throws {
+        #expect(try Arguments.parse(["meetings", "speakers", "--replay", "ab12", "--threshold", "0.6", "--no-profile"])
+                == .speakers(target: "ab12", threshold: 0.6, voiceRoot: nil, usesProfile: false, root: nil))
+        #expect(try Arguments.parse(["meetings", "speakers", "--replay=/m/x", "--voice-root", "/v"])
+                == .speakers(target: "/m/x", threshold: nil, voiceRoot: "/v", usesProfile: true, root: nil))
+        #expect(throws: UsageError.self) { try Arguments.parse(["meetings", "speakers"]) }
+        #expect(throws: UsageError.self) { try Arguments.parse(["meetings", "speakers", "--replay", "a", "--threshold", "2"]) }
+        #expect(try Arguments.parse(["meetings", "speakers", "--help"]) == .help(Help.speakers))
+    }
+
     @Test func mcpTakesARoot() throws {
         #expect(try Arguments.parse(["mcp", "--root", "/r"]) == .mcp(root: "/r"))
         #expect(throws: UsageError.self) { try Arguments.parse(["mcp", "--json"]) }

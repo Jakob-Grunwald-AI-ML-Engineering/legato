@@ -181,6 +181,8 @@ private func tokens(_ words: [(String, Int, Int, String?)]) -> String {
         #expect(first.text == "Hello there." && first.speaker == "1")
         #expect(second.text == "Hi you." && second.speaker == "2")
         #expect(first.range == 0.2..<0.9 && second.range == 1.0..<1.5, "times are meeting times")
+        #expect(first.words == [TranscriptWord(text: "Hello", start: 0.2, end: 0.5), TranscriptWord(text: "there.", start: 0.5, end: 0.9)],
+                "each word carries its meeting time")
         #expect(first.stream == .mixed)
         await eventually("the audio reaches Soniox") { await socket.audio.reduce(0) { $0 + $1.count } >= 32_000 }
 

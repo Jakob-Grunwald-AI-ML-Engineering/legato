@@ -373,9 +373,21 @@ private actor MeetingStreamRunner {
                 range = start..<max(start, start - t0 + t1)
             }
             let speaker = try? metadata?["speaker"]?.decode(String.self)
-            return TranscriptEvent(stream: .mixed, text: words.map(\.text).joined(separator: " "), isFinal: true, range: range, speaker: speaker)
+            // Word times relative to the stream; the envelope's `tOrigin` is the meeting time of the first word's start.
+            let timings = (try? metadata?["timings"]?.decode([WordTiming].self)) ?? []
+            let timed = range == nil ? nil : TranscriptWord.placed(
+                words.map(\.text), relative: timings.map { ($0.t0, $0.t1) }, origin: envelope.tOrigin)
+            return TranscriptEvent(
+                stream: .mixed, text: words.map(\.text).joined(separator: " "), isFinal: true, range: range, speaker: speaker,
+                words: timed)
         default:
             return nil
         }
     }
+}
+
+/// One entry of an `asr.segment`'s `timings`: a word's start and end relative to its stream, seconds.
+private struct WordTiming: Decodable {
+    var t0: Double?
+    var t1: Double?
 }

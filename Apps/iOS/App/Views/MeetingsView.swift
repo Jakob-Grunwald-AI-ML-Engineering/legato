@@ -92,7 +92,9 @@ private struct IOSMeetingDetail: View {
                         Label(meeting.state == .interrupted ? "Recording interrupted — captured audio and text are kept" : meeting.state.rawValue.capitalized,
                               systemImage: meeting.state == .interrupted ? "exclamationmark.circle" : "checkmark.circle")
                             .font(.callout).foregroundStyle(meeting.state == .interrupted ? .orange : .secondary)
-                        if controller.services.processing.contains(id) { ProgressView("Processing recording…") }
+                        if controller.services.processing.contains(id) {
+                            ProgressView(MeetingListLogic.finishingStatus(controller.services.runningSteps[id]))
+                        }
                         if let player { playerView(player) }
                     }
                     if let error { Text(error).foregroundStyle(.orange).font(.callout) }
@@ -185,11 +187,14 @@ private struct IOSMeetingDetail: View {
     }
     private func reload() async {
         do {
-            meeting = try await controller.services.store.meeting(id: id)
-            segments = try await controller.services.store.segments(for: id)
-            summary = try await controller.services.summaryText(meetingID: id)
-            notes = try await controller.services.store.notes(for: id) ?? ""
-            markdown = try await controller.services.markdown(meetingID: id)
+            let meeting = try await controller.services.store.meeting(id: id)
+            let segments = try await controller.services.store.segments(for: id)
+            let summary = try await controller.services.summaryText(meetingID: id)
+            let notes = try await controller.services.store.notes(for: id) ?? ""
+            let markdown = try await controller.services.markdown(meetingID: id)
+            // A newer reload started meanwhile (the meeting changed again): this read is older and must not land after it.
+            guard !Task.isCancelled else { return }
+            (self.meeting, self.segments, self.summary, self.notes, self.markdown) = (meeting, segments, summary, notes, markdown)
             if !isLive {
                 if let player { try? player.refresh() }
                 else {

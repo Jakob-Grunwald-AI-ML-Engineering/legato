@@ -1,11 +1,13 @@
 import Foundation
 import Observation
+import os
 import Synchronization
 import LegatoAgent
 import LegatoAudio
 import LegatoClaude
 import LegatoCore
 import LegatoMeetings
+import LegatoMeetingSpeakers
 import LegatoRoom
 import LegatoSoniox
 import LegatoVocabulary
@@ -33,7 +35,11 @@ public enum MeetingServicesError: Error, Equatable, LocalizedError {
 /// - **Start/stop.** ``startMeeting(title:mic:system:dictationActive:)`` refuses while a meeting or a dictation
 ///   runs (``MeetingServicesError/refused(_:)``), fails before anything is recorded when the Soniox key is missing,
 ///   and returns the live session (its `snapshots` drive the transcript). ``stopMeeting()`` stops it and starts the
-///   after-stop chain: the CAF recordings become m4a, then the Claude summary when it is automatic.
+///   after-stop chain: the CAF recordings become m4a, the speakers are checked against the recording, then the Claude
+///   summary when it is automatic.
+/// - **Speakers.** After the meeting the recording is diarized on the device (``MeetingSpeakerCleaning``): people the live
+///   engine heard as one are split, its duplicates merged, and the user's voice named "Me". Renames survive. If the check
+///   cannot run, the meeting keeps the live engine's speakers.
 /// - **Title.** A meeting still titled by its date gets a short title from Claude after its first summary
 ///   (``Meeting/titleIsAutomatic``); the user's own title is never replaced.
 /// - **Calendar.** ``applyCalendarEvent(_:to:)`` gives a meeting still titled by its date the title and attendees of the
@@ -57,6 +63,11 @@ public final class MeetingServices {
     public private(set) var processing: Set<UUID> = []
     /// Meetings whose summary is being written.
     public private(set) var summarizing: Set<UUID> = []
+    /// The step of the after-stop chain each meeting is in now (``MeetingListLogic/finishingStatus(_:)`` words it).
+    public private(set) var runningSteps: [UUID: Meeting.Step] = [:]
+    /// Called whenever the after-stop chain saved something of a meeting (a step done, the meeting finished), whoever
+    /// started the chain: a stop, or ``recover()`` at launch. The apps reload what an open window shows of it.
+    @ObservationIgnored public var onMeetingChanged: (@MainActor (UUID) -> Void)?
 
     @ObservationIgnored private let sonioxKey: @Sendable () -> String
     @ObservationIgnored private let makeClaude: @Sendable () -> any LLMBackend
@@ -64,6 +75,7 @@ public final class MeetingServices {
     @ObservationIgnored private let requestVocabulary: RequestVocabulary?
     @ObservationIgnored private let personalPrompt: @Sendable () -> String
     @ObservationIgnored private let timing: SonioxMeetingEngine.Timing
+    @ObservationIgnored private let speakerCleanup: (any MeetingSpeakerCleaning)?
     @ObservationIgnored private var starting = false
     @ObservationIgnored private var chains: [UUID: Task<Void, Never>] = [:]
 
@@ -72,12 +84,14 @@ public final class MeetingServices {
     ///   - claudeKeys: where the Claude key lives; the summary asks Claude with it.
     ///   - claudeBackend: replaces the Claude backend (tests).
     ///   - vocabularyURL: the user's vocabulary, sent to Soniox as terms.
+    ///   - speakerCleanup: the after-meeting speaker check (the apps pass ``onDeviceSpeakerCleanup``); nil skips the step.
     public init(
         store: MeetingStore, settings: MeetingSettings, sonioxKey: @escaping @Sendable () -> String, claudeKeys: any APIKeyStore,
         claudeBackend: (any LLMBackend)? = nil, vocabularyURL: URL? = nil,
         personalPrompt: @escaping @Sendable () -> String = { ComposerWritingSettings().personalPrompt },
         makeSocket: @escaping @Sendable () -> any SonioxSocket = { URLSessionSonioxSocket() },
-        timing: SonioxMeetingEngine.Timing = SonioxMeetingEngine.Timing()
+        timing: SonioxMeetingEngine.Timing = SonioxMeetingEngine.Timing(),
+        speakerCleanup: (any MeetingSpeakerCleaning)? = nil
     ) {
         self.store = store
         self.settings = settings
@@ -87,7 +101,13 @@ public final class MeetingServices {
         self.personalPrompt = personalPrompt
         self.makeSocket = makeSocket
         self.timing = timing
+        self.speakerCleanup = speakerCleanup
     }
+
+    /// The speaker check of the apps: pyannote segmentation and CAM++ on the device, and the user's voice profile.
+    public static var onDeviceSpeakerCleanup: any MeetingSpeakerCleaning { MeetingSpeakerCleanup() }
+
+    private static let log = Logger(subsystem: "de.gruenwald.legato", category: "meetings")
 
     // MARK: Arbitration
 
@@ -194,28 +214,77 @@ public final class MeetingServices {
     // MARK: After stop
 
     /// The after-stop chain of a meeting that is `processing` (or `interrupted`): the recordings become m4a and the
-    /// lossless CAFs go, then the summary when it is automatic and there is something to summarize. A
-    /// `processing` meeting ends `finished`; an `interrupted` one stays so. A step that fails is tried again by
-    /// ``recover()`` (the audio) or by the user (``summarize(meetingID:)``).
+    /// lossless CAFs go, the speakers are checked against the recording, then the summary when it is automatic and there
+    /// is something to summarize. A `processing` meeting ends `finished`; an `interrupted` one stays so. A step that fails
+    /// is tried again by ``recover()`` (the audio; the speakers while the meeting is unfinished) or by the user
+    /// (``summarize(meetingID:)``).
     public func process(_ id: UUID) async {
         guard var meeting = try? await store.meeting(id: id), meeting.state == .processing || meeting.state == .interrupted
         else { return }
+        defer {
+            runningSteps[id] = nil
+            onMeetingChanged?(id)
+        }
         if !meeting.completedSteps.contains(.audio) {
+            runningSteps[id] = .audio
             let folder = await store.folder(for: id)
             let report = await Task.detached { MeetingAudioWriter.recover(folder: folder) }.value
             if report.failed.isEmpty {
                 MeetingAudioWriter.discardLossless(in: folder)
                 meeting = (try? await store.update(id: id) { $0.completedSteps.insert(.audio) }) ?? meeting
+                onMeetingChanged?(id)
+            }
+        }
+        if speakerCleanup != nil, !meeting.completedSteps.contains(.speakers) {
+            runningSteps[id] = .speakers
+            if let saved = await cleanSpeakers(id) {
+                meeting = saved
+                onMeetingChanged?(id)
             }
         }
         if settings.summarizeAutomatically, !meeting.completedSteps.contains(.summary),
             !((try? await store.segments(for: id)) ?? []).isEmpty
         {
+            runningSteps[id] = .summary
             _ = try? await summarize(meetingID: id)
+            onMeetingChanged?(id)
         }
         _ = try? await store.update(id: id) {
             // A failed conversion must remain recoverable at next launch, even if its summary succeeded.
             if $0.state == .processing, $0.completedSteps.contains(.audio) { $0.state = .finished }
+        }
+    }
+
+    /// Checks the speakers against the recording and saves the result; the step is marked done only when it succeeded. A
+    /// failure leaves the live engine's speakers (and the transcript) as they are. Returns the meeting as saved.
+    private func cleanSpeakers(_ id: UUID) async -> Meeting? {
+        guard let speakerCleanup, let meeting = try? await store.meeting(id: id) else { return nil }
+        do {
+            let folder = await store.folder(for: id)
+            var segments = try await store.segments(for: id)
+            guard !segments.isEmpty else { return try await store.update(id: id) { $0.completedSteps.insert(.speakers) } }
+            // Segments without word times (a meeting recorded before they were kept) take them from the meeting's log.
+            RoomLogWords.fill(&segments, folder: folder)
+            let analysis = try await speakerCleanup.analyze(meeting: meeting, segments: segments, folder: folder)
+            // Renames and merges made meanwhile count: the voices are applied to the meeting as it is now.
+            guard let current = try await store.meeting(id: id) else { return nil }
+            var latest = try await store.segments(for: id)
+            RoomLogWords.fill(&latest, folder: folder)
+            let result = analysis.apply(to: latest, directory: SpeakerDirectory(meeting: current))
+            try await store.replaceSegments(result.segments, for: id)
+            let directory = result.directory
+            let saved = try await store.update(id: id) { m in
+                directory.save(into: &m)
+                m.completedSteps.insert(.speakers)
+            }
+            let (run, audio, voices) = (analysis.runSeconds, analysis.audioSeconds, analysis.timeline.clusterCount)
+            let (parts, merges, added, user) = (result.addedSegments, result.merges.count, result.newPeople.count, result.user != nil)
+            Self.log.info(
+                "Speakers checked in \(run, format: .fixed(precision: 1)) s for \(audio, format: .fixed(precision: 0)) s of audio: \(voices) voices, \(parts) split parts, \(merges) merges, \(added) new people, user found: \(user)")
+            return saved
+        } catch {
+            Self.log.error("Speaker check failed, the meeting keeps the live speakers: \(error.localizedDescription, privacy: .public)")
+            return nil
         }
     }
 
