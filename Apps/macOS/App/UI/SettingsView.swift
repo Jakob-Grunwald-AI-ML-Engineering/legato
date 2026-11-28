@@ -291,6 +291,7 @@ private struct VoiceSettingsSection: View {
     @State private var addingSetting = false
     @State private var newSettingName = ""
     @State private var confirmingDelete = false
+    @State private var confirmingDeleteRecordings = false
 
     var body: some View {
         @Bindable var enrollment = enrollment
@@ -347,7 +348,13 @@ private struct VoiceSettingsSection: View {
                     Toggle(VoiceSetupCopy.keepRecordings, isOn: $enrollment.keepRecordings)
                         .accessibilityIdentifier("settings.keepVoiceRecordings")
                     Text(VoiceSetupCopy.recordingsAbout).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    if !enrollment.recordings.isEmpty {
+                    if !enrollment.keepRecordings && !enrollment.recordings.isEmpty {
+                        Text(VoiceSetupCopy.recordingsStay).font(.callout).fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("settings.voiceRecordingsStay")
+                    }
+                    if enrollment.recordings.isEmpty {
+                        notice(.recordings)
+                    } else {
                         HStack(spacing: 12) {
                             let all = enrollment.exportAll()
                             ShareLink(item: all, preview: all.preview) {
@@ -355,6 +362,9 @@ private struct VoiceSettingsSection: View {
                             }.accessibilityIdentifier("settings.exportVoiceRecordings")
                             Button(VoiceSetupCopy.saveToFolder) { saveToFolder(all) }
                                 .accessibilityIdentifier("settings.saveVoiceRecordings")
+                            Spacer()
+                            Button(VoiceSetupCopy.deleteRecordings, role: .destructive) { enrollment.clearNotice(); confirmingDeleteRecordings = true }
+                                .disabled(enrollment.isBusy).accessibilityIdentifier("settings.deleteVoiceRecordings")
                         }
                         notice(.recordings)
                         ForEach(enrollment.recordings) { entry in
@@ -393,8 +403,12 @@ private struct VoiceSettingsSection: View {
         .alert(VoiceSetupCopy.addSettingTitle, isPresented: $addingSetting) {
             TextField(VoiceSetupCopy.addSettingPlaceholder, text: $newSettingName)
             Button("Add") { enrollment.addSituation(named: newSettingName) }
+                .disabled(!VoiceSetupCopy.isValidSettingName(newSettingName))
             Button("Cancel", role: .cancel) {}
         }
+        .confirmationDialog(VoiceSetupCopy.deleteRecordings, isPresented: $confirmingDeleteRecordings) {
+            Button(VoiceSetupCopy.deleteRecordings, role: .destructive) { enrollment.deleteRecordings() }
+        } message: { Text(VoiceSetupCopy.deleteRecordingsAbout) }
         .confirmationDialog(VoiceSetupCopy.deleteVoice, isPresented: $confirmingDelete) {
             Button(VoiceSetupCopy.deleteVoice, role: .destructive) { enrollment.deleteProfile(); onlyMyVoice = false }
         } message: { Text(VoiceSetupCopy.deleteVoiceAbout) }

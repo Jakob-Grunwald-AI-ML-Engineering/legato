@@ -1,5 +1,8 @@
 import AVFoundation
 import Foundation
+#if os(macOS)
+import AppKit
+#endif
 import Observation
 import Synchronization
 import LegatoAudio
@@ -44,6 +47,10 @@ public struct VoiceGuide: Equatable, Sendable {
     public var prompt: String?
     public var sentence = 1
     public var sentenceCount = 0
+    /// The script step on screen; Next sentence applies to this step only.
+    public var step = 0
+    /// Shown when a sentence takes long: read it aloud, or pause or press Next sentence when done.
+    public var hint: VoiceCaptureSchedule.Hint?
     public var routeName: String?
     public var isActive: Bool { phase != .saved && phase != .failed }
     public var introduction: String { VoiceSetupCopy.introduction(firstSetup: isFirstSetup) }
@@ -74,10 +81,11 @@ public struct VoiceNotice: Equatable, Sendable {
 
 /// Collects a guided recording off the main actor: the microphone's chunks go straight into the samples and the
 /// schedule, so a busy main thread neither drops audio nor slows the recording's clock. The main actor reads a
-/// snapshot about ten times a second. The recording counts as stalled only when no audio arrived for
-/// `stallSeconds`: the schedule runs on audio time, so wall time alone never ends it.
+/// snapshot about ten times a second, shows a new step and then marks it shown, so the step's audio starts when
+/// the reader can see it. The recording counts as stalled only when no audio arrived for `stallSeconds`: the
+/// schedule runs on audio time, so wall time alone never ends it. It overruns at the schedule's generous cap.
 final class VoiceCaptureRecorder: Sendable {
-    enum State: Equatable, Sendable { case running, finished, stalled, ended }
+    enum State: Equatable, Sendable { case running, finished, stalled, ended, overrun }
     struct Snapshot: Equatable, Sendable {
         var state: State
         var stepIndex: Int
@@ -85,6 +93,7 @@ final class VoiceCaptureRecorder: Sendable {
         var progress: Double
         var stepProgress: Double
         var quietRemaining: Int
+        var hint: VoiceCaptureSchedule.Hint?
     }
     private struct Box {
         var schedule: VoiceCaptureSchedule
@@ -99,7 +108,7 @@ final class VoiceCaptureRecorder: Sendable {
     init(script: VoiceReadingScript, sampleRate: Double = 16000, stallSeconds: Double = 6,
          clock: @escaping @Sendable () -> Double = { ProcessInfo.processInfo.systemUptime }) {
         var samples: [Float] = []
-        samples.reserveCapacity(Int((script.steps.reduce(0) { $0 + $1.maximumSeconds } + 2) * sampleRate))
+        samples.reserveCapacity(Int((script.steps.reduce(0) { $0 + $1.maximumSeconds } + 10) * sampleRate))
         box = Mutex(Box(schedule: VoiceCaptureSchedule(script: script, sampleRate: sampleRate), samples: samples, lastAudio: clock()))
         self.clock = clock; self.stallSeconds = stallSeconds
     }
@@ -112,10 +121,13 @@ final class VoiceCaptureRecorder: Sendable {
             let taken = box.schedule.consume(chunk)
             box.samples.append(contentsOf: chunk.prefix(taken))
             box.lastAudio = now
-            return !box.schedule.isFinished
+            return !box.schedule.isFinished && !box.schedule.isOverrun
         }
     }
-    func requestAdvance() { box.withLock { $0.schedule.requestAdvance() } }
+    /// The sheet shows `step` now.
+    func markShown(step: Int) { box.withLock { $0.schedule.markShown(step: step) } }
+    /// Next sentence, pressed while `step` was on screen.
+    func requestAdvance(step: Int) { box.withLock { $0.schedule.requestAdvance(step: step) } }
     /// The microphone's stream ended.
     func markEnded() { box.withLock { $0.ended = true } }
 
@@ -123,10 +135,10 @@ final class VoiceCaptureRecorder: Sendable {
         let now = clock()
         return box.withLock { box in
             let schedule = box.schedule
-            let state: State = schedule.isFinished ? .finished : box.ended ? .ended
+            let state: State = schedule.isFinished ? .finished : schedule.isOverrun ? .overrun : box.ended ? .ended
                 : now - box.lastAudio > stallSeconds ? .stalled : .running
             return Snapshot(state: state, stepIndex: schedule.stepIndex, sentence: schedule.sentence, progress: schedule.progress,
-                            stepProgress: schedule.stepProgress, quietRemaining: schedule.quietRemaining)
+                            stepProgress: schedule.stepProgress, quietRemaining: schedule.quietRemaining, hint: schedule.hint)
         }
     }
     func result() -> (samples: [Float], intervals: [VoiceRecordingInterval]) {
@@ -207,7 +219,7 @@ final class VoiceCaptureRecorder: Sendable {
     /// Start: the user has seen the first sentence and begins reading.
     public func start() { if guide?.phase == .ready { startSignal?.yield(()) } }
     /// Next sentence: the user finished the sentence early.
-    public func advance() { recorder?.requestAdvance() }
+    public func advance() { if let step = guide?.step { recorder?.requestAdvance(step: step) } }
     /// Try again after a failed recording, with the same setting.
     public func retry() {
         guard let request = lastRequest, !isBusy else { return }
@@ -259,7 +271,12 @@ final class VoiceCaptureRecorder: Sendable {
             #if os(iOS)
             guard await AVAudioApplication.requestRecordPermission() else { throw EnrollmentError.permission }
             #else
-            guard await AVCaptureDevice.requestAccess(for: .audio) else { throw EnrollmentError.permission }
+            // The system's access prompt sends the menu-bar app to the back; bring the Settings window forward again.
+            let asks = AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
+            let window = NSApp.keyWindow.map { $0.sheetParent ?? $0 } ?? NSApp.windows.first { $0.attachedSheet != nil }
+            let granted = await AVCaptureDevice.requestAccess(for: .audio)
+            if asks { NSApp.activate(); window?.makeKeyAndOrderFront(nil) }
+            guard granted else { throw EnrollmentError.permission }
             #endif
             try check(token)
             guide?.phase = .ready
@@ -346,11 +363,16 @@ final class VoiceCaptureRecorder: Sendable {
                 guide?.phase = step.prompt == nil ? .quiet : .reading
                 if let prompt = step.prompt { guide?.prompt = prompt }
                 guide?.sentence = max(1, snapshot.sentence)
+                guide?.step = shownStep; guide?.hint = nil
+                // The step's audio starts now that it is on screen, not when the last one ended.
+                recorder.markShown(step: shownStep)
             }
+            if snapshot.hint != guide?.hint, snapshot.stepIndex == shownStep { guide?.hint = snapshot.hint }
             meter.show(progress: snapshot.progress, stepProgress: snapshot.stepProgress, quietRemaining: snapshot.quietRemaining)
             switch snapshot.state {
             case .finished: return recorder.result()
             case .stalled, .ended: throw EnrollmentError.interrupted
+            case .overrun: throw EnrollmentError.tooLong(minutes: Int((VoiceCaptureSchedule(script: script).capSeconds / 60).rounded()))
             case .running: break
             }
             try await Task.sleep(for: .milliseconds(100))
@@ -388,6 +410,7 @@ final class VoiceCaptureRecorder: Sendable {
     /// Adds the user's own setting; it is recorded like the suggested ones.
     public func addSituation(named name: String) {
         clearNotice()
+        guard VoiceSetupCopy.isValidSettingName(name) else { return }
         Task {
             do {
                 if try await service.addSituation(named: name) == nil { notice = .init(place: .settings, text: VoiceSetupCopy.nameTaken) }
@@ -424,6 +447,20 @@ final class VoiceCaptureRecorder: Sendable {
 
     // MARK: Kept recordings
 
+    /// "Delete kept recordings": every kept recording, not the voice or its settings.
+    public func deleteRecordings() {
+        guard !isBusy else { return }
+        clearNotice()
+        let store = service.recordings
+        Task {
+            do {
+                try await Task.detached(priority: .userInitiated) { try store.deleteAll() }.value
+                notice = .init(place: .recordings, text: VoiceSetupCopy.recordingsDeleted)
+            } catch { notice = .init(place: .recordings, text: error.localizedDescription) }
+            refresh()
+        }
+    }
+
     /// Every kept recording and the profiles, as one zip for the share sheet (AirDrop to the Mac replay tool).
     public func exportAll() -> VoiceRecordingExport {
         let store = service.recordings, folders = recordings.map(\.folder), profiles = service.profilesURL
@@ -447,14 +484,20 @@ final class VoiceCaptureRecorder: Sendable {
         }
     }
 
-    private enum EnrollmentError: Error { case permission, microphoneBusy, interrupted }
+    nonisolated enum EnrollmentError: Error { case permission, microphoneBusy, interrupted, tooLong(minutes: Int) }
 
     /// What a failed recording says, worded for the first setup or the setting.
-    static func failure(_ error: any Error, firstSetup: Bool, name: String) -> String {
+    nonisolated static func failure(_ error: any Error, firstSetup: Bool, name: String) -> String {
         switch error as? EnrollmentError {
         case .permission: return VoiceSetupCopy.microphonePermission
         case .microphoneBusy: return VoiceSetupCopy.microphoneBusy
         case .interrupted: return VoiceSetupCopy.interrupted
+        case .tooLong(let minutes): return VoiceSetupCopy.tooLong(minutes: minutes)
+        case nil: break
+        }
+        switch error as? AutomaticInputError {
+        case .noUsableInput: return VoiceSetupCopy.noMicrophone
+        case .noPCM: return VoiceSetupCopy.interrupted
         case nil: break
         }
         if case .invalidEnrollment? = error as? VoiceIdentityError { return VoiceSetupCopy.tooLittleSpeech(firstSetup: firstSetup, name: name) }

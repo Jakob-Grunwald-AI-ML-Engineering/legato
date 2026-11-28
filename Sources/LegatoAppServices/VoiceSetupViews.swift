@@ -24,8 +24,15 @@ public enum VoiceSetupCopy {
     public static let addSettingTitle = "Name this setting"
     public static let addSettingPlaceholder = "For example: Café"
     public static let nameTaken = "Choose a name that is not in the list yet."
+    /// Add stays disabled until a name is typed.
+    public static func isValidSettingName(_ name: String) -> Bool { !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     public static let keepRecordings = "Keep recordings for testing"
     public static let recordingsAbout = "Saves each setup and setting recording that saved your voice on this device, with its sentences, so it can be exported and replayed on a Mac. Off: recordings stay in memory and are discarded."
+    /// Next to the switch while it is off and recordings are kept.
+    public static let recordingsStay = "Recordings already kept stay until you delete them."
+    public static let deleteRecordings = "Delete kept recordings"
+    public static let deleteRecordingsAbout = "Deletes every kept recording from this device. Your voice and its settings stay."
+    public static let recordingsDeleted = "Kept recordings deleted."
     public static let exportAll = "Export all recordings"
     public static let saveToFolder = "Save to folder…"
     public static let shareRecording = "Share this recording"
@@ -52,7 +59,13 @@ public enum VoiceSetupCopy {
     }
     public static let firstSentence = "First sentence"
     public static let start = "Start"
-    public static let startHint = "Recording starts when you press Start. When you finish a sentence, the next one follows."
+    public static let startHint = "Recording starts when you press Start. When you finish a sentence and pause, the next one follows."
+    public static func hint(_ hint: VoiceCaptureSchedule.Hint) -> String {
+        switch hint {
+        case .readAloud: "Read the sentence aloud. Or press Next sentence to skip it."
+        case .finishWithPause: "When you finish the sentence, pause for a moment or press Next sentence."
+        }
+    }
     public static let readAloud = "Read aloud"
     public static let nextSentence = "Next sentence"
     public static let stayQuiet = "Stay quiet"
@@ -73,6 +86,14 @@ public enum VoiceSetupCopy {
     public static let microphonePermission = "Allow microphone access in system Settings, then try recording again."
     public static let microphoneBusy = "Stop dictation, meetings and the held microphone before recording your voice."
     public static let interrupted = "The microphone stopped sending sound, so the recording ended. Check the microphone and try again."
+    #if os(macOS)
+    public static let noMicrophone = "No microphone could record. Connect one, or choose one under Dictation microphone, then try again."
+    #else
+    public static let noMicrophone = "No microphone could record. Connect one, then try again."
+    #endif
+    public static func tooLong(minutes: Int) -> String {
+        "The recording stopped after \(minutes) minutes, before the last sentence. Read each sentence aloud and pause when you finish it, or press Next sentence, then try again."
+    }
     public static func tooLittleSpeech(firstSetup: Bool, name: String) -> String {
         "Too little speech was heard to \(firstSetup ? "set up your voice" : "save \(name)"). Read each sentence aloud clearly, then try again."
     }
@@ -170,6 +191,10 @@ public struct VoiceRecordingGuideView: View {
             prompt(guide)
             VoiceStepBar(meter: controller.meter).frame(maxWidth: 220)
             Button(VoiceSetupCopy.nextSentence) { controller.advance() }.accessibilityIdentifier("voiceGuide.next")
+            if let hint = guide.hint {
+                Text(VoiceSetupCopy.hint(hint)).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("voiceGuide.hint")
+            }
             Spacer(minLength: 0)
             footer(guide)
         case .quiet:

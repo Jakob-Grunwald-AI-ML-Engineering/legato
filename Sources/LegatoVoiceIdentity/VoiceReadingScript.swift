@@ -8,8 +8,8 @@ public struct VoiceScriptStep: Sendable, Equatable {
     public var seconds: Double
     public init(kind: Kind, seconds: Double) { self.kind = kind; self.seconds = seconds }
     public var prompt: String? { if case .reading(let text) = kind { text } else { nil } }
-    /// The longest a step runs before it moves on by itself. A reading step usually ends earlier: when the reader
-    /// stops speaking, or on Next sentence. The margin lets a slow reader finish the sentence.
+    /// For a quiet pause its length. For a reading step, how long it runs before the sheet offers a hint; it still
+    /// ends only when the reader stops speaking, or on Next sentence.
     public var maximumSeconds: Double { prompt == nil ? seconds : seconds * VoiceReadingScript.readingTolerance }
 }
 
@@ -19,10 +19,8 @@ public struct VoiceReadingScript: Sendable, Equatable {
     public static let setupReadingSeconds = 60.0
     public static let settingReadingSeconds = 40.0
     public static let quietSeconds = 10.0
-    /// A reading step moves on by itself at this multiple of its estimate, if the reader has not stopped before.
+    /// A reading step still running at this multiple of its estimate shows a hint (it never ends on time alone).
     public static let readingTolerance = 1.6
-    /// A quiet interval's label starts this long after its step, so a last word read late is not called background.
-    public static let quietSettleSeconds = 1.0
 
     public var language: String
     public var steps: [VoiceScriptStep]

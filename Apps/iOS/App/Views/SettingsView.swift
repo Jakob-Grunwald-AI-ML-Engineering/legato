@@ -163,6 +163,7 @@ private struct BackgroundVoicesView: View {
     @State private var addingSetting = false
     @State private var newSettingName = ""
     @State private var confirmingDelete = false
+    @State private var confirmingDeleteRecordings = false
 
     var body: some View {
         @Bindable var enrollment = enrollment
@@ -205,13 +206,20 @@ private struct BackgroundVoicesView: View {
             Section {
                 Toggle(VoiceSetupCopy.keepRecordings, isOn: $enrollment.keepRecordings)
                     .accessibilityIdentifier("settings.keepVoiceRecordings")
+                if !enrollment.keepRecordings && !enrollment.recordings.isEmpty {
+                    Text(VoiceSetupCopy.recordingsStay).font(.callout)
+                        .accessibilityIdentifier("settings.voiceRecordingsStay")
+                }
                 if !enrollment.recordings.isEmpty {
                     NavigationLink {
                         VoiceRecordingsView(enrollment: enrollment)
                     } label: {
                         LabeledContent("Recordings", value: "\(enrollment.recordings.count)")
                     }.accessibilityIdentifier("settings.voiceRecordingsLink")
+                    Button(VoiceSetupCopy.deleteRecordings, role: .destructive) { enrollment.clearNotice(); confirmingDeleteRecordings = true }
+                        .disabled(enrollment.isBusy).accessibilityIdentifier("settings.deleteVoiceRecordings")
                 }
+                notice(.recordings)
             } footer: { Text(VoiceSetupCopy.recordingsAbout) }
             if enrollment.hasProfile || !enrollment.recordings.isEmpty {
                 Section {
@@ -230,8 +238,12 @@ private struct BackgroundVoicesView: View {
         .alert(VoiceSetupCopy.addSettingTitle, isPresented: $addingSetting) {
             TextField(VoiceSetupCopy.addSettingPlaceholder, text: $newSettingName)
             Button("Add") { enrollment.addSituation(named: newSettingName) }
+                .disabled(!VoiceSetupCopy.isValidSettingName(newSettingName))
             Button("Cancel", role: .cancel) {}
         }
+        .confirmationDialog(VoiceSetupCopy.deleteRecordings, isPresented: $confirmingDeleteRecordings, titleVisibility: .visible) {
+            Button(VoiceSetupCopy.deleteRecordings, role: .destructive) { enrollment.deleteRecordings() }
+        } message: { Text(VoiceSetupCopy.deleteRecordingsAbout) }
         .confirmationDialog(VoiceSetupCopy.deleteVoice, isPresented: $confirmingDelete, titleVisibility: .visible) {
             Button(VoiceSetupCopy.deleteVoice, role: .destructive) { enrollment.deleteProfile(); onlyMyVoice = false }
         } message: { Text(VoiceSetupCopy.deleteVoiceAbout) }
