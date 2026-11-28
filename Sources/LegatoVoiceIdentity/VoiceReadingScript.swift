@@ -4,10 +4,13 @@ import Foundation
 public struct VoiceScriptStep: Sendable, Equatable {
     public enum Kind: Sendable, Equatable { case reading(String), quiet }
     public var kind: Kind
-    /// Planned length; reading steps may be cut short by the user.
+    /// Planned length: the estimated reading time of a sentence, or the exact length of a quiet pause.
     public var seconds: Double
     public init(kind: Kind, seconds: Double) { self.kind = kind; self.seconds = seconds }
     public var prompt: String? { if case .reading(let text) = kind { text } else { nil } }
+    /// The longest a step runs before it moves on by itself. A reading step usually ends earlier: when the reader
+    /// stops speaking, or on Next sentence. The margin lets a slow reader finish the sentence.
+    public var maximumSeconds: Double { prompt == nil ? seconds : seconds * VoiceReadingScript.readingTolerance }
 }
 
 /// What the user reads and when they stay quiet. The first setup reads about a minute in a quiet room; a setting
@@ -16,6 +19,8 @@ public struct VoiceReadingScript: Sendable, Equatable {
     public static let setupReadingSeconds = 60.0
     public static let settingReadingSeconds = 40.0
     public static let quietSeconds = 10.0
+    /// A reading step moves on by itself at this multiple of its estimate, if the reader has not stopped before.
+    public static let readingTolerance = 1.6
     /// A quiet interval's label starts this long after its step, so a last word read late is not called background.
     public static let quietSettleSeconds = 1.0
 
@@ -31,24 +36,33 @@ public struct VoiceReadingScript: Sendable, Equatable {
         max(4, Double(sentence.split(whereSeparator: \.isWhitespace).count) / 2.4 + 1.5)
     }
 
+    /// Whether one more sentence of `seconds` brings the reading closer to `target` than stopping now.
+    private static func fits(_ seconds: Double, after total: Double, target: Double) -> Bool {
+        total == 0 || total + seconds / 2 <= target
+    }
+
     public static func firstSetup(language: String) -> Self {
         let prompts = VoiceReadingPrompts.setup(language: language)
         var steps: [VoiceScriptStep] = [], total = 0.0
-        for prompt in prompts where total < setupReadingSeconds {
-            let seconds = readingSeconds(for: prompt); total += seconds
+        for prompt in prompts {
+            let seconds = readingSeconds(for: prompt)
+            guard fits(seconds, after: total, target: setupReadingSeconds) else { break }
+            total += seconds
             steps.append(.init(kind: .reading(prompt), seconds: seconds))
         }
         return Self(language: language, steps: steps, nextCursor: 0)
     }
 
-    /// Sentences from the rotation pool, starting at `cursor`, until about 40 s of reading, in three blocks
-    /// separated by the two quiet pauses.
+    /// Sentences from the rotation pool, starting at `cursor`, for about 40 s of reading, in three blocks
+    /// separated by the two quiet pauses. `nextCursor` is where the next recording starts, so successive recordings
+    /// read different sentences until the pool comes round again.
     public static func setting(language: String, cursor: Int) -> Self {
         let pool = VoiceReadingPrompts.rotation(language: language)
-        var sentences: [(String, Double)] = [], total = 0.0, index = max(0, cursor)
-        while total < settingReadingSeconds && sentences.count < pool.count {
-            let prompt = pool[index % pool.count]; index += 1
-            let seconds = readingSeconds(for: prompt); total += seconds
+        var sentences: [(String, Double)] = [], total = 0.0, index = max(0, cursor) % max(1, pool.count)
+        while sentences.count < pool.count {
+            let prompt = pool[index % pool.count], seconds = readingSeconds(for: prompt)
+            guard fits(seconds, after: total, target: settingReadingSeconds) else { break }
+            index += 1; total += seconds
             sentences.append((prompt, seconds))
         }
         var steps: [VoiceScriptStep] = [], elapsed = 0.0, pauses = 0

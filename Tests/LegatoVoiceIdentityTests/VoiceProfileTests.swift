@@ -116,19 +116,154 @@ import Testing
         for language in ["en", "de"] {
             let setup = VoiceReadingScript.firstSetup(language: language)
             #expect(setup.steps.allSatisfy { $0.prompt != nil })
-            #expect(setup.plannedSeconds >= 60 && setup.plannedSeconds < 75)
+            #expect(abs(setup.plannedSeconds - VoiceReadingScript.setupReadingSeconds) <= 5)
             let first = VoiceReadingScript.setting(language: language, cursor: 0)
             let reading = first.steps.filter { $0.prompt != nil }.reduce(0) { $0 + $1.seconds }
-            #expect(reading >= 40 && reading < 55)
+            #expect(abs(reading - VoiceReadingScript.settingReadingSeconds) <= 5)
             #expect(first.steps.filter { $0.prompt == nil }.map(\.seconds) == [10, 10])
             #expect(first.steps.first?.prompt != nil && first.steps.last?.prompt != nil)
-            // Settings never reuse the setup sentences, and the next recording moves on to other sentences.
-            #expect(Set(first.steps.compactMap(\.prompt)).isDisjoint(with: setup.steps.compactMap(\.prompt)))
-            let second = VoiceReadingScript.setting(language: language, cursor: first.nextCursor)
-            #expect(Set(first.steps.compactMap(\.prompt)).isDisjoint(with: second.steps.compactMap(\.prompt)))
+            // Reading steps run on past their estimate before moving on by themselves; quiet steps do not.
+            #expect(first.steps.allSatisfy {
+                $0.maximumSeconds == ($0.prompt == nil ? $0.seconds : $0.seconds * VoiceReadingScript.readingTolerance)
+            })
         }
         #expect(VoiceReadingPrompts.language(preferred: ["de-DE", "en"]) == "de")
         #expect(VoiceReadingPrompts.language(preferred: ["en-GB"]) == "en")
         #expect(VoiceReadingPrompts.language(preferred: ["fr-FR"]) == "en")
+    }
+
+    @Test func successiveSettingRecordingsReadOtherSentencesThanEachOtherAndTheSetup() {
+        for language in ["en", "de"] {
+            let setup = Set(VoiceReadingScript.firstSetup(language: language).steps.compactMap(\.prompt))
+            let pool = VoiceReadingPrompts.rotation(language: language).count
+            var cursor = 0, seen = Set<String>(), read = 0
+            // Alone again, Car, a custom setting…: each starts where the last one stopped, until the pool comes round.
+            while read + 6 <= pool {
+                let script = VoiceReadingScript.setting(language: language, cursor: cursor)
+                let prompts = script.steps.compactMap(\.prompt)
+                #expect(Set(prompts).isDisjoint(with: setup))
+                #expect(Set(prompts).isDisjoint(with: seen))
+                seen.formUnion(prompts); read += prompts.count
+                #expect(script.nextCursor == (cursor + prompts.count) % pool)
+                cursor = script.nextCursor
+            }
+            #expect(seen.count == read && read >= pool - 6)
+        }
+    }
+
+    @Test func enrollmentKeepsARecordingOnlyWhenItsProfileIsSaved() async throws {
+        let root = try temporaryRoot()
+        let service = VoiceIdentityService(root: root)
+        func kept(_ samples: [Float]) -> (samples: [Float], sidecar: VoiceRecordingSidecar) {
+            (samples, VoiceRecordingSidecar(kind: .setting, situationID: "car", situationName: "Car", route: .unknown, language: "en",
+                                            intervals: [.init(kind: .reading, startMs: 0, endMs: Double(samples.count) / 16)]))
+        }
+        // A silent recording is rejected and leaves nothing behind.
+        let silent = [Float](repeating: 0, count: 10 * 16000)
+        await #expect(throws: VoiceIdentityError.self) {
+            try await service.enroll(reading: [silent], situation: .alone, route: .unknown, keeping: kept(silent))
+        }
+        #expect(service.recordings.list().isEmpty)
+        // A recording that passes the checks but cannot become a profile (no model in this folder) is not kept either.
+        let speech = (0..<(10 * 16000)).map { sin(Float($0) / 7) * 0.2 }
+        await #expect(throws: VoiceIdentityError.self) {
+            try await service.enroll(reading: [speech], situation: .alone, route: .unknown, keeping: kept(speech))
+        }
+        #expect(service.recordings.list().isEmpty)
+        #expect(!VoiceIdentityService.hasStoredProfile(at: root))
+    }
+}
+
+/// The recording's schedule runs on recorded audio, with reading steps that end when the reader stops.
+@Suite struct VoiceCaptureScheduleTests {
+    private let rate = 16000.0
+    private func speech(_ seconds: Double, level: Float = 0.1) -> [Float] {
+        (0..<Int(seconds * 16000)).map { sin(Float($0) * 0.09) * level * 1.41 }
+    }
+    private func silence(_ seconds: Double) -> [Float] { [Float](repeating: 0.0005, count: Int(seconds * 16000)) }
+    private func script(_ steps: [VoiceScriptStep]) -> VoiceReadingScript { VoiceReadingScript(language: "en", steps: steps, nextCursor: 0) }
+
+    @Test func quietStepsLastTheirAudioTimeAndLaterAudioIsNotTaken() {
+        var schedule = VoiceCaptureSchedule(script: script([.init(kind: .quiet, seconds: 10), .init(kind: .quiet, seconds: 10)]))
+        // However the audio arrives (tiny chunks, one large burst), the steps end at 10 s and 20 s of audio.
+        for _ in 0..<500 { schedule.consume(silence(0.01)) }
+        #expect(schedule.stepIndex == 0 && schedule.quietRemaining == 5)
+        let taken = schedule.consume(silence(30))
+        #expect(schedule.isFinished && taken == Int(15 * rate) && schedule.sampleCount == Int(20 * rate))
+        #expect(schedule.intervals.map(\.kind) == [.quiet, .quiet])
+        #expect(schedule.intervals.map(\.endMs) == [10_000, 20_000])
+        // A quiet label starts after the settle second, so a late last word is not called background.
+        #expect(schedule.intervals.map(\.startMs) == [1_000, 11_000])
+        #expect(schedule.progress == 1)
+    }
+
+    @Test func aReadingStepEndsWhenTheReaderStopsNotOnAShortPause() {
+        var schedule = VoiceCaptureSchedule(script: script([.init(kind: .reading("One."), seconds: 8), .init(kind: .reading("Two."), seconds: 8)]))
+        schedule.consume(silence(0.3))
+        schedule.consume(speech(2.5)); schedule.consume(silence(0.6)); schedule.consume(speech(3))
+        // Speech with a breath in it keeps the sentence going.
+        #expect(schedule.stepIndex == 0)
+        schedule.consume(silence(1.5))
+        // About 1.2 s of silence after the sentence moves on: 0.3 + 2.5 + 0.6 + 3 + 1.2 s.
+        #expect(schedule.stepIndex == 1)
+        let end = schedule.intervals[0].endMs
+        #expect(abs(end - 7_600) <= 40)
+        #expect(schedule.intervals[0] == .init(kind: .reading, startMs: 0, endMs: end, prompt: "One."))
+    }
+
+    @Test func anEarlyPauseDoesNotEndASentenceBeforeHalfItsEstimate() {
+        var schedule = VoiceCaptureSchedule(script: script([.init(kind: .reading("Long."), seconds: 10), .init(kind: .quiet, seconds: 10)]))
+        schedule.consume(speech(1)); schedule.consume(silence(2.5))
+        #expect(schedule.stepIndex == 0)
+        schedule.consume(silence(2))
+        // Half the estimate (5 s) has passed and the reader is silent: on to the pause.
+        #expect(schedule.stepIndex == 1 && abs(schedule.intervals[0].endMs - 5_000) <= 40)
+    }
+
+    @Test func steadyNoiseRunsAReadingStepToItsTolerantMaximum() {
+        var schedule = VoiceCaptureSchedule(script: script([.init(kind: .reading("Car."), seconds: 9), .init(kind: .quiet, seconds: 10)]))
+        // A loud, steady room (the TV on) never reads as the reader stopping; the step still ends.
+        schedule.consume(speech(13, level: 0.05))
+        #expect(schedule.stepIndex == 0)
+        schedule.consume(speech(2, level: 0.05))
+        #expect(schedule.stepIndex == 1)
+        #expect(abs(schedule.intervals[0].endMs - 9 * VoiceReadingScript.readingTolerance * 1000) <= 40)
+    }
+
+    @Test func aQuietPauseLearnsANoisyRoomSoTheNextSentenceEndsWhenTheReaderStops() {
+        var schedule = VoiceCaptureSchedule(script: script([.init(kind: .quiet, seconds: 10), .init(kind: .reading("Car."), seconds: 8),
+                                                           .init(kind: .quiet, seconds: 10)]))
+        schedule.consume(speech(10, level: 0.02))
+        #expect(schedule.stepIndex == 1)
+        schedule.consume(speech(3, level: 0.2)); schedule.consume(speech(1.5, level: 0.02))
+        #expect(schedule.stepIndex == 2)
+        #expect(abs(schedule.intervals[1].endMs - 14_200) <= 40)
+    }
+
+    @Test func nextSentenceEndsTheSentenceButNotInItsFirstSecond() {
+        var schedule = VoiceCaptureSchedule(script: script([.init(kind: .reading("A."), seconds: 8), .init(kind: .reading("B."), seconds: 8),
+                                                           .init(kind: .quiet, seconds: 10)]))
+        schedule.consume(speech(2))
+        schedule.requestAdvance(); schedule.consume(speech(0.1))
+        #expect(schedule.stepIndex == 1)
+        // A double tap does not skip the next sentence.
+        schedule.requestAdvance(); schedule.consume(speech(0.5))
+        #expect(schedule.stepIndex == 1)
+        schedule.consume(speech(1)); schedule.requestAdvance(); schedule.consume(speech(0.05))
+        #expect(schedule.stepIndex == 2)
+        // Next sentence does nothing in a pause.
+        schedule.requestAdvance(); schedule.consume(silence(1))
+        #expect(schedule.stepIndex == 2 && schedule.quietRemaining == 9)
+    }
+
+    @Test func progressOnlyMovesForward() {
+        var schedule = VoiceCaptureSchedule(script: VoiceReadingScript.setting(language: "en", cursor: 0))
+        var last = 0.0
+        while !schedule.isFinished {
+            schedule.consume(speech(0.25))
+            #expect(schedule.progress >= last)
+            last = schedule.progress
+        }
+        #expect(last == 1)
     }
 }

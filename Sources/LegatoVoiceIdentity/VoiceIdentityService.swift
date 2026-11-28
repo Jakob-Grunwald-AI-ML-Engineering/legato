@@ -7,9 +7,9 @@ public enum VoiceIdentityError: LocalizedError, Sendable {
     case setupRequired, invalidEnrollment, invalidModel, corruptDownload
     public var errorDescription: String? {
         switch self {
-        case .setupRequired: "Set up Only My Voice in Settings, or turn it off before dictating."
-        case .invalidEnrollment: "Read at least eight seconds of the sentences clearly to save your voice."
-        case .invalidModel: "The voice model could not run. Record your voice again in Settings, or turn Only My Voice off."
+        case .setupRequired: "Set up your voice in Settings, or turn Reduce background voices off before dictating."
+        case .invalidEnrollment: "Too little speech was heard. Read the sentences aloud clearly, then try again."
+        case .invalidModel: "The voice model could not run. Record your voice again in Settings, or turn Reduce background voices off."
         case .corruptDownload: "The voice model download failed verification. Try setup again."
         }
     }
@@ -24,6 +24,11 @@ public enum VoiceIsolationSettings {
     public static var keepRecordings: Bool {
         get { UserDefaults.standard.bool(forKey: "voiceIsolation.keepRecordings") }
         set { UserDefaults.standard.set(newValue, forKey: "voiceIsolation.keepRecordings") }
+    }
+    /// Where the next setting recording starts in the sentence rotation (`VoiceReadingScript.setting`).
+    public static var promptCursor: Int {
+        get { UserDefaults.standard.integer(forKey: "voiceIsolation.promptCursor") }
+        set { UserDefaults.standard.set(newValue, forKey: "voiceIsolation.promptCursor") }
     }
     /// A saved voice: the profile set, or a single profile saved before profile sets (migrated on first load).
     public static var hasProfile: Bool { VoiceIdentityService.hasStoredProfile(at: VoiceIdentityService.defaultRoot) }
@@ -114,9 +119,12 @@ public actor VoiceIdentityService {
 
     /// Saves the voice of `situation` on `route` from the reading parts of one recording (the quiet pauses are not
     /// passed in). The same setting on the same route replaces its profile; another route adds one.
+    /// `keeping` is the whole recording for "Keep recordings for testing": it is kept only when its profile is
+    /// saved, so a rejected, failed or cancelled recording leaves nothing behind.
     @discardableResult
     public func enroll(reading segments: [[Float]], situation: VoiceSituation, route: VoiceInputRoute,
-                       recordingID: String? = nil, date: Date = Date()) throws -> VoiceProfile {
+                       keeping recording: (samples: [Float], sidecar: VoiceRecordingSidecar)? = nil,
+                       date: Date = Date()) throws -> VoiceProfile {
         let total = segments.reduce(0) { $0 + $1.count }
         let energy = segments.reduce(Float(0)) { sum, segment in segment.reduce(sum) { $0 + $1 * $1 } } / Float(max(1, total))
         guard total >= 8 * 16000, segments.allSatisfy({ $0.allSatisfy(\.isFinite) }), energy > 0.00001 else { throw VoiceIdentityError.invalidEnrollment }
@@ -125,10 +133,14 @@ public actor VoiceIdentityService {
         let embedding = try profileEmbedding(segments)
         try Task.checkCancellation()
         let profile = VoiceProfile(situationID: situation.id, situationName: situation.name, route: route, embedding: embedding,
-                                   date: date, revision: Self.modelRevision, recordingID: recordingID)
+                                   date: date, revision: Self.modelRevision, recordingID: recording?.sidecar.id)
         var set = try profileSet()
         set.upsert(profile)
-        try save(set)
+        let kept = try recording.map { try recordings.save(samples: $0.samples, sidecar: $0.sidecar) }
+        do { try save(set) } catch {
+            if let kept { try? FileManager.default.removeItem(at: kept) }
+            throw error
+        }
         return profile
     }
     /// One quiet-room recording as the Alone setting, route unknown (the pre-setup entry point).

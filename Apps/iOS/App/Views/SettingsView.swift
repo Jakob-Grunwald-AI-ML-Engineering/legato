@@ -168,8 +168,8 @@ private struct BackgroundVoicesView: View {
         @Bindable var enrollment = enrollment
         Form {
             Section {
-                Toggle(VoiceSetupCopy.toggle, isOn: $onlyMyVoice)
-                    .disabled(!enrollment.hasProfile || enrollment.isBusy)
+                Toggle(VoiceSetupCopy.toggle, isOn: enrollment.optionBinding($onlyMyVoice))
+                    .disabled(enrollment.isBusy)
                     .accessibilityIdentifier("settings.onlyMyVoice")
                 Text(enrollment.hasProfile ? VoiceSetupCopy.saved : VoiceSetupCopy.notSetUp)
                     .font(.callout).foregroundStyle(.secondary)
@@ -177,9 +177,7 @@ private struct BackgroundVoicesView: View {
                     Button(VoiceSetupCopy.setupButton) { enrollment.startFirstSetup(microphoneBusy: microphoneBusy) }
                         .disabled(enrollment.isBusy).accessibilityIdentifier("settings.setUpVoice")
                 }
-                if let message = enrollment.message {
-                    Text(message).font(.callout).accessibilityIdentifier("settings.voiceEnrollmentMessage")
-                }
+                notice(.voice)
             } footer: { Text(VoiceSetupCopy.about) }
             if enrollment.hasProfile {
                 Section {
@@ -199,8 +197,9 @@ private struct BackgroundVoicesView: View {
                     .onDelete { offsets in
                         for index in offsets where enrollment.situations[index].isCustom { enrollment.deleteSituation(id: enrollment.situations[index].id) }
                     }
-                    Button(VoiceSetupCopy.addSetting) { newSettingName = ""; addingSetting = true }
+                    Button(VoiceSetupCopy.addSetting) { newSettingName = ""; enrollment.clearNotice(); addingSetting = true }
                         .disabled(enrollment.isBusy).accessibilityIdentifier("settings.addSetting")
+                    notice(.settings)
                 } header: { Text(VoiceSetupCopy.settingsHeader) } footer: { Text(VoiceSetupCopy.settingsAbout) }
             }
             Section {
@@ -216,7 +215,7 @@ private struct BackgroundVoicesView: View {
             } footer: { Text(VoiceSetupCopy.recordingsAbout) }
             if enrollment.hasProfile || !enrollment.recordings.isEmpty {
                 Section {
-                    Button(VoiceSetupCopy.deleteVoice, role: .destructive) { confirmingDelete = true }
+                    Button(VoiceSetupCopy.deleteVoice, role: .destructive) { enrollment.clearNotice(); confirmingDelete = true }
                         .disabled(enrollment.isBusy).accessibilityIdentifier("settings.deleteVoice")
                 } footer: { Text(VoiceSetupCopy.deleteVoiceAbout) }
             }
@@ -225,7 +224,7 @@ private struct BackgroundVoicesView: View {
         .onAppear { enrollment.refresh() }
         .onDisappear { enrollment.cancel() }
         .onChange(of: scenePhase) { _, phase in if phase == .background { enrollment.cancel() } }
-        .sheet(isPresented: Binding(get: { enrollment.guide != nil }, set: { if !$0 { enrollment.cancel() } })) {
+        .sheet(isPresented: Binding(get: { enrollment.isGuidePresented }, set: { if !$0 { enrollment.closeGuide() } })) {
             VoiceRecordingGuideView(controller: enrollment).interactiveDismissDisabled()
         }
         .alert(VoiceSetupCopy.addSettingTitle, isPresented: $addingSetting) {
@@ -237,6 +236,12 @@ private struct BackgroundVoicesView: View {
             Button(VoiceSetupCopy.deleteVoice, role: .destructive) { enrollment.deleteProfile(); onlyMyVoice = false }
         } message: { Text(VoiceSetupCopy.deleteVoiceAbout) }
     }
+
+    @ViewBuilder private func notice(_ place: VoiceNotice.Place) -> some View {
+        if let text = enrollment.notice(for: place) {
+            Text(text).font(.callout).accessibilityIdentifier("settings.voiceNotice")
+        }
+    }
 }
 
 /// Kept voice recordings, each exportable on its own or all together (AirDrop to a Mac for the replay tool).
@@ -245,13 +250,15 @@ private struct VoiceRecordingsView: View {
     var body: some View {
         List {
             Section {
-                ShareLink(item: enrollment.exportAll(), preview: SharePreview(VoiceSetupCopy.exportAll)) {
+                let all = enrollment.exportAll()
+                ShareLink(item: all, preview: all.preview) {
                     Label(VoiceSetupCopy.exportAll, systemImage: "square.and.arrow.up")
                 }.accessibilityIdentifier("settings.exportVoiceRecordings")
             }
             Section {
                 ForEach(enrollment.recordings) { entry in
-                    ShareLink(item: enrollment.export(entry), preview: SharePreview(VoiceSetupCopy.recordingTitle(entry))) {
+                    let export = enrollment.export(entry)
+                    ShareLink(item: export, preview: export.preview) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(VoiceSetupCopy.recordingTitle(entry)).foregroundStyle(.primary)
                             Text(VoiceSetupCopy.recordingDetail(entry)).font(.caption).foregroundStyle(.secondary)
