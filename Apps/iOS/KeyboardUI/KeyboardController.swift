@@ -894,11 +894,17 @@ final class KeyboardController {
         case .unbound:
             // A returning field is observed again; until then nothing is rechecked.
             draftRecheck?.cancel(); draftRecheck = nil
-        case .unchanged:
+        case .unchanged, .emptiedByKeyboard:
             draftRecheck?.cancel(); draftRecheck = nil
             blankProbeAttempted = false
             unverifiedBlankProbeOrigin = nil
             verifiedBlankProbeReturn = nil
+            // The person deleted the field by hand (#347): not a send. The draft, a staged take and its preview go on, and the
+            // next unit starts the empty field.
+            if decision == .emptiedByKeyboard {
+                stagedTake.fieldEmptied()
+                trace?("field emptied by the keyboard: draft kept")
+            }
         case .pending:
             if !blankProbeAttempted, cursorReadID != nil || isFieldBusy {
                 // A previous reader can leave the native caret at a position the queue never verified.
@@ -938,6 +944,8 @@ final class KeyboardController {
             if styleField != nil, !hasText, report.before.isEmpty, report.after.isEmpty, report.selected == nil {
                 correctionCapture?.recordDiagnosticBoundary()
             }
+            // A paused take kept across the send (`forgetLiveRun`) types its next unit into the empty field.
+            stagedTake.fieldEmptied()
             finishDraft(reason: .draftCleared)
         }
     }

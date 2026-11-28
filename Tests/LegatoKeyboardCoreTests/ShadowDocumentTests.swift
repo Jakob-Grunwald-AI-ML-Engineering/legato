@@ -158,6 +158,19 @@ import Testing
         #expect(unstructured.blankLineProbe() == nil)
     }
 
+    /// #347: the keyboard's own delete emptied the field (the person's delete key): not a send. The draft goes on, now empty.
+    @Test func aFieldEmptiedByTheKeyboardIsNotASend() {
+        var evidence = FieldQueue.DraftEvidence()
+        let deadline = FieldQueue.checkDeadlineMs
+        let known = FieldQueue.Report(before: "Typed by hand")
+        let empty = FieldQueue.Report(before: "")
+        #expect(evidence.observe(known, hasText: true, ownsEmpty: false, nowMs: 0, confirmationMs: deadline) == .unchanged)
+        #expect(evidence.observe(empty, hasText: false, ownsEmpty: true, nowMs: 10, confirmationMs: deadline) == .emptiedByKeyboard)
+        #expect(!evidence.isPending)
+        #expect(evidence.observe(empty, hasText: false, ownsEmpty: false, nowMs: deadline * 3, confirmationMs: deadline) == .unchanged,
+                "The empty field stays as it is")
+    }
+
     @Test func onlySustainedConfirmedEmptinessEndsTheDraft() {
         var evidence = FieldQueue.DraftEvidence()
         let nonempty = FieldQueue.Report(before: "This field was known.")

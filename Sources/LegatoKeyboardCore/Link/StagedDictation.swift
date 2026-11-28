@@ -306,4 +306,8 @@ public struct StagedDictation: Sendable, Equatable {
         let tail = String(record.suffix(Self.agreeCharacters))
         return proxyBefore.hasSuffix(tail) ? proxyBefore : record
     }
+
+    /// The field is empty now (the person deleted it by hand, or the host cleared it): what the take typed is no longer before
+    /// the caret, so the next unit starts the field (no separator, a capital) instead of following the record.
+    public mutating func fieldEmptied() { record = "" }
 }

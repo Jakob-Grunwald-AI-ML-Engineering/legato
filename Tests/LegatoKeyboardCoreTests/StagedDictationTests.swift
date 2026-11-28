@@ -118,6 +118,18 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         #expect(take.preview == "Keep this")
     }
 
+    /// #347: a field the person deleted by hand stays the take's field; the next unit starts it (no separator, a capital) instead of
+    /// following what the take typed before.
+    @Test func aFieldEmptiedByHandStartsTheNextUnitAfresh() {
+        var take = StagedDictation()
+        take.receive(snapshot(1, [unit(0, "First sentence."), unit(1, "second one.")]))
+        take.begin(0, typed: "First sentence.")
+        take.delivered(0)
+        #expect(prepared(take, "second one.", proxyBefore: "", after: nil, capitalization: .sentences) == " Second one.")
+        take.fieldEmptied()
+        #expect(prepared(take, "second one.", proxyBefore: "", after: nil, capitalization: .sentences) == "Second one.")
+    }
+
     /// A clear hides the open unit and the head at once, before the app answers; waiting and ready units stay.
     @Test func aClearHidesTheOpenUnitAndTheHeadUntilTheAppAnswers() {
         var take = StagedDictation()

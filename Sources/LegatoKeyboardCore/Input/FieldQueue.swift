@@ -26,7 +26,9 @@ public struct FieldQueue: Sendable {
     public struct DraftEvidence: Sendable {
         /// `unbound`: no field is bound (`bound` false: the host's field is gone, as when its editor resigns while the keyboard
         /// leaves). Its empty report says nothing about the draft, so it is neither cleared nor confirmed: nothing changes.
-        public enum Decision: Equatable, Sendable { case unchanged, pending, resumed, cleared, unbound }
+        /// `emptiedByKeyboard`: the keyboard's own deletion (`FieldQueue.ownsEmptyReport`, the person's delete key included) emptied
+        /// a field that showed text. Not a send: the draft goes on, now empty.
+        public enum Decision: Equatable, Sendable { case unchanged, pending, resumed, cleared, unbound, emptiedByKeyboard }
         private var observedContent = false
         private var firstEmptyMs: Double?
         private var firstUnavailableMs: Double?
@@ -44,8 +46,9 @@ public struct FieldQueue: Sendable {
                 return resumed ? .resumed : .unchanged
             }
             if ownsEmpty {
+                let emptied = observedContent
                 self = .init()
-                return .unchanged
+                return emptied ? .emptiedByKeyboard : .unchanged
             }
             if hasText {
                 guard observedContent else { return .unchanged }
@@ -607,15 +610,16 @@ public struct FieldQueue: Sendable {
 
     /// An issued deletion may temporarily leave the host empty. The adapter must not mistake
     /// its own confirmed operation for a host clearing the draft (for example after Send).
+    /// The person's own delete key (a tap, a held repeat, a selection) is the keyboard's deletion too: a field emptied by hand is
+    /// not a send (#347), so a take and its preview go on.
     public var ownsEmptyReport: Bool {
         guard text.isEmpty else { return false }
         if swap != nil { return true }
         if case .edit(_, let lane)? = unit?.owner, lane != .user { return true }
-        if let flight = inFlight, flight.lane != .user, case .deleteBackward = flight.op { return true }
+        if let flight = inFlight, case .deleteBackward = flight.op { return true }
         // A synchronous proxy may confirm the final deletion before the adapter observes its
-        // empty callback. Carry that automatic origin through the check's deadline only.
-        if lastSentLane != .user, sinceSendMs < deadlineMs,
-           case .deleteBackward? = lastSentOp { return true }
+        // empty callback. Carry that origin through the check's deadline only.
+        if sinceSendMs < deadlineMs, case .deleteBackward? = lastSentOp { return true }
         return false
     }
 
@@ -819,7 +823,6 @@ public struct FieldQueue: Sendable {
     /// What the queue learned about this field's host (the unit of a move, the window, the callback pattern, the
     /// latency that sets `deadlineMs`). Starts over with a new field.
     public private(set) var host = HostProfile()
-    private var lastSentLane = Lane.live
     /// After a tap, ops sent before it may still land where the user tapped: the keyboard's own work resumes once the
     /// field held still this long (kept, see `docs/field-editing.md`).
     static let quietMs = 250.0
@@ -2899,7 +2902,7 @@ public struct FieldQueue: Sendable {
         }
         inFlight = flight
         coordinator.dispatched()
-        lastSentOp = op; lastSentLane = lane
+        lastSentOp = op
         recentSends.append(Sent(op: op, lane: lane, pre: opPre, revisionRollback: rollback))
         if recentSends.count > 16 { recentSends.removeFirst() }
         sinceSendMs = 0

@@ -214,11 +214,15 @@ import Testing
         #expect(!rig.queue.ownsEmptyReport)
     }
 
-    @Test func aDeliberateUserClearIsNotAnAutomaticEmptyReport() {
+    /// #347: the person's delete key emptying the field is the keyboard's own empty report (a hand-delete, not a send), for the
+    /// check's deadline like an automatic clear.
+    @Test func aHandDeleteToEmptyIsTheKeyboardsOwnEmptyReport() {
         var rig = QueueRig(FakeField("a"))
         rig.queue.enqueue(.deleteBackward)
         do { let drained = rig.drain(); #expect(drained) }
         #expect(rig.field.string.isEmpty)
+        #expect(rig.queue.ownsEmptyReport)
+        rig.run(ms: FieldQueue.checkDeadlineMs + 100)
         #expect(!rig.queue.ownsEmptyReport)
     }
 
