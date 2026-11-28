@@ -146,13 +146,14 @@ private final class HarnessSelectionObserver: NSObject, UITextViewDelegate {
     func textViewDidChange(_ textView: UITextView) { onChange?() }
 }
 
-@MainActor
+@MainActor @Observable
 final class KeyboardHarnessModel {
     static let shared = KeyboardHarnessModel()
 
-    let document = HarnessDocument()
-    let controller: KeyboardController
-    private let link: LinkClient
+    @ObservationIgnored let document = HarnessDocument()
+    /// Replaced by `recreate` (a new view controller or keyboard process); the view follows it.
+    private(set) var controller: KeyboardController
+    @ObservationIgnored private var link: LinkClient
 
     /// Scripted typing: the key sequences `harness-type` feeds through `TypingModel.press`, the same
     /// commit path the touches use. Tokens: `shift`, `space`, `delete`, `return`, a key id
@@ -178,18 +179,33 @@ final class KeyboardHarnessModel {
     }
 
     private init() {
-        let document = self.document
         let link = LinkClient()
         self.link = link
-        controller = KeyboardController(
-            document: document, link: link, hasFullAccess: { true },
-            expansionPersistence: Self.freshPersistence(), correctionStore: AppController.shared.corrections)
+        controller = Self.makeController(document: document, link: link)
         if ["YES", "TRUE", "1"].contains(UserDefaults.standard.string(forKey: "LegatoHarnessStrip")?.uppercased() ?? "") {
             controller.toggleExpansion()
         }
+    }
+
+    private static func makeController(document: HarnessDocument, link: LinkClient) -> KeyboardController {
+        let controller = KeyboardController(
+            document: document, link: link, hasFullAccess: { true },
+            expansionPersistence: freshPersistence(), correctionStore: AppController.shared.corrections)
         controller.trace = { message in E2E.log("harness \(message) doc=\(E2E.quote(document.text))") }
         controller.beforeStartWatch = { await E2E.waitForStartWatch() }
         document.onChange = { [weak controller] in controller?.documentDidChange() }
+        return controller
+    }
+
+    /// The keyboard's controller is replaced while hidden, as a recreated view controller or a new keyboard process after a
+    /// recycle (#342) brings one that knows nothing of earlier appearances. Only the link's shared values carry over.
+    func recreate() -> [String: Any] {
+        if controller.isVisible { controller.disappeared() }
+        controller.tearDown()
+        link = LinkClient()
+        controller = Self.makeController(document: document, link: link)
+        E2E.log("harness recreated")
+        return state
     }
 
     func appeared() {
@@ -233,13 +249,14 @@ final class KeyboardHarnessModel {
 
     // MARK: Bridge drive (scripts/e2e/ios-sim.sh)
 
-    /// What the scenarios read: the field and the held take.
+    /// What the scenarios read: the field and the held take, and whether the recycle policy would see work owed (`owesWork`).
     var state: [String: Any] {
         let published = controller.dictationPresentation
+        let facts = KeyboardProcess.recycleFacts(sessionEnded: true, forced: false, published: link.readLiveDictation())
         return ["text": document.text, "visible": controller.isVisible,
                 "preview": controller.dictationPreview ?? "", "composedPreview": controller.composedPreview != nil,
                 "takePhase": published.dictationTakePhase?.rawValue ?? "", "takeText": published.dictationTake ?? "",
-                "takeFailed": controller.takeFailed, "status": controller.statusText ?? ""]
+                "takeFailed": controller.takeFailed, "status": controller.statusText ?? "", "owesWork": facts.owesWork]
     }
 
     func setVisible(_ visible: Bool) -> [String: Any] {

@@ -85,6 +85,8 @@ import LegatoSoniox
 
     /// A manual take is paused with words pending (`DictationPipeline.pauseTake`): a send still works without a take running.
     var isPaused: Bool { pipeline?.isPaused ?? false }
+    /// The staged run waits for the keyboard's return (`DictationPipeline.holdsTakeForKeyboard`): a closing session keeps it.
+    var holdsTakeForKeyboard: Bool { pipeline?.holdsTakeForKeyboard ?? false }
 
     /// The user's send of a staged take: the words so far go to the field now (`DictationPipeline.sendNow`). Dictation only.
     func sendNow(editPreview: Bool = false, preview: KeyboardRequest.PreviewAnchor? = nil, operationID: UUID? = nil) async {

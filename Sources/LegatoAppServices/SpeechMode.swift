@@ -107,6 +107,7 @@ public struct SpeechModeRouter: Sendable, Equatable {
     func beginTake() { dictation.beginTake() }
     func finishTake() async { await dictation.finishTake() }
     func pauseTake() async { await dictation.pauseTake() }
+    func suspendTake() async { await dictation.suspendTake() }
     var backgroundText: String { dictation.backgroundText }
     func vocabularyTopicContext(since: Date) -> VocabularyTopicContext { dictation.vocabularyTopicContext(since: since) }
 }

@@ -24,7 +24,9 @@ public struct FieldQueue: Sendable {
     /// Empty proxy windows during cursor movement can briefly coincide with hasText=false.
     /// Confirm sustained emptiness from the first such observation, independently of an operation's acknowledgement.
     public struct DraftEvidence: Sendable {
-        public enum Decision: Equatable, Sendable { case unchanged, pending, resumed, cleared }
+        /// `unbound`: no field is bound (`bound` false: the host's field is gone, as when its editor resigns while the keyboard
+        /// leaves). Its empty report says nothing about the draft, so it is neither cleared nor confirmed: nothing changes.
+        public enum Decision: Equatable, Sendable { case unchanged, pending, resumed, cleared, unbound }
         private var observedContent = false
         private var firstEmptyMs: Double?
         private var firstUnavailableMs: Double?
@@ -33,7 +35,8 @@ public struct FieldQueue: Sendable {
         public init() {}
 
         public mutating func observe(_ report: Report, hasText: Bool, ownsEmpty: Bool,
-                                     nowMs: Double, confirmationMs: Double) -> Decision {
+                                     nowMs: Double, confirmationMs: Double, bound: Bool = true) -> Decision {
+            guard bound else { return .unbound }
             let hasWindows = !report.before.isEmpty || !report.after.isEmpty || report.selected != nil
             if hasWindows {
                 let resumed = isPending

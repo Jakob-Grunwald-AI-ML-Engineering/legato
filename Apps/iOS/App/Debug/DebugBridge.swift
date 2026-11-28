@@ -217,6 +217,8 @@ import UIKit
         // The keyboard comes on screen / leaves it, as the extension's viewWillAppear / viewDidDisappear.
         harness.register("harness-visible") { _ in KeyboardHarnessModel.shared.setVisible(true) }
         harness.register("harness-hidden") { _ in KeyboardHarnessModel.shared.setVisible(false) }
+        // A fresh keyboard controller replaces the hidden one (a recreated view controller, a new process after a recycle).
+        harness.register("harness-recreate") { _ in KeyboardHarnessModel.shared.recreate() }
         // The take's Retry / Insert as-is buttons: the keyboard's intents over the link.
         harness.register("harness-retry") { _ in KeyboardHarnessModel.shared.press { $0.retryTake() } }
         harness.register("harness-insert-raw") { _ in KeyboardHarnessModel.shared.press { $0.insertTakeRaw() } }

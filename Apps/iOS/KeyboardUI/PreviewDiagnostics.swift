@@ -23,6 +23,8 @@ final class PreviewDiagnostics {
         /// The preview should show text but evidently does not (`PreviewBlank`); the host's session with the keyboard ended
         /// or a new one began; the process recycle checks (#342).
         case previewBlank, sessionEnded, sessionStarted, recycleWait, processRecycled
+        /// A keyboard appeared while UIKit still had the process in the background; the keyboard ended it (`KeyboardForeground`).
+        case foregroundRestored
     }
 
     struct Context: Codable {

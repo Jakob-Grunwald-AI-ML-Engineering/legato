@@ -1,5 +1,6 @@
 import AppIntents
 import SwiftUI
+import Synchronization
 
 struct LegatoShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
@@ -30,9 +31,14 @@ struct LegatoApp: App {
 }
 
 /// Settings and meeting metadata need ordinary text entry even when the voice-only Legato keyboard was last selected.
+/// UIKit may ask from a background thread (`UIKeyboardInputModeController`), so the answer is nonisolated and the flag is locked (#252).
 @MainActor final class CompanionAppDelegate: NSObject, UIApplicationDelegate {
-    static var isEditingSettings = false
-    func application(_ application: UIApplication,
+    private nonisolated static let editingSettings = Mutex(false)
+    nonisolated static var isEditingSettings: Bool {
+        get { editingSettings.withLock { $0 } }
+        set { editingSettings.withLock { $0 = newValue } }
+    }
+    nonisolated func application(_ application: UIApplication,
                      shouldAllowExtensionPointIdentifier extensionPointIdentifier: UIApplication.ExtensionPointIdentifier) -> Bool {
         extensionPointIdentifier != .keyboard || !Self.isEditingSettings
     }

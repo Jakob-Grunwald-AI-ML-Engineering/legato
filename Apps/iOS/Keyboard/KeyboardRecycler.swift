@@ -5,7 +5,8 @@ import os
 import UIKit
 
 /// Ends the keyboard's process once it is unhealthy and its host's session with the keyboard has ended (`KeyboardRecyclePolicy`,
-/// #342), so iOS starts a fresh one on the next show: only a new process recovered a preview that stopped drawing.
+/// #342), so iOS starts a fresh one on the next show: only a new process recovered a preview that stopped drawing. The cause
+/// measured since, a background UIKit never ended, is repaired as the keyboard shows (`KeyboardForeground`); this stays for any other.
 ///
 /// When that happens is what matters. Ended while the host still holds the keyboard (hidden, but the host in front), iOS shows
 /// Apple's keyboard on the next show. The host is done with it once it has resigned active and then the keyboard's scene
@@ -84,8 +85,7 @@ enum KeyboardRecycler {
     }
 
     private static func check() {
-        let takeOpen = LinkClient().readLiveDictation().map { !$0.complete } ?? false
-        let facts = KeyboardProcess.recycleFacts(sessionEnded: sessionEnded, takeOpen: takeOpen, forced: isForced)
+        let facts = KeyboardProcess.recycleFacts(sessionEnded: sessionEnded, forced: isForced, published: LinkClient().readLiveDictation())
         switch policy.decide(facts) {
         case .healthy:
             return

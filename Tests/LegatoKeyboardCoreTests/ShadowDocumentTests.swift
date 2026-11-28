@@ -98,6 +98,25 @@ import Testing
         #expect(rig.field.string.contains("after lunch"))
     }
 
+    /// #343, Reminders: as its editor resigns, the proxy loses its field (no document) some 400 ms before the keyboard leaves. That
+    /// empty report is no evidence the draft was sent, however long it lasts. A bound field that empties (a send) still clears it.
+    @Test func anUnboundFieldIsNoEvidenceThatTheDraftWasCleared() {
+        var evidence = FieldQueue.DraftEvidence()
+        let deadline = FieldQueue().draftConfirmationMs
+        let known = FieldQueue.Report(before: "Q fresh words")
+        let empty = FieldQueue.Report(before: "")
+        #expect(evidence.observe(known, hasText: true, ownsEmpty: false, nowMs: 0, confirmationMs: deadline) == .unchanged)
+        for t in [10.0, deadline, deadline * 5] {
+            #expect(evidence.observe(empty, hasText: false, ownsEmpty: false, nowMs: t, confirmationMs: deadline, bound: false) == .unbound)
+        }
+        #expect(!evidence.isPending)
+        #expect(evidence.observe(known, hasText: true, ownsEmpty: false, nowMs: deadline * 6, confirmationMs: deadline) == .unchanged)
+
+        let sentAt = deadline * 7
+        #expect(evidence.observe(empty, hasText: false, ownsEmpty: false, nowMs: sentAt, confirmationMs: deadline) == .pending)
+        #expect(evidence.observe(empty, hasText: false, ownsEmpty: false, nowMs: sentAt + deadline, confirmationMs: deadline) == .cleared)
+    }
+
     @Test func blankLineRecoveryRequiresIndependentEvidenceOfTheOriginalCaret() throws {
         let upper = "The upper paragraph is uniquely known."
         let lower = "The lower paragraph is also known."

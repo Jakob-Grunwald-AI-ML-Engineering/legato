@@ -117,11 +117,37 @@ extension LiveDictationSnapshot {
     /// The take is still being spoken into: not stopped, complete or paused.
     public var isCapturing: Bool { !complete && stopped != true && paused != true }
 
-    /// The keyboard leaves the run published when it appears (`seen`) alone: hiding ended that take and it is in History. A later
+    /// A staged run paused with words waiting (a manual Stop, #313, or the keyboard's hide, #343): the app holds it for the keyboard,
+    /// and any keyboard that appears shows it in its preview, a fresh controller or process included. The app ends the run
+    /// (`complete`) once it stops holding it (`KeyboardSession.keyboardHoldLimit`), so while the app runs a paused publication is
+    /// never a stale one. Its words are the app's: a hidden keyboard owes nothing for it (`KeyboardRecyclePolicy`).
+    /// An app that stopped running leaves it behind: the keyboard checks `isAbandoned`, and a new app process clears it (`HostLink`).
+    public var isHeldForKeyboard: Bool { staged == true && paused == true && !complete }
+
+    /// An open run whose app is not beating (`HostState.isLive`): its process is gone (iOS ends it when Full Access changes, or under
+    /// memory pressure) or cannot act. Nothing will speak into, send or end the run, and its words are in History (checkpointed as
+    /// they came): a keyboard neither shows nor follows it, one already on screen when the app ended included (it checks on each
+    /// poll). A complete run needs no app; it is never abandoned.
+    public func isAbandoned(host: HostState?, now: Date) -> Bool {
+        !complete && !(host?.isLive(now: now) ?? false)
+    }
+
+    /// The keyboard leaves the run published when it appears (`seen`) alone unless it is the keyboard's own staged take, kept
+    /// across the hide, or a run the app holds for the keyboard (`isHeldForKeyboard`, #343): any other belongs to an earlier
+    /// appearance. A later
     /// version of the same run that is still being spoken shows the app kept the take going across the appearance (it never saw
     /// the keyboard go, or the keyboard's view was recreated mid-take): the person is speaking into it now, so the keyboard follows it.
     public func continues(_ seen: LiveDictationSnapshot) -> Bool {
         runID == seen.runID && version > seen.version && isCapturing
+    }
+
+    /// A run the keyboard on screen left alone when it appeared (`seen`) that it follows after all: one that `continues`, or a later
+    /// version the app holds for the keyboard (`isHeldForKeyboard`). On a direct switch between apps the next app's keyboard appears
+    /// before the last one hides, while the run is still being spoken into; the app holds it only once no keyboard session is open,
+    /// which is that hand-over, and the keyboard on screen shows it as one appearing then would. A run that ended, or that was
+    /// stopped and is ending, stays left alone.
+    public func isFollowed(after seen: LiveDictationSnapshot) -> Bool {
+        continues(seen) || (runID == seen.runID && version > seen.version && isHeldForKeyboard)
     }
 }
 

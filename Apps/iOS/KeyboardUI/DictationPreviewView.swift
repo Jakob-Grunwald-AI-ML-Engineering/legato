@@ -134,6 +134,12 @@ private struct PreviewHoldGesture: UIGestureRecognizerRepresentable {
             moved = false
         }
 
+        /// A press that began never keeps the preview's scroll view from scrolling: a finger that rests a moment before it drags
+        /// scrolls, and the move ends the press (`moved`).
+        override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
+            preventedGestureRecognizer is UIPanGestureRecognizer ? false : super.canPrevent(preventedGestureRecognizer)
+        }
+
         private func exceededTapTravel(_ touch: UITouch) -> Bool {
             guard let tapOrigin else { return true }
             let point = touch.location(in: nil)
@@ -227,6 +233,11 @@ private final class PreviewReveal {
     private var last = Date.distantPast
     private(set) var hidden = 0
 
+    /// At most this many trailing characters type in. A larger growth (a long speech update at once, #336) shows at once except
+    /// its last ones: the preview follows its newest lines, which must never be letters it has not drawn yet. About a line of the
+    /// preview at its type size (an estimate); a spoken word or two arrives well under it.
+    static let maxHidden = 40
+
     private static func body(_ text: String) -> String { text.hasPrefix("…") ? String(text.dropFirst()) : text }
 
     /// The text of this frame: what it adds to the previous one is hidden from the end. A `placeholder` is not words: it shows at
@@ -237,11 +248,11 @@ private final class PreviewReveal {
         defer { text = newText }
         let new = Self.body(newText), prior = Self.body(old)
         guard enabled, !placeholders.contains(newText), !new.isEmpty else { hidden = 0; return }
-        guard !prior.isEmpty else { hidden = new.count; return }
+        guard !prior.isEmpty else { hidden = min(new.count, Self.maxHidden); return }
         // The old text, minus a head the preview cut off, is the start of the new one.
         let oldChars = Array(prior), newChars = Array(new)
         for cut in 0..<oldChars.count where newChars.starts(with: oldChars[cut...]) {
-            hidden = min(newChars.count, hidden + newChars.count - (oldChars.count - cut))
+            hidden = min(newChars.count, Self.maxHidden, hidden + newChars.count - (oldChars.count - cut))
             return
         }
         hidden = 0
@@ -304,11 +315,17 @@ private struct PreviewRenderer: TextRenderer {
         if capturesReference, let viewport { poofContext.clip(to: Path(viewport)) }
         var drawn = 0
         func drawPlain(_ run: Text.Layout.Run, trackSurvivors: Bool, shimmer: Bool, in context: inout GraphicsContext) {
-            if visible == Int.max && !trackSurvivors {
+            // A run wholly revealed draws as one, one wholly hidden not at all: only the run the reveal is in goes glyph by glyph,
+            // so a long text costs a frame no more than a short one (#336).
+            if !trackSurvivors, position + run.count <= visible {
                 position += run.count
                 drawn += run.count
                 context.draw(run)
                 if shimmer { waiting.append(contentsOf: run) }
+                return
+            }
+            if !trackSurvivors, position >= visible {
+                position += run.count
                 return
             }
             for slice in run {
@@ -671,6 +688,8 @@ private struct PreviewRow: View {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         format.opaque = false
+        // 8 bits a channel, as read below: the default range is extended (16 bits a channel) on a wide-colour screen.
+        format.preferredRange = .standard
         let image = UIGraphicsImageRenderer(size: rect.size, format: format).image { context in
             context.cgContext.translateBy(x: -rect.minX, y: -rect.minY)
             window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)

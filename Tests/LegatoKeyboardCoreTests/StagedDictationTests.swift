@@ -161,6 +161,30 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         #expect(take.exited == 0 && !take.started && take.previewLayout.leaving == 0..<0 && take.preview == "Next. more")
     }
 
+    /// A composed draft (tap to clean) goes in as the queue prepares any unit, without a capital: the field's separator comes first
+    /// ("…the tide" + "Third line goes." never runs together), and the row's exit does not count it.
+    @Test func aComposedDraftGetsTheFieldsSeparatorAndItsExitSkipsIt() throws {
+        var run = LiveDictationRun(staged: true, manual: true)
+        _ = run.addFinal(key: 0, text: "third line goes")
+        let flushed = run.flush()
+        let open = try #require(flushed)
+        let marked = run.markForPreview(key: open.key)
+        #expect(marked)
+        _ = run.setCleaned(key: open.key, text: "Third line goes.")
+        var take = StagedDictation()
+        take.receive(run.snapshot)
+        take.releasePreview()
+        let ready = try #require(take.nextReady)
+        let typed = prepared(take, ready.text, proxyBefore: "Out past the tide", after: nil, capitalization: .none)
+        #expect(typed == " Third line goes.")
+        #expect(prepared(take, "we sail.", proxyBefore: "Long:", after: nil, capitalization: .none) == " we sail.", "no capital added")
+        take.begin(ready.id, typed: typed)
+        take.sent(" ")
+        #expect(take.exited == 0)
+        take.sent("Th")
+        #expect(take.exited == 2)
+    }
+
     @Test func aLongBurstNeverStallsAndTheUnverifiedBoundCountsOnlyBeforeTheUnitStarts() {
         var take = StagedDictation()
         take.receive(snapshot(1, [unit(0, "A long unit.")], complete: true))
@@ -379,6 +403,56 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         #expect(!stopped.continues(seen) && !paused.continues(seen) && !snapshot(6, [unit(0, "Hello.")], complete: true).continues(seen),
                 "hiding ended a stopped, paused or complete run: it stays in History")
         #expect(paused.isCapturing == false && snapshot(1, []).isCapturing)
+    }
+
+    /// A direct app switch: the next app's keyboard appears while the run is still spoken into, and the app holds it only once the
+    /// last keyboard hid. The keyboard on screen follows it from then; a run that ended or is ending stays left alone.
+    @Test func aRunHeldAfterTheAppearanceIsFollowedAndAnEndedOneIsNot() {
+        let seen = snapshot(4, [unit(0, "Hello.", ready: false)], head: "and")
+        var held = snapshot(5, [unit(0, "Hello.", ready: false)], head: "and"); held.paused = true
+        #expect(held.isFollowed(after: seen), "held for the keyboard since the appearance")
+        #expect(snapshot(5, [unit(0, "Hello.", ready: false)], head: "and more").isFollowed(after: seen), "still spoken")
+        #expect(!held.isFollowed(after: held), "the version seen at the appearance itself")
+        var other = held; other.runID = "other"
+        #expect(!other.isFollowed(after: seen), "another run")
+        var ended = held; ended.complete = true
+        var stopped = snapshot(5, [unit(0, "Hello.")]); stopped.stopped = true
+        var typed = held; typed.staged = nil
+        #expect(!ended.isFollowed(after: seen) && !stopped.isFollowed(after: seen) && !typed.isFollowed(after: seen),
+                "an ended, ending or typed run is not held")
+    }
+
+    /// #343: a paused staged run is the app's, held for whichever keyboard appears next (a fresh controller or process too), and a
+    /// hidden keyboard owes nothing for it. Nothing else the app publishes is held.
+    @Test func onlyAPausedStagedRunIsHeldForTheKeyboard() {
+        var paused = snapshot(5, [unit(0, "Hello.", ready: false)], head: "and"); paused.paused = true
+        #expect(paused.isHeldForKeyboard)
+        var ended = paused; ended.complete = true
+        #expect(!ended.isHeldForKeyboard, "a run the app ended (the hold limit, a send) is in History")
+        var typed = paused; typed.staged = nil
+        #expect(!typed.isHeldForKeyboard, "a typed run is never held")
+        #expect(!snapshot(5, [unit(0, "Hello.")], head: "and").isHeldForKeyboard, "a run still spoken belongs to its appearance")
+        var stopped = snapshot(5, [unit(0, "Hello.")]); stopped.stopped = true
+        #expect(!stopped.isHeldForKeyboard, "a stopped run is ending")
+    }
+
+    /// #343: a held run outlives its app when iOS ends the process. An open run is abandoned once the app stops beating; a complete
+    /// one never is (its units need no app).
+    @Test func anOpenRunIsAbandonedOnlyWhileItsAppIsNotBeating() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        var held = snapshot(5, [unit(0, "Hello.", ready: false)]); held.paused = true
+        let beating = HostState(beatAt: now.addingTimeInterval(-1))
+        let stale = HostState(beatAt: now.addingTimeInterval(-LinkChannel.beatFreshness))
+        #expect(!held.isAbandoned(host: beating, now: now))
+        // A visible keyboard checks this on every poll (#343): a beat late by less than the freshness bound keeps the take.
+        let late = HostState(beatAt: now.addingTimeInterval(-(LinkChannel.beatFreshness - 0.1)))
+        #expect(!held.isAbandoned(host: late, now: now))
+        #expect(held.isAbandoned(host: stale, now: now))
+        #expect(held.isAbandoned(host: nil, now: now), "no app state at all")
+        var capturing = held; capturing.paused = nil
+        #expect(capturing.isAbandoned(host: stale, now: now))
+        var ended = held; ended.complete = true
+        #expect(!ended.isAbandoned(host: stale, now: now) && !ended.isAbandoned(host: nil, now: now))
     }
 
     @Test func adoptingARunSkipsTheUnitsAnEarlierAppearanceTypedAndKeepsAHeldRunHeld() {

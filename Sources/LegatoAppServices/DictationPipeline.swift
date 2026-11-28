@@ -542,8 +542,9 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         }
     }
 
-    /// The run a manual Stop left open (#313): its words wait in the keyboard's preview. Words after the next start append to
-    /// its open unit. It ends at a send that empties it, at the session's end or when an instruction needs the field.
+    /// The run a manual Stop (#313) or a hidden keyboard (#343) left open: its words wait in the keyboard's preview. Words after the
+    /// next start append to its open unit. It ends at a send that empties it, when the keyboard stops following it, when an
+    /// instruction needs the field or when no keyboard came back in time (`KeyboardSession.keyboardHoldLimit`).
     @ObservationIgnored private var pausedRunID: String?
     /// The keyboard stopped following this run (`LiveDictationAck.ended`): it is never paused or resumed, so the next start is a new
     /// run the keyboard shows. A paused run ends now (open unit cleaned, History).
@@ -555,22 +556,44 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
         liveTakeOpen = false
         Task { [weak self] in await self?.finishLive() }
     }
-    /// A manual run is paused with words pending (`pauseTake()`).
+    /// A run is paused with words pending (`pauseTake()`, `suspendTake()`).
     public var isPaused: Bool { pausedRunID != nil && liveRun?.runID == pausedRunID && liveRun?.complete == false }
 
     /// The mic key's Stop. A manual staged run with words waiting does not end: nothing is cleaned or sent, the words stay
     /// pending in the preview and the next `beginTake()` continues the same run. Any other take ends as `finishTake()` does:
     /// sentence-end mode, nothing pending, a held run, another mode.
-    public func pauseTake() async {
-        guard stagedLive, mode == .live, held == nil, let run = liveRun, run.manual, !run.complete, !liveTakeEnding, run.runID != unfollowedRunID,
-              run.peekOpen() != nil || run.isSpeaking || run.hasPendingPreview(after: liveDeliveryAck?.deliveredThrough) else { return await finishTake() }
+    public func pauseTake() async { await pause(hiding: false) }
+
+    /// The keyboard hid mid-take (#343): the take survives the hide. A staged run with anything not in the field yet is paused
+    /// as Stop pauses a manual one, in either send mode, so the keyboard's preview holds it again when it comes back and the next
+    /// start continues it. Any other take ends as `finishTake()` does.
+    public func suspendTake() async { await pause(hiding: true) }
+
+    /// The staged run still has words the keyboard has not typed (paused, or ended with units not in the field): closing the
+    /// keyboard's session leaves the run for the keyboard's return (#343) instead of resetting it.
+    public var holdsTakeForKeyboard: Bool {
+        guard stagedLive, mode == .live, let run = liveRun else { return false }
+        return isPaused || hasUndelivered(run)
+    }
+
+    /// Units of the run the keyboard's last receipt (`liveDeliveryAck`) does not cover, the open one included.
+    private func hasUndelivered(_ run: LiveDictationRun) -> Bool {
+        let through = liveDeliveryAck?.runID == run.runID ? liveDeliveryAck?.deliveredThrough ?? -1 : -1
+        return run.snapshot.segments.contains { $0.final && $0.id > through }
+    }
+
+    private func pause(hiding: Bool) async {
+        guard stagedLive, mode == .live, held == nil, let run = liveRun, run.manual || hiding, !run.complete, !liveTakeEnding,
+              run.runID != unfollowedRunID,
+              run.peekOpen() != nil || run.isSpeaking || run.hasPendingPreview(after: liveDeliveryAck?.deliveredThrough)
+                || (hiding && hasUndelivered(run)) else { return await finishTake() }
         liveTakeOpen = false
         pausedRunID = run.runID
         var paused = run
         paused.setPaused(true)
         publishLive(paused)
         setVoiceActive(false)
-        diagnostics?("live2.run.pause", ["run": String(run.runID.prefix(8))])
+        diagnostics?("live2.run.pause", ["run": String(run.runID.prefix(8)), "hidden": hiding])
         // Cleaned while paused, so a tap later finds the result (the pause may be long; an unchanged text is reused).
         speculateOpenUnit()
     }
