@@ -332,7 +332,7 @@ final class VoiceCaptureRecorder: Sendable {
             try check(token)
             // A setting that sounds unlike the saved voice may be someone else reading: ask, never reject. The first
             // setup has nothing to compare against.
-            if !firstSetup, try await service.profileSet().soundsDifferent(embedding, revision: VoiceIdentityService.modelRevision) {
+            if !firstSetup, try await service.profileSet().soundsDifferent(embedding, route: route, revision: VoiceIdentityService.modelRevision) {
                 guard try await confirmDifferentVoice(token: token) else { recordAgain = true; throw CancellationError() }
                 guide?.phase = .saving
                 setStatus(VoiceSetupCopy.saving(firstSetup: firstSetup, name: situation.name))

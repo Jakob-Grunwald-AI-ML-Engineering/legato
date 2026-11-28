@@ -111,11 +111,20 @@ public struct VoiceProfileSet: Codable, Sendable, Equatable {
     /// median score was 0.39 and only 17% of pairs fell below 0.2 (the same voice reading other text: 0.96–0.99).
     /// Calibrate it once kept recordings of real users on several microphones exist.
     public static let differentVoiceScore: Float = 0.2
+    /// The same check against profiles recorded on the same microphone route, where the cross-microphone drift above
+    /// does not apply: the same `say` voice scored 0.96–0.99, different voices a median of 0.39. An estimate; it only asks.
+    public static let differentVoiceScoreSameRoute: Float = 0.5
 
-    /// Whether a new recording's `embedding` sounds like someone other than the saved voice: its best match among
-    /// the comparable profiles is below ``differentVoiceScore``. False when nothing can be compared (the first setup).
-    public func soundsDifferent(_ embedding: [Float], revision: String) -> Bool {
-        guard let best = Self.bestScore(embedding, among: matchable(revision: revision, dimension: embedding.count)) else { return false }
+    /// Whether a new recording's `embedding` on `route` sounds like someone other than the saved voice: its best match
+    /// among comparable profiles of the same route is below ``differentVoiceScoreSameRoute``, or, with none on that
+    /// route, its best match among all is below ``differentVoiceScore``. False when nothing can be compared (the first setup).
+    public func soundsDifferent(_ embedding: [Float], route: VoiceInputRoute, revision: String) -> Bool {
+        let comparable = profiles.filter {
+            $0.revision == revision && $0.embedding.count == embedding.count && $0.embedding.allSatisfy(\.isFinite)
+        }
+        let sameRoute = route == .unknown ? [] : comparable.filter { $0.route.key == route.key }.map(\.embedding)
+        if let best = Self.bestScore(embedding, among: sameRoute) { return best < Self.differentVoiceScoreSameRoute }
+        guard let best = Self.bestScore(embedding, among: comparable.map(\.embedding)) else { return false }
         return best < Self.differentVoiceScore
     }
 

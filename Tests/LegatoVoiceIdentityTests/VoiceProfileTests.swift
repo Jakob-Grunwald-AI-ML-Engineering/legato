@@ -51,17 +51,32 @@ import Testing
         func score(_ vector: [Float]) -> Float { VoiceProfileSet.bestScore(vector, among: [me, meOnAirPods])! }
         // Somebody else: unlike both profiles.
         let other = unit([-0.1, 0.05, 1])
-        #expect(score(other) < VoiceProfileSet.differentVoiceScore && set.soundsDifferent(other, revision: "r"))
+        #expect(score(other) < VoiceProfileSet.differentVoiceScore && set.soundsDifferent(other, route: .unknown, revision: "r"))
         // The user on another microphone scores low against one profile (0.22–0.29 measured), but not below the
         // threshold, and only the best match counts.
         let crossMic = unit([0.26, -0.3, 0.92])
         #expect(score(crossMic) >= 0.22 && score(crossMic) < 0.3)
-        #expect(!set.soundsDifferent(crossMic, revision: "r"))
-        #expect(!set.soundsDifferent(unit([0.9, 0.2, 0.3]), revision: "r"))
+        #expect(!set.soundsDifferent(crossMic, route: .unknown, revision: "r"))
+        #expect(!set.soundsDifferent(unit([0.9, 0.2, 0.3]), route: .unknown, revision: "r"))
         // Nothing to compare against (the first setup, or profiles of another model revision): never asks.
-        #expect(!VoiceProfileSet().soundsDifferent(other, revision: "r"))
-        #expect(!set.soundsDifferent(other, revision: "newer"))
+        #expect(!VoiceProfileSet().soundsDifferent(other, route: .unknown, revision: "r"))
+        #expect(!set.soundsDifferent(other, route: .unknown, revision: "newer"))
         #expect(VoiceProfileSet.differentVoiceScore <= 0.22)
+    }
+
+    @Test func onTheSameMicrophoneADifferentVoiceIsCheckedMoreStrictly() {
+        let builtIn = VoiceInputRoute(kind: "builtIn", name: "MacBook Pro Microphone")
+        let airPods = VoiceInputRoute(kind: "bluetooth", name: "AirPods Pro")
+        let me = unit([1, 0.1, 0])
+        let set = VoiceProfileSet(profiles: [profile("alone", builtIn, me)])
+        // Someone else on the same microphone: 0.39 (the measured median between different voices) asks.
+        let other = unit([0.39, 0.92, 0])
+        #expect(VoiceProfileSet.bestScore(other, among: [me])! < VoiceProfileSet.differentVoiceScoreSameRoute)
+        #expect(set.soundsDifferent(other, route: builtIn, revision: "r"))
+        // The user again on that microphone does not.
+        #expect(!set.soundsDifferent(unit([0.95, 0.2, 0.05]), route: builtIn, revision: "r"))
+        // On a microphone with no profile yet, only the lenient cross-microphone threshold applies.
+        #expect(!set.soundsDifferent(other, route: airPods, revision: "r"))
     }
 
     @Test func matchableSkipsOtherRevisionsSizesAndNonFiniteVectors() {
