@@ -487,13 +487,28 @@ public struct LiveDictationRun: Sendable, Equatable {
         return true
     }
 
-    /// The undo: every discarded unit is a normal closed unit again; returns (cleanup key, raw text) of each to clean, in order.
-    public mutating func restoreDiscarded() -> [(key: Int, text: String)] {
-        guard !discarded.isEmpty else { return [] }
-        let restored = discarded.sorted()
+    /// How long a discard can be taken back (`restoreDiscarded`), in the app and for a draft the keyboard keeps. An estimate, to be
+    /// tuned on the phone.
+    public static let discardUndoSeconds = 4.0
+
+    /// The undo reverses the swipe: the discarded words are the open unit's again, as they were before it, still pending in the
+    /// preview and never sent for cleanup by the undo. Everything spoken since joins them, as if no swipe had happened: the units
+    /// from the first discarded one on become the one open unit (raw words; a cleanup of one of them, landed or on its way, no
+    /// longer counts, since its unit's range changed). None of them is in the field: delivery waits behind a discarded unit.
+    /// The next send, pause boundary or stop closes it as usual. True when the target changed.
+    @discardableResult
+    public mutating func restoreDiscarded() -> Bool {
+        guard staged, let first = discarded.min() else { return false }
+        let start = units[first].lowerBound
+        units.replaceSubrange(first..., with: [start..<finals.count])
+        openUnit = true
+        cleaned = cleaned.filter { $0.key < first }
+        ready = ready.filter { $0 < first }
         discarded = []
+        previewCompositions = previewCompositions.filter { $0.key < start }
+        releasedPreviews = releasedPreviews.filter { $0 < start }
         version += 1
-        return restored.compactMap { unit in closingKey(unit).map { ($0, rawText(unit)) } }
+        return true
     }
 
     /// The undo window ended: every discarded unit becomes empty text and ready (nothing to type). True when the target changed.

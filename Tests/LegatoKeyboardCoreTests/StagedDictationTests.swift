@@ -103,12 +103,15 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         take.receive(run.snapshot)
         #expect(take.hasDiscarded && take.preview == "Keep this", "The discarded words are not shown")
         #expect(take.nextReady == nil, "The discarded unit is not ready, so the unit behind it waits")
-        // Undo: the app cleans the unit again as a normal closed unit.
+        // Undo (#347): the words are the open unit again, as before the swipe, with what was said since; nothing is ready to type.
         var undone = run
         let restored = undone.restoreDiscarded()
-        #expect(restored.map(\.text) == ["Throw this away please now."] && !undone.hasDiscarded)
+        #expect(restored && !undone.hasDiscarded)
+        #expect(undone.peekOpen()?.text == "Throw this away please now. Keep this")
         take.receive(undone.snapshot)
         #expect(!take.hasDiscarded && take.preview == "Throw this away please now. Keep this")
+        #expect(take.nextReady == nil && take.hasDiscardable && take.previewLayout.waiting.isEmpty,
+                "Still pending, clearable again, not thinking")
         // Expiry: the unit is empty and ready, so the keyboard passes it.
         let expired = run.expireDiscarded()
         #expect(expired)
@@ -116,6 +119,71 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         take.receive(run.snapshot)
         #expect(!take.hasDiscarded && take.nextReady?.text == "Keep this" && take.deliveredThrough == 0)
         #expect(take.preview == "Keep this")
+    }
+
+    /// #347: undone words travel as the open unit does. A unit said after the swipe joins them (its cleanup no longer fits the
+    /// unit), a send closes them as one unit for cleanup, and a second swipe left discards them again.
+    @Test func undoneWordsAreTheOpenUnitAgainAndTravelLikeIt() throws {
+        var run = LiveDictationRun(staged: true)
+        _ = run.addFinal(key: 0, text: "bring these words back")
+        let openUnit = run.flush()
+        let open = try #require(openUnit)
+        let marked = run.discard(key: open.key)
+        #expect(marked)
+        let closed = run.addFinal(key: 1, text: "This sentence is long enough to close.")
+        #expect(closed != nil && run.unitRange(key: 1) == 1..<2, "Said after the swipe: closed at its sentence end")
+        let restored = run.restoreDiscarded()
+        #expect(restored && run.unitCount == 1)
+        #expect(run.unitRange(key: 1) == 0..<2, "The cleanup sent for 1..<2 is stale")
+        let segment = try #require(run.snapshot.segments.first)
+        #expect(segment.closed == false && segment.ready == false && segment.discarded == nil && segment.cleaned == false)
+        let sentUnit = run.flush()
+        let sent = try #require(sentUnit)
+        #expect(sent.key == 1 && sent.text == "bring these words back This sentence is long enough to close.")
+        let again = run.discard(key: sent.key)
+        #expect(again && run.hasDiscarded)
+    }
+
+    /// #347: a composed draft swiped away waits out its undo window in the keyboard (the app never kept it): hidden, the units
+    /// behind it waiting and the app told nothing. The undo shows it again as it was; the window's end drops it, never typed.
+    @Test func aComposedDraftSwipedAwayWaitsOutItsUndoWindowInTheKeyboard() throws {
+        var run = LiveDictationRun(staged: true, manual: true)
+        _ = run.addFinal(key: 0, text: "write a note to anna")
+        let openUnit = run.flush()
+        let open = try #require(openUnit)
+        _ = run.markForPreview(key: open.key)
+        _ = run.setCleaned(key: open.key, text: "Hi Anna.")
+        _ = run.addFinal(key: 1, text: "Next words.")
+        let nextUnit = run.flush()
+        let next = try #require(nextUnit)
+        _ = run.setRaw(key: next.key)
+        var take = StagedDictation()
+        take.receive(run.snapshot)
+        #expect(take.offeredDraft?.text == "Hi Anna." && take.preview == "Hi Anna. Next words.")
+        take.discardPreviewDraft()
+        #expect(take.offeredDraft == nil && take.hasDiscarded && take.preview == "Next words.")
+        #expect(take.nextReady == nil && take.handledThrough == nil, "Nothing behind it goes, and the receipt does not move yet")
+        take.receive(run.snapshot)
+        #expect(take.hasDiscarded, "A snapshot keeps it swiped away")
+        take.undoDraftDiscard()
+        #expect(take.offeredDraft?.text == "Hi Anna." && !take.hasDiscarded && take.preview == "Hi Anna. Next words.")
+        take.discardPreviewDraft()
+        let expired = take.expireDraftDiscard()
+        #expect(expired)
+        #expect(!take.hasDiscarded && take.previewDraft == nil && take.handledThrough == 0)
+        #expect(take.nextReady?.text == "Next words.")
+    }
+
+    /// #347: a field the person deleted by hand stays the take's field; the next unit starts it (no separator, a capital) instead of
+    /// following what the take typed before.
+    @Test func aFieldEmptiedByHandStartsTheNextUnitAfresh() {
+        var take = StagedDictation()
+        take.receive(snapshot(1, [unit(0, "First sentence."), unit(1, "second one.")]))
+        take.begin(0, typed: "First sentence.")
+        take.delivered(0)
+        #expect(prepared(take, "second one.", proxyBefore: "", after: nil, capitalization: .sentences) == " Second one.")
+        take.fieldEmptied()
+        #expect(prepared(take, "second one.", proxyBefore: "", after: nil, capitalization: .sentences) == "Second one.")
     }
 
     /// A clear hides the open unit and the head at once, before the app answers; waiting and ready units stay.

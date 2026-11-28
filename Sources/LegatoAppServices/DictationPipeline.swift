@@ -422,8 +422,8 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// dropped, and a cleanup result that arrives later is ignored. A tap's cut already in flight becomes raw.
     public func sendRawNow(preview: KeyboardRequest.PreviewAnchor? = nil) async { await send(raw: true, preview: preview) }
 
-    /// How long a discard can be taken back (`undoDiscardNow()`). An estimate, to be tuned on the phone.
-    public static let discardUndoSeconds = 4.0
+    /// How long a discard can be taken back (`undoDiscardNow()`; `LiveDictationRun.discardUndoSeconds`).
+    public static let discardUndoSeconds = LiveDictationRun.discardUndoSeconds
     @ObservationIgnored private var discardTimer: Task<Void, Never>?
 
     /// The user's swipe left on the preview: what is still in it and not yet sent for cleanup (the open unit and the speaking
@@ -433,14 +433,17 @@ public typealias DictationTakePhase = LegatoKeyboardCore.DictationTakePhase
     /// (`undoDiscardNow()`); then it becomes empty text. Ignored without a staged run in progress or when nothing would be discarded.
     public func discardNow() async { await send(raw: false, discard: true) }
 
-    /// Takes back the discard while its window is open: the words go to cleanup as a normal closed unit.
+    /// Takes back the discard while its window is open: the words are back in the preview as the open unit, as before the swipe
+    /// (`LiveDictationRun.restoreDiscarded`). Nothing is cleaned or typed now; a tap, a swipe right, the next pause or the stop sends
+    /// them on as usual.
     public func undoDiscardNow() async {
         guard var run = liveRun, run.hasDiscarded, !run.complete else { return }
         discardTimer?.cancel(); discardTimer = nil
-        let restored = run.restoreDiscarded()
+        guard run.restoreDiscarded() else { return }
         publishLive(run)
-        diagnostics?("live2.discard.undo", ["run": String(run.runID.prefix(8)), "units": restored.count])
-        for unit in restored { await submitLive(unit.text, key: unit.key, run: run) }
+        diagnostics?("live2.discard.undo", ["run": String(run.runID.prefix(8))])
+        // A paused manual run cleans its open unit ahead, so a later tap finds the result (`pause`).
+        if isPaused { speculateOpenUnit() }
     }
 
     /// The window ended (or the run did): the discarded units become empty.

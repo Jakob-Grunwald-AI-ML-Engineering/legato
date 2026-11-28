@@ -160,7 +160,9 @@ private func line(_ sequence: Int, _ text: String) -> DictationRouteLine {
         await pipeline.reset()
     }
 
-    @Test func undoDiscardNowCleansTheUnitLikeASend() async throws {
+    /// #347: the undo reverses the swipe. The words are the open unit again, pending in the preview and not cleaned; the next send
+    /// cleans them like any open unit.
+    @Test func undoDiscardNowPutsTheWordsBackAsTheOpenUnitAndTheNextSendCleansThem() async throws {
         let cleaner = Upper()
         let pipeline = manual(cleaner)
         pipeline.cutRecognizer = { true }
@@ -169,9 +171,14 @@ private func line(_ sequence: Int, _ text: String) -> DictationRouteLine {
         pipeline.boundary("finalize")
         try await until { pipeline.liveRun?.snapshot.segments.first?.discarded == true }
         await pipeline.undoDiscardNow()
+        var unit = try #require(pipeline.liveRun?.snapshot.segments.first)
+        #expect(unit.text == "bring it back" && unit.discarded == nil && unit.closed == false && unit.ready == false)
+        #expect(cleaner.inputs.withLock { $0.isEmpty }, "The undo cleans nothing")
+        await pipeline.sendNow()
+        pipeline.boundary("finalize")
         try await until { pipeline.liveRun?.snapshot.segments.first?.ready == true }
-        let unit = try #require(pipeline.liveRun?.snapshot.segments.first)
-        #expect(unit.text == "Bring it back" && unit.discarded == nil)
+        unit = try #require(pipeline.liveRun?.snapshot.segments.first)
+        #expect(unit.text == "Bring it back")
         #expect(cleaner.inputs.withLock { $0 } == ["bring it back"])
         await pipeline.reset()
     }

@@ -338,7 +338,7 @@ final class KeyboardController {
     /// Hands the row `Self.listening` when nothing is said yet.
     var dictationPreview: String? {
         if stagedTake.runID != nil, !stagedTake.isFinished {
-            if stagedTake.previewDraft?.released == false { return composedPreview == nil ? nil : stagedTake.preview }
+            if stagedTake.offeredDraft != nil { return composedPreview == nil ? nil : stagedTake.preview }
             let spoken = stagedTake.preview
             // A unit being typed keeps its start: the row anchors on the exit point, so its head is never cut away.
             let leaving = stagedTake.inFlight != nil
@@ -363,18 +363,33 @@ final class KeyboardController {
     }
 
     var composedPreview: StagedDictation.PreviewDraft? {
-        guard let draft = stagedTake.previewDraft, !draft.released, let field = document.documentID, field == liveDocumentID else { return nil }
+        guard let draft = stagedTake.offeredDraft, let field = document.documentID, field == liveDocumentID else { return nil }
         return draft
     }
 
-    var canSendPreview: Bool {
-        guard fullAccess, !isHoldingPreview, !stagedTake.isAwaitingPreview else { return false }
-        if stagedTake.previewDraft?.released == false { return composedPreview != nil }
+    /// What the preview takes by what it shows: a swipe right or an insert (`previewOffersSend`), a tap or press to compose, a
+    /// swipe left. Acting on it also needs Full Access (`canSendPreview`, `canComposePreview`, `canDiscardPreview`): the gestures
+    /// reach the app over the link. A gesture the preview takes without it says how to turn it on (`needsFullAccess`, #347).
+    var previewOffersSend: Bool {
+        guard !isHoldingPreview, !stagedTake.isAwaitingPreview else { return false }
+        if stagedTake.offeredDraft != nil { return composedPreview != nil }
         return stagedTake.runID != nil && (!stagedTake.complete || stagedTake.held) && !stagedTake.preview.isEmpty
     }
 
-    var canComposePreview: Bool {
-        canSendPreview && !stagedTake.complete && stagedTake.inFlight == nil && stagedTake.previewDraft?.released != true
+    var previewOffersCompose: Bool {
+        previewOffersSend && !stagedTake.complete && stagedTake.inFlight == nil && stagedTake.previewDraft?.released != true
+    }
+
+    var canSendPreview: Bool { fullAccess && previewOffersSend }
+    var canComposePreview: Bool { fullAccess && previewOffersCompose }
+
+    /// A preview gesture the preview takes (`offered`) but that cannot act without Full Access: the row says how to turn it on
+    /// instead of the gesture doing nothing. True when it did.
+    private func needsFullAccess(_ offered: Bool, to action: String) -> Bool {
+        guard offered, !fullAccess else { return false }
+        trace?("preview gesture needs Full Access")
+        show("To \(action), turn on Allow Full Access in Settings > General > Keyboard > Keyboards > Legato.")
+        return true
     }
 
     private var previewAnchor: KeyboardRequest.PreviewAnchor? {
@@ -395,7 +410,10 @@ final class KeyboardController {
     }
 
     func beginPreviewHold() -> Bool {
+        // Without Full Access a press says nothing yet: it may turn into a swipe, which names its own action. A press that ends
+        // in place says it (`DictationPreviewView`).
         guard canComposePreview, let runID = stagedTake.runID else { return false }
+        endDraftUndo()
         let anchor = previewAnchor
         guard composedPreview == nil || anchor != nil else { return false }
         let hold = KeyboardRequest.PreviewHold(id: UUID().uuidString, runID: runID)
@@ -416,7 +434,11 @@ final class KeyboardController {
 
     /// A quick tap or an accessibility action composes the current draft without separate instructions.
     func composePreviewWithoutInstructions() {
-        guard canComposePreview else { return }
+        guard canComposePreview else {
+            _ = needsFullAccess(previewOffersCompose, to: "clean up dictation")
+            return
+        }
+        endDraftUndo()
         let anchor = previewAnchor
         guard composedPreview == nil || anchor != nil else { return }
         let id = UUID().uuidString
@@ -425,9 +447,10 @@ final class KeyboardController {
     }
 
     /// A swipe left on the preview clears what is still in it and not yet sent for cleanup: the open unit and the speaking head
-    /// (`RequestCommand.discard`). The app keeps it for a short undo window (`undoDiscard`). Units already sent for cleanup,
-    /// ready ones and the one being typed stay.
-    var canDiscardPreview: Bool { canSendPreview && (composedPreview != nil || stagedTake.hasDiscardable) }
+    /// (`RequestCommand.discard`), or the composed draft. The app keeps the words for a short undo window (`undoDiscard`), the
+    /// keyboard the draft (`draftUndoWindow`). Units already sent for cleanup, ready ones and the one being typed stay.
+    var previewOffersDiscard: Bool { previewOffersSend && (composedPreview != nil || stagedTake.hasDiscardable) }
+    var canDiscardPreview: Bool { fullAccess && previewOffersDiscard }
 
     struct PreviewExit: Equatable, Identifiable {
         enum Direction: Equatable { case left, right }
@@ -456,15 +479,21 @@ final class KeyboardController {
     }
 
     func discardPreview() {
-        guard canDiscardPreview else { return }
-        showPreviewExit(discardablePreviewText, direction: .left)
+        guard canDiscardPreview else {
+            _ = needsFullAccess(previewOffersDiscard, to: "clear dictation")
+            return
+        }
+        endDraftUndo()
+        let cleared = discardablePreviewText
         if composedPreview != nil {
+            trace?("preview swiped left: discard draft")
             stagedTake.discardPreviewDraft()
-            acknowledgeStaged()
-            driveStaged()
+            showPreviewExit(cleared, direction: .left)
+            startDraftUndo()
             syncRowTakeover()
             return
         }
+        showPreviewExit(cleared, direction: .left)
         trace?("preview swiped left: discard")
         stagedTake.clearOpen()
         link.send(.discard, id: UUID().uuidString)
@@ -477,18 +506,55 @@ final class KeyboardController {
     /// How long a cleared preview stays hidden without the app's answer: the recognizer's cut can take up to `sendCutWait` (1.5 s). An estimate.
     static let clearAnswerWait = Duration.milliseconds(2000)
 
-    /// The undo chip is offered while the latest snapshot has a discarded unit (the app's window is open).
+    /// The undo chip is offered while cleared words wait out their undo window: a discarded unit in the latest snapshot (the app's
+    /// window is open) or a draft swiped away here (`draftUndoWindow`).
     var canUndoDiscard: Bool { stagedTake.runID != nil && stagedTake.hasDiscarded && fullAccess }
 
+    /// The undo puts the cleared words back in the preview as they were: the app reopens its discarded unit, the keyboard shows its
+    /// draft again. Nothing is typed.
     func undoDiscard() {
         guard canUndoDiscard else { return }
+        if stagedTake.previewDraft?.discarded == true {
+            trace?("preview undo discard draft")
+            draftUndoWindow?.cancel(); draftUndoWindow = nil
+            stagedTake.undoDraftDiscard()
+            syncRowTakeover()
+            return
+        }
         trace?("preview undo discard")
         link.send(.undoDiscard, id: UUID().uuidString)
     }
 
+    /// A draft swiped away waits out its undo window here (`StagedDictation.discardPreviewDraft`); the app never kept it.
+    @ObservationIgnored private var draftUndoWindow: Task<Void, Never>?
+
+    private func startDraftUndo() {
+        draftUndoWindow?.cancel()
+        draftUndoWindow = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(LiveDictationRun.discardUndoSeconds))
+            guard !Task.isCancelled else { return }
+            self?.endDraftUndo()
+        }
+    }
+
+    /// The draft's window ends: at its time, at the next preview gesture, or when the keyboard hides. The draft is dropped, the
+    /// app hears it was handled and delivery goes on behind it.
+    private func endDraftUndo() {
+        draftUndoWindow?.cancel(); draftUndoWindow = nil
+        guard stagedTake.expireDraftDiscard() else { return }
+        trace?("preview draft discard final")
+        acknowledgeStaged()
+        driveStaged()
+        syncRowTakeover()
+    }
+
     /// A swipe right inserts the composed draft or sends the pending speech without cleanup (`RequestCommand.sendRaw`).
     func previewSwiped() {
-        guard canSendPreview else { return }
+        guard canSendPreview else {
+            _ = needsFullAccess(previewOffersSend, to: "insert dictation")
+            return
+        }
+        endDraftUndo()
         if composedPreview != nil {
             guard !document.isSecureTextEntry, !draftEvidence.isPending else {
                 show("Return to the original text field to insert this draft.")
@@ -674,6 +740,8 @@ final class KeyboardController {
         correctionPoll?.cancel(); correctionPoll = nil
         isVisible = false
         recordPreviewLifecycle(.didDisappear)
+        // A draft swiped away is final once the keyboard hides: the app's receipt says it was handled, so it is not shown again.
+        endDraftUndo()
         if let snapshot = liveSnapshot, snapshot.staged == true, stagedTake.runID == snapshot.runID {
             // A staged take survives a hide (#343): its units, the run and following it are kept, and the preview shows them
             // again when the keyboard comes back. Only work in flight to the field stops (`stopStagedDelivery`).
@@ -894,11 +962,17 @@ final class KeyboardController {
         case .unbound:
             // A returning field is observed again; until then nothing is rechecked.
             draftRecheck?.cancel(); draftRecheck = nil
-        case .unchanged:
+        case .unchanged, .emptiedByKeyboard:
             draftRecheck?.cancel(); draftRecheck = nil
             blankProbeAttempted = false
             unverifiedBlankProbeOrigin = nil
             verifiedBlankProbeReturn = nil
+            // The person deleted the field by hand (#347): not a send. The draft, a staged take and its preview go on, and the
+            // next unit starts the empty field.
+            if decision == .emptiedByKeyboard {
+                stagedTake.fieldEmptied()
+                trace?("field emptied by the keyboard: draft kept")
+            }
         case .pending:
             if !blankProbeAttempted, cursorReadID != nil || isFieldBusy {
                 // A previous reader can leave the native caret at a position the queue never verified.
@@ -938,6 +1012,8 @@ final class KeyboardController {
             if styleField != nil, !hasText, report.before.isEmpty, report.after.isEmpty, report.selected == nil {
                 correctionCapture?.recordDiagnosticBoundary()
             }
+            // A paused take kept across the send (`forgetLiveRun`) types its next unit into the empty field.
+            stagedTake.fieldEmptied()
             finishDraft(reason: .draftCleared)
         }
     }

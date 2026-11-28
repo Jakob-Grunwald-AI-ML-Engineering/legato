@@ -39,6 +39,9 @@ public struct StagedDictation: Sendable, Equatable {
         public let text: String
         public let sentByHost: Bool
         public fileprivate(set) var released: Bool
+        /// The person swiped the draft away and its undo window is open (`discardPreviewDraft`): the preview hides it and the
+        /// units behind it wait. The keyboard alone keeps it; the app hears of it only when the window ends (`expireDraftDiscard`).
+        public fileprivate(set) var discarded = false
 
         fileprivate init(unit: LiveSegment) {
             unitID = unit.id
@@ -53,6 +56,12 @@ public struct StagedDictation: Sendable, Equatable {
     public private(set) var previewDraft: PreviewDraft?
     public var isAwaitingPreview: Bool {
         pending.first?.editPreview == true && previewDraft == nil
+    }
+
+    /// The composed draft the preview offers: prepared, not released to the field and not swiped away.
+    public var offeredDraft: PreviewDraft? {
+        guard let previewDraft, !previewDraft.released, !previewDraft.discarded else { return nil }
+        return previewDraft
     }
 
     public var hasPreviewContinuation: Bool {
@@ -141,8 +150,9 @@ public struct StagedDictation: Sendable, Equatable {
         var layout = PreviewLayout()
         for unit in pending + [LiveSegment(id: -1, text: head, final: false)] {
             // A discarded unit is not shown (its undo window is open); it is not ready, so delivery waits for it. While the app
-            // has not answered a clear, the open unit and the head are hidden the same way.
-            guard unit.discarded != true, !(clearing && (unit.id < 0 || unit.closed == false)) else { continue }
+            // has not answered a clear, the open unit and the head are hidden the same way, and so is a draft swiped away here.
+            guard unit.discarded != true, !(clearing && (unit.id < 0 || unit.closed == false)),
+                  !(previewDraft?.discarded == true && previewDraft?.unitID == unit.id) else { continue }
             let piece = unit.editPreview == true ? unit.text : unit.text.trimmingCharacters(in: .whitespaces)
             guard !piece.isEmpty else { continue }
             if unit.editPreview == true {
@@ -165,8 +175,9 @@ public struct StagedDictation: Sendable, Equatable {
     /// What the preview shows (`previewLayout`).
     public var preview: String { previewLayout.text }
 
-    /// A unit the person discarded is waiting out its undo window in the app: the preview hides it and later units wait behind it.
-    public var hasDiscarded: Bool { pending.contains { $0.discarded == true } }
+    /// Words the person cleared are waiting out their undo window: a unit in the app, or a composed draft here
+    /// (`PreviewDraft.discarded`). The preview hides them and later units wait behind them.
+    public var hasDiscarded: Bool { pending.contains { $0.discarded == true } || previewDraft?.discarded == true }
 
     /// There is something a clear would throw away: words in the open unit or the head, not already cleared.
     public var hasDiscardable: Bool {
@@ -204,22 +215,47 @@ public struct StagedDictation: Sendable, Equatable {
             previewDraft = nil
             return
         }
-        let next = PreviewDraft(unit: first)
+        var next = PreviewDraft(unit: first)
         if let current = previewDraft, current.unitID == next.unitID, current.operationID == next.operationID, current.original == next.original,
            current.text == next.text, current.sentByHost == next.sentByHost { return }
+        // A draft swiped away stays so for its undo window, whatever the app says of its unit meanwhile.
+        if let current = previewDraft, current.unitID == next.unitID { next.discarded = current.discarded }
         previewDraft = next
     }
 
     public mutating func releasePreview() {
-        guard let draft = previewDraft, !draft.released else { return }
+        guard let draft = previewDraft, !draft.released, !draft.discarded else { return }
         if draft.text.isEmpty {
-            discardPreviewDraft()
+            dropPreviewDraft()
         } else {
             previewDraft?.released = true
         }
     }
 
+    /// A swipe left on the composed draft: it leaves the preview for the undo window (`PreviewDraft.discarded`), the units behind
+    /// it waiting, as a unit the app discards does. `undoDraftDiscard` puts it back as it was; `expireDraftDiscard` drops it.
     public mutating func discardPreviewDraft() {
+        guard let draft = previewDraft, !draft.released, !draft.discarded else { return }
+        previewDraft?.discarded = true
+    }
+
+    /// The undo: the draft is in the preview again, still to be inserted or cleared.
+    public mutating func undoDraftDiscard() {
+        guard previewDraft?.discarded == true else { return }
+        previewDraft?.discarded = false
+    }
+
+    /// The draft's undo window ended (or another gesture or the keyboard's hide closed it): it is dropped, never typed. True when
+    /// it was waiting.
+    @discardableResult
+    public mutating func expireDraftDiscard() -> Bool {
+        guard previewDraft?.discarded == true else { return false }
+        dropPreviewDraft()
+        return true
+    }
+
+    /// The draft's unit is handled without typing it: delivery goes on behind it.
+    private mutating func dropPreviewDraft() {
         guard let draft = previewDraft, !draft.released else { return }
         deliveredThrough = draft.unitID
         skipEmpty()
@@ -306,4 +342,8 @@ public struct StagedDictation: Sendable, Equatable {
         let tail = String(record.suffix(Self.agreeCharacters))
         return proxyBefore.hasSuffix(tail) ? proxyBefore : record
     }
+
+    /// The field is empty now (the person deleted it by hand, or the host cleared it): what the take typed is no longer before
+    /// the caret, so the next unit starts the field (no separator, a capital) instead of following the record.
+    public mutating func fieldEmptied() { record = "" }
 }
