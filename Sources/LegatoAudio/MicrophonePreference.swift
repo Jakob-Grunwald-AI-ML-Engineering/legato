@@ -4,7 +4,8 @@ import Foundation
 ///
 /// - `automatic`: Legato's ranking (`AudioInputCandidate.ordered`): built-in, then wired or USB, then Bluetooth
 ///   (AirPods), then a Continuity iPhone or iPad. The system default is ignored, so an iPhone that macOS made the
-///   default does not take over.
+///   default does not take over. Only when none of those is present (a Mac whose sole input is virtual, such as
+///   BlackHole) does the system's default input stand in, rather than no microphone at all.
 /// - `systemDefault`: the system's default input first.
 /// - `device`: one input by its persistent UID (Core Audio's device UID on the Mac). When it is gone or fails, the
 ///   capture continues as `automatic`.
@@ -42,13 +43,16 @@ public enum MicrophonePreference: Equatable, Sendable {
 extension AudioInputCandidate {
     /// The order a capture tries inputs in under `preference`. Automatic is `ordered(_:)`. An explicit choice (the
     /// system default, or a device by UID) goes first when it is present and can deliver audio, whatever its kind;
-    /// the automatic order follows as the fallback. `defaultID` is the `id` of the system's default input.
+    /// the automatic order follows as the fallback. `defaultID` is the `id` of the system's default input; it is
+    /// the last resort when the automatic order is empty.
     public static func ordered(_ inputs: [Self], preference: MicrophonePreference, defaultID: String?) -> [Self] {
-        let automatic = ordered(inputs)
+        let systemDefault = defaultID.flatMap { id in inputs.first { $0.id == id && $0.isSelectable } }
+        var automatic = ordered(inputs)
+        if automatic.isEmpty, let systemDefault { automatic = [systemDefault] }
         let chosen: Self?
         switch preference {
         case .automatic: return automatic
-        case .systemDefault: chosen = defaultID.flatMap { id in inputs.first { $0.id == id } }
+        case .systemDefault: chosen = systemDefault
         case .device(let uid): chosen = inputs.first { ($0.uid ?? $0.id) == uid }
         }
         guard let chosen, chosen.isSelectable else { return automatic }
