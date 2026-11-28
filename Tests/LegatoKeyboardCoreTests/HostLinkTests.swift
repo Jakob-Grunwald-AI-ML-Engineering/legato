@@ -151,6 +151,25 @@ private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
         #expect(fresh.initialPosts == [LinkChannel.Note.host]) // keyboards are told
     }
 
+    /// #343: iOS ended the app while it held a take for the keyboard (Full Access changed). The new process holds no run, so the
+    /// open publication goes, and keyboards are told; a complete one (nothing left for an app to do) stays.
+    @Test func startingTheLinkClearsARunAnEarlierProcessLeftOpen() {
+        let backing = MemoryLinkStore()
+        let live = LiveDictationLink(store: LinkStore(backing))
+        var held = LiveDictationSnapshot(runID: "held", version: 3, segments: [.init(id: 0, text: "left behind", final: true, ready: false)],
+                                         staged: true, paused: true)
+        live.publish(held)
+        let fresh = Rig(backing: backing)
+        #expect(live.read() == nil)
+        #expect(fresh.initialPosts.contains(LinkChannel.Note.dictationLive))
+
+        held.paused = nil; held.complete = true
+        live.publish(held)
+        let next = Rig(backing: backing)
+        #expect(live.read() == held)
+        #expect(next.initialPosts == [LinkChannel.Note.host])
+    }
+
     // MARK: publishing
 
     @Test func aLeaseKeepsTheBeatGoingAndAllowsRemoteStart() async {

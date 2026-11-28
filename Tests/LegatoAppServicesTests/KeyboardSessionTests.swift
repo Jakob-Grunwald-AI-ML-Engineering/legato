@@ -558,6 +558,8 @@ private final class HeldCleaner: SentenceCleaning {
     @Test(arguments: [true, false]) func aKeptTakeEndsIntoHistoryWhenNoKeyboardReturnsInTime(manual: Bool) async throws {
         let clock = VirtualSleep()
         let (pipeline, keyboard) = try await session(HeldCleaner(), manual: manual, clock: clock)
+        let published = PublishedRuns()
+        pipeline.onLiveChange = { published.last = .some($0) }
         try await keyboard.debugDictationLine("we should ship it on friday")
         keyboard.update(visible: false, surface: .dictation); await keyboard.settle()
         try await until { pipeline.isPaused && clock.sleepers == 1 }
@@ -568,6 +570,8 @@ private final class HeldCleaner: SentenceCleaning {
         try await cleanedHistory("We should ship it on friday")
         try await until { self.logged.has("live2.run.end") && pipeline.liveRun == nil }
         #expect(!logged.has("live2.run.drop"), "Ended and cleaned, not dropped")
+        // The run is withdrawn from the keyboard: a preview that still shows it lets it go (`KeyboardController.retireStagedTake`).
+        #expect(published.last == .some(nil))
     }
 
     @Test func aKeyboardBackBeforeTheLimitKeepsTheTake() async throws {
@@ -584,6 +588,11 @@ private final class HeldCleaner: SentenceCleaning {
         #expect(pipeline.isPaused && pipeline.liveRun?.runID == runID, "The bound was cancelled")
         #expect(!logged.has("live2.run.end"))
     }
+}
+
+/// The last run the pipeline published to the keyboard (`.some(nil)`: it withdrew the run).
+@MainActor private final class PublishedRuns {
+    var last: LiveDictationSnapshot??
 }
 
 /// A virtual clock for one-shot waits: a sleep returns only once `advance` moves the clock past its end, and a cancelled one

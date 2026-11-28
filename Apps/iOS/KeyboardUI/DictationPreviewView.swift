@@ -134,6 +134,12 @@ private struct PreviewHoldGesture: UIGestureRecognizerRepresentable {
             moved = false
         }
 
+        /// A press that began never keeps the preview's scroll view from scrolling: a finger that rests a moment before it drags
+        /// scrolls, and the move ends the press (`moved`).
+        override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
+            preventedGestureRecognizer is UIPanGestureRecognizer ? false : super.canPrevent(preventedGestureRecognizer)
+        }
+
         private func exceededTapTravel(_ touch: UITouch) -> Bool {
             guard let tapOrigin else { return true }
             let point = touch.location(in: nil)

@@ -881,14 +881,19 @@ final class KeyboardController {
     private var queueContextBefore: String { queue.seeded ? queue.projectedBefore : shown(document.contextBefore) }
 
     /// A blank proxy window only ends a draft after it stays empty. A returning window must locate the
-    /// same draft before its automation resumes. Run this even during a cursor walk.
+    /// same draft before its automation resumes. Run this even during a cursor walk. A proxy with no field bound
+    /// (`documentID` nil: Reminders' editor resigns some 400 ms before the keyboard leaves) is no evidence: the draft was not
+    /// sent, and a staged take kept across the hide must not end as if it was (`DraftEvidence.Decision.unbound`).
     private func observeDraftBoundary() {
         guard blankProbeLease == nil else { return }
         let report = currentReport, hasText = document.hasText, time = Self.uptimeMs
         let confirmation = queue.draftConfirmationMs
         let decision = draftEvidence.observe(report, hasText: hasText, ownsEmpty: queue.ownsEmptyReport,
-                                             nowMs: time, confirmationMs: confirmation)
+                                             nowMs: time, confirmationMs: confirmation, bound: document.documentID != nil)
         switch decision {
+        case .unbound:
+            // A returning field is observed again; until then nothing is rechecked.
+            draftRecheck?.cancel(); draftRecheck = nil
         case .unchanged:
             draftRecheck?.cancel(); draftRecheck = nil
             blankProbeAttempted = false
@@ -1402,6 +1407,9 @@ final class KeyboardController {
                 noteLive(followed, "cleared", detail: "unfinished held=\(stagedTake.held)")
             }
             if liveSeen != nil { liveSeen = nil; liveSnapshot = nil; setLiveRunning(false) }
+            // No run is published: the app holds none (it ended or dropped it, a held take past its bound included, or a new app
+            // process cleared one it left). Its words are in History; the preview lets it go.
+            retireStagedTake(reason: "unpublished")
             return
         }
         #if DEBUG || LEGATO_INTERNAL
@@ -1571,9 +1579,9 @@ final class KeyboardController {
         liveTypedRunIDs.insert(runID)
         let origin = draftID
         var edit = FieldQueue.Edit(kind: .typist, target: unit.text, atCursor: true, requiresVerifiedInsertion: true, isSpeech: true)
-        if unit.editPreview != true {
-            edit.unit = .init(text: unit.text, capitalization: autocapitalization, contextFallback: fallback)
-        }
+        // A composed draft (tap to clean, #323) gets its separator from the field like any unit; its letters stay as the preview
+        // showed them, so no capital is added.
+        edit.unit = .init(text: unit.text, capitalization: unit.editPreview == true ? .none : autocapitalization, contextFallback: fallback)
         stagedBegan = (edit.id, ChunkEntrance.insertsStagedTextWhole(unit.text))
         stagedActivity = ContinuousClock.now
         enqueue(edit) { [weak self] event in
@@ -1626,6 +1634,18 @@ final class KeyboardController {
         trace?("staged held")
         liveRecoveryDismissed = false
         acknowledgeStaged()
+        syncRowTakeover()
+    }
+
+    /// The app no longer holds the staged take this keyboard shows: it ended or dropped the run, or its process is gone. What the
+    /// preview still holds of it is stale (a tap, swipe or clear would reach no run) and its words are in History, so the preview lets
+    /// it go. A unit on its way to the field finishes first (the next poll retires the rest), and a draft the person released to
+    /// the field is still typed.
+    private func retireStagedTake(reason: String) {
+        guard stagedTake.runID != nil, !stagedTake.isFinished, stagedTake.inFlight == nil, stagedTake.previewDraft?.released != true else { return }
+        trace?("staged take retired reason=\(reason)")
+        stagedTake = StagedDictation()
+        stagedWaitingSince = nil
         syncRowTakeover()
     }
 
@@ -1712,7 +1732,8 @@ final class KeyboardController {
         }
         if let runID = liveSnapshot?.runID {
             // A staged take that is cleared with the draft (sent) ends here: what is not in the field is in History only.
-            if stagedTake.runID == runID { holdStaged(); acknowledgeStaged(ending: reason) }
+            // Nothing more of it is typed, so the preview does not keep its rest either (no tap or swipe could send it).
+            if stagedTake.runID == runID { holdStaged(); acknowledgeStaged(ending: reason); retireStagedTake(reason: reason.rawValue) }
             queue.cancelRun(runID); handle(queue.drainEvents())
         }
         if let runID = liveSnapshot?.runID { ignoredLiveRunID = runID; ignoredAtAppearance = nil }
@@ -1725,8 +1746,25 @@ final class KeyboardController {
     /// across its hide (#343), is followed on, ended or not, until every unit is in the field. So is a run the app holds for the
     /// keyboard (`LiveDictationSnapshot.isHeldForKeyboard`): a controller that never saw it (a recreated view, a new process after
     /// a recycle) shows it at once. Only this appearing, visible controller decides; a hidden one never adopts a run.
+    /// An open run whose app is gone (`LiveDictationSnapshot.isAbandoned`) is neither shown nor followed, this controller's own
+    /// staged take included: nothing would act on its preview.
     private func ignorePublishedRun() {
-        guard let published = link.readLiveDictation() else { ignoredLiveRunID = nil; ignoredAtAppearance = nil; return }
+        guard let published = link.readLiveDictation() else {
+            ignoredLiveRunID = nil; ignoredAtAppearance = nil
+            // Before the first frame, not at the first poll: a run the app withdrew while the keyboard was away is not shown.
+            retireStagedTake(reason: "unpublished")
+            return
+        }
+        reloadHost()
+        if published.isAbandoned(host: host, now: now) {
+            noteLive(published, "appear", detail: "abandoned \(published.paused == true ? "paused" : "open")", once: false)
+            if stagedTake.runID == published.runID { retireStagedTake(reason: "abandoned") }
+            if blockedLiveRunID == published.runID { blockedLiveRunID = nil }
+            if liveSnapshot?.runID == published.runID { liveSnapshot = nil; liveSeen = nil; setLiveRunning(false) }
+            ignoredLiveRunID = published.runID
+            ignoredAtAppearance = published
+            return
+        }
         let ownStaged = stagedTake.runID == published.runID && !stagedTake.isFinished
         let held = published.isHeldForKeyboard
         let following = held || (published.runID == liveSnapshot?.runID && (!published.complete || ownStaged))

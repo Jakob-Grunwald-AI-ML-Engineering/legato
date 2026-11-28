@@ -121,7 +121,15 @@ extension LiveDictationSnapshot {
     /// and any keyboard that appears shows it in its preview, a fresh controller or process included. The app ends the run
     /// (`complete`) once it stops holding it (`KeyboardSession.keyboardHoldLimit`), so while the app runs a paused publication is
     /// never a stale one. Its words are the app's: a hidden keyboard owes nothing for it (`KeyboardRecyclePolicy`).
+    /// An app that stopped running leaves it behind: the keyboard checks `isAbandoned`, and a new app process clears it (`HostLink`).
     public var isHeldForKeyboard: Bool { staged == true && paused == true && !complete }
+
+    /// An open run whose app is not beating (`HostState.isLive`): its process is gone (iOS ends it when Full Access changes, or under
+    /// memory pressure) or cannot act. Nothing will speak into, send or end the run, and its words are in History (checkpointed as
+    /// they came): an appearing keyboard neither shows nor follows it. A complete run needs no app; it is never abandoned.
+    public func isAbandoned(host: HostState?, now: Date) -> Bool {
+        !complete && !(host?.isLive(now: now) ?? false)
+    }
 
     /// The keyboard leaves the run published when it appears (`seen`) alone unless it is the keyboard's own staged take, kept
     /// across the hide, or a run the app holds for the keyboard (`isHeldForKeyboard`, #343): any other belongs to an earlier

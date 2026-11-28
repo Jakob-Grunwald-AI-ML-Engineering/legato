@@ -246,7 +246,9 @@ public struct StagedDictation: Sendable, Equatable {
         started = true
         guard revealProgress else { return }
         for character in piece {
-            if previewDraft?.unitID != inFlight, exited == 0, character.isWhitespace { continue }
+            // A composed draft's own text may open with a line break; the space before it is always the separator (the queue
+            // trims the draft's own spaces when it prepares it).
+            if exited == 0, character == " " || (previewDraft?.unitID != inFlight && character.isWhitespace) { continue }
             exited += 1
         }
     }

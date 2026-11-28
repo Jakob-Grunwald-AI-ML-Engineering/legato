@@ -46,6 +46,13 @@ public final class HostLink {
         // An earlier process's instruction (its strip, a read or an edit carrying field text) is stale too.
         InstructionLink(store: store).clearAll()
         post(LinkChannel.Note.host)
+        // So is a run it left open (a take held for the keyboard when iOS ended the app, #343): this process holds no run, and its
+        // words are in History. A keyboard showing it lets it go (`KeyboardController.retireStagedTake`).
+        let live = LiveDictationLink(store: store)
+        if let left = live.read(), !left.complete {
+            live.clear()
+            post(LinkChannel.Note.dictationLive)
+        }
     }
 
     // MARK: Publishing
