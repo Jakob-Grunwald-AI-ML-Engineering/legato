@@ -33,6 +33,8 @@ public struct VoiceGuide: Equatable, Sendable {
         /// Start was pressed and the microphone is starting.
         case starting
         case reading, quiet
+        /// The recording sounds unlike the saved voice: the sheet asks (`status`) before saving, Record again or Keep it.
+        case confirmVoice
         /// Computing and saving the profile (`status`).
         case saving
         /// The outcome is `status`.
@@ -59,13 +61,14 @@ public struct VoiceGuide: Equatable, Sendable {
 /// The progress of a guided recording, updated about ten times a second while it runs.
 @MainActor @Observable public final class VoiceCaptureMeter {
     public private(set) var progress = 0.0
-    public private(set) var stepProgress = 0.0
+    /// Speech heard in the current sentence against the speech that counts as reading it; never moves without speech.
+    public private(set) var speechProgress = 0.0
     public private(set) var quietRemaining = 0
     /// Assigns only what changed visibly, so an unchanged value redraws nothing.
-    func show(progress: Double, stepProgress: Double, quietRemaining: Int) {
+    func show(progress: Double, speechProgress: Double, quietRemaining: Int) {
         if progress != self.progress, abs(progress - self.progress) >= 0.005 || progress == 0 || progress == 1 { self.progress = progress }
-        if stepProgress != self.stepProgress, abs(stepProgress - self.stepProgress) >= 0.01 || stepProgress == 0 || stepProgress == 1 {
-            self.stepProgress = stepProgress
+        if speechProgress != self.speechProgress, abs(speechProgress - self.speechProgress) >= 0.01 || speechProgress == 0 || speechProgress == 1 {
+            self.speechProgress = speechProgress
         }
         if quietRemaining != self.quietRemaining { self.quietRemaining = quietRemaining }
     }
@@ -91,7 +94,7 @@ final class VoiceCaptureRecorder: Sendable {
         var stepIndex: Int
         var sentence: Int
         var progress: Double
-        var stepProgress: Double
+        var speechProgress: Double
         var quietRemaining: Int
         var hint: VoiceCaptureSchedule.Hint?
     }
@@ -138,7 +141,7 @@ final class VoiceCaptureRecorder: Sendable {
             let state: State = schedule.isFinished ? .finished : schedule.isOverrun ? .overrun : box.ended ? .ended
                 : now - box.lastAudio > stallSeconds ? .stalled : .running
             return Snapshot(state: state, stepIndex: schedule.stepIndex, sentence: schedule.sentence, progress: schedule.progress,
-                            stepProgress: schedule.stepProgress, quietRemaining: schedule.quietRemaining, hint: schedule.hint)
+                            speechProgress: schedule.speechProgress, quietRemaining: schedule.quietRemaining, hint: schedule.hint)
         }
     }
     func result() -> (samples: [Float], intervals: [VoiceRecordingInterval]) {
@@ -169,7 +172,11 @@ final class VoiceCaptureRecorder: Sendable {
     @ObservationIgnored private var microphone: (any AudioSource)?
     @ObservationIgnored private var recorder: VoiceCaptureRecorder?
     @ObservationIgnored private var startSignal: AsyncStream<Void>.Continuation?
-    @ObservationIgnored private var lastRequest: (situation: VoiceSituation, firstSetup: Bool, microphoneBusy: @MainActor () -> Bool)?
+    /// The answer to "This sounds different…": true keeps the recording, false records again.
+    @ObservationIgnored private var voiceAnswer: AsyncStream<Bool>.Continuation?
+    /// The last recording asked for; `sentences` is how many it read, so a retry reads as many.
+    @ObservationIgnored private var lastRequest: (situation: VoiceSituation, firstSetup: Bool, sentences: Int,
+                                                  microphoneBusy: @MainActor () -> Bool)?
     @ObservationIgnored private var generation = 0
 
     public init(service: VoiceIdentityService = .shared) { self.service = service }
@@ -220,26 +227,30 @@ final class VoiceCaptureRecorder: Sendable {
     public func start() { if guide?.phase == .ready { startSignal?.yield(()) } }
     /// Next sentence: the user finished the sentence early.
     public func advance() { if let step = guide?.step { recorder?.requestAdvance(step: step) } }
-    /// Try again after a failed recording, with the same setting.
+    /// Try again after a failed recording, with the same setting and as many sentences.
     public func retry() {
         guard let request = lastRequest, !isBusy else { return }
-        run(situation: request.situation, firstSetup: request.firstSetup, microphoneBusy: request.microphoneBusy)
+        run(situation: request.situation, firstSetup: request.firstSetup, sentences: request.sentences, microphoneBusy: request.microphoneBusy)
     }
+    /// Keep it: saves a recording that sounds different from the saved voice.
+    public func keepDifferentVoice() { if guide?.phase == .confirmVoice { voiceAnswer?.yield(true) } }
+    /// Record again: discards a recording that sounds different and starts the same setting over.
+    public func recordAgain() { if guide?.phase == .confirmVoice { voiceAnswer?.yield(false) } }
     /// Done, or the sheet was dismissed: cancels a recording that still runs.
     public func closeGuide() {
         if isBusy { cancel() } else { guide = nil; isGuidePresented = false }
     }
 
-    private func run(situation: VoiceSituation, firstSetup: Bool, microphoneBusy: @escaping @MainActor () -> Bool) {
+    private func run(situation: VoiceSituation, firstSetup: Bool, sentences: Int? = nil, microphoneBusy: @escaping @MainActor () -> Bool) {
         guard !isBusy else { return }
         clearNotice()
-        lastRequest = (situation, firstSetup, microphoneBusy)
         let language = VoiceReadingPrompts.language()
         let script = firstSetup ? VoiceReadingScript.firstSetup(language: language)
-            : VoiceReadingScript.setting(language: language, cursor: VoiceIsolationSettings.promptCursor)
+            : VoiceReadingScript.setting(language: language, cursor: VoiceIsolationSettings.promptCursor, sentences: sentences)
+        lastRequest = (situation, firstSetup, script.sentenceCount, microphoneBusy)
         generation += 1
         let token = generation
-        meter.show(progress: 0, stepProgress: 0, quietRemaining: 0)
+        meter.show(progress: 0, speechProgress: 0, quietRemaining: 0)
         guide = VoiceGuide(title: firstSetup ? VoiceSetupCopy.setupButton : situation.name, isFirstSetup: firstSetup,
                            status: VoiceSetupCopy.preparing, prompt: script.steps.first?.prompt, sentenceCount: script.sentenceCount)
         isGuidePresented = true
@@ -263,7 +274,7 @@ final class VoiceCaptureRecorder: Sendable {
 
     private func perform(token: Int, situation: VoiceSituation, firstSetup: Bool, script: VoiceReadingScript,
                          starts: AsyncStream<Void>, microphoneBusy: @escaping @MainActor () -> Bool) async {
-        var ownsAudioSession = false
+        var ownsAudioSession = false, recordAgain = false
         do {
             try await service.prepareModels()
             try check(token)
@@ -273,9 +284,9 @@ final class VoiceCaptureRecorder: Sendable {
             #else
             // The system's access prompt sends the menu-bar app to the back; bring the Settings window forward again.
             let asks = AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
-            let window = NSApp.keyWindow.map { $0.sheetParent ?? $0 } ?? NSApp.windows.first { $0.attachedSheet != nil }
+            let window = Self.sheetParent()
             let granted = await AVCaptureDevice.requestAccess(for: .audio)
-            if asks { NSApp.activate(); window?.makeKeyAndOrderFront(nil) }
+            if asks { bringForward(window) }
             guard granted else { throw EnrollmentError.permission }
             #endif
             try check(token)
@@ -317,7 +328,16 @@ final class VoiceCaptureRecorder: Sendable {
             let kept = keepRecordings ? (samples: capture.samples, sidecar: VoiceRecordingSidecar(
                 kind: firstSetup ? .setup : .setting, situationID: situation.id, situationName: situation.name, route: route,
                 language: script.language, intervals: capture.intervals)) : nil
-            try await service.enroll(reading: segments, situation: situation, route: route, keeping: kept)
+            let embedding = try await service.readingEmbedding(segments)
+            try check(token)
+            // A setting that sounds unlike the saved voice may be someone else reading: ask, never reject. The first
+            // setup has nothing to compare against.
+            if !firstSetup, try await service.profileSet().soundsDifferent(embedding, revision: VoiceIdentityService.modelRevision) {
+                guard try await confirmDifferentVoice(token: token) else { recordAgain = true; throw CancellationError() }
+                guide?.phase = .saving
+                setStatus(VoiceSetupCopy.saving(firstSetup: firstSetup, name: situation.name))
+            }
+            try await service.save(embedding: embedding, situation: situation, route: route, keeping: kept)
             try check(token)
             hasProfile = VoiceIsolationSettings.hasProfile
             if firstSetup { VoiceIsolationSettings.enabled = true }
@@ -339,8 +359,49 @@ final class VoiceCaptureRecorder: Sendable {
         if token == generation {
             isBusy = false; operation = nil; recorder = nil; startSignal = nil
             refresh()
+            if recordAgain { retry() }
         }
     }
+
+    /// Asks "This sounds different…" and waits: true for Keep it, false for Record again.
+    private func confirmDifferentVoice(token: Int) async throws -> Bool {
+        let (answers, continuation) = AsyncStream<Bool>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        voiceAnswer = continuation
+        defer { voiceAnswer = nil }
+        guide?.phase = .confirmVoice
+        setStatus(VoiceSetupCopy.differentVoice)
+        var waiting = answers.makeAsyncIterator()
+        guard let keep = await waiting.next() else { throw CancellationError() }
+        try check(token)
+        return keep
+    }
+
+    #if os(macOS)
+    /// The window the recording sheet is attached to (Settings), else the key window.
+    private static func sheetParent() -> NSWindow? {
+        NSApp.windows.first { $0.attachedSheet != nil } ?? NSApp.keyWindow.map { $0.sheetParent ?? $0 }
+    }
+    /// After the microphone prompt the menu-bar app is inactive and Settings sits behind other windows. Activates the
+    /// app whichever app is active now (the prompt's process never yields activation, so a plain `activate()` can be
+    /// refused), orders the window front and makes its sheet key. The prompt may still be closing when its answer
+    /// arrives, so this is repeated twice shortly after while the app is not active.
+    private func bringForward(_ window: NSWindow?) {
+        func raise() {
+            guard let target = window ?? Self.sheetParent() else { NSApp.activate(ignoringOtherApps: true); return }
+            NSApp.activate(ignoringOtherApps: true)
+            target.orderFrontRegardless()
+            (target.attachedSheet ?? target).makeKeyAndOrderFront(nil)
+        }
+        raise()
+        Task { @MainActor [weak self] in
+            for delay in [0.3, 0.7] {
+                try? await Task.sleep(for: .seconds(delay))
+                guard self?.isGuidePresented == true else { return }
+                if !NSApp.isActive || NSApp.keyWindow == nil { raise() }
+            }
+        }
+    }
+    #endif
 
     /// Feeds the microphone into a ``VoiceCaptureRecorder`` off the main actor, and shows its progress here.
     private func capture(_ stream: AsyncStream<AudioChunk>, script: VoiceReadingScript,
@@ -368,7 +429,7 @@ final class VoiceCaptureRecorder: Sendable {
                 recorder.markShown(step: shownStep)
             }
             if snapshot.hint != guide?.hint, snapshot.stepIndex == shownStep { guide?.hint = snapshot.hint }
-            meter.show(progress: snapshot.progress, stepProgress: snapshot.stepProgress, quietRemaining: snapshot.quietRemaining)
+            meter.show(progress: snapshot.progress, speechProgress: snapshot.speechProgress, quietRemaining: snapshot.quietRemaining)
             switch snapshot.state {
             case .finished: return recorder.result()
             case .stalled, .ended: throw EnrollmentError.interrupted
@@ -398,7 +459,7 @@ final class VoiceCaptureRecorder: Sendable {
     /// Stops a running recording and closes the sheet.
     public func cancel() {
         operation?.cancel()
-        startSignal?.finish()
+        startSignal?.finish(); voiceAnswer?.finish()
         let mic = microphone
         Task { await mic?.stop() }
         if guide != nil { guide = nil }

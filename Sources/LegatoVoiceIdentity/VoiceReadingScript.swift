@@ -11,6 +11,8 @@ public struct VoiceScriptStep: Sendable, Equatable {
     /// For a quiet pause its length. For a reading step, how long it runs before the sheet offers a hint; it still
     /// ends only when the reader stops speaking, or on Next sentence.
     public var maximumSeconds: Double { prompt == nil ? seconds : seconds * VoiceReadingScript.readingTolerance }
+    /// The estimated time spent speaking a reading step: its estimate without the moment to start.
+    public var speechSeconds: Double { max(1, seconds - VoiceReadingScript.startSeconds) }
 }
 
 /// What the user reads and when they stay quiet. The first setup reads about a minute in a quiet room; a setting
@@ -29,9 +31,12 @@ public struct VoiceReadingScript: Sendable, Equatable {
     public var sentenceCount: Int { steps.filter { $0.prompt != nil }.count }
     public var plannedSeconds: Double { steps.reduce(0) { $0 + $1.seconds } }
 
+    /// The moment a reader takes to start a sentence, part of its estimate.
+    public static let startSeconds = 1.5
+
     /// About 2.4 words a second, plus a moment to start; never under four seconds.
     public static func readingSeconds(for sentence: String) -> Double {
-        max(4, Double(sentence.split(whereSeparator: \.isWhitespace).count) / 2.4 + 1.5)
+        max(4, Double(sentence.split(whereSeparator: \.isWhitespace).count) / 2.4 + startSeconds)
     }
 
     /// Whether one more sentence of `seconds` brings the reading closer to `target` than stopping now.
@@ -53,13 +58,14 @@ public struct VoiceReadingScript: Sendable, Equatable {
 
     /// Sentences from the rotation pool, starting at `cursor`, for about 40 s of reading, in three blocks
     /// separated by the two quiet pauses. `nextCursor` is where the next recording starts, so successive recordings
-    /// read different sentences until the pool comes round again.
-    public static func setting(language: String, cursor: Int) -> Self {
+    /// read different sentences until the pool comes round again. `sentences` fixes how many are read instead (a
+    /// retry reads as many as the attempt before it, though other sentences).
+    public static func setting(language: String, cursor: Int, sentences count: Int? = nil) -> Self {
         let pool = VoiceReadingPrompts.rotation(language: language)
         var sentences: [(String, Double)] = [], total = 0.0, index = max(0, cursor) % max(1, pool.count)
-        while sentences.count < pool.count {
+        while sentences.count < min(count ?? pool.count, pool.count) {
             let prompt = pool[index % pool.count], seconds = readingSeconds(for: prompt)
-            guard fits(seconds, after: total, target: settingReadingSeconds) else { break }
+            guard count != nil || fits(seconds, after: total, target: settingReadingSeconds) else { break }
             index += 1; total += seconds
             sentences.append((prompt, seconds))
         }

@@ -6,9 +6,10 @@ import Foundation
 ///
 /// A step starts when the app shows it (``markShown(step:)``), so a label never covers audio from before the reader
 /// could see its sentence; the audio between two steps belongs to neither. A quiet step ends after its length. A
-/// reading step ends on Next sentence, or when the reader has spoken and then stayed silent for a moment (not before
-/// half its estimated time). It never ends on a timeout: past its tolerant maximum it only offers a hint. The whole
-/// recording stops at a generous cap (``isOverrun``), so it cannot run forever.
+/// reading step ends on Next sentence, or when the reader has spoken most of the sentence and then stayed silent for
+/// a moment. Less speech than that needs a long silence, so a pause at a comma never moves on mid-sentence; neither
+/// ends a step before half its estimated time. It never ends on a timeout: past its tolerant maximum it only offers a
+/// hint. The whole recording stops at a generous cap (``isOverrun``), so it cannot run forever.
 public struct VoiceCaptureSchedule: Sendable {
     /// What the reading sheet suggests when a sentence takes long.
     public enum Hint: Sendable, Equatable {
@@ -37,9 +38,15 @@ public struct VoiceCaptureSchedule: Sendable {
     private var frameEnergy: Float = 0
     private var frameFill = 0
 
-    /// Silence after speech that ends a reading step.
+    /// Silence that ends a reading step once ``readShare`` of the sentence was heard.
     public static let pauseSeconds = 1.2
-    /// Speech a reading step needs before a pause can end it: this share of its estimate, and never under
+    /// Speech that counts as the sentence read: this share of its estimated speech time
+    /// (``VoiceScriptStep/speechSeconds``). Half a sentence and a breath at a comma is well below it.
+    public static let readShare = 0.7
+    /// Silence that ends a reading step heard only in part (a fast reader, or words skipped): far longer than a
+    /// pause inside a sentence.
+    public static let longPauseSeconds = 3.0
+    /// Speech a reading step needs before even a long silence can end it: this share of its estimate, and never under
     /// ``minimumSpeechSeconds``, so a cough or the tail of the last sentence does not count as reading it.
     public static let speechShare = 0.2
     public static let minimumSpeechSeconds = 0.6
@@ -63,10 +70,11 @@ public struct VoiceCaptureSchedule: Sendable {
         let done = script.steps.prefix(stepIndex).reduce(0) { $0 + $1.seconds } + min(stepElapsed, script.steps[stepIndex].seconds)
         return min(1, done / max(1, script.plannedSeconds))
     }
-    /// The current step up to its planned length.
-    public var stepProgress: Double {
-        guard let step = currentStep else { return 1 }
-        return min(1, stepElapsed / max(0.1, step.seconds))
+    /// Speech heard in the current reading step against the speech that counts as reading it (``readShare``): 0
+    /// until the reader speaks, whatever the time, and 0 in a quiet step or before the step is shown.
+    public var speechProgress: Double {
+        guard let step = currentStep, step.prompt != nil, stepShown else { return 0 }
+        return min(1, activity.speechSeconds / readSpeech(step))
     }
     /// Whole seconds left in a quiet step, as the countdown shows them.
     public var quietRemaining: Int {
@@ -116,14 +124,16 @@ public struct VoiceCaptureSchedule: Sendable {
     }
 
     private func requiredSpeech(_ step: VoiceScriptStep) -> Double { max(Self.minimumSpeechSeconds, step.seconds * Self.speechShare) }
+    private func readSpeech(_ step: VoiceScriptStep) -> Double { max(requiredSpeech(step), step.speechSeconds * Self.readShare) }
 
     private mutating func endStepIfDue() {
         guard stepShown, let step = currentStep else { return }
         let elapsed = stepElapsed
         let start = Double(stepStart) / sampleRate * 1000, end = Double(sampleCount) / sampleRate * 1000
         if let prompt = step.prompt {
-            let heard = activity.speechSeconds >= requiredSpeech(step)
-            let finishedSpeaking = heard && activity.silenceSeconds >= Self.pauseSeconds && elapsed >= step.seconds / 2
+            let speech = activity.speechSeconds, silence = activity.silenceSeconds
+            let pause = speech >= readSpeech(step) ? Self.pauseSeconds : speech >= requiredSpeech(step) ? Self.longPauseSeconds : .infinity
+            let finishedSpeaking = silence >= pause && elapsed >= step.seconds / 2
             guard advanceRequested || finishedSpeaking else { return }
             // A sentence skipped without reading it is not labelled as read.
             if activity.speechSeconds >= Self.minimumSpeechSeconds {

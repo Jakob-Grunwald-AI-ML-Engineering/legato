@@ -104,6 +104,21 @@ public struct VoiceProfileSet: Codable, Sendable, Equatable {
             .max()
     }
 
+    /// Below this best cosine to the saved profiles, a new setting recording asks whether someone else was reading.
+    /// An estimate, set low on purpose: the check only asks and never rejects, and the user's own voice on another
+    /// microphone has scored 0.22–0.29 against a profile from a different one, so a stricter value would ask real users.
+    /// It catches only a clearly different voice: between twelve macOS `say` voices reading the setup sentences, the
+    /// median score was 0.39 and only 17% of pairs fell below 0.2 (the same voice reading other text: 0.96–0.99).
+    /// Calibrate it once kept recordings of real users on several microphones exist.
+    public static let differentVoiceScore: Float = 0.2
+
+    /// Whether a new recording's `embedding` sounds like someone other than the saved voice: its best match among
+    /// the comparable profiles is below ``differentVoiceScore``. False when nothing can be compared (the first setup).
+    public func soundsDifferent(_ embedding: [Float], revision: String) -> Bool {
+        guard let best = Self.bestScore(embedding, among: matchable(revision: revision, dimension: embedding.count)) else { return false }
+        return best < Self.differentVoiceScore
+    }
+
     /// A `profile.json` from before profile sets: its one embedding becomes the Alone setting on an unknown route.
     public static func migrating(legacy data: Data, date: Date) -> VoiceProfileSet? {
         struct Legacy: Decodable { let revision: String; let embedding: [Float] }

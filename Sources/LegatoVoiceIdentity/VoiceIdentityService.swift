@@ -125,12 +125,25 @@ public actor VoiceIdentityService {
     public func enroll(reading segments: [[Float]], situation: VoiceSituation, route: VoiceInputRoute,
                        keeping recording: (samples: [Float], sidecar: VoiceRecordingSidecar)? = nil,
                        date: Date = Date()) throws -> VoiceProfile {
+        try save(embedding: readingEmbedding(segments), situation: situation, route: route, keeping: recording, date: date)
+    }
+    /// The voice of one recording's reading parts, not saved yet. Throws ``VoiceIdentityError/invalidEnrollment`` for
+    /// too little speech.
+    public func readingEmbedding(_ segments: [[Float]]) throws -> [Float] {
         let total = segments.reduce(0) { $0 + $1.count }
         let energy = segments.reduce(Float(0)) { sum, segment in segment.reduce(sum) { $0 + $1 * $1 } } / Float(max(1, total))
         guard total >= 8 * 16000, segments.allSatisfy({ $0.allSatisfy(\.isFinite) }), energy > 0.00001 else { throw VoiceIdentityError.invalidEnrollment }
         try Task.checkCancellation()
         try loadModels()
         let embedding = try profileEmbedding(segments)
+        try Task.checkCancellation()
+        return embedding
+    }
+    /// Saves a ``readingEmbedding(_:)`` as the profile of `situation` on `route`, as ``enroll(reading:situation:route:keeping:date:)`` does.
+    @discardableResult
+    public func save(embedding: [Float], situation: VoiceSituation, route: VoiceInputRoute,
+                     keeping recording: (samples: [Float], sidecar: VoiceRecordingSidecar)? = nil,
+                     date: Date = Date()) throws -> VoiceProfile {
         try Task.checkCancellation()
         let profile = VoiceProfile(situationID: situation.id, situationName: situation.name, route: route, embedding: embedding,
                                    date: date, revision: Self.modelRevision, recordingID: recording?.sidecar.id)

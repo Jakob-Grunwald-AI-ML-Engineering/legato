@@ -79,6 +79,10 @@ public enum VoiceSetupCopy {
         firstSetup ? "Your voice is set up and Reduce background voices is on. Record the places where you often dictate to help it further."
             : "Saved \(name) with \(route)."
     }
+    /// Before saving a setting whose voice is unlike the saved one.
+    public static let differentVoice = "This sounds different from your other recordings. If someone else was reading, record again."
+    public static let recordAgain = "Record again"
+    public static let keepIt = "Keep it"
     public static let tryAgain = "Try again"
     public static let done = "Done"
 
@@ -189,12 +193,9 @@ public struct VoiceRecordingGuideView: View {
             Spacer(minLength: 0)
             Text(VoiceSetupCopy.readAloud).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             prompt(guide)
-            VoiceStepBar(meter: controller.meter).frame(maxWidth: 220)
+            VoiceSpeechBar(meter: controller.meter).frame(maxWidth: 220)
             Button(VoiceSetupCopy.nextSentence) { controller.advance() }.accessibilityIdentifier("voiceGuide.next")
-            if let hint = guide.hint {
-                Text(VoiceSetupCopy.hint(hint)).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("voiceGuide.hint")
-            }
+            hint(guide.hint)
             Spacer(minLength: 0)
             footer(guide)
         case .quiet:
@@ -204,6 +205,17 @@ public struct VoiceRecordingGuideView: View {
             Text(VoiceSetupCopy.stayQuietDetail).font(.callout).foregroundStyle(.secondary)
             Spacer(minLength: 0)
             footer(guide)
+        case .confirmVoice:
+            Spacer(minLength: 0)
+            Image(systemName: "person.wave.2").font(.system(size: 40)).foregroundStyle(.orange).accessibilityHidden(true)
+            Text(guide.status).font(.callout).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("voiceGuide.result")
+            Spacer(minLength: 0)
+            HStack(spacing: 12) {
+                Button(VoiceSetupCopy.keepIt) { controller.keepDifferentVoice() }.accessibilityIdentifier("voiceGuide.keep")
+                Button(VoiceSetupCopy.recordAgain) { controller.recordAgain() }
+                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).accessibilityIdentifier("voiceGuide.recordAgain")
+            }
         case .saved, .failed:
             Spacer(minLength: 0)
             Image(systemName: guide.phase == .saved ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
@@ -227,6 +239,20 @@ public struct VoiceRecordingGuideView: View {
             .fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("voiceGuide.prompt")
     }
 
+    /// The hint under Next sentence. Its space is always taken (by the longest hint, invisible), so the sentence and
+    /// the button stay put when a hint appears.
+    private func hint(_ hint: VoiceCaptureSchedule.Hint?) -> some View {
+        ZStack {
+            hintText(.readAloud).hidden().accessibilityHidden(true)
+            hintText(.finishWithPause).hidden().accessibilityHidden(true)
+            if let hint { hintText(hint).accessibilityIdentifier("voiceGuide.hint") }
+        }
+    }
+    private func hintText(_ hint: VoiceCaptureSchedule.Hint) -> some View {
+        Text(VoiceSetupCopy.hint(hint)).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
     private func footer(_ guide: VoiceGuide) -> some View {
         VStack(spacing: 8) {
             Text(VoiceSetupCopy.sentence(guide.sentence, of: guide.sentenceCount)).font(.caption).foregroundStyle(.secondary)
@@ -236,9 +262,10 @@ public struct VoiceRecordingGuideView: View {
     }
 }
 
-private struct VoiceStepBar: View {
+/// How much of the sentence has been heard: empty until the reader speaks, full once it counts as read.
+private struct VoiceSpeechBar: View {
     let meter: VoiceCaptureMeter
-    var body: some View { ProgressView(value: meter.stepProgress) }
+    var body: some View { ProgressView(value: meter.speechProgress).accessibilityIdentifier("voiceGuide.speech") }
 }
 
 private struct VoiceOverallBar: View {

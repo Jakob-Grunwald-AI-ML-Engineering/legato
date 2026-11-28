@@ -45,6 +45,25 @@ import Testing
         #expect(VoiceProfileSet.bestScore(vector, among: [[1, 0]]) == nil)
     }
 
+    @Test func aRecordingUnlikeEverySavedProfileSoundsDifferent() {
+        let me = unit([1, 0.1, 0]), meOnAirPods = unit([0.25, 1, 0])
+        let set = VoiceProfileSet(profiles: [profile("alone", .unknown, me), profile("office", .unknown, meOnAirPods)])
+        func score(_ vector: [Float]) -> Float { VoiceProfileSet.bestScore(vector, among: [me, meOnAirPods])! }
+        // Somebody else: unlike both profiles.
+        let other = unit([-0.1, 0.05, 1])
+        #expect(score(other) < VoiceProfileSet.differentVoiceScore && set.soundsDifferent(other, revision: "r"))
+        // The user on another microphone scores low against one profile (0.22–0.29 measured), but not below the
+        // threshold, and only the best match counts.
+        let crossMic = unit([0.26, -0.3, 0.92])
+        #expect(score(crossMic) >= 0.22 && score(crossMic) < 0.3)
+        #expect(!set.soundsDifferent(crossMic, revision: "r"))
+        #expect(!set.soundsDifferent(unit([0.9, 0.2, 0.3]), revision: "r"))
+        // Nothing to compare against (the first setup, or profiles of another model revision): never asks.
+        #expect(!VoiceProfileSet().soundsDifferent(other, revision: "r"))
+        #expect(!set.soundsDifferent(other, revision: "newer"))
+        #expect(VoiceProfileSet.differentVoiceScore <= 0.22)
+    }
+
     @Test func matchableSkipsOtherRevisionsSizesAndNonFiniteVectors() {
         let good = [Float](repeating: 0.1, count: 192)
         var bad = good; bad[3] = .nan
@@ -148,6 +167,21 @@ import Testing
                 cursor = script.nextCursor
             }
             #expect(seen.count == read && read >= pool - 6)
+        }
+    }
+
+    @Test func aRetryReadsAsManySentencesAsTheAttemptBefore() {
+        for language in ["en", "de"] {
+            let pool = VoiceReadingPrompts.rotation(language: language).count
+            // Wherever the rotation stands, a retry of a four- or five-sentence recording reads four or five, with
+            // its two pauses, and still moves the rotation on.
+            for cursor in 0..<pool {
+                let first = VoiceReadingScript.setting(language: language, cursor: cursor)
+                let retry = VoiceReadingScript.setting(language: language, cursor: first.nextCursor, sentences: first.sentenceCount)
+                #expect(retry.sentenceCount == first.sentenceCount)
+                #expect(retry.steps.filter { $0.prompt == nil }.count == 2 && retry.steps.last?.prompt != nil)
+                #expect(retry.nextCursor == (first.nextCursor + first.sentenceCount) % pool)
+            }
         }
     }
 

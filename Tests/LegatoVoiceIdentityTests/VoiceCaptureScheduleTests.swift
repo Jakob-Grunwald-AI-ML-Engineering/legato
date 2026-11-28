@@ -43,13 +43,51 @@ import Testing
         #expect(schedule.intervals[0] == .init(kind: .reading, startMs: 0, endMs: end, prompt: "One."))
     }
 
-    @Test func anEarlyPauseDoesNotEndASentenceBeforeHalfItsEstimate() {
+    @Test func aSentenceHeardOnlyInPartNeedsALongSilence() {
         var schedule = VoiceCaptureSchedule(script: script([.init(kind: .reading("Long."), seconds: 10), .init(kind: .quiet, seconds: 10)]))
-        schedule.consume(speech(2.5)); schedule.consume(silence(1.5))
+        // 2.5 s of an estimated 8.5 s of speech: far from read, so a pause of a second or two does not end it.
+        schedule.consume(speech(2.5)); schedule.consume(silence(2.9))
         #expect(schedule.stepIndex == 0)
-        schedule.consume(silence(2))
-        // Half the estimate (5 s) has passed and the reader is silent: on to the pause.
-        #expect(schedule.stepIndex == 1 && abs(schedule.intervals[0].endMs - 5_000) <= 40)
+        // Three seconds of silence do (the reader read fast or left words out): on to the pause.
+        schedule.consume(silence(0.5))
+        #expect(schedule.stepIndex == 1 && abs(schedule.intervals[0].endMs - 5_500) <= 40)
+    }
+
+    /// The tester read half a sentence, paused at its comma for about 1.2 s and read on: the sentence must hold, and
+    /// both halves are labelled with it.
+    @Test(arguments: [1.2, 1.6, 2.5])
+    func aPauseMidSentenceDoesNotSkipAhead(_ pause: Double) {
+        let first = VoiceReadingPrompts.english[2], second = VoiceReadingPrompts.english[3]
+        let estimate = VoiceReadingScript.readingSeconds(for: first)
+        var schedule = VoiceCaptureSchedule(script: script([.init(kind: .reading(first), seconds: estimate),
+                                                           .init(kind: .reading(second), seconds: estimate)]))
+        // The first half: about 40% of the sentence's estimated speech.
+        let half = (estimate - VoiceReadingScript.startSeconds) * 0.4
+        schedule.consume(silence(0.8)); schedule.consume(speech(half))
+        #expect(schedule.speechProgress > 0.5 && schedule.speechProgress < 0.6)
+        schedule.consume(silence(pause))
+        #expect(schedule.stepIndex == 0 && schedule.stepElapsed >= estimate / 2)
+        schedule.consume(speech(half)); schedule.consume(silence(0.4))
+        #expect(schedule.stepIndex == 0 && schedule.speechProgress == 1)
+        schedule.consume(silence(0.9))
+        #expect(schedule.stepIndex == 1)
+        let read = 0.8 + half + pause + half + VoiceCaptureSchedule.pauseSeconds
+        #expect(schedule.intervals.map(\.prompt) == [first] && schedule.intervals[0].startMs == 0)
+        #expect(abs(schedule.intervals[0].endMs - read * 1000) <= 40)
+    }
+
+    @Test func theSentenceBarShowsSpeechHeardNotTimePassed() {
+        var schedule = VoiceCaptureSchedule(script: script([.init(kind: .reading("A."), seconds: 9.5), .init(kind: .quiet, seconds: 10)]))
+        // Silence for longer than the estimate: nothing heard, so the bar stays empty.
+        schedule.consume(silence(12))
+        #expect(schedule.speechProgress == 0)
+        // 2.8 s of the 5.6 s that count as reading it (70% of 8 s): half full.
+        schedule.consume(speech(2.8))
+        #expect(abs(schedule.speechProgress - 0.5) < 0.01)
+        schedule.consume(speech(3))
+        #expect(schedule.speechProgress == 1)
+        schedule.consume(silence(1.3))
+        #expect(schedule.stepIndex == 1 && schedule.speechProgress == 0)
     }
 
     @Test func aLateStartNeverMovesOnBeforeTheReaderSpeaksAndShowsAHint() {
@@ -95,7 +133,7 @@ import Testing
     @Test func backgroundSpeechInAPauseStaysQuietAndTheNextSentenceStartsWhenShown() {
         var schedule = VoiceCaptureSchedule(script: script([.init(kind: .reading("A."), seconds: 6), .init(kind: .quiet, seconds: 10),
                                                            .init(kind: .reading("B."), seconds: 6)]))
-        schedule.consume(speech(3)); schedule.consume(silence(1.3))
+        schedule.consume(speech(3.5)); schedule.consume(silence(1.3))
         #expect(schedule.stepIndex == 1 && !schedule.stepShown)
         schedule.consume(silence(0.1)); show(&schedule)
         let quietStart = Double(schedule.sampleCount) / rate * 1000
@@ -108,7 +146,7 @@ import Testing
         #expect(schedule.stepIndex == 2 && schedule.intervals.count == 2)
         show(&schedule)
         let readingStart = Double(schedule.sampleCount) / rate * 1000
-        schedule.consume(silence(0.4)); schedule.consume(speech(3)); schedule.consume(silence(1.3))
+        schedule.consume(silence(0.4)); schedule.consume(speech(3.5)); schedule.consume(silence(1.3))
         #expect(schedule.isFinished && schedule.intervals[2].startMs == readingStart && schedule.intervals[2].prompt == "B.")
     }
 
@@ -156,8 +194,9 @@ import Testing
     }
 
     /// A simulated reader in front of the sheet: it sees a step 0.1 s after the step begins, starts reading after its
-    /// reaction time (one starts very late), reads with short breaths (one reads very slowly, the last one at
-    /// length), and somebody talks in the room during each pause. Every word lands in the right label.
+    /// reaction time (one starts very late), reads with short breaths (one reads very slowly, one stops at a comma for
+    /// 1.5 s, the last one reads at length), and somebody talks in the room during each pause. Every word lands in the
+    /// right label.
     @Test(arguments: [VoiceReadingScript.setting(language: "en", cursor: 0), VoiceReadingScript.firstSetup(language: "de")])
     func labelsMatchWhatWasSpoken(_ script: VoiceReadingScript) {
         var schedule = VoiceCaptureSchedule(script: script)
@@ -169,6 +208,14 @@ import Testing
             if sentence == 2 { return (1, estimate * 2.5) }                      // reads slowly
             if sentence == sentences.count - 1 { return (0.8, estimate * 3) }    // a long last sentence
             return (0.6 + Double(sentence % 3) * 0.4, estimate * 0.8)
+        }
+        /// Whether the reader is speaking `reading` seconds after starting a sentence they read for `seconds`;
+        /// sentence 3 stops at a comma halfway for 1.5 s.
+        func talks(_ sentence: Int, at reading: Double, for seconds: Double) -> Bool {
+            let comma = seconds / 2, pause = sentence == 3 ? 1.5 : 0
+            if reading >= comma && reading < comma + pause { return false }
+            let spoken = reading >= comma + pause ? reading - pause : reading
+            return spoken >= 0 && spoken < seconds && spoken.truncatingRemainder(dividingBy: 2) < 1.7
         }
         var shownStep = -1, shownAt = 0, lag = 0
         var spoken: [(ms: Double, step: Int)] = []
@@ -186,8 +233,9 @@ import Testing
             if schedule.stepShown {
                 let since = Double(schedule.sampleCount - shownAt) / rate
                 if script.steps[shownStep].prompt != nil {
-                    let (reaction, seconds) = reader(script.steps.prefix(shownStep).filter { $0.prompt != nil }.count)
-                    talking = since >= reaction && since < reaction + seconds && (since - reaction).truncatingRemainder(dividingBy: 2) < 1.7
+                    let sentence = script.steps.prefix(shownStep).filter { $0.prompt != nil }.count
+                    let (reaction, seconds) = reader(sentence)
+                    talking = talks(sentence, at: since - reaction, for: seconds)
                 } else {
                     talking = since >= 2 && since < 8
                 }
