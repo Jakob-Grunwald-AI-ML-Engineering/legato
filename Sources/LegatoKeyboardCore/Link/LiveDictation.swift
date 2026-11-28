@@ -140,6 +140,15 @@ extension LiveDictationSnapshot {
     public func continues(_ seen: LiveDictationSnapshot) -> Bool {
         runID == seen.runID && version > seen.version && isCapturing
     }
+
+    /// A run the keyboard on screen left alone when it appeared (`seen`) that it follows after all: one that `continues`, or a later
+    /// version the app holds for the keyboard (`isHeldForKeyboard`). On a direct switch between apps the next app's keyboard appears
+    /// before the last one hides, while the run is still being spoken into; the app holds it only once no keyboard session is open,
+    /// which is that hand-over, and the keyboard on screen shows it as one appearing then would. A run that ended, or that was
+    /// stopped and is ending, stays left alone.
+    public func isFollowed(after seen: LiveDictationSnapshot) -> Bool {
+        continues(seen) || (runID == seen.runID && version > seen.version && isHeldForKeyboard)
+    }
 }
 
 /// keyboard -> app (`link.dictation.live.notes`, internal builds): why the keyboard does not show or follow a run, and when its

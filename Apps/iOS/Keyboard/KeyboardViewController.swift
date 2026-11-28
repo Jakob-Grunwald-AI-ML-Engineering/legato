@@ -106,7 +106,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        KeyboardForeground.keyboardWillAppear()
+        KeyboardForeground.keyboardWillAppear(self)
         buildKeyboard()
         controller?.showsGlobe = needsInputModeSwitchKey
         controller?.appeared()
@@ -123,6 +123,7 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillDisappear(_ animated: Bool) {
         controller?.recordPreviewLifecycle(.willDisappear)
         handoffVisible = false
+        KeyboardForeground.keyboardWillDisappear(self)
         super.viewWillDisappear(animated)
     }
 

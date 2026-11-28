@@ -1456,10 +1456,11 @@ final class KeyboardController {
             }
             return
         }
-        if snapshot.runID == ignoredLiveRunID, let seen = ignoredAtAppearance, snapshot.continues(seen) {
-            // Still spoken after the appearance: the take went on across it, and the person is dictating into it now.
+        if snapshot.runID == ignoredLiveRunID, let seen = ignoredAtAppearance, snapshot.isFollowed(after: seen) {
+            // Still spoken after the appearance: the take went on across it, and the person is dictating into it now. Or held
+            // since: the keyboard it was spoken under hid after this one appeared (a direct app switch), and the app holds it.
             ignoredLiveRunID = nil; ignoredAtAppearance = nil
-            noteLive(snapshot, "adopted", detail: "continued")
+            noteLive(snapshot, "adopted", detail: snapshot.isHeldForKeyboard ? "held" : "continued")
         }
         guard snapshot.runID != ignoredLiveRunID else {
             noteLive(snapshot, "ignored", detail: ignoredAtAppearance?.runID == snapshot.runID ? "appear" : "forgot")

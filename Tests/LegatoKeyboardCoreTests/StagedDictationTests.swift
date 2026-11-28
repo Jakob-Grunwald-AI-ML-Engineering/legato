@@ -405,6 +405,23 @@ private func prepared(_ take: StagedDictation, _ text: String, proxyBefore: Stri
         #expect(paused.isCapturing == false && snapshot(1, []).isCapturing)
     }
 
+    /// A direct app switch: the next app's keyboard appears while the run is still spoken into, and the app holds it only once the
+    /// last keyboard hid. The keyboard on screen follows it from then; a run that ended or is ending stays left alone.
+    @Test func aRunHeldAfterTheAppearanceIsFollowedAndAnEndedOneIsNot() {
+        let seen = snapshot(4, [unit(0, "Hello.", ready: false)], head: "and")
+        var held = snapshot(5, [unit(0, "Hello.", ready: false)], head: "and"); held.paused = true
+        #expect(held.isFollowed(after: seen), "held for the keyboard since the appearance")
+        #expect(snapshot(5, [unit(0, "Hello.", ready: false)], head: "and more").isFollowed(after: seen), "still spoken")
+        #expect(!held.isFollowed(after: held), "the version seen at the appearance itself")
+        var other = held; other.runID = "other"
+        #expect(!other.isFollowed(after: seen), "another run")
+        var ended = held; ended.complete = true
+        var stopped = snapshot(5, [unit(0, "Hello.")]); stopped.stopped = true
+        var typed = held; typed.staged = nil
+        #expect(!ended.isFollowed(after: seen) && !stopped.isFollowed(after: seen) && !typed.isFollowed(after: seen),
+                "an ended, ending or typed run is not held")
+    }
+
     /// #343: a paused staged run is the app's, held for whichever keyboard appears next (a fresh controller or process too), and a
     /// hidden keyboard owes nothing for it. Nothing else the app publishes is held.
     @Test func onlyAPausedStagedRunIsHeldForTheKeyboard() {

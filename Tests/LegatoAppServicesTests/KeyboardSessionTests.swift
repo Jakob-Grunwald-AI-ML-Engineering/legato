@@ -574,6 +574,25 @@ private final class HeldCleaner: SentenceCleaning {
         #expect(published.last == .some(nil))
     }
 
+    /// A direct app switch: the next app's keyboard is already on screen when the last one hides, so its presence opens a session
+    /// again as soon as the hide closed one. The take is held, not ended, its bound is not armed and the pipeline is not reset under
+    /// the open session; the next line joins the take.
+    @Test(arguments: [true, false]) func aKeyboardThatReopensAsTheLastOneClosesKeepsTheTake(manual: Bool) async throws {
+        let clock = VirtualSleep()
+        let (pipeline, keyboard) = try await session(HeldCleaner(), manual: manual, clock: clock)
+        try await keyboard.debugDictationLine("alpha bravo charlie")
+        let runID = try #require(pipeline.liveRun?.runID)
+        keyboard.update(visible: false, surface: .dictation)
+        try await until { !keyboard.isOpen }
+        keyboard.update(visible: true, surface: .dictation); await keyboard.settle()
+        try await until { pipeline.isPaused }
+        #expect(keyboard.isOpen && clock.sleepers == 0, "No bound under an open session")
+        #expect(pipeline.liveRun?.runID == runID && pipeline.liveRun?.snapshot.text == "alpha bravo charlie")
+        try await keyboard.debugDictationLine("delta echo foxtrot")
+        #expect(pipeline.liveRun?.runID == runID && pipeline.liveRun?.snapshot.text == "alpha bravo charlie delta echo foxtrot")
+        #expect(!logged.has("live2.run.end") && !logged.has("live2.run.drop"))
+    }
+
     @Test func aKeyboardBackBeforeTheLimitKeepsTheTake() async throws {
         let clock = VirtualSleep()
         let (pipeline, keyboard) = try await session(HeldCleaner(), manual: true, clock: clock)
