@@ -89,7 +89,7 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
     public enum State: String, Sendable, Equatable, Codable {
         /// Capturing now.
         case recording
-        /// Stopped; the after-stop chain (m4a, then the summary) has not finished.
+        /// Stopped; the after-stop chain (m4a, the speakers, then the summary) has not finished.
         case processing
         case finished
         /// The app died while recording; found by ``MeetingRecovery``.
@@ -100,6 +100,9 @@ public struct Meeting: Sendable, Equatable, Codable, Identifiable {
     public enum Step: String, Sendable, Equatable, Codable, CaseIterable {
         /// The CAF recordings converted to m4a.
         case audio
+        /// The speakers were checked against the whole recording (split, merged, the user found). The meeting is
+        /// finished without it, with the live engine's speakers.
+        case speakers
         /// A summary was written, automatically after the meeting or when the user asked.
         /// The meeting is finished without it.
         case summary

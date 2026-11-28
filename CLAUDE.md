@@ -11,6 +11,10 @@ Open-source on-device dictation app for iOS and macOS (Swift).
 - Deploy: `git fetch origin && git push origin origin/main:live`. Never force-push `live`. Every push to `live` ships (`.github/workflows/release.yml`).
 - CI entry points are `scripts/ci/test.sh` and `scripts/ci/release.sh check|mac-build|ship`. Wire builds there, not in YAML.
 
+## Meetings
+
+- Measure speaker changes on real saved meetings with `legato meetings speakers --replay <id>` (read-only, counts only; [how](Sources/LegatoMeetingsCLI/speakers-replay.md)).
+
 ## Build output
 
 - Session start and wrap-up: `scripts/dev/prune-build-caches.sh --delete` removes all Legato build output except the one fixed DerivedData per target (`derived/{gate,mac,ios-sim,ios-device}`) and `SourcePackages`, skipping anything in use. `--report` shows disk use per directory (`scripts/dev/build-caches.md`).

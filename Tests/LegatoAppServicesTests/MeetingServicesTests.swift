@@ -4,6 +4,7 @@ import Testing
 import LegatoAudio
 import LegatoClaude
 import LegatoCore
+import LegatoMeetingSpeakers
 import LegatoMeetings
 import LegatoSoniox
 @testable import LegatoAppServices
@@ -62,7 +63,10 @@ final class TitlingClaude: LLMBackend {
     let claude: any LLMBackend
     let services: MeetingServices
 
-    init(sonioxKey: String = "sk-soniox", claude: any LLMBackend = ScriptedClaude(), autoSummary: Bool = true) {
+    init(
+        sonioxKey: String = "sk-soniox", claude: any LLMBackend = ScriptedClaude(), autoSummary: Bool = true,
+        speakerCleanup: (any MeetingSpeakerCleaning)? = nil
+    ) {
         store = MeetingStore(root: root)
         let sockets = MeetingSockets()
         self.sockets = sockets
@@ -72,7 +76,8 @@ final class TitlingClaude: LLMBackend {
         settings.summarizeAutomatically = autoSummary
         services = MeetingServices(
             store: store, settings: settings, sonioxKey: { sonioxKey }, claudeKeys: InMemoryAPIKeyStore(apiKey: "sk-ant"),
-            claudeBackend: claude, personalPrompt: { "" }, makeSocket: { sockets.make() }, timing: .tests)
+            claudeBackend: claude, personalPrompt: { "" }, makeSocket: { sockets.make() }, timing: .tests,
+            speakerCleanup: speakerCleanup)
     }
 
     var scripted: ScriptedClaude { claude as! ScriptedClaude }
@@ -147,6 +152,34 @@ final class TitlingClaude: LLMBackend {
         #expect(saved.state == .processing, "A failed audio step must be retried at launch, never reported finished")
         #expect(!saved.completedSteps.contains(.audio))
         #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("mic.caf").path))
+    }
+
+    @Test func theSpeakerCheckRunsBeforeTheSummaryAndIsSaved() async throws {
+        // One voice speaks both segments and is the user: the live engine's two labels were one person.
+        var voices = SpeakerTimeline(clusters: 1, duration: 7)
+        for frame in SpeakerTimeline.frameIndex(1)..<SpeakerTimeline.frameIndex(6) { voices.set(1, cluster: 0, frame: frame) }
+        let rig = ServicesRig(speakerCleanup: FixedSpeakerCleanup(result: .success(SpeakerAnalysis(timeline: voices, user: 0))))
+        defer { rig.cleanup() }
+        let meeting = try await rig.saved(state: .processing)
+        await rig.services.process(meeting.id)
+        let saved = try #require(try await rig.store.meeting(id: meeting.id))
+        #expect(saved.state == .finished && saved.completedSteps.contains(.speakers))
+        #expect(saved.speakers == ["P1": SpeakerInfo(name: "Me", colorIndex: 0)] && saved.mergedSpeakers == ["P2": "P1"])
+        #expect(try await rig.store.segments(for: meeting.id).map(\.speaker) == ["P1", "P1"])
+        #expect(rig.scripted.requests.first?.contains("Me") == true, "the summary sees the checked speakers")
+    }
+
+    @Test func aFailedSpeakerCheckKeepsTheLiveSpeakersAndFinishesTheMeeting() async throws {
+        let rig = ServicesRig(speakerCleanup: FixedSpeakerCleanup(result: .failure(.noRecording)))
+        defer { rig.cleanup() }
+        let meeting = try await rig.saved(state: .processing)
+        let before = try await rig.store.segments(for: meeting.id)
+        await rig.services.process(meeting.id)
+        let saved = try #require(try await rig.store.meeting(id: meeting.id))
+        #expect(saved.state == .finished && !saved.completedSteps.contains(.speakers))
+        #expect(saved.speakers == meeting.speakers)
+        #expect(try await rig.store.segments(for: meeting.id) == before)
+        #expect(try await rig.services.summaryText(meetingID: meeting.id) != nil)
     }
 
     @Test func aMeetingRecordsWithSpeakersStopsAndIsSummarized() async throws {
@@ -389,4 +422,10 @@ final class TitlingClaude: LLMBackend {
         let kept = try #require(try await rig.store.meeting(id: typed.id))
         #expect(kept.title == "Weekly" && kept.attendees.isEmpty)
     }
+}
+
+/// A speaker check that answers the same for every meeting.
+private struct FixedSpeakerCleanup: MeetingSpeakerCleaning {
+    let result: Result<SpeakerAnalysis, MeetingSpeakerCleanupError>
+    func analyze(meeting: Meeting, segments: [MeetingSegment], folder: URL) async throws -> SpeakerAnalysis { try result.get() }
 }

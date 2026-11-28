@@ -86,7 +86,7 @@ final class IOSMeetingController {
     private static func production(root: URL, vocabularyURL: URL?) -> MeetingServices {
         MeetingServices(store: MeetingStore(root: root), settings: MeetingSettings(defaults: AppGroup.defaults),
             sonioxKey: { (try? KeychainKeyStore(service: "de.gruenwald.legato.soniox").apiKey()) ?? "" },
-            claudeKeys: KeychainKeyStore(), vocabularyURL: vocabularyURL)
+            claudeKeys: KeychainKeyStore(), vocabularyURL: vocabularyURL, speakerCleanup: MeetingServices.onDeviceSpeakerCleanup)
     }
     var isActive: Bool { phase != .idle || services.isRecording }
     var shown: [Meeting] { meetings.filter { searchHits?.contains($0.id) ?? true } }

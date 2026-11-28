@@ -106,7 +106,8 @@ final class MeetingController {
         #endif
         services = MeetingServices(
             store: MeetingStore(root: root), settings: MeetingSettings(defaults: defaults),
-            sonioxKey: sonioxKey, claudeKeys: claudeKeys, vocabularyURL: vocabularyURL, makeSocket: makeSocket)
+            sonioxKey: sonioxKey, claudeKeys: claudeKeys, vocabularyURL: vocabularyURL, makeSocket: makeSocket,
+            speakerCleanup: MeetingServices.onDeviceSpeakerCleanup)
     }
 
     var isRecording: Bool { phase != .idle || services.isRecording }

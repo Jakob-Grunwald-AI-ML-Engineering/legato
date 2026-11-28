@@ -79,8 +79,19 @@ public struct SpeakerDirectory: Sendable, Equatable {
         return id
     }
 
+    /// Splits someone off `person`: speech found to be another voice goes to a new person (the next id, "Speaker N",
+    /// a free colour), whose id is returned. `person` keeps its id, name and colour; the caller moves the speech.
+    @discardableResult
+    public mutating func split(from person: PersonID?) -> PersonID { add() }
+
     /// What the app shows for `id`; nil for a person this meeting does not have.
     public func displayName(of id: PersonID) -> String? { speakers[id]?.name }
+
+    /// The user gave `id` a name: it is not "Speaker N" any more.
+    public func isRenamed(_ id: PersonID) -> Bool {
+        guard let name = speakers[id]?.name else { return false }
+        return name != Self.defaultName(Self.number(id) ?? 0)
+    }
 
     /// Gives `id` a new name. A blank name goes back to "Speaker N". If another person already has that name
     /// the two are merged into that other person, and the merge is returned.
