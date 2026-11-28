@@ -68,16 +68,29 @@ The `speakers` step of the after-stop chain (`LegatoMeetingSpeakers`) runs betwe
 
 - **Segmentation:** pyannote segmentation-3.0 runs on overlapping 10 s windows (5 s hop). Its weights are under the MIT licence, © 2023 CNRS (upstream revision `e66f3d3b`). Legato uses Fluid Inference's Core ML conversion `pyannote_segmentation.mlmodelc` from [FluidInference/speaker-diarization-coreml](https://huggingface.co/FluidInference/speaker-diarization-coreml), pinned at revision `7eab74f3463c736418d0eb10296261ae581146c9`. That repository mixes licences. Its NOTICE.md lists this legacy file under its upstream MIT licence and puts only the Community-1 files (Segmentation, FBank, Embedding, PLDA) under CC-BY-4.0, which Legato does not use. The files are checked against SHA-256 hashes and cached under `Application Support/Legato/Models/pyannote-segmentation-3.0`.
 - **Voices:** the app's CAM++ embeds 3 s of each local speaker's solo speech. Agglomerative clustering joins the embeddings (average linkage, cosine 0.5, an estimate). Small voice fragments are folded into larger voices. Embeddings exist in memory only while the step runs.
-- **Words:** each word goes to the voice that speaks most during it. When the voices are close, Soniox's label decides. A segment is split where its speaker changes, and its first part keeps the segment's id. Each person keeps the voice that holds most of their words. Duplicates are merged, and two people with different user-given names are never merged.
-- **Me:** on the Mac, the user is the one voice loud on the microphone (10 dB over the system audio). When several voices are (people in the room), the best profile match at 0.45 or more decides. On the iPhone, the profile alone decides.
+- **Words:** each word goes to the voice that speaks most during it. When the voices are close, Soniox's label decides. Each person keeps the voice that holds most of their words. Duplicates are merged, and two people with different user-given names are never merged. A voice nobody holds becomes a new person, unless its centroid is at least 0.6 similar to a held voice on the same track (an estimate): then it is a fragment of that voice.
+- **Splits:** Soniox heard one speaker in a segment, and its segment edges are more exact than the diarization's. A change of person inside a segment therefore holds only when its part has at least 3 words and lasts at least 1 s, or when the louder track switches for at least 0.3 s (a barge-in from the other side). Without tracks (the iPhone), a clean interjection of 2 or more words also holds, if the neighbouring voices stay silent through it. Shorter parts join their neighbours. The first part keeps the segment's id. All these values are estimates.
+- **Me:** on the Mac, the user is the one voice loud on the microphone (10 dB over the system audio). When the user is alone on the microphone, the tracks decide word by word. A word loud on the microphone is the user's wherever the diarization hears the user's voice at all, and a word loud on the system audio is never the user's. When several voices are loud on the microphone (people in the room), the best profile match at 0.45 or more decides. On the iPhone, the profile alone decides.
 
-Measured on this Mac with `legato meetings speakers --replay`. The word times came from the meetings' logs. "Me/Them disagreement" counts the words loud on one track whose track differs from the side most of their person's words are on.
+Measured on this Mac with `legato meetings speakers --replay` (release build for the run times). The word times came from the meetings' logs. "Me/Them disagreement" counts the words loud on one track whose track differs from the side most of their person's words are on.
 
-| Meeting | Audio | Run time | Per audio hour | People before → after | Merges / new | Split segments | Me/Them disagreement before → after |
-|---|---|---|---|---|---|---|---|
-| A | 25 min | 28 s | 68 s | 3 → 3 | 0 / 0 | 8 | 0.9% → 0.9% |
-| B | 54 min | 51 s | 57 s | 3 → 5 | 0 / 2 | 108 | 8.9% → 1.8% |
-| C | 79 min | 83 s | 63 s | 8 → 4 | 4 / 0 | 170 | 15.8% → 4.0% |
+| Meeting | Audio | Run time | Per audio hour | People before → after | Merges / new | Me/Them disagreement before → after |
+|---|---|---|---|---|---|---|
+| A | 25 min | 28 s | 68 s | 3 → 3 | 0 / 0 | 0.9% → 0.5% |
+| B | 54 min | 51 s | 57 s | 3 → 4 | 0 / 1 | 8.9% → 1.0% |
+| C | 79 min | 83 s | 63 s | 8 → 4 | 4 / 0 | 15.8% → 1.4% |
+
+The first version split words too eagerly. A tester saw the user's sentences split between Me and a remote speaker, a fifth "speaker" continuing others' sentences, and two people alternating inside one sentence. The quality lines of the replay, before → after the split, track and fragment rules:
+
+| Meeting | Changes inside a live segment (track-confirmed) | Short parts | Me recall | Me precision |
+|---|---|---|---|---|
+| A | 8 (0) → 4 (4) | 12 → 5 | 98.2% → 98.8% | 98.5% → 99.4% |
+| B | 142 (4) → 12 (6) | 165 → 9 | 82.6% → 90.1% | 96.8% → 98.7% |
+| C | 222 (15) → 25 (12) | 268 → 13 | 96.0% → 96.5% | 90.3% → 98.5% |
+
+- Recall and precision are self-labelled by the same tracks the rules use. They show consistency, not independent accuracy.
+- B's remaining recall misses are mostly quiet microphone words (about −50 to −40 dBFS) where the diarization hears no voice of the user's. They are left out on purpose.
+- In B the fifth person was a voice with 0.62 centroid similarity to Speaker 2, on the same track. It is now part of Speaker 2. The closest pair of distinct people in these meetings scored 0.59, so the 0.6 margin is thin.
 
 - About 80% of the run time is CAM++. The other ~20% is segmentation, Core ML on the CPU and Neural Engine.
 - iPhone run time is unmeasured.

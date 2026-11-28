@@ -38,6 +38,8 @@ struct MeetingDiarizer {
         var timeline: SpeakerTimeline
         /// Per voice, the stretches (meeting seconds) where it alone speaks, longest first.
         var soloSpeech: [[Range<TimeInterval>]]
+        /// Cosine similarity between the voices' centroids, `[voice][voice]`.
+        var voiceSimilarity: [[Float]] = []
         var audioSeconds: TimeInterval
         var windows = 0
         /// Local speakers embedded reliably, embedded from little speech, placed by their surroundings, left out.
@@ -111,8 +113,9 @@ struct MeetingDiarizer {
         output.windows = starts.count
         output.segmentationTime = segmentationTime
         output.embeddingTime = embeddingTime
-        let voices = cluster(&locals)
+        let (voices, centroids) = cluster(&locals)
         guard voices > 0 else { return output }
+        output.voiceSimilarity = centroids.map { a in centroids.map { SpeakerClustering.dot(a, $0) } }
 
         // Activity: in each 20 ms frame, how many window frames had the voice, over how many window frames covered it.
         let frames = max(1, Int((duration / SpeakerTimeline.frame).rounded(.up)))
@@ -214,8 +217,8 @@ struct MeetingDiarizer {
     }
 
     /// Clusters the reliable embeddings into voices, folds the small voices into the nearest large one, places the weak
-    /// embeddings, and returns the number of voices. Labels are written onto `locals`.
-    private func cluster(_ locals: inout [Local]) -> Int {
+    /// embeddings, and returns the number of voices and their centroids. Labels are written onto `locals`.
+    private func cluster(_ locals: inout [Local]) -> (Int, [[Float]]) {
         var reliable = locals.indices.filter { locals[$0].kind == .reliable }
         var overflow: [Int] = []
         if reliable.count > options.maxClustered {
@@ -224,7 +227,7 @@ struct MeetingDiarizer {
             overflow = reliable.filter { !kept.contains($0) }
             reliable = reliable.filter { kept.contains($0) }
         }
-        guard !reliable.isEmpty else { return 0 }
+        guard !reliable.isEmpty else { return (0, []) }
         let vectors = reliable.map { locals[$0].embedding! }
         var labels = SpeakerClustering.agglomerate(vectors, threshold: options.threshold)
 
@@ -277,7 +280,7 @@ struct MeetingDiarizer {
             }
         }
         for index in locals.indices { locals[index].embedding = nil }
-        return voices.count
+        return (voices.count, voices)
     }
 
     /// Consecutive frame indices as closed runs.

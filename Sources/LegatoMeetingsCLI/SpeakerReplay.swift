@@ -88,6 +88,11 @@ enum SpeakerReplay {
         lines.append("Voices → people: " + result.voicePeople.sorted { $0.key < $1.key }.map { "v\($0.key) → \($0.value)" }.joined(separator: ", "))
         lines.append("Splits: \(result.splitSegments) segments split into \(result.splitSegments + result.addedSegments) parts; "
                      + "\(result.movedWords) words moved to another person (merges aside)")
+        let changes = changesInside(segments, result.segments, analysis)
+        lines.append("Quality (self-labelled from the live segments and the tracks):")
+        lines.append("  People: \(wordsBefore.count) before, \(wordsAfter.count) after")
+        lines.append("  Changes of person inside a live segment: \(changes.flips), of them \(changes.confirmed) where the louder track switches; "
+                     + "short parts (under \(Int(SpeakerReassignment.minimumRunSeconds)) s or \(SpeakerReassignment.minimumRunWords) words): \(changes.short)")
 
         var user = "Me: " + (result.user.map { "\($0) (\(result.directory.displayName(of: $0) ?? "?"))" } ?? "not found")
         if let voice = analysis.user { user += ", voice v\(voice)" }
@@ -114,13 +119,48 @@ enum SpeakerReplay {
                          + "\(moved.away) the other way round, \(moved.neutral) unchanged in that respect")
             if let me = result.user {
                 let (precision, recall) = userTruth(result.segments, me, analysis)
-                lines.append(String(format: "  Me vs microphone words: precision %.1f%%, recall %.1f%%", precision * 100, recall * 100))
+                lines.append(String(format: "  Me recall (microphone words given to Me) %.1f%%, Me precision (Me's words loud on the microphone) %.1f%%",
+                                    recall * 100, precision * 100))
             }
         } else {
             lines.append("Track truth: one track only (no system audio), nothing to compare")
         }
         lines.append("Nothing was saved.")
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// Over the live segments that were split: the changes of person inside them, how many of those the louder track
+    /// switches at (both parts loud on one track, different ones), and the parts shorter than the cleanup's minimum.
+    private static func changesInside(
+        _ original: [MeetingSegment], _ result: [MeetingSegment], _ analysis: SpeakerAnalysis
+    ) -> (flips: Int, confirmed: Int, short: Int) {
+        let originalIDs = Set(original.map(\.id))
+        func side(_ part: MeetingSegment) -> MeetingSelf.Side? {
+            let sides = (part.words ?? []).compactMap { analysis.side(from: $0.start, to: $0.end) }
+            let mic = sides.filter { $0 == .mic }.count, system = sides.count - mic
+            return mic > system ? .mic : system > mic ? .system : nil
+        }
+        var flips = 0, confirmed = 0, short = 0
+        var r = 0
+        while r < result.count {
+            var parts = [result[r]]
+            r += 1
+            while r < result.count, !originalIDs.contains(result[r].id) {
+                parts.append(result[r])
+                r += 1
+            }
+            guard parts.count > 1 else { continue }
+            flips += parts.count - 1
+            for (a, b) in zip(parts, parts.dropFirst()) {
+                if let sa = side(a), let sb = side(b), sa != sb { confirmed += 1 }
+            }
+            short += parts.filter { part in
+                let words = part.words?.count ?? 0
+                let seconds = (part.words?.last?.end ?? part.end) - (part.words?.first?.start ?? part.start)
+                return words < SpeakerReassignment.minimumRunWords || seconds < SpeakerReassignment.minimumRunSeconds
+            }.count
+        }
+        return (flips, confirmed, short)
     }
 
     private static func wordCounts(_ segments: [MeetingSegment]) -> [PersonID: Int] {

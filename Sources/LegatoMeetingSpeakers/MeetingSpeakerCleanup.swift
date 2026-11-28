@@ -29,6 +29,8 @@ public struct SpeakerAnalysis: Sendable {
     public var micDominant: [Int: Bool]?
     /// Per checked voice, its similarity to the user's profile; nil without a usable profile.
     public var similarity: [Int: Float]?
+    /// How alike the voices sound: the cosine similarity of their centroids, `[voice][voice]`.
+    public var voiceSimilarity: [[Float]]
     public var audioSeconds: TimeInterval
     /// How long the analysis took, seconds, and the parts of it in the segmentation model and the voice embeddings.
     public var runSeconds: TimeInterval
@@ -43,7 +45,7 @@ public struct SpeakerAnalysis: Sendable {
 
     public init(
         timeline: SpeakerTimeline, user: Int? = nil, micDominant: [Int: Bool]? = nil, similarity: [Int: Float]? = nil,
-        audioSeconds: TimeInterval = 0, runSeconds: TimeInterval = 0, segmentationSeconds: TimeInterval = 0,
+        voiceSimilarity: [[Float]] = [], audioSeconds: TimeInterval = 0, runSeconds: TimeInterval = 0, segmentationSeconds: TimeInterval = 0,
         embeddingSeconds: TimeInterval = 0, windows: Int = 0,
         embedded: (reliable: Int, weak: Int, guessed: Int, unplaced: Int) = (0, 0, 0, 0),
         micEnergy: TrackEnergy? = nil, systemEnergy: TrackEnergy? = nil
@@ -52,6 +54,7 @@ public struct SpeakerAnalysis: Sendable {
         self.user = user
         self.micDominant = micDominant
         self.similarity = similarity
+        self.voiceSimilarity = voiceSimilarity
         self.audioSeconds = audioSeconds
         self.runSeconds = runSeconds
         self.segmentationSeconds = segmentationSeconds
@@ -64,7 +67,18 @@ public struct SpeakerAnalysis: Sendable {
 
     /// The segments and people after the cleanup (``SpeakerReassignment``).
     public func apply(to segments: [MeetingSegment], directory: SpeakerDirectory) -> SpeakerReassignment.Result {
-        SpeakerReassignment.apply(timeline, user: user, to: segments, directory: directory)
+        SpeakerReassignment.apply(timeline, user: user, to: segments, directory: directory, evidence: evidence)
+    }
+
+    /// The tracks and how alike the voices sound, for ``SpeakerReassignment``.
+    public var evidence: SpeakerReassignment.Evidence {
+        var side: (@Sendable (TimeInterval, TimeInterval) -> MeetingSelf.Side?)?
+        if let micEnergy, let systemEnergy {
+            side = { start, end in
+                MeetingSelf.side(micPower: micEnergy.meanPower(from: start, to: end), systemPower: systemEnergy.meanPower(from: start, to: end))
+            }
+        }
+        return SpeakerReassignment.Evidence(side: side, micDominant: micDominant, voiceSimilarity: voiceSimilarity)
     }
 
     /// Which track a span is clearly louder on; nil without both tracks or when neither is.
@@ -163,7 +177,8 @@ public struct MeetingSpeakerCleanup: MeetingSpeakerCleaning {
 
         let user = MeetingSelf.user(micDominant: micDominant, similarity: similarity)
         return SpeakerAnalysis(
-            timeline: timeline, user: user, micDominant: micDominant, similarity: similarity, audioSeconds: diarization.audioSeconds,
+            timeline: timeline, user: user, micDominant: micDominant, similarity: similarity,
+            voiceSimilarity: diarization.voiceSimilarity, audioSeconds: diarization.audioSeconds,
             runSeconds: Self.seconds(ContinuousClock.now - began), segmentationSeconds: Self.seconds(diarization.segmentationTime),
             embeddingSeconds: Self.seconds(diarization.embeddingTime), windows: diarization.windows,
             embedded: (diarization.reliable, diarization.weak, diarization.guessed, diarization.unplaced),

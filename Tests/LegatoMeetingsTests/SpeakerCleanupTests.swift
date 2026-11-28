@@ -155,7 +155,79 @@ import LegatoCore
         #expect(result.movedWords == 0)
     }
 
+    /// Tracks where `spans` are clearly louder on one side (the rest on neither), with `mic` the microphone's voices.
+    private func tracks(_ spans: [(from: TimeInterval, to: TimeInterval, side: MeetingSelf.Side)], mic: [Int: Bool],
+                        similarity: [[Float]] = []) -> SpeakerReassignment.Evidence {
+        SpeakerReassignment.Evidence(
+            side: { start, end in spans.first { start < $0.to && end > $0.from }?.side }, micDominant: mic, voiceSimilarity: similarity)
+    }
+
+    @Test func aShortChangeOfVoiceInsideASegmentJoinsItsNeighbours() {
+        // P1 speaks 0–3.6 s; the diarization hears voice 1 for one word in it, on the same track as the rest.
+        let sentence = segment(["one", "two", "three", "four", "five", "six", "seven", "eight", "nine"], from: 0, speaker: "P1")
+        let later = segment(["I", "said", "so"], from: 5, speaker: "P2")
+        let island = timeline(duration: 7, [(0, 0, 1.2), (1, 1.2, 1.6), (0, 1.6, 3.6), (1, 5, 6.2)], voices: 2)
+        let system = tracks([(0, 7, .system)], mic: [0: false, 1: false])
+        let result = SpeakerReassignment.apply(island, user: nil, to: [sentence, later], directory: people(2), evidence: system)
+        #expect(result.segments.map(\.speaker) == ["P1", "P2"] && result.splitSegments == 0, "the word stays in its sentence")
+
+        // Four words over a second hold: the live engine missed a change of speaker.
+        let long = timeline(duration: 7, [(0, 0, 2), (1, 2, 3.6), (1, 5, 6.2)], voices: 2)
+        let split = SpeakerReassignment.apply(long, user: nil, to: [sentence, later], directory: people(2), evidence: system)
+        #expect(split.segments.map(\.speaker) == ["P1", "P2", "P2"])
+        #expect(split.segments[1].text == "six seven eight nine")
+
+        // Without tracks, a clean two-word interjection holds; one the first voice keeps speaking through does not.
+        let clean = timeline(duration: 7, [(0, 0, 1.2), (1, 1.2, 2), (0, 2, 3.6), (1, 5, 6.2)], voices: 2)
+        let interjection = SpeakerReassignment.apply(clean, user: nil, to: [sentence, later], directory: people(2))
+        #expect(interjection.segments.map(\.speaker) == ["P1", "P2", "P1", "P2"])
+        var blurred = clean
+        for frame in SpeakerTimeline.frameIndex(1.2)..<SpeakerTimeline.frameIndex(2) { blurred.set(0.3, cluster: 0, frame: frame) }
+        let kept = SpeakerReassignment.apply(blurred, user: nil, to: [sentence, later], directory: people(2))
+        #expect(kept.segments.map(\.speaker) == ["P1", "P2"], "the first voice speaks through it")
+    }
+
+    @Test func aBargeInFromTheOtherTrackHoldsEvenAsOneWord() {
+        // The user (voice 0, microphone) speaks 0–2.8 s; the other side says one word at 1.2–1.6 s on the system audio.
+        let sentence = segment(["one", "two", "three", "yes", "five", "six", "seven"], from: 0, speaker: "P1")
+        let later = segment(["I", "said", "so"], from: 5, speaker: "P2")
+        let voices = timeline(duration: 7, [(0, 0, 1.2), (1, 1.2, 1.6), (0, 1.6, 2.8), (1, 5, 6.2)], voices: 2)
+        let sides = tracks([(0, 1.2, .mic), (1.2, 1.6, .system), (1.6, 2.8, .mic), (5, 6.2, .system)], mic: [0: true, 1: false])
+        let result = SpeakerReassignment.apply(voices, user: 0, to: [sentence, later], directory: people(2), evidence: sides)
+        #expect(result.segments.map(\.speaker) == ["P1", "P2", "P1", "P2"])
+        #expect(result.segments[1].text == "yes" && result.user == "P1")
+    }
+
+    @Test func theUsersMicrophoneWordsAreTheUsersWhicheverVoiceTheDiarizationPutFirst() {
+        // The live engine gave the user's sentence to P2. The diarization hears voice 1 louder in its middle, but the
+        // user's voice too, and the words are loud on the microphone; the last word is microphone noise under silence.
+        let theirs = segment(["a", "b", "c", "d", "e", "f"], from: 0, speaker: "P2")
+        let mine = segment(["one", "two", "three", "four", "noise"], from: 3, speaker: "P2")
+        var voices = timeline(duration: 6, [(1, 0, 2.4), (0, 3, 4.6), (1, 3.8, 4.6)], voices: 2)
+        for frame in SpeakerTimeline.frameIndex(3.8)..<SpeakerTimeline.frameIndex(4.6) { voices.set(0.3, cluster: 0, frame: frame) }
+        let sides = tracks([(0, 2.4, .system), (3, 5, .mic)], mic: [0: true, 1: false])
+        let result = SpeakerReassignment.apply(voices, user: 0, to: [theirs, mine], directory: people(2), evidence: sides)
+        #expect(result.segments.map(\.speaker) == ["P2", "P3"] && result.user == "P3")
+        #expect(result.segments[1].text == "one two three four noise", "the noise word joins its sentence, unsplit")
+    }
+
     // MARK: People
+
+    @Test func aVoiceThatSoundsLikeAHeldOneIsNotANewPerson() {
+        let count = SpeakerReassignment.minimumWordsForNewPerson
+        let first = segment((0...count).map { "a\($0)" }, from: 0, speaker: "P1")
+        let second = segment((0..<count).map { "b\($0)" }, from: first.end + 1, speaker: "P1")
+        let voices = timeline(duration: second.end + 1, [(0, 0, first.end), (1, second.start, second.end)], voices: 2)
+        let alike: [[Float]] = [[1, SpeakerReassignment.duplicateSimilarity], [SpeakerReassignment.duplicateSimilarity, 1]]
+        let one = SpeakerReassignment.apply(voices, user: nil, to: [first, second], directory: people(1),
+                                            evidence: SpeakerReassignment.Evidence(voiceSimilarity: alike))
+        #expect(one.newPeople.isEmpty && one.segments.map(\.speaker) == ["P1", "P1"])
+
+        // On different tracks they are two people however alike they sound.
+        let twoTracks = SpeakerReassignment.Evidence(micDominant: [0: false, 1: true], voiceSimilarity: alike)
+        let two = SpeakerReassignment.apply(voices, user: nil, to: [first, second], directory: people(1), evidence: twoTracks)
+        #expect(two.newPeople == ["P2"] && two.segments.map(\.speaker) == ["P1", "P2"])
+    }
 
     @Test func aSplitAddsSomeoneNewAndKeepsTheOthers() {
         var directory = people(2)
