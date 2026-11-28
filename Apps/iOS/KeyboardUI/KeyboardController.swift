@@ -388,7 +388,7 @@ final class KeyboardController {
     private func needsFullAccess(_ offered: Bool, to action: String) -> Bool {
         guard offered, !fullAccess else { return false }
         trace?("preview gesture needs Full Access")
-        show("Turn on Allow Full Access for Legato in Settings > General > Keyboard to \(action).")
+        show("To \(action), turn on Allow Full Access in Settings > General > Keyboard > Keyboards > Legato.")
         return true
     }
 
@@ -410,10 +410,9 @@ final class KeyboardController {
     }
 
     func beginPreviewHold() -> Bool {
-        guard canComposePreview, let runID = stagedTake.runID else {
-            _ = needsFullAccess(previewOffersCompose, to: "clean up dictation")
-            return false
-        }
+        // Without Full Access a press says nothing yet: it may turn into a swipe, which names its own action. A press that ends
+        // in place says it (`DictationPreviewView`).
+        guard canComposePreview, let runID = stagedTake.runID else { return false }
         endDraftUndo()
         let anchor = previewAnchor
         guard composedPreview == nil || anchor != nil else { return false }

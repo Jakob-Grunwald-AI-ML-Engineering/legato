@@ -169,7 +169,11 @@ private struct PreviewHoldGesture: UIGestureRecognizerRepresentable {
         case .began where !recognizer.moved:
             if controller.beginPreviewHold() { onBloom(context.converter.localLocation) }
         case .changed where recognizer.moved: controller.endPreviewHold(apply: false)
-        case .ended: controller.endPreviewHold(apply: !recognizer.moved)
+        case .ended:
+            let held = controller.isHoldingPreview
+            controller.endPreviewHold(apply: !recognizer.moved)
+            // A press without Full Access that never moved: the hint a tap gets (`KeyboardController.needsFullAccess`).
+            if !held, !recognizer.moved, !controller.fullAccess { controller.composePreviewWithoutInstructions() }
         case .cancelled: controller.endPreviewHold(apply: false)
         default: break
         }
