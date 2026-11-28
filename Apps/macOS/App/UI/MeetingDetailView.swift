@@ -48,7 +48,8 @@ struct MeetingDetailView: View {
                         .pickerStyle(.segmented).labelsHidden().fixedSize()
                         gapIndicator
                         if processing && !summarizing {
-                            Label("Finishing the recording…", systemImage: "hourglass").font(.caption).foregroundStyle(.secondary)
+                            Label(MeetingListLogic.finishingStatus(controller.services.runningSteps[meeting.id]), systemImage: "hourglass")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -154,7 +155,7 @@ struct MeetingDetailView: View {
             if isLive {
                 placeholder("The summary is written when you stop the meeting.", symbol: "text.badge.checkmark")
             } else if summarizing {
-                HStack(spacing: 10) { ProgressView().controlSize(.small); Text("Writing the summary…").foregroundStyle(.secondary) }
+                HStack(spacing: 10) { ProgressView().controlSize(.small); Text(MeetingListLogic.finishingStatus(.summary)).foregroundStyle(.secondary) }
             } else if let summary {
                 MeetingSummaryView(text: summary)
             } else if meeting.summaryFailure == nil && !processing {
@@ -224,9 +225,12 @@ struct MeetingDetailView: View {
     private func load() async {
         let services = controller.services
         let id = meeting.id
-        segments = (try? await services.store.segments(for: id)) ?? []
-        summary = (try? await services.summaryText(meetingID: id)) ?? nil
-        markdown = (try? await services.markdown(meetingID: id)) ?? ""
+        let segments = (try? await services.store.segments(for: id)) ?? []
+        let summary = (try? await services.summaryText(meetingID: id)) ?? nil
+        let markdown = (try? await services.markdown(meetingID: id)) ?? ""
+        // A newer load started meanwhile (the meeting changed again): this read is older and must not land after it.
+        guard !Task.isCancelled else { return }
+        (self.segments, self.summary, self.markdown) = (segments, summary, markdown)
         guard !isLive else { return }
         let folder = await services.store.folder(for: id)
         if player == nil {

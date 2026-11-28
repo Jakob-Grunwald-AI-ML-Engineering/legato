@@ -45,6 +45,7 @@ final class IOSMeetingController {
     @ObservationIgnored private var activityObserver: Task<Void, Never>?
     @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
     @ObservationIgnored private var backgroundTasks: [UUID: UIBackgroundTaskIdentifier] = [:]
+    @ObservationIgnored private let reloads = SerialReload()
 
     init(root: URL, vocabularyURL: URL?, keyboard: KeyboardSession, microphone: MicrophoneHost,
          publishReservation: @escaping (Bool) -> Void) {
@@ -72,6 +73,8 @@ final class IOSMeetingController {
                 await self.stop(interrupted: true)
             }
         }
+        // Each step the after-stop chain saves, after a stop or at launch, reaches an open meeting.
+        services.onMeetingChanged = { [weak self] _ in Task { await self?.refresh() } }
         preparation = Task {
             // Dismiss stale activities from a process that died. Their Stop intent cannot restart capture.
             for stale in Activity<MeetingAttributes>.activities { await stale.end(nil, dismissalPolicy: .immediate) }
@@ -253,7 +256,8 @@ final class IOSMeetingController {
         }
         await finishCapture(interrupted: interrupted)
         await refresh()
-        if let id = meeting?.id { await services.waitForProcessing(id); await refresh() }
+        // The chain reports its steps through `onMeetingChanged`; the background time lasts until it ends.
+        if let id = meeting?.id { await services.waitForProcessing(id) }
         endBackgroundTime(backgroundID)
     }
 
@@ -318,7 +322,9 @@ final class IOSMeetingController {
     private func endBackgroundTime(_ id: UUID) {
         if let task = backgroundTasks.removeValue(forKey: id), task != .invalid { UIApplication.shared.endBackgroundTask(task) }
     }
-    func refresh() async {
+    /// Reads the list again, one read at a time (`SerialReload`): the last read wins.
+    func refresh() async { await reloads.run { [weak self] in await self?.reload() } }
+    private func reload() async {
         do { meetings = try await services.meetings(); revision += 1; search() }
         catch { notice = "Could not load meetings: \(error.localizedDescription)" }
     }

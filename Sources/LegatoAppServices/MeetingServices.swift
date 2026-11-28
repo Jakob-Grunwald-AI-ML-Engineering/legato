@@ -63,6 +63,11 @@ public final class MeetingServices {
     public private(set) var processing: Set<UUID> = []
     /// Meetings whose summary is being written.
     public private(set) var summarizing: Set<UUID> = []
+    /// The step of the after-stop chain each meeting is in now (``MeetingListLogic/finishingStatus(_:)`` words it).
+    public private(set) var runningSteps: [UUID: Meeting.Step] = [:]
+    /// Called whenever the after-stop chain saved something of a meeting (a step done, the meeting finished), whoever
+    /// started the chain: a stop, or ``recover()`` at launch. The apps reload what an open window shows of it.
+    @ObservationIgnored public var onMeetingChanged: (@MainActor (UUID) -> Void)?
 
     @ObservationIgnored private let sonioxKey: @Sendable () -> String
     @ObservationIgnored private let makeClaude: @Sendable () -> any LLMBackend
@@ -216,21 +221,33 @@ public final class MeetingServices {
     public func process(_ id: UUID) async {
         guard var meeting = try? await store.meeting(id: id), meeting.state == .processing || meeting.state == .interrupted
         else { return }
+        defer {
+            runningSteps[id] = nil
+            onMeetingChanged?(id)
+        }
         if !meeting.completedSteps.contains(.audio) {
+            runningSteps[id] = .audio
             let folder = await store.folder(for: id)
             let report = await Task.detached { MeetingAudioWriter.recover(folder: folder) }.value
             if report.failed.isEmpty {
                 MeetingAudioWriter.discardLossless(in: folder)
                 meeting = (try? await store.update(id: id) { $0.completedSteps.insert(.audio) }) ?? meeting
+                onMeetingChanged?(id)
             }
         }
-        if !meeting.completedSteps.contains(.speakers) {
-            meeting = await cleanSpeakers(id) ?? meeting
+        if speakerCleanup != nil, !meeting.completedSteps.contains(.speakers) {
+            runningSteps[id] = .speakers
+            if let saved = await cleanSpeakers(id) {
+                meeting = saved
+                onMeetingChanged?(id)
+            }
         }
         if settings.summarizeAutomatically, !meeting.completedSteps.contains(.summary),
             !((try? await store.segments(for: id)) ?? []).isEmpty
         {
+            runningSteps[id] = .summary
             _ = try? await summarize(meetingID: id)
+            onMeetingChanged?(id)
         }
         _ = try? await store.update(id: id) {
             // A failed conversion must remain recoverable at next launch, even if its summary succeeded.

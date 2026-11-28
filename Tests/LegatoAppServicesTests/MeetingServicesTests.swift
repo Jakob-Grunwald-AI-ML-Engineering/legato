@@ -169,6 +169,25 @@ final class TitlingClaude: LLMBackend {
         #expect(rig.scripted.requests.first?.contains("Me") == true, "the summary sees the checked speakers")
     }
 
+    @Test func aChainStartedAtLaunchReportsEachSavedStepSoAnOpenWindowReloads() async throws {
+        var voices = SpeakerTimeline(clusters: 1, duration: 7)
+        for frame in SpeakerTimeline.frameIndex(1)..<SpeakerTimeline.frameIndex(6) { voices.set(1, cluster: 0, frame: frame) }
+        let rig = ServicesRig(speakerCleanup: FixedSpeakerCleanup(result: .success(SpeakerAnalysis(timeline: voices, user: 0))))
+        defer { rig.cleanup() }
+        let meeting = try await rig.saved(state: .processing)
+        var reported: [Meeting.Step?] = []
+        rig.services.onMeetingChanged = { id in
+            if id == meeting.id { reported.append(rig.services.runningSteps[id]) }
+        }
+        await rig.services.recover()
+        await rig.services.waitForProcessing(meeting.id)
+        // The audio, the speakers and the summary each reach the window as they are saved; the last call sees the
+        // meeting finished and no step running.
+        #expect(reported == [.audio, .speakers, .summary, nil])
+        #expect(try await rig.store.meeting(id: meeting.id)?.state == .finished)
+        #expect(rig.services.runningSteps.isEmpty)
+    }
+
     @Test func aFailedSpeakerCheckKeepsTheLiveSpeakersAndFinishesTheMeeting() async throws {
         let rig = ServicesRig(speakerCleanup: FixedSpeakerCleanup(result: .failure(.noRecording)))
         defer { rig.cleanup() }
