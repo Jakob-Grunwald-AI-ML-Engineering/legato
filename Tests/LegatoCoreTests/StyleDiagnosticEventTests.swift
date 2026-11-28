@@ -27,7 +27,8 @@ struct StyleDiagnosticEventTests {
         let file = root.appendingPathComponent("style-diag.jsonl")
         let take = UUID()
         func through(_ action: StyleDiagnosticEvent.Action) async throws -> [StyleDiagnosticEvent] {
-            let until = ContinuousClock.now + .seconds(3)
+            // The log writes on a utility queue, which a loaded runner can starve for seconds (release real-deps run).
+            let until = ContinuousClock.now + .seconds(30)
             while ContinuousClock.now < until {
                 let lines = (try? Data(contentsOf: file))?.split(separator: 10) ?? []
                 let rows = try lines.map { try JSONDecoder().decode(StyleDiagnosticEvent.self, from: $0) }
