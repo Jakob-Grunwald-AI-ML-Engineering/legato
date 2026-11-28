@@ -75,7 +75,7 @@ public struct SpeakerAnalysis: Sendable {
 }
 
 /// Diarizes the meeting's mix on the device (``MeetingDiarizer``) and finds the user: on the Mac a voice that is loud on
-/// the microphone and not on the system audio and (with a voice profile) matches the profile; on the iPhone the voice
+/// the microphone and not on the system audio (the profile decides between several such voices); on the iPhone the voice
 /// that matches the profile. Downloads the segmentation and CAM++ models when they are missing.
 public struct MeetingSpeakerCleanup: MeetingSpeakerCleaning {
     /// Solo speech compared with the profile per voice: up to this many stretches…

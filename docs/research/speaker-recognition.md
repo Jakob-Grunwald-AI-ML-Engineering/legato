@@ -69,7 +69,7 @@ The `speakers` step of the after-stop chain (`LegatoMeetingSpeakers`) runs betwe
 - **Segmentation:** pyannote segmentation-3.0 runs on overlapping 10 s windows (5 s hop). Its weights are under the MIT licence, © 2023 CNRS (upstream revision `e66f3d3b`). Legato uses Fluid Inference's Core ML conversion `pyannote_segmentation.mlmodelc` from [FluidInference/speaker-diarization-coreml](https://huggingface.co/FluidInference/speaker-diarization-coreml), pinned at revision `7eab74f3463c736418d0eb10296261ae581146c9`. That repository mixes licences. Its NOTICE.md lists this legacy file under its upstream MIT licence and puts only the Community-1 files (Segmentation, FBank, Embedding, PLDA) under CC-BY-4.0, which Legato does not use. The files are checked against SHA-256 hashes and cached under `Application Support/Legato/Models/pyannote-segmentation-3.0`.
 - **Voices:** the app's CAM++ embeds 3 s of each local speaker's solo speech. Agglomerative clustering joins the embeddings (average linkage, cosine 0.5, an estimate). Small voice fragments are folded into larger voices. Embeddings exist in memory only while the step runs.
 - **Words:** each word goes to the voice that speaks most during it. When the voices are close, Soniox's label decides. A segment is split where its speaker changes, and its first part keeps the segment's id. Each person keeps the voice that holds most of their words. Duplicates are merged, and two people with different user-given names are never merged.
-- **Me:** on the Mac, the user is the voice loud on the microphone (10 dB over the system audio) that also matches the profile (0.45). Without a profile, it is the only microphone voice. On the iPhone, the profile alone decides.
+- **Me:** on the Mac, the user is the one voice loud on the microphone (10 dB over the system audio). When several voices are (people in the room), the best profile match at 0.45 or more decides. On the iPhone, the profile alone decides.
 
 Measured on this Mac with `legato meetings speakers --replay`. The word times came from the meetings' logs. "Me/Them disagreement" counts the words loud on one track whose track differs from the side most of their person's words are on.
 
@@ -81,7 +81,7 @@ Measured on this Mac with `legato meetings speakers --replay`. The word times ca
 
 - About 80% of the run time is CAM++. The other ~20% is segmentation, Core ML on the CPU and Neural Engine.
 - iPhone run time is unmeasured.
-- The only voice profile on this Mac comes from a UAT build, and it scored 0.22–0.29 against the microphone voice. With the 0.45 threshold, "Me" was therefore found only with `--no-profile`. Calibrate the threshold once a real guided-setup profile exists.
+- The only voice profile on this Mac comes from a UAT build, and it scored 0.22–0.29 against the microphone voice. The Mac rule therefore trusts the tracks when exactly one voice is on the microphone. The 0.45 threshold still decides on the iPhone and between people in the room; calibrate it once a real guided-setup profile exists.
 
 ## How to measure
 

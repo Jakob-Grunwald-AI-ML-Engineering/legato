@@ -195,10 +195,11 @@ import LegatoCore
 
         // Mac with a profile: the microphone voice that matches; a remote voice never, however similar.
         #expect(MeetingSelf.user(micDominant: [0: true, 1: false, 2: true], similarity: [0: 0.2, 1: 0.9, 2: 0.6]) == 2)
-        #expect(MeetingSelf.user(micDominant: [0: true, 1: false], similarity: [0: 0.2]) == nil)
+        #expect(MeetingSelf.user(micDominant: [0: true, 1: false], similarity: [0: 0.2]) == 0, "the only microphone voice, even when a profile from another mic scores low")
         // Mac without a profile: only when one voice is the microphone's.
         #expect(MeetingSelf.user(micDominant: [0: true, 1: false], similarity: nil) == 0)
         #expect(MeetingSelf.user(micDominant: [0: true, 1: true], similarity: nil) == nil, "two people in the room")
+        #expect(MeetingSelf.user(micDominant: [0: true, 1: true], similarity: [0: 0.2, 1: 0.3]) == nil, "two in the room, neither matches")
         // iPhone: the profile alone; without it, nobody.
         #expect(MeetingSelf.user(micDominant: nil, similarity: [0: 0.3, 1: 0.7]) == 1)
         #expect(MeetingSelf.user(micDominant: nil, similarity: nil) == nil)

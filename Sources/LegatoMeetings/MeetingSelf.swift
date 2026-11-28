@@ -83,14 +83,15 @@ public enum MeetingSelf {
     ///   - micDominant: per voice, whether it is the microphone's (``isMicDominant(_:)``); nil when the meeting has one
     ///     track only (the iPhone).
     ///   - similarity: per voice, its similarity to the user's voice profile; nil without a profile.
-    /// - Returns: with two tracks, a microphone voice that also matches the profile (the best match), or without a profile
-    ///   the only microphone voice; with one track, the best profile match. Nil when nothing qualifies.
+    /// - Returns: with two tracks, the only microphone voice; with several (people in the room) the one that best matches
+    ///   the profile. The tracks are the stronger evidence: a profile recorded on another microphone can score low
+    ///   against the user's own meeting voice. With one track, the best profile match. Nil when nothing qualifies.
     public static func user(micDominant: [Int: Bool]?, similarity: [Int: Float]?) -> Int? {
         let matching = similarity.map { $0.filter { $0.value >= profileThreshold } }
         if let micDominant {
             let candidates = Set(micDominant.filter(\.value).keys)
-            guard let matching else { return candidates.count == 1 ? candidates.first : nil }
-            return matching.filter { candidates.contains($0.key) }.max { ($0.value, -$0.key) < ($1.value, -$1.key) }?.key
+            if candidates.count == 1 { return candidates.first }
+            return matching?.filter { candidates.contains($0.key) }.max { ($0.value, -$0.key) < ($1.value, -$1.key) }?.key
         }
         return matching?.max { ($0.value, -$0.key) < ($1.value, -$1.key) }?.key
     }
