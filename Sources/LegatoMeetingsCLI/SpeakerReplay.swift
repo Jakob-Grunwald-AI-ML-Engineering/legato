@@ -14,16 +14,7 @@ enum SpeakerReplay {
 
         // Word times: the segments' own, else the meeting's log for meetings saved before they were kept.
         let timed = segments.filter { $0.words != nil }.count
-        var fromLog = 0
-        if timed < segments.count {
-            let logged = RoomLogWords.read(detail.folder.appendingPathComponent("log/room.jsonl"))
-            for index in segments.indices where segments[index].words == nil {
-                if let words = RoomLogWords.match(segments[index], in: logged) {
-                    segments[index].words = words
-                    fromLog += 1
-                }
-            }
-        }
+        let fromLog = RoomLogWords.fill(&segments, folder: detail.folder)
 
         let voiceFolder = voiceRoot.map { URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath, isDirectory: true) }
             ?? defaultVoiceRoot()
@@ -206,38 +197,6 @@ enum SpeakerReplay {
             }
         }
         return (userDecided > 0 ? Double(userMic) / Double(userDecided) : 0, mic > 0 ? Double(userMic) / Double(mic) : 0)
-    }
-}
-
-/// The word times of a meeting's live segments as its Room log recorded them (`asr.segment` events), for meetings saved
-/// before the segments kept them. Read-only.
-enum RoomLogWords {
-    struct Entry {
-        var start: TimeInterval
-        var words: [TranscriptWord]
-    }
-
-    static func read(_ url: URL) -> [Entry] {
-        guard let data = try? Data(contentsOf: url), let text = String(data: data, encoding: .utf8) else { return [] }
-        var entries: [Entry] = []
-        for line in text.split(separator: "\n") where line.contains("\"asr.segment\"") {
-            guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                object["channel"] as? String == "asr.segment", let origin = object["tOrigin"] as? Double,
-                let payload = object["payload"] as? [String: Any], let words = payload["words"] as? [[String: Any]],
-                let metadata = payload["metadata"] as? [String: Any], let timings = metadata["timings"] as? [[String: Any]]
-            else { continue }
-            let texts = words.compactMap { $0["text"] as? String }
-            let times = timings.map { (start: $0["t0"] as? Double, end: $0["t1"] as? Double) }
-            guard texts.count == words.count, let placed = TranscriptWord.placed(texts, relative: times, origin: origin) else { continue }
-            entries.append(Entry(start: origin, words: placed))
-        }
-        return entries
-    }
-
-    /// The logged words of `segment`: same start (within a millisecond) and the same text.
-    static func match(_ segment: MeetingSegment, in entries: [Entry]) -> [TranscriptWord]? {
-        let text = segment.text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-        return entries.first { abs($0.start - segment.start) < 0.001 && $0.words.map(\.text).joined(separator: " ") == text }?.words
     }
 }
 

@@ -243,12 +243,17 @@ public final class MeetingServices {
     private func cleanSpeakers(_ id: UUID) async -> Meeting? {
         guard let speakerCleanup, let meeting = try? await store.meeting(id: id) else { return nil }
         do {
-            let segments = try await store.segments(for: id)
+            let folder = await store.folder(for: id)
+            var segments = try await store.segments(for: id)
             guard !segments.isEmpty else { return try await store.update(id: id) { $0.completedSteps.insert(.speakers) } }
-            let analysis = try await speakerCleanup.analyze(meeting: meeting, segments: segments, folder: await store.folder(for: id))
+            // Segments without word times (a meeting recorded before they were kept) take them from the meeting's log.
+            RoomLogWords.fill(&segments, folder: folder)
+            let analysis = try await speakerCleanup.analyze(meeting: meeting, segments: segments, folder: folder)
             // Renames and merges made meanwhile count: the voices are applied to the meeting as it is now.
             guard let current = try await store.meeting(id: id) else { return nil }
-            let result = analysis.apply(to: try await store.segments(for: id), directory: SpeakerDirectory(meeting: current))
+            var latest = try await store.segments(for: id)
+            RoomLogWords.fill(&latest, folder: folder)
+            let result = analysis.apply(to: latest, directory: SpeakerDirectory(meeting: current))
             try await store.replaceSegments(result.segments, for: id)
             let directory = result.directory
             let saved = try await store.update(id: id) { m in
