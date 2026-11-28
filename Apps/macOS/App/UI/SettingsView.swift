@@ -35,6 +35,9 @@ struct SettingsView: View {
     @AppStorage(ComposerWritingSettings.promptKey) private var personalPrompt = ""
     @AppStorage("voiceIsolation.enabled") private var onlyMyVoice = false
     @State private var enrollment = VoiceEnrollmentController.shared
+    @State private var addingSetting = false
+    @State private var newSettingName = ""
+    @State private var confirmingDelete = false
     @State private var page: Page? = .overview
     @State private var claudeKey = ""
     @State private var sonioxKey = ""
@@ -87,37 +90,104 @@ struct SettingsView: View {
     }
 
     private var voice: some View {
-        card {
-            VStack(alignment: .leading, spacing: 14) {
-
-            Toggle("Reduce background voices (experimental)", isOn: $onlyMyVoice)
-                .disabled(!enrollment.hasProfile || enrollment.isBusy)
-                .accessibilityIdentifier("settings.onlyMyVoice")
-            Text(enrollment.hasProfile ? "Voice profile saved on this device." : "Record your voice once to help reduce background voices.")
-                .font(.callout).foregroundStyle(.secondary)
-            Text("Speak alone in a quiet place for ten seconds. Try: ‘Today I’m taking a moment to describe what I’m working on and what I’d like to do next. I want my writing to sound natural and clear.’")
-                .font(.callout).foregroundStyle(.secondary)
-            if enrollment.isBusy {
-                if enrollment.isRecording { ProgressView(value: enrollment.progress) }
-                else { ProgressView() }
-                Text(enrollment.stage).font(.callout).accessibilityIdentifier("settings.voiceEnrollmentStatus")
-                Button("Cancel", role: .cancel) { enrollment.cancel() }
-            } else {
-                Button(enrollment.hasProfile ? "Record replacement voice profile" : "Record voice profile") {
-                    enrollment.record(microphoneBusy: { controller.dictation.isActive || controller.meetings.isRecording })
-                }.accessibilityIdentifier("settings.recordVoiceProfile")
-                if enrollment.hasProfile {
-                    Button("Delete voice profile", role: .destructive) { enrollment.deleteProfile(); onlyMyVoice = false }
-                        .accessibilityIdentifier("settings.deleteVoiceProfile")
+        @Bindable var enrollment = enrollment
+        let microphoneBusy: @MainActor () -> Bool = { controller.dictation.isActive || controller.meetings.isRecording }
+        return VStack(alignment: .leading, spacing: 20) {
+            card {
+                VStack(alignment: .leading, spacing: 14) {
+                    Label("Background voices", systemImage: "person.wave.2").font(.headline)
+                    Toggle(VoiceSetupCopy.toggle, isOn: $onlyMyVoice)
+                        .disabled(!enrollment.hasProfile || enrollment.isBusy)
+                        .accessibilityIdentifier("settings.onlyMyVoice")
+                    Text(enrollment.hasProfile ? VoiceSetupCopy.saved : VoiceSetupCopy.notSetUp)
+                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    if !enrollment.hasProfile {
+                        Button(VoiceSetupCopy.setupButton) { enrollment.startFirstSetup(microphoneBusy: microphoneBusy) }
+                            .disabled(enrollment.isBusy).accessibilityIdentifier("settings.setUpVoice")
+                    }
+                    if let message = enrollment.message {
+                        Text(message).font(.callout).fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("settings.voiceEnrollmentMessage")
+                    }
+                    Text(VoiceSetupCopy.about).font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
-            if let message = enrollment.message {
-                Text(message).font(.callout).accessibilityIdentifier("settings.voiceEnrollmentMessage")
+            if enrollment.hasProfile {
+                card {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(VoiceSetupCopy.settingsHeader).font(.headline)
+                        Text(VoiceSetupCopy.settingsAbout).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        ForEach(enrollment.situations) { row in
+                            Divider()
+                            HStack(spacing: 10) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(row.name).font(.body.weight(.medium))
+                                    Text(row.detail).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 8)
+                                if row.isCustom {
+                                    Button { enrollment.deleteSituation(id: row.id) } label: { Image(systemName: "trash") }
+                                        .buttonStyle(.borderless).help("Delete \(row.name)").accessibilityLabel("Delete \(row.name)")
+                                        .disabled(enrollment.isBusy)
+                                }
+                                Button(VoiceSetupCopy.recordButton(row)) { enrollment.record(situationID: row.id, microphoneBusy: microphoneBusy) }
+                                    .controlSize(.small).disabled(enrollment.isBusy)
+                                    .accessibilityIdentifier("settings.recordSetting.\(row.id)")
+                            }
+                        }
+                        Divider()
+                        Button(VoiceSetupCopy.addSetting) { newSettingName = ""; addingSetting = true }
+                            .disabled(enrollment.isBusy).accessibilityIdentifier("settings.addSetting")
+                    }
+                }
             }
-            Text("Quietly reduces background voices while prioritizing your speech, without holding text back. Experimental: other voices may still get through. First setup downloads a model; only your voice profile is saved locally, not the recording. Changes apply to the next take. Meetings keep every speaker.")
-                .font(.footnote).foregroundStyle(.secondary)
+            card {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle(VoiceSetupCopy.keepRecordings, isOn: $enrollment.keepRecordings)
+                        .accessibilityIdentifier("settings.keepVoiceRecordings")
+                    Text(VoiceSetupCopy.recordingsAbout).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    if !enrollment.recordings.isEmpty {
+                        ShareLink(item: enrollment.exportAll(), preview: SharePreview(VoiceSetupCopy.exportAll)) {
+                            Label(VoiceSetupCopy.exportAll, systemImage: "square.and.arrow.up")
+                        }.accessibilityIdentifier("settings.exportVoiceRecordings")
+                        ForEach(enrollment.recordings) { entry in
+                            Divider()
+                            HStack {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(VoiceSetupCopy.recordingTitle(entry))
+                                    Text(VoiceSetupCopy.recordingDetail(entry)).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                ShareLink(item: enrollment.export(entry), preview: SharePreview(VoiceSetupCopy.recordingTitle(entry))) {
+                                    Image(systemName: "square.and.arrow.up")
+                                }.buttonStyle(.borderless).help("Share this recording")
+                            }
+                        }
+                    }
+                }
             }
-        }.onDisappear { enrollment.cancel() }
+            if enrollment.hasProfile || !enrollment.recordings.isEmpty {
+                HStack {
+                    Text(VoiceSetupCopy.deleteVoiceAbout).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button(VoiceSetupCopy.deleteVoice, role: .destructive) { confirmingDelete = true }
+                        .disabled(enrollment.isBusy).accessibilityIdentifier("settings.deleteVoice")
+                }
+            }
+        }
+        .onAppear { enrollment.refresh() }
+        .onDisappear { enrollment.cancel() }
+        .sheet(isPresented: Binding(get: { enrollment.guide != nil }, set: { if !$0 { enrollment.cancel() } })) {
+            VoiceRecordingGuideView(controller: enrollment).interactiveDismissDisabled()
+        }
+        .alert(VoiceSetupCopy.addSettingTitle, isPresented: $addingSetting) {
+            TextField(VoiceSetupCopy.addSettingPlaceholder, text: $newSettingName)
+            Button("Add") { enrollment.addSituation(named: newSettingName) }
+            Button("Cancel", role: .cancel) {}
+        }
+        .confirmationDialog(VoiceSetupCopy.deleteVoice, isPresented: $confirmingDelete) {
+            Button(VoiceSetupCopy.deleteVoice, role: .destructive) { enrollment.deleteProfile(); onlyMyVoice = false }
+        } message: { Text(VoiceSetupCopy.deleteVoiceAbout) }
     }
 
     private var overview: some View {
