@@ -12,10 +12,13 @@ public struct MeetingSegment: Sendable, Equatable, Codable, Identifiable {
     public var end: TimeInterval
     /// Who spoke: a person id of the meeting's ``Meeting/speakers``. Nil when the engine gave no speaker.
     public var speaker: PersonID?
+    /// The segment's words with their meeting times, when the engine gave them; nil for meetings saved before they
+    /// were kept (no key in `segments.jsonl`). The speaker cleanup reassigns and splits by them.
+    public var words: [TranscriptWord]?
 
     public init(
         id: UUID = UUID(), stream: TranscriptEvent.Stream = .mixed, text: String, start: TimeInterval, end: TimeInterval,
-        speaker: PersonID? = nil
+        speaker: PersonID? = nil, words: [TranscriptWord]? = nil
     ) {
         self.id = id
         self.stream = stream
@@ -23,5 +26,6 @@ public struct MeetingSegment: Sendable, Equatable, Codable, Identifiable {
         self.start = start
         self.end = end
         self.speaker = speaker
+        self.words = words
     }
 }

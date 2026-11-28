@@ -505,7 +505,7 @@ public actor MeetingSession {
             end = elapsed
             start = min(heardAt ?? end, end)
         }
-        var segment = MeetingSegment(stream: .mixed, text: text, start: start, end: end)
+        var segment = MeetingSegment(stream: .mixed, text: text, start: start, end: end, words: event.words)
         segment.speaker = event.speaker.map(person(for:))
         segments.append(segment)
         save { [store, id = meeting.id, segment] in try await store.appendSegment(segment, to: id) }

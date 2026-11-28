@@ -20,6 +20,7 @@ let package = Package(
         .library(name: "LegatoMac", targets: ["LegatoMac"]),
         .library(name: "LegatoClaude", targets: ["LegatoClaude"]),
         .library(name: "LegatoMeetings", targets: ["LegatoMeetings"]),
+        .library(name: "LegatoMeetingSpeakers", targets: ["LegatoMeetingSpeakers"]),
         .library(name: "LegatoMeetingsCLI", targets: ["LegatoMeetingsCLI"]),
         .executable(name: "legato", targets: ["legato"]),
     ],
@@ -43,8 +44,8 @@ let package = Package(
         .testTarget(name: "LegatoVocabularyTests", dependencies: ["LegatoVocabulary"]),
         .target(name: "LegatoAudio", dependencies: ["LegatoCore", "LegatoAudioBridge"]),
         .testTarget(name: "LegatoAudioTests", dependencies: ["LegatoAudio", "LegatoCore", "LegatoAudioBridge"]),
-        .target(name: "LegatoAppServices", dependencies: ["LegatoVoiceIdentity", "LegatoCore", "LegatoVocabulary", "LegatoAudio", "LegatoRoom", "LegatoSoniox", "LegatoClaude", "LegatoAgent", "LegatoComposerDoc", "LegatoMeetings", "LegatoKeyboardCore", .target(name: "LegatoMac", condition: .when(platforms: [.macOS]))]),
-        .testTarget(name: "LegatoAppServicesTests", dependencies: ["LegatoAppServices", "LegatoCore", "LegatoVocabulary", "LegatoMeetings", .target(name: "LegatoMac", condition: .when(platforms: [.macOS])), "LegatoKeyboardCore"]),
+        .target(name: "LegatoAppServices", dependencies: ["LegatoVoiceIdentity", "LegatoCore", "LegatoVocabulary", "LegatoAudio", "LegatoRoom", "LegatoSoniox", "LegatoClaude", "LegatoAgent", "LegatoComposerDoc", "LegatoMeetings", "LegatoMeetingSpeakers", "LegatoKeyboardCore", .target(name: "LegatoMac", condition: .when(platforms: [.macOS]))]),
+        .testTarget(name: "LegatoAppServicesTests", dependencies: ["LegatoAppServices", "LegatoCore", "LegatoVocabulary", "LegatoMeetings", "LegatoMeetingSpeakers", .target(name: "LegatoMac", condition: .when(platforms: [.macOS])), "LegatoKeyboardCore"]),
         .target(name: "LegatoMac", dependencies: ["LegatoCore", "LegatoKeyboardCore"]),
         .testTarget(name: "LegatoMacTests", dependencies: ["LegatoMac", "LegatoCore"]),
         .target(name: "LegatoClaude", dependencies: ["LegatoCore"]),
@@ -53,8 +54,10 @@ let package = Package(
         // Meeting notes: a mixed-stream session, its store, recovery, summaries and export. Core only.
         .target(name: "LegatoMeetings", dependencies: ["LegatoCore"]),
         .testTarget(name: "LegatoMeetingsTests", dependencies: ["LegatoMeetings", "LegatoCore"], resources: [.copy("Fixtures")]),
+        // After a meeting: who spoke when, from the recording (pyannote segmentation + CAM++ on the device), and which voice is the user.
+        .target(name: "LegatoMeetingSpeakers", dependencies: ["LegatoMeetings", "LegatoVoiceIdentity", "LegatoAudio", "LegatoCore"]),
         // `legato`: read-only meeting search for agents and scripts (CLI and MCP server). The Mac app bundles the executable.
-        .target(name: "LegatoMeetingsCLI", dependencies: ["LegatoMeetings"]),
+        .target(name: "LegatoMeetingsCLI", dependencies: ["LegatoMeetings", "LegatoMeetingSpeakers", "LegatoVoiceIdentity", "LegatoCore"], exclude: ["speakers-replay.md"]),
         .executableTarget(name: "legato", dependencies: ["LegatoMeetingsCLI"]),
         .testTarget(name: "LegatoMeetingsCLITests", dependencies: ["LegatoMeetingsCLI", "LegatoMeetings", "legato"]),
     ],
