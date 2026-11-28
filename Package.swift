@@ -22,10 +22,15 @@ let package = Package(
         .library(name: "LegatoMeetings", targets: ["LegatoMeetings"]),
         .library(name: "LegatoMeetingsCLI", targets: ["LegatoMeetingsCLI"]),
         .executable(name: "legato", targets: ["legato"]),
+        .executable(name: "legato-voice-replay", targets: ["legato-voice-replay"]),
     ],
     targets: [
         .testTarget(name: "LegatoRoomTests", dependencies: ["LegatoRoom", "LegatoComposerDoc"]),
         .target(name: "LegatoVoiceIdentity", resources: [.copy("ModelAssets.json")]),
+        .testTarget(name: "LegatoVoiceIdentityTests", dependencies: ["LegatoVoiceIdentity"]),
+        // Mac-only developer tool: replays kept voice recordings through the production background-voice filter
+        // (scripts/dev/voice-replay.md). Not part of either app.
+        .executableTarget(name: "legato-voice-replay", dependencies: ["LegatoSoniox", "LegatoVoiceIdentity", "LegatoClaude"]),
         .target(name: "LegatoSoniox", dependencies: ["LegatoRoom", "LegatoComposerDoc", "LegatoVoiceIdentity", "LegatoVocabulary"]),
         .testTarget(name: "LegatoSonioxTests", dependencies: ["LegatoSoniox", "LegatoRoom", "LegatoComposerDoc"]),
         .target(name: "LegatoComposerDoc"),

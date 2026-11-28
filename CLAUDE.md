@@ -15,6 +15,10 @@ Open-source on-device dictation app for iOS and macOS (Swift).
 
 - Session start and wrap-up: `scripts/dev/prune-build-caches.sh --delete` removes all Legato build output except the one fixed DerivedData per target (`derived/{gate,mac,ios-sim,ios-device}`) and `SourcePackages`, skipping anything in use. `--report` shows disk use per directory (`scripts/dev/build-caches.md`).
 
+## Voice measurements
+
+- Background voices: `scripts/dev/voice-replay.sh <exported recordings>` replays kept voice recordings through the production filter offline (`scripts/dev/voice-replay.md`). Its `--transcribe` is a paid Soniox call: only on Jakob's request.
+
 ## Interactive testing and visible handback
 
 - During human-like dictation, typing and cursor testing, target less than 500 ms of interruption caused by Legato. Any keyboard or dictation lock longer than one second fails acceptance. Measure the longest observed delay, not only averages; distinguish host/input latency from automation transport and recognizer latency. Deliberate delays in the raw exploration tool are not product responsiveness evidence.
